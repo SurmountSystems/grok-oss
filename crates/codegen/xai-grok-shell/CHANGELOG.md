@@ -4,7 +4,9 @@
 
 ## Features
 
-- **OpenRouter** is available as a separate model option (`openrouter-grok-4.5`). It does not replace native Grok models. `grok-oss login --openrouter` stores a key in the OS keyring or `provider_credentials.json`. `OPENROUTER_API_KEY` wins when it is set.
+- **Grok OSS branding**: product name Grok OSS, CLI binary `grok-oss` (Surmount open-source fork of Grok Build).
+- **OpenRouter** is available as a separate model option (`openrouter-grok-4.5`). It does not replace native Grok models. `grok-oss login --openrouter` stores a key in the OS keyring or `provider_credentials.json`, and `grok-oss logout --openrouter` clears it. `OPENROUTER_API_KEY` wins when it is set.
+- **Zed-compatible credential discovery**: when no local key is set, Grok OSS read-only probes Zed's `development_credentials` file and Zed's OS keychain layouts. Grok OSS never writes Zed's stores.
 - **Custom agents** from plugins or your config can now be chosen directly with spawn_subagent.
 - **MCP servers** can now use a token file that is re-read on every request so rotating credentials stay fresh.
 - **Models can now show** a colored notice banner above the prompt while selected.

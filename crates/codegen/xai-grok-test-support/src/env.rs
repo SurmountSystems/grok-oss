@@ -207,6 +207,7 @@ pub fn ensure_cargo_bin_with_features(
     binary
 }
 
+/// Resolve CLI binary: `GROK_BINARY` env (CI) or a locally built `grok-oss` binary.
 pub fn grok_binary() -> PathBuf {
     if let Some(path) = resolved_override() {
         return path;
@@ -215,14 +216,15 @@ pub fn grok_binary() -> PathBuf {
         return path;
     }
 
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_xai-grok-pager") {
+    // Cargo sets CARGO_BIN_EXE_<name> with underscores for hyphens.
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_grok-oss") {
         let p = PathBuf::from(path);
         if p.exists() {
             return p;
         }
     }
 
-    ensure_cargo_bin("xai-grok-pager-bin", "xai-grok-pager")
+    ensure_cargo_bin("xai-grok-pager-bin", "grok-oss")
 }
 
 fn resolved_override() -> Option<PathBuf> {
