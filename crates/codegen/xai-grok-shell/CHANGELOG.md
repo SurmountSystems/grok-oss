@@ -4,6 +4,7 @@
 
 ## Features
 
+- **OpenRouter** is available as a separate model option (`openrouter-grok-4.5`). It does not replace native Grok models. `grok-oss login --openrouter` stores a key in the OS keyring or `provider_credentials.json`. `OPENROUTER_API_KEY` wins when it is set.
 - **Custom agents** from plugins or your config can now be chosen directly with spawn_subagent.
 - **MCP servers** can now use a token file that is re-read on every request so rotating credentials stay fresh.
 - **Models can now show** a colored notice banner above the prompt while selected.

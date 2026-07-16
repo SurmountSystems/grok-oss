@@ -24,6 +24,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 fs2 = { workspace = true }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+keyring = { workspace = true }
 obfstr = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
