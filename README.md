@@ -57,6 +57,21 @@ grok-oss --version
 
 If the GitHub repo is still named `grok-build`, use that clone URL until rename.
 
+### Nix
+
+```bash
+nix develop          # fenix toolchain from rust-toolchain.toml + build deps
+nix build .#grok-oss # → ./result/bin/grok-oss
+```
+
+CI uses the same flake (see `.github/workflows/ci.yml`). Locally, mirror GH CI with:
+
+```bash
+just ci        # full nix job (build + checks + openrouter tests)
+just ci-quick  # faster cargo check/tests inside nix develop
+```
+
+
 ### Official upstream binary (not this fork)
 
 ```bash

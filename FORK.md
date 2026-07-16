@@ -61,6 +61,21 @@ Keep diffs **small and product-facing** so merges stay tractable:
 - [x] AUR packaging sources (`packaging/aur/`)
 - [x] CONTRIBUTING accepts PRs on this fork
 
+## Nix & CI
+
+- [`flake.nix`](flake.nix) — fenix (pinned via `rust-toolchain.toml`) + crane
+  package `grok-oss`, `devShell`, and checks.
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — `nix build .#grok-oss`
+  and focused cargo checks/tests on PRs to `main`.
+
+```bash
+nix develop
+nix build .#grok-oss
+nix flake check   # runs packages + checks (long)
+just ci           # same steps as GitHub Actions (preferred before push)
+just ci-quick     # faster cargo-only path inside nix develop
+```
+
 ## Releases
 
 - Upstream version strings (e.g. `0.1.220-alpha.4`) may still appear from
