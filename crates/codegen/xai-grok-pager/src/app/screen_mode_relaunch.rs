@@ -843,13 +843,23 @@ mod tests {
         // explicit flag makes the manual resume persist the sticky preference
         // like a successful exec would.
         let cli = cli_hint_name();
+        let full = screen_mode_relaunch_resume_hint("abc-sid", false);
         assert_eq!(
-            screen_mode_relaunch_resume_hint("abc-sid", false),
+            full,
             format!("GROK_SCREEN_MODE=fullscreen {cli} --fullscreen --resume abc-sid")
         );
+        assert!(
+            !full.contains(" grok "),
+            "must not use upstream binary name: {full}"
+        );
+        let min = screen_mode_relaunch_resume_hint("abc-sid", true);
         assert_eq!(
-            screen_mode_relaunch_resume_hint("abc-sid", true),
+            min,
             format!("GROK_SCREEN_MODE=minimal {cli} --minimal --resume abc-sid")
+        );
+        assert!(
+            !min.contains(" grok "),
+            "must not use upstream binary name: {min}"
         );
     }
 

@@ -6,8 +6,11 @@ edition.workspace = true
 description = "Backend environment presets for the Grok CLI crate family: endpoint URL defaults and env-var test support."
 
 [features]
-# single shared rlib per crate, so downstream Bazel test targets need the
-default-bazel = []
+# Exposes `EnvVarGuard` (and its process-wide env lock) to downstream
+# crates' test targets. `cfg(test)` alone does not enable this for dependents.
+test-support = []
+# Bazel CI shared rlib: compile test helpers into the default library.
+default-bazel = ["test-support"]
 
 [dependencies]
 tracing = { workspace = true }

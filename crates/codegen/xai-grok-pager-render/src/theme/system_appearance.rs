@@ -31,12 +31,12 @@ pub enum SystemAppearance {
 /// For the extended chain that includes OSC 11 as a startup-only fallback,
 /// see [`detect_with_osc11_fallback`].
 ///
-/// In `#[cfg(test)]` builds, checks the mock override first so that
+/// In `#[cfg(any(test, feature = "test-support"))]` builds, checks the mock override first so that
 /// `SystemAppearanceWatcher`'s polling loop (which calls `detect()`
 /// directly) is also controllable from tests.
 #[must_use]
 pub fn detect() -> Option<SystemAppearance> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(v) = mock_override() {
         return v;
     }
@@ -56,7 +56,7 @@ pub fn detect() -> Option<SystemAppearance> {
 /// live [`SystemAppearanceWatcher`] uses [`detect`] (without OSC 11).
 #[must_use]
 pub fn detect_with_osc11_fallback() -> Option<SystemAppearance> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(v) = mock_override() {
         return v;
     }
@@ -78,7 +78,7 @@ fn detect_without_mock() -> Option<SystemAppearance> {
 ///
 /// Returns `Some(value)` when a mock is active, `None` when real
 /// detection should proceed.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn mock_override() -> Option<Option<SystemAppearance>> {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -107,9 +107,9 @@ pub fn to_theme_kind(
 ///
 /// In test builds, a shorter interval (50ms) is used so polling tests
 /// complete quickly.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Watches for system appearance changes via polling.
@@ -175,30 +175,30 @@ impl Drop for SystemAppearanceWatcher {
 
 // -- Test support ----------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::Mutex;
 
 /// Mock override for `detect()`. When set to `Some(value)`, `detect()`
 /// returns the mock value instead of calling `dark_light::detect()`.
 /// This ensures the `SystemAppearanceWatcher` polling loop (which calls
 /// `detect()` directly) is also controllable from tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static MOCK_APPEARANCE: Mutex<Option<Option<SystemAppearance>>> = Mutex::new(None);
 
 /// Override `detect()` for tests. Set to `Some(value)` to mock a specific
 /// appearance, or `None` to mock detection failure.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_mock(value: Option<SystemAppearance>) {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner()) = Some(value);
 }
 
 /// Clear the mock override, restoring real detection behavior.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn clear_mock() {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::super::cache as theme_cache;
     use super::*;

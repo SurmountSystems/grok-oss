@@ -409,9 +409,7 @@ pub fn detect_unix_shell_kind() -> UnixShellKind {
 /// vanishes (Nix GC, deleted worktree-linked binary) can be re-resolved
 /// without restarting the agent process.
 #[cfg(unix)]
-fn shell_path_cache(
-    kind: UnixShellKind,
-) -> &'static std::sync::Mutex<Option<String>> {
+fn shell_path_cache(kind: UnixShellKind) -> &'static std::sync::Mutex<Option<String>> {
     use std::sync::{Mutex, OnceLock};
     static BASH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     static ZSH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -590,7 +588,10 @@ mod tests {
         // hardcoded `/bin/bash` fallback).
         let p = unix_shell_path(UnixShellKind::Bash);
         assert!(
-            std::path::Path::new(&p).file_name().and_then(|n| n.to_str()) == Some("bash"),
+            std::path::Path::new(&p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                == Some("bash"),
             "expected a path ending in 'bash', got {p}"
         );
     }
@@ -609,7 +610,10 @@ mod tests {
     fn refresh_unix_shell_path_returns_bash() {
         let p = refresh_unix_shell_path(UnixShellKind::Bash);
         assert!(
-            std::path::Path::new(&p).file_name().and_then(|n| n.to_str()) == Some("bash"),
+            std::path::Path::new(&p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                == Some("bash"),
             "expected a path ending in 'bash', got {p}"
         );
         // Subsequent unix_shell_path should see the refreshed value.

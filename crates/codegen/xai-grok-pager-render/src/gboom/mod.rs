@@ -276,7 +276,7 @@ impl GboomState {
 
     /// Whether the game currently holds a latched movement control. Lets the
     /// app layer assert that backgrounded games drop their holds.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn any_movement_held(&self) -> bool {
         self.game.any_held()
     }
@@ -408,7 +408,7 @@ impl Default for GboomState {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};

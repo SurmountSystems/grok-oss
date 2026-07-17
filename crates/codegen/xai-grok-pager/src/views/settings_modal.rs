@@ -660,6 +660,7 @@ fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
+        "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
@@ -5718,6 +5719,9 @@ mod tests {
                 "toolset.ask_user_question.timeout_enabled",
                 // PAGER-owned plan_mode (Agent category).
                 "plan_mode",
+                // SHELL-owned auto_run_implement (Agent category; live cache,
+                // default ON — follow-up /implement after successful turns).
+                "auto_run_implement",
                 // SHELL-owned coding_data_sharing (Privacy category).
                 "coding_data_sharing",
                 // SHELL-owned default_model (Models category).

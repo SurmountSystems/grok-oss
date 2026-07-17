@@ -8,7 +8,9 @@ description = "Foundation modules for the grok shell crate family: environment p
 [features]
 # CI default set: builds a single shared rlib per crate, so downstream test
 # targets need the test-only helper surface compiled in.
-default-bazel = []
+default-bazel = ["test-support"]
+# Expose EnvVarGuard (and similar) to dependents' cargo tests.
+test-support = ["xai-grok-env/test-support"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -41,7 +43,7 @@ windows = { workspace = true }
 tempfile = { workspace = true }
 # `cfg(test)` in this crate does not enable features on dependencies, so the
 # tests' `EnvVarGuard` re-export needs the feature turned on explicitly.
-xai-grok-env = { workspace = true, features = [] }
+xai-grok-env = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
