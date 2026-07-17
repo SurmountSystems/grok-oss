@@ -424,9 +424,30 @@ fn force_mold_rustflags(raw: &str) -> String {
     stripped
 }
 
+/// Cargo subcommands that accept `-j` / `--jobs` (compile-heavy work).
+/// Others (notably `fmt`) reject `-j` and must only get `CARGO_BUILD_JOBS` via
+/// env if anything — injecting argv `-j` breaks GHA `just test` under
+/// `CI_LOW_MEM` (`cargo fmt -j 2 --all -- --check`).
+fn cargo_subcommand_accepts_jobs(sub: &str) -> bool {
+    matches!(
+        sub,
+        "build"
+            | "check"
+            | "test"
+            | "bench"
+            | "run"
+            | "clippy"
+            | "rustc"
+            | "doc"
+            | "install"
+            | "rustdoc"
+    )
+}
+
 /// Insert or replace cargo -j N so restarts actually reduce parallelism.
-/// Only injects for real cargo subcommands (build/check/test/...). Meta
-/// invocations like `cargo --version` only get CARGO_BUILD_JOBS via env.
+/// Only injects for job-aware cargo subcommands (build/check/test/clippy/...).
+/// Meta invocations (`cargo --version`) and non-job subcommands (`fmt`) only
+/// get `CARGO_BUILD_JOBS` via env in [`run_once`].
 fn with_jobs_args(cmd: &[String], jobs: u32) -> Vec<String> {
     let mut out = Vec::with_capacity(cmd.len() + 2);
     let mut i = 0;
@@ -456,8 +477,14 @@ fn with_jobs_args(cmd: &[String], jobs: u32) -> Vec<String> {
         return out;
     }
     // Subcommand
+    let sub = cmd[i].as_str();
     out.push(cmd[i].clone());
     i += 1;
+    if !cargo_subcommand_accepts_jobs(sub) {
+        // e.g. `cargo fmt` — pass through without -j.
+        out.extend(cmd[i..].iter().cloned());
+        return out;
+    }
     // Drop existing -j / --jobs on the remainder
     let rest = &cmd[i..];
     let mut j = 0;
@@ -748,6 +775,25 @@ mod tests {
         let out = with_jobs_args(&cmd, 2);
         assert_eq!(out, vec!["cargo", "--version"]);
         assert!(!out.iter().any(|a| a == "-j" || a.starts_with("-j")));
+    }
+
+    #[test]
+    fn with_jobs_fmt_does_not_inject_j() {
+        // GHA CI_LOW_MEM: cargo-mem-guard wraps `cargo fmt --all -- --check`.
+        // cargo-fmt rejects argv -j (exit 2); only job-aware subcommands get it.
+        let cmd = vec![
+            "cargo".into(),
+            "fmt".into(),
+            "--all".into(),
+            "--".into(),
+            "--check".into(),
+        ];
+        let out = with_jobs_args(&cmd, 2);
+        assert_eq!(
+            out,
+            vec!["cargo", "fmt", "--all", "--", "--check"]
+        );
+        assert!(!out.iter().any(|a| a == "-j" || a.starts_with("-j") || a.starts_with("--jobs")));
     }
 
     #[test]
