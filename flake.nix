@@ -60,7 +60,8 @@
           perl
           ripgrep # offline bundle for xai-grok-tools / shell build.rs
           makeWrapper
-        ];
+        ]
+        ++ lib.optionals stdenv.isLinux [ mold ];
 
         buildInputs =
           with pkgs;
@@ -85,6 +86,10 @@
           # build.rs scripts download musl rg unless these are set (nix builds are pure).
           GROK_TOOLS_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
           GROK_SHELL_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
+          # Match .cargo/config.toml; keep mold last so host fuse-ld=wild cannot win impurely.
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
         };
 
         cargoArtifacts = craneLib.buildDepsOnly (
@@ -161,15 +166,22 @@
             pkgs.openssl
             pkgs.git
             pkgs.ripgrep
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.dbus ];
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.dbus
+            pkgs.mold
+          ];
 
           PROTOC = "${pkgs.protobuf}/bin/protoc";
           OPENSSL_NO_VENDOR = "1";
           GROK_TOOLS_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
           GROK_SHELL_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
+          # Append mold last so a host ~/.cargo fuse-ld=wild cannot win.
+          RUSTFLAGS = pkgs.lib.optionalString pkgs.stdenv.isLinux "-C link-arg=-fuse-ld=mold";
 
           shellHook = ''
             echo "Grok OSS dev shell (fenix from rust-toolchain.toml)"
+            echo "  linker: mold (Linux; see .cargo/config.toml)"
             echo "  cargo build -p xai-grok-pager-bin --release   # → target/release/grok-oss"
             echo "  cargo test  -p xai-grok-shell --test openrouter_credentials"
             echo "  nix build .#grok-oss"

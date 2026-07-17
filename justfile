@@ -49,6 +49,8 @@ ci-quick:
 dev:
     nix develop
 
-# Install binary with cargo (non-Nix path).
+# Install binary with cargo (non-Nix path). Requires mold on PATH (Linux).
+# Re-asserts -fuse-ld=mold so a host ~/.cargo fuse-ld=wild cannot win.
 install:
-    cargo install --path crates/codegen/xai-grok-pager-bin --locked --force
+    command -v mold >/dev/null || { echo "error: mold not on PATH (install mold, or: nix develop -c just install)"; exit 1; }
+    RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=mold" cargo install --path crates/codegen/xai-grok-pager-bin --locked --force
