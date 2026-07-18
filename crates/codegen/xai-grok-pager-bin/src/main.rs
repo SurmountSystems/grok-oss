@@ -1889,11 +1889,8 @@ async fn async_main() -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 if openrouter {
                     let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                    xai_grok_shell::auth::run_openrouter_login(
-                        &grok_home,
-                        api_key.as_deref(),
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    xai_grok_shell::auth::run_openrouter_login(&grok_home, api_key.as_deref())
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                     println!();
                     xai_grok_shell::instrumentation::finalize_and_exit(0);
                 }
