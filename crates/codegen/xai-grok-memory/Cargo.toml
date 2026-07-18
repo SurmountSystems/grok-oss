@@ -8,7 +8,6 @@ edition.workspace = true
 # Exposes `#[cfg(test)]`-only helpers (`MemoryStorage::with_paths`,
 # `MockEmbeddingProvider`) to downstream crates' test targets.
 test-support = []
-default-bazel = ["test-support"]
 
 [dependencies]
 anyhow = { workspace = true }
