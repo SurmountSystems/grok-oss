@@ -1351,7 +1351,7 @@ pub use test_support::{
 // Tests
 // ===========================================================================
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
     use crate::terminal::{

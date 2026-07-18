@@ -316,7 +316,7 @@ pub fn pin_theme() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

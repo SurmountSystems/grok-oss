@@ -53,6 +53,11 @@ fn matches_trusted_base_url(candidate: &str, trusted_base: &str) -> bool {
         && candidate.port_or_known_default() == trusted.port_or_known_default()
         && path_matches
 }
+/// Historical env name still exported by `just test` / `cargo-ci`. Loopback is
+/// always trusted now (see [`is_cli_chat_proxy_url`]); the var is a no-op.
+#[allow(dead_code)]
+pub const TRUST_LOOPBACK_CLI_CHAT_PROXY_ENV: &str = "GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY";
+
 /// True for cli-chat-proxy URLs (production, plus local-dev hosts when the
 /// optional non-production feature is enabled). When that feature is on,
 /// runtime env overrides can extend this trust set. Loopback is always
@@ -61,6 +66,7 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     if matches_trusted_base_url(url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL) {
         return true;
     }
+    // Loopback is always accepted (unit tests and local mock servers).
     if let Ok(u) = reqwest::Url::parse(url)
         && let Some(h) = u.host_str()
         && (h == "localhost" || h == "127.0.0.1" || h == "::1")
