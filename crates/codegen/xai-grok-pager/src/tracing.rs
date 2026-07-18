@@ -326,14 +326,7 @@ pub fn init_tracing() -> TracingHandle {
         EnvFilter, Layer as _, filter::LevelFilter, fmt, layer::SubscriberExt as _,
     };
     let (make_writer, rx) = TracingChannelMakeWriter::new();
-<<<<<<< HEAD
     let directives = default_directives();
-=======
-    let payload_level = "off";
-    let directives = format!(
-        "xai_grok_shell=info,xai_grok_pager=trace,xai_grok_tools=info,xai_acp_lib=info,{RMCP_SSE_NOISE_TARGET}=error,sampling_log=off,{ACP_UPDATE_TARGET}=debug,{ACP_UPDATE_PAYLOAD_TARGET}={payload_level}"
-    );
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::WARN.into())
         .parse_lossy(&directives);

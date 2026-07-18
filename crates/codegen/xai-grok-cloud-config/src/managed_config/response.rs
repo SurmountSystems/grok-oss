@@ -94,12 +94,7 @@ pub(super) struct ManagedConfigResponse {
     /// The signed envelopes (additive; absent from old servers), primary first: a rollover server dual-signs, each payload signed by its own key.
     #[serde(default)]
     pub(super) signatures: Option<Vec<xai_grok_config::signed_policy::SignatureEnvelope>>,
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
     /// The is-managed claim envelopes (additive; absent from old servers), same rotation shape as `signatures`, persisted as their own sidecar.
-=======
-    /// The is-managed claim envelopes (additive; absent from old servers), same
-    /// rotation shape as `signatures`, persisted as their own sidecar.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs
     #[serde(default)]
     pub(super) managed_identity_signatures:
         Option<Vec<xai_grok_config::signed_policy::SignatureEnvelope>>,
@@ -122,11 +117,7 @@ impl ManagedConfigResponse {
         )
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
     /// The claim envelope to verify; same picking rule as [`Self::signature_sidecar`].
-=======
-    /// The claim envelope to verify — same picking rule as [`Self::signature_sidecar`].
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs
     pub(super) fn managed_identity_sidecar(
         &self,
     ) -> Option<xai_grok_config::signed_policy::SignatureEnvelope> {
@@ -147,19 +138,12 @@ impl ManagedConfigResponse {
         self.requirements.as_deref().is_some_and(|s| !s.is_empty())
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
     /// Served `fail_closed` from the payload (not disk).
-=======
-    /// Served `fail_closed` from the payload (not disk). Non-bool → warn once, treat as false.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs
     pub(super) fn requirements_fail_closed(&self) -> bool {
         let Some(req) = self.requirements.as_deref() else {
             return false;
         };
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs
         use prod_mc_cli_chat_proxy_types::{FailClosedFlag, fail_closed_flag_status};
         let status = fail_closed_flag_status(req);
         if matches!(status, FailClosedFlag::Invalid) {
@@ -175,7 +159,6 @@ impl ManagedConfigResponse {
     }
 }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
 pub(super) enum ApplyOutcome {
     /// `wrote` = at least one artifact written or removed.
     Applied {
@@ -183,15 +166,6 @@ pub(super) enum ApplyOutcome {
     },
     /// Lock held by another process, or the credential vanished mid-fetch.
     Skipped,
-=======
-/// Result of applying a fetched managed-config response.
-pub(super) enum ApplyOutcome {
-    /// Locked, persisted policy, recorded marker. `wrote` = ≥1 artifact written or removed.
-    Applied { wrote: bool },
-    /// Nothing persisted/marked: lock held by another process, or credential vanished mid-fetch.
-    Skipped,
-    /// Envelope failed verification — nothing persisted or marked.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs
     SignatureRejected,
     /// Verified response parked for the next boot's pre-sandbox apply.
     Staged,
@@ -206,34 +180,15 @@ impl ApplyOutcome {
 
     pub(super) fn skipped(&self) -> bool {
         matches!(self, Self::Skipped)
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
     }
 
     pub(super) fn staged(&self) -> bool {
         matches!(self, Self::Staged)
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs
     }
 
     pub(super) fn signature_rejected(&self) -> bool {
         matches!(self, Self::SignatureRejected)
     }
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
-=======
-}
-
-/// Pick the envelope whose (hint-only) key_id is trusted, else the first.
-fn pick_trusted_envelope(
-    envelopes: Option<&[xai_grok_config::signed_policy::SignatureEnvelope]>,
-    key_id_trusted: impl Fn(&str) -> bool,
-) -> Option<xai_grok_config::signed_policy::SignatureEnvelope> {
-    let envelopes = envelopes?;
-    envelopes
-        .iter()
-        .find(|e| key_id_trusted(&e.key_id))
-        .or_else(|| envelopes.first())
-        .cloned()
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs
 }
 
 /// Pick the envelope whose (hint-only) key_id is trusted, else the first.
@@ -265,10 +220,7 @@ pub(super) fn verify_signed_envelope(
     let sidecar = body.signature_sidecar().ok_or_else(|| {
         "managed policy is required but the server returned no signature".to_owned()
     })?;
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs
     // Unclamped wall clock: a fresh envelope must heal an inflated floor, not be refused by it.
     let payload = signed_policy::verify_fetched(&sidecar, active_team_id, now_unix())
         .map_err(|e| e.to_string())?;
@@ -280,41 +232,5 @@ pub(super) fn verify_signed_envelope(
 }
 
 #[cfg(test)]
-<<<<<<< HEAD:crates/codegen/xai-grok-cloud-config/src/managed_config/response.rs
 #[path = "response_tests.rs"]
 mod tests;
-=======
-mod tests {
-    use super::*;
-
-    /// Picking (shared by the policy and claim carriers): the first trusted-key_id
-    /// entry wins; no trusted entry → the first entry (picking must not invent
-    /// absence); no array (old/unsigned server) → None.
-    #[test]
-    fn pick_trusted_envelope_prefers_trusted_then_falls_back() {
-        use xai_grok_config::signed_policy::SignatureEnvelope;
-        let envelope = |kid: &str| SignatureEnvelope {
-            signed_payload: format!("payload-{kid}"),
-            signature: format!("sig-{kid}"),
-            key_id: kid.to_owned(),
-        };
-        let envelopes = vec![envelope("v1"), envelope("v2")];
-
-        // A rotated client trusting only v2 picks the v2 envelope from the array.
-        let picked = pick_trusted_envelope(Some(&envelopes), |id| id == "v2").unwrap();
-        assert_eq!(picked.key_id, "v2");
-        assert_eq!(picked.signed_payload, "payload-v2");
-
-        // Trusting v1 picks the primary entry (first in the array).
-        let picked = pick_trusted_envelope(Some(&envelopes), |id| id == "v1").unwrap();
-        assert_eq!(picked.key_id, "v1");
-
-        // No trusted id → the first entry, so verification reports UnknownKeyId.
-        let picked = pick_trusted_envelope(Some(&envelopes), |_| false).unwrap();
-        assert_eq!(picked.key_id, "v1");
-
-        // Nothing signed at all → None.
-        assert!(pick_trusted_envelope(None, |_| true).is_none());
-    }
-}
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/managed_config/response.rs

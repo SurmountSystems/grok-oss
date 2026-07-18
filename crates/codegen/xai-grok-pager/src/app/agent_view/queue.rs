@@ -122,20 +122,12 @@ impl AgentView {
                 .is_some_and(|g| matches!(g.status, crate::app::agent::GoalDisplayStatus::Active))
     }
 
-<<<<<<< HEAD
     /// Set both send-now expectations: the cancel marker and the follow-without-jump pin. Gate with [`Self::expects_send_now_cancel`].
-=======
-    /// Arm the send-now cancel-marker expectation. Gate with
-    /// [`Self::expects_send_now_cancel`]. Also stamps
-    /// [`Self::follow_without_jump_prompt_id`] (cleared on adopt / clear) for
-    /// failure-path bookkeeping; scroll jumps to the painted user prompt.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn arm_send_now_expectation(&mut self, prompt_id: String) {
         self.follow_without_jump_prompt_id = Some(prompt_id.clone());
         self.expect_send_now_cancel = Some(prompt_id);
     }
 
-<<<<<<< HEAD
     pub(crate) fn send_now_awaiting_current(&self) -> bool {
         self.expect_send_now_cancel
             .as_deref()
@@ -143,9 +135,6 @@ impl AgentView {
     }
 
     /// Clear both send-now expectations (failure, interactive cancel, or reload).
-=======
-    /// Clear cancel-marker expectation + pin (failure / interactive cancel / reload).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn clear_send_now_expectation(&mut self) {
         self.expect_send_now_cancel = None;
         self.follow_without_jump_prompt_id = None;

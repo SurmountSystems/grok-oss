@@ -201,13 +201,8 @@ pub struct ScrollbackState {
     expanded_groups: HashSet<EntryId>,
 
     // Link map
-<<<<<<< HEAD
     /// Monotonically increasing counter, bumped when visible link positions or policy inputs change.
     /// Used by `VisibleLinkMap::is_stale()` to skip rebuilds.
-=======
-    /// Monotonically increasing counter, bumped when visible link positions or
-    /// policy inputs change. Used by `VisibleLinkMap::is_stale()` to skip rebuilds.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     generation: u64,
 
     /// Bumped only when entries are added or removed or an entry's content changes.
@@ -484,13 +479,8 @@ impl ScrollbackState {
 
     // Link map generation
 
-<<<<<<< HEAD
     /// Current link-map generation.
     /// Incremented when positions or link-policy inputs change and invalidate the visible link map.
-=======
-    /// Current link-map generation. Incremented when positions or link-policy
-    /// inputs change and invalidate the visible link map.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -1086,14 +1076,8 @@ impl ScrollbackState {
         self.entries.get_index_of(&id)
     }
 
-<<<<<<< HEAD
     /// Capture a width-stable bookmark of the viewport-top content, to re-pin it after a resize/re-wrap (the `/jump` capture-and-restore).
     /// `None` when there's no layout to anchor to.
-=======
-    /// Capture a width-stable bookmark of the viewport-top content, to re-pin
-    /// it after a resize/re-wrap (the `/jump` capture-and-restore). `None` when
-    /// there's no layout to anchor to.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn capture_scroll_bookmark(&self) -> Option<ScrollAnchor> {
         self.capture_scroll_anchor()
     }
@@ -1583,10 +1567,7 @@ impl ScrollbackState {
             scroll_offset: self.scroll_offset,
             follow_mode: self.follow_mode,
             follow_preserve_scroll: self.follow_preserve_scroll,
-<<<<<<< HEAD
             follow_preserve_content_generation: self.follow_preserve_content_generation,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             viewport_height: self.viewport_height,
             last_width: self.last_width,
             selected: self.selected,
@@ -1600,10 +1581,7 @@ impl ScrollbackState {
         self.scroll_offset = snap.scroll_offset;
         self.follow_mode = snap.follow_mode;
         self.follow_preserve_scroll = snap.follow_preserve_scroll;
-<<<<<<< HEAD
         self.follow_preserve_content_generation = snap.follow_preserve_content_generation;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         self.viewport_height = snap.viewport_height;
         self.last_width = snap.last_width;
         self.selected = snap.selected;
@@ -3338,10 +3316,7 @@ mod tests {
         state.prepare_layout(W0, H0);
         state.follow_mode = false;
         state.follow_preserve_scroll = true;
-<<<<<<< HEAD
         state.follow_preserve_content_generation = 17;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         state.set_selected(Some(0));
         state.set_scroll_offset(3);
         state.view_mode = ViewMode::SingleTurn;
@@ -3352,10 +3327,7 @@ mod tests {
         let expected_offset = snap.scroll_offset;
         let expected_follow = snap.follow_mode;
         let expected_preserve = snap.follow_preserve_scroll;
-<<<<<<< HEAD
         let expected_preserve_generation = snap.follow_preserve_content_generation;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let expected_vh = snap.viewport_height;
         let expected_lw = snap.last_width;
         let expected_sel = snap.selected;
@@ -3373,13 +3345,10 @@ mod tests {
         assert_eq!(state.scroll_offset, expected_offset);
         assert_eq!(state.follow_mode, expected_follow);
         assert_eq!(state.follow_preserve_scroll, expected_preserve);
-<<<<<<< HEAD
         assert_eq!(
             state.follow_preserve_content_generation,
             expected_preserve_generation
         );
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(state.viewport_height, expected_vh);
         assert_eq!(state.last_width, expected_lw);
         assert_eq!(state.selected, expected_sel);
@@ -3406,7 +3375,6 @@ mod tests {
         assert!(state.prepare_layout(W1, H));
         assert_eq!(state.last_width, W1);
         assert_eq!(state.layout_cache.as_ref().unwrap().width, W1);
-<<<<<<< HEAD
         let Some(peek_height) = state
             .layout_cache
             .as_ref()
@@ -3415,9 +3383,6 @@ mod tests {
         else {
             panic!("expected cached entry 1");
         };
-=======
-        let peek_height = state.layout_cache.as_ref().unwrap().entries[1].height;
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
         state.restore_viewport_snapshot(snap);
         assert_eq!(state.last_width, W0);
@@ -3430,12 +3395,8 @@ mod tests {
         let cache = state.layout_cache.as_ref().unwrap();
         assert_eq!(cache.width, W0);
         assert_ne!(
-<<<<<<< HEAD
             cache.entries.get(1).map(|e| e.height),
             Some(peek_height),
-=======
-            cache.entries[1].height, peek_height,
->>>>>>> e3fdf3ed (Merge 2 (#4))
             "heights must be recomputed for W0, not left at W1 wrap"
         );
     }

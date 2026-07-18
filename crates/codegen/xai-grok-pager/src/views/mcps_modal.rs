@@ -168,13 +168,10 @@ pub struct McpsServerSession {
     pub auth_required: bool,
     #[serde(default)]
     pub setup_required: bool,
-<<<<<<< HEAD
     /// Managed-policy verdict for a server the merge dropped (absent on
     /// older shells and on live servers).
     #[serde(default)]
     pub blocked_reason: Option<String>,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
@@ -281,7 +278,6 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
             let (status, tool_count, tools, auth_required, enabled) =
                 if let Some(session) = &entry.session {
                     let enabled = session.enabled;
-<<<<<<< HEAD
                     // The shell sets blockedReason only on servers its merge dropped: a terminal
                     // verdict, so it outranks the live setup/auth statuses.
                     if session.blocked_reason.is_some() {
@@ -294,10 +290,6 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                         )
                     } else if session.setup_required {
                         // Prefer setupRequired bool; status is a fallback for older shells.
-=======
-                    // Prefer setupRequired bool; status is a fallback for older shells.
-                    if session.setup_required {
->>>>>>> e3fdf3ed (Merge 2 (#4))
                         (
                             McpServerDisplayStatus::SetupRequired,
                             0,
@@ -350,16 +342,8 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                 .source_label
                 .or(entry.source)
                 .unwrap_or_else(|| "local".to_string());
-<<<<<<< HEAD
             // Derived from the status so a policy-blocked row cannot also open the setup form.
             let setup_required = status == McpServerDisplayStatus::SetupRequired;
-=======
-            let setup_required = entry
-                .session
-                .as_ref()
-                .is_some_and(|session| session.setup_required)
-                || matches!(status, McpServerDisplayStatus::SetupRequired);
->>>>>>> e3fdf3ed (Merge 2 (#4))
             McpServerInfo {
                 name: entry.name,
                 display_name: entry.display_name,
@@ -473,10 +457,7 @@ mod tests {
                     tools: vec![],
                     auth_required: false,
                     setup_required: false,
-<<<<<<< HEAD
                     blocked_reason: None,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 }),
             }],
             session_mcp_resolved: None,
@@ -683,10 +664,7 @@ mod tests {
                     tools: vec![],
                     auth_required: false,
                     setup_required: false,
-<<<<<<< HEAD
                     blocked_reason: None,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 }),
             }
         }

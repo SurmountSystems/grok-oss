@@ -1379,17 +1379,7 @@ mod tests {
 
     // ---- capture_changes_diff fallback paths -----------------
 
-<<<<<<< HEAD
     /// Run a `git` subcommand from `cwd`; panic on non-zero exit so test setup failures are loud.
-=======
-    /// Run a `git` subcommand from `cwd`; panic on non-zero exit so
-    /// test setup failures are loud. Used to script the lazy-baseline
-    /// scenarios below.
-    ///
-    /// Masks host global/system git config (`commit.gpgsign`,
-    /// `core.hooksPath`, etc.) so fixture commits in temp repos are
-    /// hermetic and do not trip developer-machine signing hooks.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn git(cwd: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new(super::git_bin())
             .args(args)

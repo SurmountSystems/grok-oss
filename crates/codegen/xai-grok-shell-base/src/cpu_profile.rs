@@ -510,12 +510,7 @@ fn now_timestamp() -> String {
     Utc::now().format("%Y%m%dT%H%M%S%.6fZ").to_string()
 }
 
-<<<<<<< HEAD
 // Module-level (not inside `mod tests`) so downstream crates' test targets can reach it in test-only builds
-=======
-// Module-level (not inside `mod tests`) so downstream crates' test targets
-// can reach it in test-only builds.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[cfg(any(test, feature = "test-support"))]
 impl CpuProfileManager {
     pub fn start_with_engine_for_test(

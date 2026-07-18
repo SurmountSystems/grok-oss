@@ -393,7 +393,6 @@ impl SessionActor {
                         requires_restart: false,
                     };
                 }
-<<<<<<< HEAD
                 // Shared gated pipeline (parse → registry flock → gate → save → auto-enable): this arm can't
                 // bypass the lockdown; blocking work runs off the LocalSet (invariant: plugin/acquire.rs).
                 let cwd = self.session_info.cwd.clone();
@@ -405,30 +404,6 @@ impl SessionActor {
                 match installed {
                     Ok(Ok(outcome)) => {
                         let count = outcome.plugin_names.len();
-=======
-                let cwd = std::path::Path::new(&self.session_info.cwd);
-                let install_source =
-                    xai_grok_agent::plugins::git_install::parse_install_source(&source, cwd);
-                let registry = xai_grok_agent::plugins::InstallRegistry::load();
-                match xai_grok_agent::plugins::git_install::install_from_source(
-                    &install_source,
-                    &registry,
-                    crate::plugin::marketplace_require_sha(),
-                ) {
-                    Ok(result) => {
-                        let repo = xai_grok_agent::plugins::git_install::build_installed_repo(
-                            &result,
-                            &install_source,
-                        );
-                        let mut registry = registry;
-                        registry.insert(result.repo_key.clone(), repo);
-                        if let Err(e) = registry.save() {
-                            tracing::warn!("Failed to save install registry: {e}");
-                        }
-                        let (names, post_warnings) =
-                            crate::config::post_install_plugin(&result.repo_key);
-                        let count = names.len();
->>>>>>> e3fdf3ed (Merge 2 (#4))
                         let mut msg = format!(
                             "Installed {count} plugin(s) from {source}: {}",
                             outcome.plugin_names.join(", ")
@@ -594,7 +569,6 @@ impl SessionActor {
                             requires_restart: false,
                         }
                     }
-<<<<<<< HEAD
                     Ok(Err(UpdateError::NotFound { name })) => ActionOutcome {
                         status: OutcomeStatus::NotFound,
                         message: format!("Plugin \"{name}\" not found."),
@@ -621,55 +595,6 @@ impl SessionActor {
                         requires_reload: false,
                         requires_restart: false,
                     },
-=======
-                } else {
-                    all_repos
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), v.clone()))
-                        .collect()
-                };
-
-                let mut messages = Vec::new();
-                let mut any_updated = false;
-                for (key, repo) in &repos_to_update {
-                    match xai_grok_agent::plugins::git_install::update_repo(
-                        key,
-                        repo,
-                        crate::plugin::marketplace_require_sha(),
-                    ) {
-                        Ok(status) => {
-                            use xai_grok_agent::plugins::git_install::UpdateStatus;
-                            match status {
-                                UpdateStatus::Updated(result) => {
-                                    if result.changed {
-                                        any_updated = true;
-                                        messages.push(format!("{key}: updated"));
-                                    } else {
-                                        messages.push(format!("{key}: already up to date"));
-                                    }
-                                }
-                                UpdateStatus::Pinned { ref_name } => {
-                                    messages.push(format!("{key}: pinned to {ref_name}"));
-                                }
-                                UpdateStatus::LiveLocal => {
-                                    messages.push(format!("{key}: local symlink (already live)"));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            messages.push(format!("{key}: update failed: {e}"));
-                        }
-                    }
-                }
-                if let Err(e) = registry.save() {
-                    tracing::warn!("Failed to save install registry after update: {e}");
-                }
-                ActionOutcome {
-                    status: OutcomeStatus::Success,
-                    message: messages.join("\n"),
-                    requires_reload: any_updated,
-                    requires_restart: false,
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 }
             }
             PluginsAction::Add { path } => {

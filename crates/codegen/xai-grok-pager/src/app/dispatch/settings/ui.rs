@@ -14,11 +14,7 @@ use super::setters::{
     set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
     set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
     set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
-<<<<<<< HEAD
     set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
-=======
-    set_voice_stt_language_inner,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 use crate::app::actions::{Action, Effect, ModelChoice};
 use crate::app::app_view::{ActiveView, AppView};
@@ -657,7 +653,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("compact_mode", SettingValue::Bool(b)) => Some(Action::SetCompactMode(*b)),
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
-<<<<<<< HEAD
         ("page_flip_on_send", SettingValue::Bool(b)) => Some(Action::SetPageFlipOnSend(*b)),
         ("dashboard_preview", SettingValue::Bool(enabled)) => {
             Some(Action::SetDashboardPreview(*enabled))
@@ -671,8 +666,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("follow_up_behavior", SettingValue::Enum(s)) => {
             crate::appearance::FollowUpBehavior::from_canonical(s).map(Action::SetFollowUpBehavior)
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         ("simple_mode", SettingValue::Bool(b)) => Some(Action::SetSimpleMode(*b)),
         ("contextual_hints.undo", SettingValue::Bool(b)) => Some(Action::SetContextualHintUndo(*b)),
         ("contextual_hints.plan_mode", SettingValue::Bool(b)) => {
@@ -690,12 +683,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("contextual_hints.word_select", SettingValue::Bool(b)) => {
             Some(Action::SetContextualHintWordSelect(*b))
         }
-<<<<<<< HEAD
         ("contextual_hints.export_copy", SettingValue::Bool(b)) => {
             Some(Action::SetContextualHintExportCopy(*b))
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         ("contextual_hints.ssh_wrap", SettingValue::Bool(b)) => {
             Some(Action::SetContextualHintSshWrap(*b))
         }
@@ -796,12 +786,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetHunkTrackerMode((*s).to_string()))
         }
         ("screen_mode", SettingValue::Enum(s)) => Some(Action::SetScreenMode((*s).to_string())),
-<<<<<<< HEAD
         ("voice_keybind_enabled", SettingValue::Bool(b)) => {
             Some(Action::SetVoiceKeybindEnabled(*b))
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         ("voice_capture_mode", SettingValue::Enum(s)) => {
             Some(Action::SetVoiceCaptureMode((*s).to_string()))
         }
@@ -846,7 +833,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),
-<<<<<<< HEAD
         ("page_flip_on_send", SettingValue::Bool(b)) => set_page_flip_on_send_inner(app, *b),
         ("dashboard_preview", SettingValue::Bool(enabled)) => {
             app.current_ui.dashboard_preview = Some(*enabled);
@@ -862,8 +848,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 set_follow_up_behavior_inner(app, mode);
             }
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         ("simple_mode", SettingValue::Bool(b)) => set_simple_mode_inner(app, *b),
         ("contextual_hints.undo", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.undo = v, *b)
@@ -883,12 +867,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("contextual_hints.word_select", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.word_select = v, *b)
         }
-<<<<<<< HEAD
         ("contextual_hints.export_copy", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.export_copy = v, *b)
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         ("contextual_hints.ssh_wrap", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.ssh_wrap = v, *b)
         }
@@ -1083,12 +1064,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("screen_mode", SettingValue::Enum(s)) => {
             set_screen_mode_inner(app, crate::settings::canonical_screen_mode(Some(s)));
         }
-<<<<<<< HEAD
         ("voice_keybind_enabled", SettingValue::Bool(b)) => {
             set_voice_keybind_enabled_inner(app, *b)
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         ("voice_capture_mode", SettingValue::Enum(s)) => {
             set_voice_capture_mode_inner(
                 app,

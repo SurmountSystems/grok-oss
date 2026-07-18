@@ -31,10 +31,7 @@ pub struct BashToolConfig {
     /// Whether to allow a background `&` operator in foreground commands (default: `true`).
     /// Resolution: config.toml (this) > remote settings > `true`.
     pub allow_background_operator: Option<bool>,
-<<<<<<< HEAD
     pub login_shell_capture: Option<bool>,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 impl BashToolConfig {

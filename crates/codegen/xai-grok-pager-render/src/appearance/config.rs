@@ -6,13 +6,6 @@ use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, RawString};
 use xai_grok_shared::ui_config::UiConfig;
-<<<<<<< HEAD
-=======
-
-// ============================================================================
-// Runtime Config (used by render code)
-// ============================================================================
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
 /// Background style for block content area.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -33,12 +26,7 @@ pub struct AppearanceConfig {
     pub show_timestamps: bool,
     /// Timeline sidebar (per-turn tick rail). Toggled via `/timeline`.
     pub show_timeline: bool,
-<<<<<<< HEAD
     /// Whether hooks & plugins UI is disabled (hides /hooks, /plugins commands and scrollback annotations). `false` by default (plugins enabled).
-=======
-    /// Whether hooks & plugins UI is disabled (hides /hooks, /plugins commands
-    /// and scrollback annotations). `false` by default (plugins enabled).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub disable_plugins: bool,
     /// Always show the "plan" chip in the status bar when plan content is available, even after the user exits plan mode.
     /// `false` by default (chip hidden once plan mode ends).

@@ -104,7 +104,6 @@ impl HookRegistry {
         all
     }
 
-<<<<<<< HEAD
     /// Look up a spec by its full name, so disable/enable actions can consult its provenance before mutating disabled-hooks state.
     pub fn find_by_name(&self, name: &str) -> Option<&HookSpec> {
         self.hooks.values().flatten().find(|s| s.name == name)
@@ -113,23 +112,6 @@ impl HookRegistry {
     /// Rebuild the `matcher` field (serde skips it) from `configured_matcher` after any wire restore.
     /// Until then a configured pattern acts as match-all.
     /// An invalid pattern can't be rejected here (the registry is live), so it installs [`HookMatcher::never`]: fail closed rather than match all.
-=======
-    /// Recompile the `matcher` field on every [`HookSpec`] from its
-    /// `configured_matcher` pattern string.
-    ///
-    /// After deserialization the compiled [`HookMatcher`] is `None`
-    /// (`#[serde(skip)]`). This rebuilds it via [`HookMatcher::new`].
-    ///
-    /// Specs whose `configured_matcher` is `None` (intentional match-all)
-    /// are left untouched. Invalid patterns cannot be rejected the way the
-    /// parse path does (`HookError::InvalidMatcher` + skip the hook): the
-    /// registry is already live, so we install [`HookMatcher::never`]
-    /// instead: fail closed rather than widening to match all.
-    ///
-    /// Call this after any serde / wire restore (e.g. workspace proxy
-    /// `wire_to_hook_registry`). Until then, a configured pattern with
-    /// `matcher: None` behaves as match-all.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn recompile_matchers(&mut self) {
         for specs in self.hooks.values_mut() {
             for spec in specs.iter_mut() {
@@ -1286,11 +1268,7 @@ mod tests {
         assert_eq!(registry.len(), 1);
     }
 
-<<<<<<< HEAD
     /// A spec as serde restores it from the wire: compiled matcher cleared, pattern still set.
-=======
-    /// Wire/serde-shaped spec: compiled matcher cleared, pattern still set.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn recompile_test_spec(
         name: &str,
         configured_matcher: Option<&str>,
@@ -1299,11 +1277,7 @@ mod tests {
         crate::config::HookSpec {
             name: name.into(),
             event: HookEventName::PreToolUse,
-<<<<<<< HEAD
             handler_type: crate::config::HandlerType::Command,
-=======
-            handler_type: "command".into(),
->>>>>>> e3fdf3ed (Merge 2 (#4))
             configured_matcher: configured_matcher.map(str::to_owned),
             matcher: None,
             enabled: true,
@@ -1314,65 +1288,21 @@ mod tests {
             timeout_ms: 5_000,
             source_dir: PathBuf::from("/tmp"),
             extra_env: Default::default(),
-<<<<<<< HEAD
             layer: crate::config::HookProvenance::File,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 
     #[test]
-<<<<<<< HEAD
-=======
-    fn recompile_matchers_fail_closed_on_invalid_pattern() {
-        // Serde skips `matcher`; recompile must not leave it None (match-all).
-        let mut registry = HookRegistry::default();
-        registry.append_specs(vec![recompile_test_spec("broken", Some("[invalid"))]);
-        registry.recompile_matchers();
-
-        let hooks = registry.hooks_for(HookEventName::PreToolUse);
-        assert_eq!(hooks.len(), 1);
-        let matcher = hooks[0]
-            .matcher
-            .as_ref()
-            .expect("invalid matcher must compile to never-match, not stay None");
-        assert!(!matcher.is_match("run_terminal_command"));
-        assert!(!matcher.is_match("read_file"));
-        assert!(!matcher.is_match("Bash"));
-    }
-
-    #[test]
-    fn recompile_matchers_restores_valid_pattern() {
-        let mut registry = HookRegistry::default();
-        registry.append_specs(vec![recompile_test_spec("ok", Some("Bash"))]);
-        registry.recompile_matchers();
-
-        let matcher = registry.hooks_for(HookEventName::PreToolUse)[0]
-            .matcher
-            .as_ref()
-            .expect("valid matcher should recompile");
-        assert!(matcher.is_match("run_terminal_command"));
-        assert!(!matcher.is_match("read_file"));
-    }
-
-    #[test]
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn recompile_matchers_leaves_intentional_match_all() {
         let mut registry = HookRegistry::default();
         registry.append_specs(vec![recompile_test_spec("all", None)]);
         registry.recompile_matchers();
 
         assert!(
-<<<<<<< HEAD
             registry
                 .hooks_for(HookEventName::PreToolUse)
                 .first()
                 .is_some_and(|h| h.matcher.is_none()),
-=======
-            registry.hooks_for(HookEventName::PreToolUse)[0]
-                .matcher
-                .is_none(),
->>>>>>> e3fdf3ed (Merge 2 (#4))
             "no configured pattern must stay match-all (matcher None)"
         );
     }
@@ -1391,26 +1321,18 @@ mod tests {
         let by_name: std::collections::HashMap<_, _> =
             hooks.iter().map(|h| (h.name.as_str(), h)).collect();
 
-<<<<<<< HEAD
         let ok = by_name
             .get("ok")
             .unwrap_or_else(|| panic!("missing ok spec: {by_name:?}"))
-=======
-        let ok = by_name["ok"]
->>>>>>> e3fdf3ed (Merge 2 (#4))
             .matcher
             .as_ref()
             .expect("valid sibling must recompile");
         assert!(ok.is_match("run_terminal_command"));
         assert!(!ok.is_match("read_file"));
 
-<<<<<<< HEAD
         let broken = by_name
             .get("broken")
             .unwrap_or_else(|| panic!("missing broken spec: {by_name:?}"))
-=======
-        let broken = by_name["broken"]
->>>>>>> e3fdf3ed (Merge 2 (#4))
             .matcher
             .as_ref()
             .expect("invalid sibling must become never-match");
@@ -1418,7 +1340,6 @@ mod tests {
         assert!(!broken.is_match("Bash"));
         assert!(!broken.is_match("read_file"));
     }
-<<<<<<< HEAD
 
     fn write_requirements(dir: &Path, content: &str) {
         std::fs::write(dir.join("requirements.toml"), content).unwrap();
@@ -1529,6 +1450,4 @@ timeout = 5
             "reading the disguised directory as a settings file must surface ReadFile; got {errors:?}"
         );
     }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }

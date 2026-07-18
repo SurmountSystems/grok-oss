@@ -782,7 +782,6 @@ pub(crate) async fn spawn_session_actor(
             grep_ugrep,
         }
     };
-<<<<<<< HEAD
     let resolve_policy = || crate::util::config::resolve_shell_env_policy(effective_cfg.as_ref());
     let terminal_backend: std::sync::Arc<dyn xai_grok_tools::computer::types::TerminalBackend> =
         match terminal_backend_kind {
@@ -832,23 +831,6 @@ pub(crate) async fn spawn_session_actor(
         session: file_acceleration_session,
     } = crate::session::file_acceleration::select_session_fs(
         (client_fs_capable && tool_context.gateway.is_some()).then(|| {
-=======
-    let terminal_backend: std::sync::Arc<dyn xai_grok_tools::computer::types::TerminalBackend> =
-        if let Some(parent_tb) = parent_terminal_backend.filter(|_| startup_hints.is_subagent) {
-            parent_tb
-        } else if client_terminal_capable && tool_context.gateway.is_some() {
-            std::sync::Arc::new(crate::terminal::AcpTerminalAdapter::new(
-                tool_context.gateway.clone().unwrap(),
-                tool_context.session_id.clone().unwrap(),
-            )) as std::sync::Arc<dyn xai_grok_tools::computer::types::TerminalBackend>
-        } else {
-            let backend: std::sync::Arc<dyn xai_grok_tools::computer::types::TerminalBackend> =
-                std::sync::Arc::new(LocalTerminalBackend::new_local(resolve_search_shadows()));
-            backend
-        };
-    let fs_backend: std::sync::Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem> =
-        if client_fs_capable && tool_context.gateway.is_some() {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             std::sync::Arc::new(xai_grok_workspace::file_system::AcpFsAdapter::new(
                 tool_context.gateway.clone().unwrap(),
                 tool_context.session_id.clone().unwrap(),
@@ -1018,11 +1000,7 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         };
-<<<<<<< HEAD
         let embed_credentials = xai_grok_login::credential_provider::embedding_session_credentials(
-=======
-        let embed_credentials = crate::auth::credential_provider::embedding_session_credentials(
->>>>>>> e3fdf3ed (Merge 2 (#4))
             &embed_base_url,
             auth_manager.as_ref(),
             api_key_provider.clone(),
@@ -1037,16 +1015,12 @@ pub(crate) async fn spawn_session_actor(
                 .map_or_else(Default::default, |mc| mc.search.clone()),
             watcher,
             stale_claim_secs: watcher_config.stale_claim_secs,
-<<<<<<< HEAD
             search_source: crate::session::memory::MemorySearchSource::Tool,
             observation_sink: std::sync::Arc::new(
                 crate::session::memory_observation::TelemetryMemoryObservationSink {
                     session_id: session_info.id.to_string(),
                 },
             ),
-=======
-            search_source: "tool",
->>>>>>> e3fdf3ed (Merge 2 (#4))
             embedding_credentials: embed_credentials,
         };
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
@@ -3003,7 +2977,6 @@ impl crate::session::mcp_restart::RestartActions for SessionRestartActions {
             .end_restart(server);
     }
 }
-<<<<<<< HEAD
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MemoryStorageSelection {
     Enabled,
@@ -3224,5 +3197,3 @@ mod terminal_backend_select_tests {
         );
     }
 }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))

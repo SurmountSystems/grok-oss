@@ -164,26 +164,16 @@ pub struct AgentViewLayout {
     pub scrollback_content: Rect,
     /// Scrollbar track position (x coordinate).
     pub scrollbar_x: u16,
-<<<<<<< HEAD
     /// Timeline rail left edge, only meaningful when `timeline_width > 0`.
     /// The rail's right edge lands on the scrollbar column, which the rail replaces.
     pub timeline_x: u16,
     /// Columns reserved for the timeline rail (0 means the rail is hidden).
     /// Non-zero also means the scrollbar does not render this frame.
-=======
-    /// Timeline rail left edge (only meaningful when `timeline_width > 0`;
-    /// the rail's right edge lands on the scrollbar column, which the rail
-    /// replaces).
-    pub timeline_x: u16,
-    /// Columns reserved for the timeline rail (0 = rail hidden). Non-zero
-    /// also means the scrollbar does not render this frame.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub timeline_width: u16,
 }
 impl AgentViewLayout {
     /// Stack the rows described by `params` into the screen area.
     ///
-<<<<<<< HEAD
     /// Each row's rules are documented on [`AgentViewLayoutParams`].
     pub fn compute(params: AgentViewLayoutParams) -> Self {
         let AgentViewLayoutParams {
@@ -208,45 +198,6 @@ impl AgentViewLayout {
             status_line_height,
             compact,
         } = params;
-=======
-    /// When `todo_height` is 0, the todo pane and its gap are omitted.
-    /// When `turn_status_height` is 0, the turn status line is omitted.
-    /// When `banner_height` is 0, the reserved banner row is omitted.
-    /// When `cta_height` is 0, the plugin-CTA row is omitted. It is also
-    /// forced to 0 on short terminals (`area.height <= SHORT_TERMINAL_ROWS`)
-    /// so the prompt and scrollback are never starved.
-    /// When `follow_ups_height` is 0, the follow-up chips row is omitted; it
-    /// is force-suppressed on short terminals on the same `SHORT_TERMINAL_ROWS`
-    /// rule as the CTA row.
-    /// When `startup_warning_height` is 0, the startup warning area is omitted.
-    /// `prompt_gap` is 0 or 1 — controls the gap row between turn status
-    /// (or scrollback) and the prompt widget.
-    /// `timeline_width` reserves rail columns for the timeline sidebar in
-    /// place of the scrollbar (0 = hidden); it requires the scrollbar's
-    /// gutter geometry, so a disabled scrollbar forces it to 0.
-    #[allow(clippy::too_many_arguments)]
-    pub fn compute(
-        area: Rect,
-        layout_cfg: &LayoutConfig,
-        scrollbar_cfg: &ScrollbarConfig,
-        timeline_width: u16,
-        prompt_height: u16,
-        tasks_height: u16,
-        catalog_height: u16,
-        todo_height: u16,
-        queue_height: u16,
-        btw_height: u16,
-        turn_status_height: u16,
-        banner_height: u16,
-        cta_height: u16,
-        follow_ups_height: u16,
-        startup_warning_height: u16,
-        prompt_gap: u16,
-        voice_recording_height: u16,
-        shortcuts_height: u16,
-        compact: bool,
-    ) -> Self {
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let outer_vpad = layout_cfg.eff_outer_vpad(compact);
         let bottom_vpad = if area.height <= SHORT_TERMINAL_ROWS {
             0
@@ -2032,24 +1983,7 @@ mod tests {
         cta_height: u16,
         follow_ups_height: u16,
     ) -> AgentViewLayout {
-<<<<<<< HEAD
         AgentViewLayout::compute(AgentViewLayoutParams {
-=======
-        let layout_cfg = LayoutConfig::default();
-        let scrollbar_cfg = ScrollbarConfig::default();
-        AgentViewLayout::compute(
-            area,
-            &layout_cfg,
-            &scrollbar_cfg,
-            0,
-            2,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
->>>>>>> e3fdf3ed (Merge 2 (#4))
             banner_height,
             cta_height,
             follow_ups_height,
@@ -2059,7 +1993,6 @@ mod tests {
     fn layout_with_cta(area: Rect, cta_height: u16) -> AgentViewLayout {
         layout_with_rows(area, 0, cta_height, 0)
     }
-<<<<<<< HEAD
     fn layout_with_status_line(
         area: Rect,
         prompt_height: u16,
@@ -2228,45 +2161,16 @@ mod tests {
         );
         assert_eq!(over_budget.scrollback.height, SCROLLBACK_MIN_ROWS);
     }
-=======
-    /// Minimal layout with a timeline rail request — hides the cfg-dependent
-    /// arity of `compute` like `layout_with_rows` does.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn layout_with_rail(
         area: Rect,
         timeline_width: u16,
         scrollbar_cfg: &ScrollbarConfig,
     ) -> AgentViewLayout {
-<<<<<<< HEAD
         AgentViewLayout::compute(AgentViewLayoutParams {
             timeline_width,
             scrollbar_cfg: *scrollbar_cfg,
             ..base_params(area)
         })
-=======
-        let layout_cfg = LayoutConfig::default();
-        AgentViewLayout::compute(
-            area,
-            &layout_cfg,
-            scrollbar_cfg,
-            timeline_width,
-            2,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            false,
-        )
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     #[test]
     fn timeline_rail_replaces_the_scrollbar_column() {

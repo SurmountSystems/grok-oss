@@ -5,24 +5,16 @@ use std::sync::Arc;
 use ratatui::layout::Rect;
 
 use crate::app::actions::Action;
-<<<<<<< HEAD
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
     CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
     SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
     current_value_for, dynamic_enum_choices,
-=======
-use crate::settings::{
-    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind,
-    SettingMeta, SettingValue, SettingsRegistry, StringValidator, current_value_for,
-    dynamic_enum_choices,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 use crate::views::modal_window::ModalWindowState;
 
 use xai_grok_shell::agent::config::UiConfig;
 
-<<<<<<< HEAD
 /// Public display title of the modal, also used by `views/modal.rs::ActiveModal::message` so renames stay in one place.
 pub const MODAL_TITLE: &str = "Settings";
 
@@ -31,22 +23,6 @@ pub const MODAL_TITLE: &str = "Settings";
 pub(super) const TITLE_LEADING_DECORATION_W: u16 = 2; // `─ `: 1 cell box-drawing + 1 cell space.
 
 // Descriptions are expand-on-demand via Right/Left arrows; see `render_expanded_description`
-=======
-// ---------------------------------------------------------------------------
-// Public constants
-// ---------------------------------------------------------------------------
-
-/// Public display title of the modal — also used by
-/// `views/modal.rs::ActiveModal::message` so renames stay in one place.
-pub const MODAL_TITLE: &str = "Settings";
-
-/// Width of the `"─ "` leading decoration before the title in the
-/// modal's top border. Used to compute the breadcrumb hit-rect x offset.
-pub(super) const TITLE_LEADING_DECORATION_W: u16 = 2; // `─ `: 1 cell box-drawing + 1 cell space.
-
-// Descriptions are now expand-on-demand via Right/Left arrows;
-// see `render_expanded_description`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
 /// Below this width the row list is skipped (chrome renders empty).
 pub(super) const CONTENT_MIN_WIDTH: u16 = 10;
@@ -54,21 +30,11 @@ pub(super) const CONTENT_MIN_WIDTH: u16 = 10;
 /// Default max width for the modal. Keeps the row list compact on wide terminals.
 pub(super) const STANDARD_MAX_WIDTH: u16 = 110;
 
-<<<<<<< HEAD
 /// Per-side margin when editing `max_thoughts_width` (modal widens to `terminal_width - 2*margin` so the wrap preview is useful).
 pub(super) const MAX_THOUGHTS_WIDTH_WIDENED_MARGIN: u16 = 8;
 
 /// Outcome of a key or mouse event.
 /// Separate from `InputOutcome` because the modal doesn't own `agent.active_modal`; close is the caller's responsibility.
-=======
-/// Per-side margin when editing `max_thoughts_width` (modal widens
-/// to `terminal_width - 2*margin` so the wrap preview is useful).
-pub(super) const MAX_THOUGHTS_WIDTH_WIDENED_MARGIN: u16 = 8;
-
-/// Outcome of a key or mouse event. Separate from `InputOutcome`
-/// because the modal doesn't own `agent.active_modal` — close is
-/// the caller's responsibility.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum SettingsKeyOutcome {
@@ -77,76 +43,44 @@ pub enum SettingsKeyOutcome {
     /// Forward to dispatch.
     Action(Action),
     /// Forward two actions in order (first must resolve before second).
-<<<<<<< HEAD
     /// Used by `d`-reset-in-picker to revert preview before opening the reset-confirm overlay.
     ActionPair(Action, Action),
     /// Close the modal and dispatch `Action` (deep-link Esc revert or Enter commit).
     ActionThenClose(Action),
-=======
-    /// Used by `d`-reset-in-picker to revert preview before opening
-    /// the reset-confirm overlay.
-    ActionPair(Action, Action),
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Internal state mutation, no action.
     Changed,
     /// No-op.
     Unchanged,
 }
 
-<<<<<<< HEAD
 /// One row in the visible flat list: either a category header (non-selectable) or a setting row (selectable, dispatchable).
-=======
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// One row in the visible flat list — either a category header (non-
-/// selectable) or a setting row (selectable, dispatchable).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone)]
 pub enum RowEntry {
     Header { category: SettingCategory },
     Setting { key: SettingKey, meta_index: usize },
 }
 
-<<<<<<< HEAD
 /// Read-only projection of the modal's private discriminated state.
-=======
-/// Mode state for the modal.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone)]
 pub enum SettingsModalMode {
     Browse,
     /// `/` was pressed; chars filter the visible rows.
     FilterFocused,
-<<<<<<< HEAD
     /// Enum chooser sub-pane.
     /// `supports_preview` is cached at open time to avoid per-keystroke registry lookups.
-=======
-    /// Enum chooser sub-pane. `supports_preview` is cached at open
-    /// time to avoid per-keystroke registry lookups.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     PickingEnum {
         key: SettingKey,
         choices_idx: usize,
         original_value: SettingValue,
         supports_preview: bool,
     },
-<<<<<<< HEAD
     /// Group sub-sheet: a list of the group's child Bool toggles. `child_idx` is the focused child
     /// within the group. Space/Enter toggles in place (the sheet stays open); Esc returns to Browse.
     /// Mirrors `PickingEnum`'s open/render/commit flow but for independent toggles.
-=======
-    /// Group sub-sheet: a list of the group's child Bool toggles. `child_idx`
-    /// is the focused child within the group. Space/Enter toggles in place
-    /// (the sheet stays open); Esc returns to Browse. Mirrors `PickingEnum`'s
-    /// open/render/commit flow but for independent toggles.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     PickingGroup {
         key: SettingKey,
         child_idx: usize,
     },
-<<<<<<< HEAD
     /// Inline string/int editor. No live preview; Esc is a pure cancel.
     EditingValue {
         key: SettingKey,
@@ -225,39 +159,18 @@ pub(crate) struct RowVisibility {
 }
 
 /// Settings modal state. Boxed inside `ActiveModal::Settings` to avoid clippy `large_enum_variant`.
-=======
-    /// Inline string/int editor. `cursor_byte` is always on a char
-    /// boundary. `validation_error` shows live feedback; commit
-    /// re-validates before dispatching. No `original_value` — these
-    /// settings have no live preview, so Esc is a pure cancel.
-    EditingValue {
-        key: SettingKey,
-        buffer: String,
-        cursor_byte: usize,
-        validation_error: Option<String>,
-    },
-}
-
-/// Settings modal state. Boxed inside `ActiveModal::Settings` to
-/// avoid clippy `large_enum_variant`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub struct SettingsModalState {
     pub window: ModalWindowState,
     pub registry: Arc<SettingsRegistry>,
     /// `UiConfig` snapshot, refreshed by the dispatcher on mutations.
     pub ui_snapshot: UiConfig,
     pub pager_snapshot: PagerLocalSnapshot,
-<<<<<<< HEAD
     /// Computed row layout (headers and settings, in render order).
-=======
-    /// Computed row layout (headers + settings, in render order).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub rows: Vec<RowEntry>,
     /// Index into `rows` of the focused row.
     pub selected: usize,
     /// Vertical scroll offset (line-granular).
     pub scroll_offset: usize,
-<<<<<<< HEAD
     pub(super) state: SettingsState,
     /// Row indices matching `query`, recomputed per mutation (not per frame).
     pub(super) filtered_cache: Vec<usize>,
@@ -299,53 +212,11 @@ pub struct SettingsModalState {
 impl SettingsModalState {
     /// Appearance rows stay visible. Test helpers use this; production open
     /// passes a [`RowVisibility`] snapshot via [`Self::new_with_row_visibility`].
-=======
-    pub mode: SettingsModalMode,
-    /// Filter query. Persists across FilterFocused→Browse on Enter; cleared by Esc.
-    pub query: String,
-    /// Byte offset of the editing cursor within `query`.
-    pub query_cursor: usize,
-    /// Row indices matching `query`, recomputed per mutation (not per frame).
-    pub(super) filtered_cache: Vec<usize>,
-
-    // -- Mouse hit-test rects (populated by render) --
-    pub list_area: Rect,
-    /// Click-hit rect per row, parallel to `rows`.
-    pub row_rects: Vec<Rect>,
-    /// Click-hit rect for the value column on each row. Bool rows
-    /// toggle on click; Enum/String/Int rows open the sub-pane.
-    pub value_hit_rects: Vec<Rect>,
-    /// `(decrement_rect, increment_rect)` for the Int stepper's
-    /// `‹`/`›` glyphs. Zero-sized when not in Int editing mode.
-    pub editor_adornment_rects: (Rect, Rect),
-    /// Click-hit rect per choice in `PickingEnum`. Each rect spans the
-    /// full height of a choice (including wrapped description lines).
-    pub picker_choice_rects: Vec<Rect>,
-    /// Hit-rect for the breadcrumb title in sub-pane modes
-    /// (`PickingEnum`/`EditingValue`). Clicking anywhere on
-    /// `Settings › <label>` cancels back to Browse. `None` in
-    /// Browse/FilterFocused. Cleared on mode transitions.
-    pub settings_breadcrumb_rect: Option<Rect>,
-    /// Hover flag for the breadcrumb — adds underline affordance.
-    pub breadcrumb_hovered: bool,
-    /// Keys whose description is expanded (Right/l to expand, Left/h
-    /// to collapse). Multiple rows can be expanded simultaneously.
-    pub expanded_keys: std::collections::HashSet<&'static str>,
-    /// Row under the mouse cursor for hover highlighting. Indexes
-    /// `rows` in Browse, `picker_choice_rects` in PickingEnum,
-    /// always `None` in EditingValue.
-    pub hover_row: Option<usize>,
-}
-
-impl SettingsModalState {
-    /// Construct a new modal state from a registry + snapshots.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn new(
         registry: Arc<SettingsRegistry>,
         ui_snapshot: UiConfig,
         pager_snapshot: PagerLocalSnapshot,
     ) -> Self {
-<<<<<<< HEAD
         Self::new_with_row_visibility(
             registry,
             ui_snapshot,
@@ -364,9 +235,6 @@ impl SettingsModalState {
         visibility: RowVisibility,
     ) -> Self {
         let rows = build_rows(&registry, visibility);
-=======
-        let rows = build_rows(&registry);
->>>>>>> e3fdf3ed (Merge 2 (#4))
         // Start on the first selectable (non-header) row.
         let selected = rows
             .iter()
@@ -381,16 +249,10 @@ impl SettingsModalState {
             rows,
             selected,
             scroll_offset: 0,
-<<<<<<< HEAD
             state: SettingsState {
                 filter: LineEditor::default(),
                 mode: SettingsMode::Browse,
             },
-=======
-            mode: SettingsModalMode::Browse,
-            query: String::new(),
-            query_cursor: 0,
->>>>>>> e3fdf3ed (Merge 2 (#4))
             filtered_cache,
             list_area: Rect::default(),
             row_rects: Vec::new(),
@@ -401,7 +263,6 @@ impl SettingsModalState {
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
-<<<<<<< HEAD
             close_on_picker_exit: false,
             picker_last_click: None,
             visibility,
@@ -424,11 +285,6 @@ impl SettingsModalState {
             .map_or(meta.description, CodingDataSharingLock::reason)
     }
 
-=======
-        }
-    }
-
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// The currently-focused setting row, if any.
     pub fn focused_setting(&self) -> Option<(SettingKey, &SettingMeta)> {
         match self.rows.get(self.selected)? {
@@ -440,7 +296,6 @@ impl SettingsModalState {
         }
     }
 
-<<<<<<< HEAD
     /// Focus a setting by registry key (Browse mode).
     /// Returns whether the key was found; no-op if missing.
     pub fn focus_key(&mut self, key: &str) -> bool {
@@ -456,14 +311,11 @@ impl SettingsModalState {
         false
     }
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Filtered row indices in render order.
     pub fn filtered_indices(&self) -> &[usize] {
         &self.filtered_cache
     }
 
-<<<<<<< HEAD
     /// Rebuild rows from current process gates (voice / kitty) and the open-time visibility snapshot.
     /// Keeps focus on the same key when possible; exits sub-panes if the key vanished.
     pub fn rebuild_rows(&mut self) {
@@ -477,20 +329,6 @@ impl SettingsModalState {
         };
 
         self.rows = build_rows(&self.registry, self.visibility);
-=======
-    /// Rebuild rows from current process gates (voice / kitty / minimal).
-    /// Keeps focus on the same key when possible; exits sub-panes if the key vanished.
-    pub fn rebuild_rows(&mut self) {
-        let prev_key = self.focused_setting().map(|(k, _)| k);
-        let subpane_key = match &self.mode {
-            SettingsModalMode::PickingEnum { key, .. }
-            | SettingsModalMode::PickingGroup { key, .. }
-            | SettingsModalMode::EditingValue { key, .. } => Some(*key),
-            SettingsModalMode::Browse | SettingsModalMode::FilterFocused => None,
-        };
-
-        self.rows = build_rows(&self.registry);
->>>>>>> e3fdf3ed (Merge 2 (#4))
         self.invalidate_filter();
 
         if let Some(key) = subpane_key {
@@ -499,13 +337,7 @@ impl SettingsModalState {
                 .iter()
                 .any(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key));
             if !still_visible {
-<<<<<<< HEAD
                 self.transition_to_browse();
-=======
-                self.mode = SettingsModalMode::Browse;
-                self.settings_breadcrumb_rect = None;
-                self.picker_choice_rects.clear();
->>>>>>> e3fdf3ed (Merge 2 (#4))
             }
         }
 
@@ -528,7 +360,6 @@ impl SettingsModalState {
         }
     }
 
-<<<<<<< HEAD
     pub fn mode(&self) -> SettingsModalMode {
         match &self.state.mode {
             SettingsMode::Browse => SettingsModalMode::Browse,
@@ -596,11 +427,6 @@ impl SettingsModalState {
     pub(super) fn invalidate_filter(&mut self) {
         self.filtered_cache =
             compute_filtered(&self.rows, &self.registry, self.state.filter.text());
-=======
-    /// Recompute `filtered_cache` from the current `query`.
-    pub(super) fn invalidate_filter(&mut self) {
-        self.filtered_cache = compute_filtered(&self.rows, &self.registry, &self.query);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Snap `selected` to the first visible setting if filtered out.
@@ -613,15 +439,11 @@ impl SettingsModalState {
         }
         // Snap to first selectable row in the visible filter.
         for &row_idx in &self.filtered_cache {
-<<<<<<< HEAD
             if self
                 .rows
                 .get(row_idx)
                 .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
             {
-=======
-            if matches!(self.rows[row_idx], RowEntry::Setting { .. }) {
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 self.selected = row_idx;
                 return;
             }
@@ -642,7 +464,6 @@ impl SettingsModalState {
             None => 0,
         };
         while next < self.filtered_cache.len() {
-<<<<<<< HEAD
             let Some(&row_idx) = self.filtered_cache.get(next) else {
                 break;
             };
@@ -651,10 +472,6 @@ impl SettingsModalState {
                 .get(row_idx)
                 .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
             {
-=======
-            let row_idx = self.filtered_cache[next];
-            if matches!(self.rows[row_idx], RowEntry::Setting { .. }) {
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 self.selected = row_idx;
                 return true;
             }
@@ -676,7 +493,6 @@ impl SettingsModalState {
             None => self.filtered_cache.len() - 1,
         };
         loop {
-<<<<<<< HEAD
             let Some(&row_idx) = self.filtered_cache.get(prev) else {
                 break;
             };
@@ -685,10 +501,6 @@ impl SettingsModalState {
                 .get(row_idx)
                 .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
             {
-=======
-            let row_idx = self.filtered_cache[prev];
-            if matches!(self.rows[row_idx], RowEntry::Setting { .. }) {
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 self.selected = row_idx;
                 return true;
             }
@@ -705,15 +517,11 @@ impl SettingsModalState {
         if idx >= self.rows.len() {
             return false;
         }
-<<<<<<< HEAD
         if !self
             .rows
             .get(idx)
             .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
         {
-=======
-        if !matches!(self.rows[idx], RowEntry::Setting { .. }) {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             return false;
         }
         if self.selected == idx {
@@ -723,14 +531,8 @@ impl SettingsModalState {
         true
     }
 
-<<<<<<< HEAD
     /// Reset hit-test geometry so mouse handlers degrade gracefully when render is aborted.
     /// Does not clear `hover_row`; that's cleared on mode transitions instead to avoid per-frame flicker.
-=======
-    /// Reset hit-test geometry so mouse handlers degrade gracefully
-    /// when render is aborted. Does NOT clear `hover_row` — that's
-    /// cleared on mode transitions instead to avoid per-frame flicker.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn reset_hit_rects(&mut self) {
         self.list_area = Rect::default();
         self.row_rects.clear();
@@ -741,7 +543,6 @@ impl SettingsModalState {
         self.breadcrumb_hovered = false;
     }
 
-<<<<<<< HEAD
     /// Transition to Browse, clearing sub-pane hover/breadcrumb state to prevent stale hit-rects across mode changes.
     pub(crate) fn transition_to_browse(&mut self) {
         self.state.mode = SettingsMode::Browse;
@@ -803,15 +604,6 @@ impl SettingsModalState {
             min,
             max,
         };
-=======
-    /// Transition to Browse, clearing sub-pane hover/breadcrumb state
-    /// to prevent stale hit-rects across mode changes.
-    pub(crate) fn transition_to_browse(&mut self) {
-        self.mode = SettingsModalMode::Browse;
-        self.hover_row = None;
-        self.settings_breadcrumb_rect = None;
-        self.breadcrumb_hovered = false;
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Transition to `PickingEnum` if the focused row is Enum/DynamicEnum.
@@ -821,12 +613,9 @@ impl SettingsModalState {
             let Some((key, meta)) = self.focused_setting() else {
                 return false;
             };
-<<<<<<< HEAD
             if self.row_lock(key).is_some() {
                 return false;
             }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             // Handles both static `Enum` and `DynamicEnum` catalogs.
             let (supports_preview, resolved): (bool, Vec<OwnedEnumChoice>) = match &meta.kind {
                 SettingKind::Enum {
@@ -854,16 +643,9 @@ impl SettingsModalState {
                 ),
                 _ => return false,
             };
-<<<<<<< HEAD
             // Soft-fail if a static catalog exceeds the product cap
             // DynamicEnum (e.g. models) is exempt: those lists are runtime-sized and always scroll.
             // The chooser itself scrolls static lists too; this assert is a design guard, not a render requirement
-=======
-            // Soft-fail if a static catalog exceeds the product cap. DynamicEnum
-            // (e.g. models) is exempt — those lists are runtime-sized and always
-            // scroll. The chooser itself scrolls static lists too; this assert is
-            // a design guard, not a render requirement.
->>>>>>> e3fdf3ed (Merge 2 (#4))
             debug_assert!(
                 resolved.len() <= MAX_PICKER_CHOICES
                     || matches!(meta.kind, SettingKind::DynamicEnum { .. }),
@@ -881,16 +663,9 @@ impl SettingsModalState {
             (key, first, cur, supports_preview, resolved)
         };
 
-<<<<<<< HEAD
         // Resolve choices_idx from current value
         // For DynamicEnum, a current value that no longer exists in the catalog falls back to index 1 (the first real entry past the sentinel)
         // This avoids accidentally wiping the user's preference
-=======
-        // Resolve choices_idx from current value. For DynamicEnum,
-        // if the current value no longer exists in the catalog,
-        // fall back to index 1 (first real entry past sentinel)
-        // to avoid accidentally wiping the user's preference.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let is_dynamic_enum = matches!(
             self.registry.find(key).map(|m| &m.kind),
             Some(SettingKind::DynamicEnum { .. })
@@ -937,28 +712,13 @@ impl SettingsModalState {
                 _ => SettingValue::Enum(""),
             }
         });
-<<<<<<< HEAD
         self.transition_to_picking_enum(key, choices_idx, original_value, supports_preview);
-=======
-        self.mode = SettingsModalMode::PickingEnum {
-            key,
-            choices_idx,
-            supports_preview,
-            original_value,
-        };
->>>>>>> e3fdf3ed (Merge 2 (#4))
         self.hover_row = None;
         true
     }
 
-<<<<<<< HEAD
     /// Transition to `PickingGroup` if the focused row is a `Group`.
     /// Returns `false` for any other kind so the caller can fall through to the enum/editor entry points.
-=======
-    /// Transition to `PickingGroup` if the focused row is a `Group`. Returns
-    /// `false` for any other kind so the caller can fall through to the
-    /// enum/editor entry points.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn try_enter_picking_group(&mut self) -> bool {
         let Some((key, meta)) = self.focused_setting() else {
             return false;
@@ -966,11 +726,7 @@ impl SettingsModalState {
         if !matches!(meta.kind, SettingKind::Group { .. }) {
             return false;
         }
-<<<<<<< HEAD
         self.transition_to_picking_group(key, 0);
-=======
-        self.mode = SettingsModalMode::PickingGroup { key, child_idx: 0 };
->>>>>>> e3fdf3ed (Merge 2 (#4))
         self.hover_row = None;
         true
     }
@@ -980,7 +736,6 @@ impl SettingsModalState {
         let Some((key, meta)) = self.focused_setting() else {
             return false;
         };
-<<<<<<< HEAD
         let kind = meta.kind.clone();
         let value = self.value_for(key);
         match kind {
@@ -1011,44 +766,12 @@ impl SettingsModalState {
             }
             _ => return false,
         }
-=======
-        let buffer = match (&meta.kind, self.value_for(key)) {
-            (SettingKind::String { .. }, Some(SettingValue::String(s))) => s,
-            (SettingKind::Int { .. }, Some(SettingValue::Int(i))) => i.to_string(),
-            // Fallback for registry skew — seed from default.
-            (SettingKind::String { default, .. }, _) => default.to_string(),
-            (SettingKind::Int { default, .. }, _) => default.to_string(),
-            _ => return false,
-        };
-        let cursor_byte = buffer.len();
-
-        // Validate the seed value upfront.
-        let validation_error = match &meta.kind {
-            SettingKind::String { validator, .. } => {
-                validate_string(*validator, &buffer, &self.pager_snapshot.available_models)
-            }
-            SettingKind::Int { min, max, .. } => validate_int(&buffer, *min, *max),
-            _ => None,
-        };
-
-        self.mode = SettingsModalMode::EditingValue {
-            key,
-            buffer,
-            cursor_byte,
-            validation_error,
-        };
->>>>>>> e3fdf3ed (Merge 2 (#4))
         self.hover_row = None;
         true
     }
 
-<<<<<<< HEAD
     /// Build the Action that toggles the focused Bool row.
     /// Returns `None` with an error log on registry skew (caught by CI tests).
-=======
-    /// Build the Action that toggles the focused Bool row. Returns
-    /// `None` with an error log on registry skew (caught by CI tests).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn toggle_focused_bool(&self) -> Option<Action> {
         let (key, meta) = self.focused_setting()?;
         if !matches!(meta.kind, SettingKind::Bool { .. }) {
@@ -1086,15 +809,9 @@ impl SettingsModalState {
     }
 }
 
-<<<<<<< HEAD
 /// Compute filtered row indices for a query.
 /// Headers are emitted only when at least one setting in their section matches.
 /// Returns all indices when `query` is empty.
-=======
-/// Compute filtered row indices for a query. Headers are emitted only
-/// when ≥1 setting in their section matches. Returns all indices when
-/// `query` is empty.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) fn compute_filtered(
     rows: &[RowEntry],
     registry: &SettingsRegistry,
@@ -1126,7 +843,6 @@ pub(super) fn compute_filtered(
 }
 
 /// Row visibility: voice rows need the voice gate; capture needs key releases;
-<<<<<<< HEAD
 /// `hidden_in_minimal` rows drop when `hide_appearance` is set.
 /// Pure for unit tests.
 pub(super) fn setting_row_visible(
@@ -1141,44 +857,21 @@ pub(super) fn setting_row_visible(
             "voice_keybind_enabled" | "voice_capture_mode" | "voice_stt_language"
         )
     {
-=======
-/// `hidden_in_minimal` rows are dropped in minimal mode. Pure for unit tests.
-pub(super) fn setting_row_visible(
-    meta: &SettingMeta,
-    kitty_releases: bool,
-    minimal: bool,
-    voice_mode: bool,
-) -> bool {
-    if !voice_mode && matches!(meta.key, "voice_capture_mode" | "voice_stt_language") {
->>>>>>> e3fdf3ed (Merge 2 (#4))
         return false;
     }
     if meta.key == "voice_capture_mode" && !kitty_releases {
         return false;
     }
-<<<<<<< HEAD
     if hide_appearance && meta.hidden_in_minimal {
-=======
-    if minimal && meta.hidden_in_minimal {
->>>>>>> e3fdf3ed (Merge 2 (#4))
         return false;
     }
     true
 }
 
-<<<<<<< HEAD
 fn build_rows(registry: &SettingsRegistry, visibility: RowVisibility) -> Vec<RowEntry> {
     let kitty_releases = crate::app::kitty_releases_reported();
     let voice_mode = crate::app::voice_mode_enabled();
     // Keys that belong to a group sub-sheet are rendered only inside that sheet, never as their own top-level rows
-=======
-fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
-    let kitty_releases = crate::app::kitty_flags_pushed();
-    let minimal = crate::app::minimal_mode_active();
-    let voice_mode = crate::app::voice_mode_enabled();
-    // Keys that belong to a group sub-sheet are rendered only inside that
-    // sheet, never as their own top-level rows.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let group_children: std::collections::HashSet<SettingKey> = registry
         .all()
         .iter()
@@ -1196,11 +889,7 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
             if meta.category != *cat {
                 continue;
             }
-<<<<<<< HEAD
             if !setting_row_visible(meta, kitty_releases, visibility.hide_appearance, voice_mode) {
-=======
-            if !setting_row_visible(meta, kitty_releases, minimal, voice_mode) {
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 continue;
             }
             if group_children.contains(meta.key) {
@@ -1232,30 +921,20 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.send_now" => Some(Action::SetContextualHintSendNow(new)),
         "contextual_hints.small_screen" => Some(Action::SetContextualHintSmallScreen(new)),
         "contextual_hints.word_select" => Some(Action::SetContextualHintWordSelect(new)),
-<<<<<<< HEAD
         "contextual_hints.export_copy" => Some(Action::SetContextualHintExportCopy(new)),
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
         "voice_keybind_enabled" => Some(Action::SetVoiceKeybindEnabled(new)),
-=======
-        "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
-        "multiline_mode" => Some(Action::SetMultilineMode(new)),
-        "vim_mode" => Some(Action::SetVimMode(new)),
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "remember_tool_approvals" => Some(Action::SetRememberToolApprovals(new)),
         "toolset.ask_user_question.timeout_enabled" => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
         }
-<<<<<<< HEAD
         "subagent_model_inheritance" => Some(Action::SetSubagentModelInheritance(new)),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
-<<<<<<< HEAD
         "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
@@ -1263,29 +942,16 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
 
-=======
-        "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
         "auto_update" => Some(Action::SetAutoUpdate(new)),
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
-<<<<<<< HEAD
-=======
-        "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
->>>>>>> e3fdf3ed (Merge 2 (#4))
         _ => None,
     }
 }
 
-<<<<<<< HEAD
 /// Construct `Action::Preview*` for an Enum setting, used by the picker's Up/Down (live preview) and Esc (revert).
 /// Preview actions never persist; they only mutate the live visual.
-=======
-/// Construct `Action::Preview*` for an Enum setting — used by the
-/// picker's Up/Down (live preview) and Esc (revert). Preview actions
-/// never persist; they only mutate the live visual.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<Action> {
     match key {
         "theme" => Some(Action::PreviewTheme(choice.to_string())),
@@ -1314,15 +980,8 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             "always-approve" => Some(Action::SetPermissionMode(
                 crate::app::actions::PermissionModeKind::AlwaysApprove,
             )),
-<<<<<<< HEAD
             // Auto's feature gate is enforced in `set_permission_mode` (via `app.auto_mode_gate`, the same source the Shift+Tab cycle uses)
             // The modal and the cycle thus never disagree; committing Auto when the gate is off degrades to Ask there
-=======
-            // Auto's feature gate is enforced in `set_permission_mode`
-            // (via `app.auto_mode_gate`, the same source the Shift+Tab cycle
-            // uses), so the modal and the cycle never disagree. Committing Auto
-            // when the gate is off degrades to Ask there.
->>>>>>> e3fdf3ed (Merge 2 (#4))
             "auto" => Some(Action::SetPermissionMode(
                 crate::app::actions::PermissionModeKind::Auto,
             )),
@@ -1353,19 +1012,12 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         }
         "keep_text_selection" => crate::appearance::TextSelection::from_canonical(choice)
             .map(Action::SetKeepTextSelection),
-<<<<<<< HEAD
         // Junk canonicals fold to None, so Enter no-ops instead of mis-mapping
         "scroll_mode" => {
             crate::appearance::ScrollMode::from_canonical(choice).map(Action::SetScrollMode)
         }
         "follow_up_behavior" => crate::appearance::FollowUpBehavior::from_canonical(choice)
             .map(Action::SetFollowUpBehavior),
-=======
-        // Junk canonicals fold to None — Enter no-ops instead of mis-mapping.
-        "scroll_mode" => {
-            crate::appearance::ScrollMode::from_canonical(choice).map(Action::SetScrollMode)
-        }
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
         }
@@ -1438,21 +1090,13 @@ pub(super) fn validate_string(
             }
         }
         StringValidator::KnownModel => {
-<<<<<<< HEAD
             // Empty is the "clear default" sentinel
-=======
-            // Empty = "clear default" sentinel.
->>>>>>> e3fdf3ed (Merge 2 (#4))
             if buffer.is_empty() {
                 return None;
             }
             // Reject if the model catalog hasn't loaded yet.
             if available_models.is_empty() {
-<<<<<<< HEAD
                 return Some("Model catalog still loading, try again".to_string());
-=======
-                return Some("Model catalog still loading — try again".to_string());
->>>>>>> e3fdf3ed (Merge 2 (#4))
             }
             let matched = available_models
                 .iter()
@@ -1466,30 +1110,9 @@ pub(super) fn validate_string(
     }
 }
 
-<<<<<<< HEAD
 /// Soft product cap on static Enum choices (settings unit tests enforce it). This limit exists so
 /// catalogs stay intentionally curated rather than unbounded. Sized to fit the full Grok STT
 /// language list (25 codes + client-only `auto` = 26) with headroom.
-=======
-/// Validate an Int buffer against `(min, max)` bounds.
-pub(super) fn validate_int(buffer: &str, min: i64, max: i64) -> Option<String> {
-    if buffer.is_empty() {
-        return Some("Value cannot be empty".to_string());
-    }
-    match buffer.parse::<i64>() {
-        Ok(v) if v >= min && v <= max => None,
-        Ok(v) => Some(format!("Value out of range ({min}\u{2013}{max}): {v}")),
-        Err(_) => Some(format!("Not a valid integer: \"{buffer}\"")),
-    }
-}
-
-/// Soft product cap on static Enum choices (settings unit tests enforce it).
-///
-/// The chooser already scrolls within the viewport when the focused choice
-/// falls off-screen (`picker_scroll_offset`); this limit exists so catalogs
-/// stay intentionally curated rather than unbounded. Sized to fit the full
-/// Grok STT language list (25 codes + client-only `auto` = 26) with headroom.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) const MAX_PICKER_CHOICES: usize = 32;
 
 /// The children of a group setting, or an empty slice if `key` is not a group.
@@ -1500,7 +1123,6 @@ pub(super) fn group_children(state: &SettingsModalState, key: SettingKey) -> &'s
     }
 }
 
-<<<<<<< HEAD
 /// The runtime gates that can hide an Enum choice, gathered once per picker query.
 #[derive(Clone, Copy)]
 pub(super) struct EnumChoiceGates {
@@ -1526,31 +1148,11 @@ pub(super) fn enum_choice_gated_off(
 
 /// The effective static Enum choices for a picker, hiding gated-off options so the modal never offers a choice the setter would silently no-op.
 /// Every index-based picker path (len / at / render / seed) routes through this.
-=======
-/// Whether `(key, canonical)` is gated off and must not be offered as a choice:
-/// `permission_mode`'s "auto" when the auto gate is off, and
-/// `voice_capture_mode`'s "hold" without key-release reporting. Pure (gates
-/// passed as args) so it's unit-testable without touching process globals.
-pub(super) fn enum_choice_gated_off(
-    key: SettingKey,
-    canonical: &str,
-    auto_mode_gate: bool,
-    kitty_releases: bool,
-) -> bool {
-    (key == "permission_mode" && canonical == "auto" && !auto_mode_gate)
-        || (key == "voice_capture_mode" && canonical == "hold" && !kitty_releases)
-}
-
-/// The effective static Enum choices for a picker, hiding gated-off options so
-/// the modal never offers a choice the setter would silently no-op. Every
-/// index-based picker path (len / at / render / seed) routes through this.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) fn effective_enum_choices<'a>(
     key: SettingKey,
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-<<<<<<< HEAD
     let gates = EnumChoiceGates {
         auto_mode: snapshot.auto_mode_gate,
         kitty_releases: crate::app::kitty_releases_reported(),
@@ -1559,13 +1161,5 @@ pub(super) fn effective_enum_choices<'a>(
     choices
         .iter()
         .filter(|c| !enum_choice_gated_off(key, c.canonical, gates))
-=======
-    let kitty_releases = crate::app::kitty_flags_pushed();
-    choices
-        .iter()
-        .filter(|c| {
-            !enum_choice_gated_off(key, c.canonical, snapshot.auto_mode_gate, kitty_releases)
-        })
->>>>>>> e3fdf3ed (Merge 2 (#4))
         .collect()
 }

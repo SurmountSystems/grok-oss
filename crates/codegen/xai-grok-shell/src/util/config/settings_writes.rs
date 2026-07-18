@@ -87,18 +87,12 @@ pub async fn set_show_timestamps(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.show_timestamps = Some(value)).await
 }
 
-<<<<<<< HEAD
 /// Persist `[ui].show_timeline` via `update_config`.
 /// The `Option<bool>` shape matches `show_timestamps`.
-=======
-/// Persist `[ui].show_timeline` via `update_config`. Same `Option<bool>`
-/// shape as `show_timestamps`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub async fn set_show_timeline(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.show_timeline = Some(value)).await
 }
 
-<<<<<<< HEAD
 pub async fn set_page_flip_on_send(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.page_flip_on_send = Some(value)).await
 }
@@ -190,10 +184,6 @@ pub async fn set_follow_up_behavior(value: String) -> Result<()> {
 
 /// Persist `[ui].simple_mode` via `update_config`.
 /// The `Option<bool>` shape matches `show_timestamps`.
-=======
-/// Persist `[ui].simple_mode` via `update_config`. Same `Option<bool>`
-/// shape as `show_timestamps`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub async fn set_simple_mode(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.simple_mode = Some(value)).await
 }
@@ -229,26 +219,18 @@ pub async fn set_contextual_hint_word_select(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.contextual_hints.word_select = Some(value)).await
 }
 
-<<<<<<< HEAD
 /// Persist `[ui.contextual_hints].export_copy` via `update_config`.
 pub async fn set_contextual_hint_export_copy(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.contextual_hints.export_copy = Some(value)).await
 }
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 /// Persist `[ui.contextual_hints].ssh_wrap` via `update_config`.
 pub async fn set_contextual_hint_ssh_wrap(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.contextual_hints.ssh_wrap = Some(value)).await
 }
 
-<<<<<<< HEAD
 /// Persist `[ui].theme` via `update_config`.
 /// Caller must pass the canonical theme name (`groknight`, `tokyonight`, `auto`, etc.).
-=======
-/// Persist `[ui].theme` via `update_config`. Caller must pass the
-/// canonical theme name (`groknight`, `tokyonight`, `auto`, etc.).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub async fn set_theme(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.theme = Some(value)).await
 }

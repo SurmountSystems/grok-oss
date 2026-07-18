@@ -1,16 +1,7 @@
 //! Minimal-mode sign-in / folder-trust rendering for the live region.
 //!
-<<<<<<< HEAD
 //! Minimal has no welcome screen, so before any agent session exists the live region shows the sign-in flow itself.
 //! [`draw_live`](super::live::draw_live) maps [`AuthState`] and [`TrustState`] to a [`MinimalAuthHint`] and renders it via [`render_auth`].
-=======
-//! Before any agent session exists (unauthenticated / folder-trust pending) the
-//! minimal live region shows the sign-in flow itself — device or external-command
-//! flow, a sign-in error, the folder-trust question, or a brief "starting"
-//! transient once both gates are open — since minimal has no welcome screen.
-//! [`draw_live`](super::live::draw_live) computes a [`MinimalAuthHint`] from the
-//! app's [`AuthState`] + [`TrustState`] and renders it via [`render_auth`].
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use std::path::PathBuf;
 
@@ -22,15 +13,8 @@ use ratatui::text::{Line, Span};
 use xai_grok_pager::app::app_view::{AuthState, TrustState};
 use xai_grok_pager::theme::Theme;
 
-<<<<<<< HEAD
 /// What the minimal live region shows when there is no active agent yet.
 /// Computed before the draw closure so the closure can own it.
-=======
-/// What the minimal live region shows when there is no active agent yet: the
-/// in-region sign-in flow (device or external-command), a sign-in error, the
-/// folder-trust question, or a brief "starting" transient once authenticated
-/// (and trusted). Computed before the draw closure so the closure can own it.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) enum MinimalAuthHint {
     /// Interactive sign-in underway: show the URL (when known) and the device code (when the URL carries one).
     /// Covers device flow and the external command flow, where the provider opens its own browser and `url` may be `None`.
@@ -40,7 +24,6 @@ pub(super) enum MinimalAuthHint {
     },
     /// The last sign-in attempt failed; show the error.
     Failed(String),
-<<<<<<< HEAD
     /// Authenticated, but the cwd has untrusted repo-local config: ask before creating a session.
     /// Input (y/Enter trust, n/Esc quit) is handled by the welcome interceptor in `AppView::handle_input`; this is render-only.
     TrustFolder { workspace: PathBuf },
@@ -51,22 +34,6 @@ pub(super) enum MinimalAuthHint {
 /// Map the app's auth and trust state to what the no-agent live region should show.
 /// Mirrors the welcome screen's gate order: trust is only offered after auth is `Done`, when the user has access and is not ZDR-blocked.
 /// Those gates already block sessions, and the input interceptor only answers trust under the same conditions.
-=======
-    /// Authenticated, but the cwd has untrusted repo-local config — ask before
-    /// creating a session. Input (y/Enter trust, n/Esc quit) is handled by the
-    /// welcome interceptor in `AppView::handle_input`; this is render-only.
-    TrustFolder { workspace: PathBuf },
-    /// Authenticated (+ trusted) — the session is being created (brief transient).
-    Starting,
-}
-
-/// Map the app's auth + trust state to what the no-agent live region should show.
-///
-/// Mirrors the welcome screen's gate order: trust is only offered after auth is
-/// `Done`, when the user has access and is not ZDR-blocked (those gates already
-/// block sessions, and the input interceptor only answers trust under the same
-/// conditions).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) fn minimal_auth_hint(
     auth: &AuthState,
     trust: &TrustState,
@@ -100,24 +67,13 @@ pub(super) fn minimal_auth_hint(
     }
 }
 
-<<<<<<< HEAD
 /// Rows the no-agent live region needs for `hint` (before path wrap).
 /// Used by the overlay host so the viewport grows enough to show the trust question instead of clipping to the idle prompt height.
-=======
-/// Rows the no-agent live region needs for `hint` (before path wrap). Used by
-/// the overlay host so the viewport grows enough to show the trust question
-/// instead of clipping to the idle prompt height.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) fn auth_hint_rows(hint: &MinimalAuthHint, width: u16) -> u16 {
     match hint {
         // header + blank + "Opening browser…"
         MinimalAuthHint::SigningIn { url: None, code: _ } => 3,
-<<<<<<< HEAD
         // header + blank + "Open this URL" + url rows + optional code block + blank + "Waiting…"
-=======
-        // header + blank + "Open this URL" + url rows + optional code block +
-        // blank + "Waiting…"
->>>>>>> e3fdf3ed (Merge 2 (#4))
         MinimalAuthHint::SigningIn {
             url: Some(url),
             code,
@@ -138,12 +94,7 @@ pub(super) fn auth_hint_rows(hint: &MinimalAuthHint, width: u16) -> u16 {
     }
 }
 
-<<<<<<< HEAD
 /// How many rows `text` needs when painted char-by-char at `width` (no wrap-inserted spaces); same layout as [`render_url`].
-=======
-/// How many rows `text` needs when painted char-by-char at `width` (no
-/// wrap-inserted spaces) — same layout as [`render_url`].
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn wrapped_char_rows(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
     let chars = text.chars().filter(|c| !c.is_control()).count();
@@ -153,14 +104,8 @@ fn wrapped_char_rows(text: &str, width: u16) -> u16 {
     chars.div_ceil(width) as u16
 }
 
-<<<<<<< HEAD
 /// Parse the device-flow `user_code` from a verification URL (`None` if absent or malformed).
 /// Mirrors `views::welcome::extract_user_code`, kept local so minimal does not depend on welcome-screen internals.
-=======
-/// Parse the device-flow `user_code` from a verification URL (`None` if absent
-/// or malformed). Mirrors `views::welcome::extract_user_code`, kept local so
-/// minimal does not depend on welcome-screen internals.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn device_user_code(url: &str) -> Option<&str> {
     let code = url
         .split('?')
@@ -224,13 +169,8 @@ fn render_url(
     y.saturating_add(1)
 }
 
-<<<<<<< HEAD
 /// Render the sign-in / trust flow (or transient status) in the live region when no agent exists yet.
 /// Top-aligned in `area`; clips to its height.
-=======
-/// Render the sign-in / trust flow (or transient status) in the live region when
-/// no agent exists yet. Top-aligned in `area`; clips to its height.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &MinimalAuthHint) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -439,11 +379,7 @@ mod tests {
 
         let trust_done = TrustState::Done;
 
-<<<<<<< HEAD
         // Device flow maps to SigningIn carrying the URL and the parsed code
-=======
-        // Device flow → SigningIn carrying the URL and the parsed code.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let st = AuthState::Authenticating {
             request_seq: 1,
             handle: None,
@@ -505,12 +441,7 @@ mod tests {
             _ => panic!("expected TrustFolder"),
         }
 
-<<<<<<< HEAD
         // Access / ZDR gates suppress the trust question (matches welcome and the input interceptor)
-=======
-        // Access / ZDR gates suppress the trust question (matches welcome +
-        // the input interceptor).
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(matches!(
             minimal_auth_hint(&AuthState::Done, &trust, false, false),
             MinimalAuthHint::Starting
@@ -537,11 +468,7 @@ mod tests {
             code: Some("ABCD-EFGH".into()),
         };
         render_auth(&mut buf, area, &theme, &hint);
-<<<<<<< HEAD
         let text = crate::buffer_text(&buf);
-=======
-        let text = buffer_text(&buf, area);
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(text.contains("Sign in to Grok"), "header: {text:?}");
         assert!(text.contains("accounts.x.ai/device"), "url: {text:?}");
         assert!(text.contains("ABCD-EFGH"), "device code: {text:?}");
@@ -560,11 +487,7 @@ mod tests {
             workspace: PathBuf::from("/home/agent/project"),
         };
         render_auth(&mut buf, area, &theme, &hint);
-<<<<<<< HEAD
         let text = crate::buffer_text(&buf);
-=======
-        let text = buffer_text(&buf, area);
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(
             text.contains("Do you trust the contents of this directory?"),
             "question: {text:?}"
@@ -586,26 +509,7 @@ mod tests {
             workspace: PathBuf::from(long),
         };
         let rows = auth_hint_rows(&hint, 40);
-<<<<<<< HEAD
         // The 200-char path wraps to 5 rows at width 40, so the total sits well above the fixed rows
         assert!(rows >= 12, "expected room for wrapped path, got {rows}");
     }
-=======
-        // path alone needs 5 rows at width 40 (200/40); total well above base.
-        assert!(rows >= 12, "expected room for wrapped path, got {rows}");
-    }
-
-    fn buffer_text(buf: &Buffer, area: Rect) -> String {
-        let mut text = String::new();
-        for y in 0..area.height {
-            for x in 0..area.width {
-                if let Some(c) = buf.cell((x, y)) {
-                    text.push_str(c.symbol());
-                }
-            }
-            text.push('\n');
-        }
-        text
-    }
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }

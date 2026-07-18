@@ -67,7 +67,6 @@ fn resolve_search_tool_enabled(
     env.or(config).or(managed).unwrap_or(true)
 }
 
-<<<<<<< HEAD
 const ENV_LOGIN_SHELL_CAPTURE: &str = "GROK_LOGIN_ENV";
 
 fn login_shell_capture_from_toml(v: Option<&TomlValue>) -> Option<bool> {
@@ -291,11 +290,6 @@ mod login_shell_capture_tests {
 
 /// Env override for `[toolset.ask_user_question] timeout_enabled`. The secs env
 /// var lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
-=======
-/// Env override for `[toolset.ask_user_question] timeout_enabled` (parsed by
-/// the shared [`xai_grok_config::env_bool`] via `BoolFlag`). The secs env var
-/// lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 const ENV_ASK_USER_QUESTION_TIMEOUT_ENABLED: &str = "GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED";
 
 fn ask_user_question_timeout_enabled_from_toml(v: Option<&TomlValue>) -> Option<bool> {

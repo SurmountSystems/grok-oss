@@ -44,11 +44,6 @@ pub use network_policy::{
     ChildNetworkPolicy, NETWORK_POLICY_SNAPSHOT_VERSION, NetworkPolicySnapshot,
     NetworkPolicySnapshotError, WebsiteAction, WebsiteOrigin, WebsiteOriginError, WebsitePolicy,
 };
-<<<<<<< HEAD
-=======
-#[cfg(all(feature = "enforce", unix))]
-use nono::Sandbox;
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub use profiles::{
     ProfileName, SandboxConfig, SandboxProfile, load_sandbox_config, sandbox_profile_conflicts,
 };
@@ -78,10 +73,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 static SANDBOX: OnceLock<GlobalSandboxState> = OnceLock::new();
 static CONFIGURED_PROFILE: OnceLock<String> = OnceLock::new();
-<<<<<<< HEAD
 static CONFINEMENT_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 static AUTO_ALLOW_BASH: AtomicBool = AtomicBool::new(false);
 const BWRAP_ENV_VAR: &str = "__GROK_INSIDE_BWRAP";
 pub fn is_inside_bwrap() -> bool {
@@ -96,16 +88,11 @@ struct GlobalSandboxState {
     applied: bool,
     restrict_network_at_known_linux_launches: bool,
 }
-<<<<<<< HEAD
 /// The per-spawn seccomp filter is self-contained: it needs neither Landlock nor bwrap, so it keys on the resolved `restrict_network` alone.
 /// In the degraded states (Landlock unsupported, or `Sandbox::apply` failing inside bwrap) this filter is the only remaining enforcement.
 /// Keying on Landlock success would silently disable that session-long child-network control; keying on the config is the fail-closed direction.
 fn restrict_network_at_known_linux_launches(configured: bool) -> bool {
     configured && cfg!(target_os = "linux")
-=======
-fn restrict_network_at_known_linux_launches(applied: bool, configured: bool) -> bool {
-    applied && configured && cfg!(target_os = "linux")
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 /// Whether known Linux child launch paths should install the seccomp network filter.
 pub fn should_restrict_child_network() -> bool {
@@ -207,15 +194,12 @@ impl SandboxManager {
             tracing::info!("Sandbox disabled (profile: off)");
             return Ok(());
         }
-<<<<<<< HEAD
         if requires_hook_write_deny(&self.profile, workspace) {
             xai_grok_config::ensure_grok_hook_slots(paths::grok_home().as_path())
                 .map_err(|e| anyhow::anyhow!("hook write-deny ensure failed: {e}"))?;
         }
         hook_write_deny::maybe_install_namespace_lockdown_inside_bwrap(&self.profile, workspace)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let config = profiles::load_sandbox_config(workspace);
         let mut resolved = self.profile.resolve_profile(workspace, &config)?;
         self.net_restricted = resolved.restrict_network;
@@ -243,12 +227,8 @@ impl SandboxManager {
                     &resolved,
                 ));
                 tracing::info!(
-<<<<<<< HEAD
                     profile = %self.profile,
                     workspace = %workspace.display(),
-=======
-                    profile = % self.profile, workspace = % workspace.display(),
->>>>>>> e3fdf3ed (Merge 2 (#4))
                     restrict_network_configured = self.net_restricted,
                     "Sandbox applied (kernel-enforced, irreversible)"
                 );
@@ -286,10 +266,6 @@ impl SandboxManager {
             logger: self.logger,
             applied: self.applied,
             restrict_network_at_known_linux_launches: restrict_network_at_known_linux_launches(
-<<<<<<< HEAD
-=======
-                self.applied,
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 self.net_restricted,
             ),
         });
@@ -303,11 +279,7 @@ impl SandboxManager {
     }
     /// Whether known Linux child launch paths should install the seccomp network filter.
     pub fn restrict_child_network(&self) -> bool {
-<<<<<<< HEAD
         restrict_network_at_known_linux_launches(self.net_restricted)
-=======
-        restrict_network_at_known_linux_launches(self.applied, self.net_restricted)
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     pub fn profile(&self) -> &ProfileName {
         &self.profile

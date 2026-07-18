@@ -131,13 +131,7 @@ pub fn check_previous_crash(crash_dir: &Path) -> Option<CrashReport> {
 }
 
 /// Write `contents` with owner-only permissions when the platform allows it.
-<<<<<<< HEAD
 /// Crash reports may include source paths and backtraces; under `$GROK_HOME` they must not be world-readable.
-=======
-///
-/// Crash reports may include source paths and backtraces; when they land under
-/// `$GROK_HOME` they must not be world-readable.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {

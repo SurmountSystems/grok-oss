@@ -1,8 +1,5 @@
 use super::*;
-<<<<<<< HEAD
 use crate::sampling::ConversationItem;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::session::info::Info;
 use crate::session::persistence::default_model_id;
 use crate::session::storage::{SessionUpdate, StorageAdapter};
@@ -48,14 +45,10 @@ async fn ordinary_and_durable_appends_keep_every_physical_line_parseable() {
     let durable = tokio::spawn(async move {
         for index in 0..N {
             durable
-<<<<<<< HEAD
                 .append_update_durable_commit_aware(
                     &info_b,
                     &update(&info_b, format!("durable-{index}")),
                 )
-=======
-                .append_update_durable(&info_b, &update(&info_b, format!("durable-{index}")))
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 .await
                 .unwrap();
         }
@@ -82,7 +75,6 @@ async fn append_commit_is_reported_when_bookkeeping_fails() {
         .init_session(&info, default_model_id())
         .await
         .unwrap();
-<<<<<<< HEAD
     let summary = dir.path().join("summary.json");
     std::fs::remove_file(&summary).unwrap();
     std::fs::create_dir(&summary).unwrap();
@@ -153,89 +145,29 @@ async fn chat_append_commit_is_reported_when_bookkeeping_fails() {
             .lines()
             .count(),
         1
-=======
-    let result = adapter
-        .append_update_with_bookkeeping(&info, &update(&info, "committed".into()), async {
-            Err(io::Error::other("summary patch failed"))
-        })
-        .await;
-    assert!(matches!(
-        result,
-        Err(crate::session::storage::AppendUpdateError::Committed(_))
-    ));
-    let bytes = std::fs::read(dir.path().join("updates.jsonl")).unwrap();
-    let parsed = bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<SessionUpdateEnvelope>)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(parsed.len(), 1);
-}
-
-#[test]
-fn lock_serializes_tail_heal_and_complete_record() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("updates.jsonl");
-    std::fs::write(&path, b"torn").unwrap();
-    JsonlStorageAdapter::append_jsonl_line_sync(
-        &path,
-        b"{\"record\":1}\n".to_vec(),
-        AppendDurability::Buffered,
-    )
-    .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(path).unwrap(),
-        "torn\n{\"record\":1}\n"
->>>>>>> e3fdf3ed (Merge 2 (#4))
     );
 }
 
 #[test]
 fn directory_barrier_failure_is_retried_even_after_file_exists() {
-<<<<<<< HEAD
     let mut attempts = 0;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("updates.jsonl");
     let mut flaky_parent = || {
         attempts += 1;
         if attempts == 1 {
-=======
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = TEST_LOCK.lock().unwrap();
-    fn sync_file(file: &std::fs::File) -> io::Result<()> {
-        file.sync_all()
-    }
-    fn flaky_parent(_path: &Path) -> io::Result<()> {
-        if ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             Err(io::Error::other("directory barrier failed"))
         } else {
             Ok(())
         }
-<<<<<<< HEAD
     };
-=======
-    }
-
-    ATTEMPTS.store(0, Ordering::SeqCst);
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("updates.jsonl");
->>>>>>> e3fdf3ed (Merge 2 (#4))
     assert!(
         JsonlStorageAdapter::append_jsonl_line_sync_with(
             &path,
             b"{\"record\":1}\n".to_vec(),
             AppendDurability::Durable,
-<<<<<<< HEAD
             std::fs::File::sync_all,
             &mut flaky_parent,
-=======
-            sync_file,
-            flaky_parent,
->>>>>>> e3fdf3ed (Merge 2 (#4))
         )
         .is_err()
     );
@@ -243,7 +175,6 @@ fn directory_barrier_failure_is_retried_even_after_file_exists() {
         &path,
         b"{\"record\":1}\n".to_vec(),
         AppendDurability::Durable,
-<<<<<<< HEAD
         std::fs::File::sync_all,
         &mut flaky_parent,
     )
@@ -253,27 +184,12 @@ fn directory_barrier_failure_is_retried_even_after_file_exists() {
 
 #[test]
 fn file_barrier_error_after_write_is_committed_and_keeps_the_line() {
-=======
-        sync_file,
-        flaky_parent,
-    )
-    .unwrap();
-    assert_eq!(ATTEMPTS.load(Ordering::SeqCst), 2);
-}
-
-#[test]
-fn file_barrier_error_propagates() {
-    fn fail(_file: &std::fs::File) -> io::Result<()> {
-        Err(io::Error::other("file barrier failed"))
-    }
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("updates.jsonl");
     let error = JsonlStorageAdapter::append_jsonl_line_sync_with(
         &path,
         b"{\"record\":1}\n".to_vec(),
         AppendDurability::Durable,
-<<<<<<< HEAD
         |_| Err(io::Error::other("file barrier failed")),
         || Ok(()),
     )
@@ -541,21 +457,10 @@ async fn init_session_skips_parent_sync_on_a_populated_resume() {
         .await
         .unwrap();
     assert_eq!(parent_syncs.load(std::sync::atomic::Ordering::SeqCst), 0);
-=======
-        fail,
-        |_| Ok(()),
-    )
-    .unwrap_err();
-    assert_eq!(error.to_string(), "file barrier failed");
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn darwin_fullfsync_seam_reports_invalid_descriptor() {
-<<<<<<< HEAD
     assert!(super::super::fullfsync_raw(-1).is_err());
-=======
-    assert!(JsonlStorageAdapter::fullfsync_raw(-1).is_err());
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }

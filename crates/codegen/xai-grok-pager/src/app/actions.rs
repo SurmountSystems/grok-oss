@@ -6,10 +6,7 @@
 //! - [`Effect`]: produced by dispatch, consumed by the event loop (async).
 //! - [`TaskResult`]: produced by spawned tasks, fed back into dispatch.
 use super::agent::AgentId;
-<<<<<<< HEAD
 use crate::app::status_line::StatusLineRun;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::scrollback::entry::EntryId;
 use agent_client_protocol as acp;
 use std::num::NonZeroU64;
@@ -62,11 +59,7 @@ pub enum Action {
     QuitForUpdate,
     /// Resume the recent foreign session offered on the launch welcome screen.
     ResumeForeignSession,
-<<<<<<< HEAD
     /// Re-exec into the other screen mode (`true` means minimal).
-=======
-    /// Re-exec into the other screen mode (`true` = minimal).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     RelaunchInScreenMode {
         minimal: bool,
     },
@@ -93,11 +86,8 @@ pub enum Action {
     CheckSubscription,
     /// Open an arbitrary URL in the system browser (with scheme validation).
     OpenUrl(String),
-<<<<<<< HEAD
     /// Resubmit the prompt that last hit the credit/usage limit.
     RetryCreditLimitPrompt,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Open a semantic scrollback link.
     OpenLink(crate::render::osc8::LinkTarget),
     /// Open grok.com managed connectors, appending session teamId when set.
@@ -521,16 +511,11 @@ pub enum Action {
     SetHunkTrackerMode(String),
     /// Set default screen mode (`fullscreen` | `minimal`); restart-required.
     SetScreenMode(String),
-<<<<<<< HEAD
     /// Enable/disable the Ctrl+Space / F8 voice-dictation shortcut. SHELL-owned; persisted to `[ui].voice_keybind_enabled`.
     /// Takes effect on the next keypress; `/voice` is unaffected.
     SetVoiceKeybindEnabled(bool),
     /// Set the voice capture mode (`toggle` | `hold`). SHELL-owned; persisted to `[ui].voice_capture_mode`.
     /// Takes effect for the next Ctrl+Space press.
-=======
-    /// Set the voice capture mode (`toggle` | `hold`). SHELL-owned; persisted to
-    /// `[ui].voice_capture_mode`. Takes effect for the next Ctrl+Space press.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     SetVoiceCaptureMode(String),
     /// Set the voice STT language (catalog code or `auto`). SHELL-owned; persisted to `[ui].voice_stt_language`.
     /// Takes effect for the next voice capture.
@@ -545,7 +530,6 @@ pub enum Action {
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).
     SetTimeline(bool),
-<<<<<<< HEAD
     /// This action saves `[ui].dashboard_preview`.
     SetDashboardPreview(bool),
     /// Set `[ui].page_flip_on_send` (default ON). Persists via `Effect::PersistSetting`.
@@ -559,8 +543,6 @@ pub enum Action {
     /// Mid-turn follow-up routing (`queue` | `steer`).
     /// SHARED-owned: `[ui].follow_up_behavior`.
     SetFollowUpBehavior(crate::appearance::FollowUpBehavior),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Set simple mode (ASCII / minimal glyphs). Persists via `Effect::PersistSetting`.
     SetSimpleMode(bool),
     /// Set the per-tip contextual-hint user config (`[ui.contextual_hints]`).
@@ -572,10 +554,7 @@ pub enum Action {
     SetContextualHintSendNow(bool),
     SetContextualHintSmallScreen(bool),
     SetContextualHintWordSelect(bool),
-<<<<<<< HEAD
     SetContextualHintExportCopy(bool),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     SetContextualHintSshWrap(bool),
     /// Commit the active theme (canonical name, e.g. `"groknight"`, `"auto"`).
     SetTheme(String),
@@ -983,12 +962,6 @@ pub enum Action {
     RewindCancelOffer,
     RewindDismiss,
     RewindDismissError,
-<<<<<<< HEAD
-=======
-    /// Submit an inline edit: conversation-only rewind to that prompt, then
-    /// resubmit the edited text (state lives on `AgentView::inline_edit`).
-    InlineEditSubmit,
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Open the `/jump` turn picker.
     JumpShowPicker,
     /// Jump to a turn by its prompt's stable id and close the picker.
@@ -2101,14 +2074,8 @@ pub enum Effect {
     /// Log out via `x.ai/auth/logout` (shell clears auth.json and in-memory state).
     Logout,
     /// Cancel an in-flight interactive auth on the shell (`x.ai/auth/cancel`).
-<<<<<<< HEAD
     /// Used when the user abandons mid-session `/login` so the device-code poll stops instead of running until the code expires.
     /// `request_seq` scopes the cancel so a delayed RPC cannot tear down a successor login.
-=======
-    /// Used when the user abandons mid-session `/login` so the device-code
-    /// poll stops instead of running until the code expires. `request_seq`
-    /// scopes the cancel so a delayed RPC cannot tear down a successor login.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     CancelAuth { request_seq: u64 },
     /// Re-check subscription status via `x.ai/auth/check_subscription`.
     /// `verify` scopes the result to a deferred-gate verification (see [`crate::app::subscription`]); `None` for generic checks.
@@ -2365,15 +2332,12 @@ pub enum McpAuthTriggerOutcome {
     Authenticated,
     SetupRequired(crate::views::mcps_modal::McpSetupConfig),
 }
-<<<<<<< HEAD
 #[derive(Clone, Debug)]
 pub enum DoctorPlanningOutcome {
     Listing(String),
     Plan(Box<crate::diagnostics::FixPlan>),
     RunLocally(String),
 }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 /// Result from a completed async [`Effect`].
 ///
 /// Wrapped in `Action::TaskComplete` and dispatched synchronously.
@@ -3117,14 +3081,8 @@ pub enum TaskResult {
     LogoutComplete,
     /// Best-effort `x.ai/auth/cancel` finished (no UI update; state already left Authenticating).
     AuthCancelComplete,
-<<<<<<< HEAD
     /// Shell responded to `x.ai/auth/check_subscription`.
     /// `verify` echoes the generation from `Effect::CheckSubscription` for deferred-gate verifications.
-=======
-    /// Shell responded to `x.ai/auth/check_subscription`. `verify` echoes
-    /// the generation from `Effect::CheckSubscription` for deferred-gate
-    /// verifications.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     CheckSubscriptionComplete {
         verify: Option<u64>,
         meta: Option<serde_json::Value>,

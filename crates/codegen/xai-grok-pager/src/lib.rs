@@ -62,17 +62,8 @@ pub mod wrap_clipboard_image;
 pub mod wrap_cmd;
 pub(crate) mod wrap_filter;
 pub(crate) mod wrap_restore;
-<<<<<<< HEAD
 pub use xai_grok_gboom as gboom;
 pub use xai_grok_pager_render::key;
-=======
-
-pub mod tool_usage;
-
-// Presentation-primitives layer extracted into the sibling crate
-// `xai-grok-pager-render`. Re-exported at the crate root so existing
-// `crate::<module>::...` references throughout the pager keep resolving.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub use xai_grok_pager_render::{
     appearance, clipboard, glyphs, host, input, link_opener, modal_window_state, prompt_images,
     render, search, syntax, terminal, theme, util,

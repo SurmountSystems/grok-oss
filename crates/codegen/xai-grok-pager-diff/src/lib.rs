@@ -201,34 +201,9 @@ pub fn diff_hunks_from_strings(old_text: &str, new_text: &str, start_line: usize
         .collect()
 }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
 /// Fold consecutive edits of the same file in post-state `ln` coordinates so merged hunks don't repeat context or show intermediate states.
 /// A later edit of a shown context line replaces that Equal row; a line edited twice collapses to `-original +final`.
 /// If shared `ln` coordinates cannot describe the pair truthfully, keep separate hunks — the bail exists so the pager never renders wrong content.
-=======
-/// Stitch overlapping/adjacent hunks from coalesced same-file edits into
-/// unified hunks.
-///
-/// Consecutive edits to nearby lines each carry ±context from their own file
-/// snapshot, so a merged block's concatenated hunks repeat context lines and
-/// re-show intermediate file states. Folding each hunk into the accumulated
-/// previous one in `ln` (post-state) coordinates:
-///
-/// - a later edit of a shown context line swaps that Equal row for its
-///   `-`/`+` pair;
-/// - a line edited twice collapses to `-original +final` (no intermediate);
-/// - repeated context is dropped; new trailing rows extend the hunk.
-///
-/// Anything the shared `ln` coordinates cannot describe truthfully bails to
-/// the separate-hunk fallback (today's gap-marker rendering): non-monotonic
-/// or non-adjacent pairs, text disagreement at a shared `ln` (line-count
-/// drift between snapshots makes coordinates lie), and line-count-changing
-/// shapes inside the covered range (pure deletes, unpaired inserts,
-/// multi-line replacement runs). Never render wrong content.
-///
-/// Kept rows retain the `lo` of their own snapshot — the same convention the
-/// unmerged per-hunk display already uses for its old-file column.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
 pub fn stitch_overlapping_hunks(hunks: Vec<DiffHunk>) -> Vec<DiffHunk> {
     let mut out: Vec<DiffHunk> = Vec::with_capacity(hunks.len());
     for hunk in hunks {
@@ -243,11 +218,7 @@ pub fn stitch_overlapping_hunks(hunks: Vec<DiffHunk>) -> Vec<DiffHunk> {
     out
 }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
 /// Returns the post-state (`ln`) range that a hunk's rendered (Equal and Insert) rows cover.
-=======
-/// Post-state (`ln`) coverage of a hunk's rendered rows (Equal/Insert).
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
 fn render_range(hunk: &DiffHunk) -> Option<(usize, usize)> {
     let mut range: Option<(usize, usize)> = None;
     for line in hunk {
@@ -262,11 +233,7 @@ fn render_range(hunk: &DiffHunk) -> Option<(usize, usize)> {
     range
 }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
 /// Returns the index of the row in `hunk` that renders post-state line `ln` (Equal or Insert).
-=======
-/// Row index in `hunk` rendering post-state line `ln` (Equal or Insert).
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
 fn render_pos(hunk: &DiffHunk, ln: usize) -> Option<usize> {
     hunk.iter()
         .position(|l| l.tag != ChangeTag::Delete && l.ln == ln)
@@ -276,12 +243,7 @@ fn trimmed(text: &str) -> &str {
     text.trim_end_matches(['\r', '\n'])
 }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
 /// Folds `b` into `a` when both describe one contiguous post-state region; `None` keeps the pair as separate hunks.
-=======
-/// Fold `b` into `a` when both describe one contiguous post-state region;
-/// `None` keeps the pair as separate hunks.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
 fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
     let (a_min, a_max) = render_range(a)?;
     let (b_min, _) = render_range(b)?;
@@ -293,21 +255,12 @@ fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
     let mut max_ln = a_max;
     let mut i = 0;
     while i < b.len() {
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
         let Some(row) = b.get(i) else { break };
         if row.ln > max_ln {
             // Past the stitched coverage, `b` is the sole source for this tail, so splice its remaining rows in verbatim
             // Rendered rows must stay contiguous
             let tail = b.get(i..)?;
             for rest in tail {
-=======
-        let row = &b[i];
-        if row.ln > max_ln {
-            // Past the stitched coverage: `b` is the sole source for this
-            // tail, so splice its remaining rows in verbatim (rendered rows
-            // must stay contiguous).
-            for rest in &b[i..] {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
                 if rest.tag != ChangeTag::Delete {
                     if rest.ln != max_ln + 1 {
                         return None;
@@ -321,28 +274,18 @@ fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
         match row.tag {
             ChangeTag::Equal => {
                 let pos = render_pos(&out, row.ln)?;
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
                 if trimmed(&out.get(pos)?.text) != trimmed(&row.text) {
-=======
-                if trimmed(&out[pos].text) != trimmed(&row.text) {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
                     return None;
                 }
                 i += 1;
             }
             ChangeTag::Delete => {
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
                 // Only single-line replacement pairs keep line counts (and therefore every later `ln`) truthful
-=======
-                // Only single-line replacement pairs keep line counts (and
-                // therefore every later `ln`) truthful.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
                 let next = b.get(i + 1)?;
                 if next.tag != ChangeTag::Insert || next.ln != row.ln {
                     return None;
                 }
                 let pos = render_pos(&out, row.ln)?;
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
                 if trimmed(&out.get(pos)?.text) != trimmed(&row.text) {
                     return None;
                 }
@@ -359,53 +302,20 @@ fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
                         if let Some(slot) = out.get_mut(pos) {
                             *slot = next.clone();
                         }
-=======
-                if trimmed(&out[pos].text) != trimmed(&row.text) {
-                    return None;
-                }
-                match out[pos].tag {
-                    // A context line the later call edited: show its -/+ pair.
-                    ChangeTag::Equal => {
-                        out[pos] = row.clone();
-                        out.insert(pos + 1, next.clone());
-                    }
-                    // Same line edited twice: keep the earlier delete (if
-                    // any), drop the intermediate text, keep the final insert.
-                    ChangeTag::Insert => {
-                        out[pos] = next.clone();
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
                     }
                     ChangeTag::Delete => unreachable!("render_pos skips deletes"),
                 }
                 i += 2;
             }
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
             // An unpaired insert inside the covered range grows the line count
-=======
-            // Unpaired insert inside the covered range: line-count growth.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
             ChangeTag::Insert => return None,
         }
     }
     Some(out)
 }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
 /// Extract diff hunks from an ACP ToolCall's raw_output or content. Fall back to `ToolCallContent::Diff`
 /// old_text/new_text for a full-text diff. Line numbers come from `meta` when available (pre-execution previews).
-=======
-/// Extract diff hunks from an ACP ToolCall's raw_output or content.
-///
-/// Tries three strategies in order:
-/// 1. Parse `raw_output` as `SearchReplaceOutput::EditsApplied` for structured
-///    per-edit hunks with context lines and accurate line numbers.
-/// 2. Parse `Diff.meta` as `SearchReplaceEditContextInformation` for structured
-///    edit details embedded in the Diff content block (set by acp_conversion).
-/// 3. Fall back to `ToolCallContent::Diff` old_text/new_text for full-text diff,
-///    using line numbers from `meta` when available (pre-execution previews).
-///
-/// Returns `(hunks, edit_count)`.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
 pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk>, usize) {
     use xai_grok_tools::types::output::{
         SearchReplaceEditContextInformation, SearchReplaceOutput, ToolOutput,
@@ -929,14 +839,7 @@ mod tests {
         assert!(hunks.is_empty(), "empty-to-empty must diff to nothing");
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
     /// An edit detail with the surrounding context the real search_replace tool emits from its own file snapshot.
-=======
-    // ── Overlap stitching (coalesced same-file edits) ──────────────────
-
-    /// An edit detail with the ±context the real search_replace tool emits
-    /// from its own file snapshot.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
     fn edit_detail(
         old: &str,
         new: &str,
@@ -961,15 +864,8 @@ mod tests {
             .collect()
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
     /// Five sequential one-for-one line edits on a 5-line file, each hunk carrying overlapping context (three lines each side) from its own snapshot.
     /// The merged block must render one unified hunk of five -/+ pairs: no repeated context, no intermediate file states, no separators.
-=======
-    /// Session 019f646d repro: five sequential 1:1 edits on a 5-line file,
-    /// each hunk carrying overlapping ±3 context from its own snapshot. The
-    /// merged block must render ONE unified hunk of five -/+ pairs — no
-    /// repeated context, no intermediate file states, no separators.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
     #[test]
     fn stitch_five_sequential_full_line_edits_into_one_hunk() {
         let edits = [
@@ -1020,11 +916,7 @@ mod tests {
         let stitched = stitch_overlapping_hunks(hunks);
         assert_eq!(stitched.len(), 1, "overlapping hunks stitch into one");
         assert_eq!(
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
             stitch_rows(only_hunk(&stitched)),
-=======
-            stitch_rows(&stitched[0]),
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
             vec![
                 (ChangeTag::Delete, 1, 1, "line one"),
                 (ChangeTag::Insert, 2, 1, "LINE ONE"),
@@ -1042,7 +934,6 @@ mod tests {
 
     #[test]
     fn stitch_collapses_double_edit_to_original_and_final() {
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
         // Edit "a" to "b" then "b" to "c" on the same line: the merged hunk shows -a +c only
         let first = build_diff_hunks(&[edit_detail("a", "b", 1, "", "x\n")]);
         let second = build_diff_hunks(&[edit_detail("b", "c", 1, "", "x\n")]);
@@ -1056,15 +947,6 @@ mod tests {
         let stitched = stitch_overlapping_hunks(vec![first_hunk.clone(), second_hunk.clone()]);
         assert_eq!(stitched.len(), 1);
         let rows: Vec<(ChangeTag, usize, &str)> = only_hunk(&stitched)
-=======
-        // a→b then b→c on the same line: the merged hunk shows -a +c only.
-        let first = build_diff_hunks(&[edit_detail("a", "b", 1, "", "x\n")]);
-        let second = build_diff_hunks(&[edit_detail("b", "c", 1, "", "x\n")]);
-
-        let stitched = stitch_overlapping_hunks(vec![first[0].clone(), second[0].clone()]);
-        assert_eq!(stitched.len(), 1);
-        let rows: Vec<(ChangeTag, usize, &str)> = stitched[0]
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
             .iter()
             .map(|l| (l.tag, l.ln, l.text.trim_end()))
             .collect();
@@ -1092,12 +974,7 @@ mod tests {
             mk("beta", 2, 2, ChangeTag::Delete),
             mk("BETA", 3, 2, ChangeTag::Insert),
         ];
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
         // Overlapping `ln` range but conflicting text at ln 1: the line counts drifted between snapshots, the coordinates lie, so keep both hunks
-=======
-        // Overlapping `ln` range but conflicting text at ln 1: line-count
-        // drift between snapshots — coordinates lie, so keep both hunks.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
         let b = vec![
             mk("omega", 1, 1, ChangeTag::Equal),
             mk("gamma", 3, 3, ChangeTag::Delete),
@@ -1106,18 +983,12 @@ mod tests {
 
         let stitched = stitch_overlapping_hunks(vec![a.clone(), b.clone()]);
         assert_eq!(stitched.len(), 2, "disagreement keeps hunks separate");
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
         assert_eq!(stitched.first().map(stitch_rows), Some(stitch_rows(&a)));
         assert_eq!(stitched.get(1).map(stitch_rows), Some(stitch_rows(&b)));
-=======
-        assert_eq!(stitch_rows(&stitched[0]), stitch_rows(&a));
-        assert_eq!(stitch_rows(&stitched[1]), stitch_rows(&b));
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
     }
 
     #[test]
     fn stitch_bails_to_separate_hunks_on_insert_only_overlap() {
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
         // "beta" edited to "BETA" at line 2, then an insert-only edit (the insert_after shape: empty old_string) between BETA and gamma
         // The insertion grows the line count, so every later `ln` in the first hunk would lie
         // The unpaired-Insert arm must keep both hunks unmodified
@@ -1127,15 +998,6 @@ mod tests {
             (Some(a), Some(b)) => (a.clone(), b.clone()),
             _ => panic!("expected hunks in both diffs"),
         };
-=======
-        // "beta"→"BETA" at line 2, then an insert-only edit (the insert_after
-        // shape: empty old_string) between BETA and gamma. The insertion
-        // grows the line count, so every later `ln` in the first hunk would
-        // lie — the unpaired-Insert arm must keep both hunks unmodified.
-        let a = build_diff_hunks(&[edit_detail("beta", "BETA", 2, "alpha\n", "gamma\n")]);
-        let b = build_diff_hunks(&[edit_detail("", "inserted", 3, "BETA\n", "gamma\n")]);
-        let (a, b) = (a[0].clone(), b[0].clone());
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
 
         let stitched = stitch_overlapping_hunks(vec![a.clone(), b.clone()]);
         assert_eq!(stitched, vec![a, b], "insert-only overlap keeps both hunks");
@@ -1143,7 +1005,6 @@ mod tests {
 
     #[test]
     fn stitch_bails_to_separate_hunks_on_delete_run_overlap() {
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
         // A delete-only edit lands inside the previous hunk's coverage
         // The pair rule (a Delete immediately followed by its same-`ln` Insert) declines, so both hunks survive unmodified
         let a = build_diff_hunks(&[edit_detail("alpha", "ALPHA", 1, "", "beta\ngamma\n")]);
@@ -1152,33 +1013,16 @@ mod tests {
             (Some(a), Some(b)) => (a.clone(), b.clone()),
             _ => panic!("expected hunks in both diffs"),
         };
-=======
-        // Delete-only edit inside the previous hunk's coverage: the pair rule
-        // (Delete immediately followed by its same-`ln` Insert) declines, so
-        // both hunks survive unmodified.
-        let a = build_diff_hunks(&[edit_detail("alpha", "ALPHA", 1, "", "beta\ngamma\n")]);
-        let b = build_diff_hunks(&[edit_detail("beta", "", 2, "ALPHA\n", "gamma\n")]);
-        let (a, b) = (a[0].clone(), b[0].clone());
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
 
         let stitched = stitch_overlapping_hunks(vec![a.clone(), b.clone()]);
         assert_eq!(stitched, vec![a, b], "delete-only overlap keeps both hunks");
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
         // Same for a multi-line replacement run, two Deletes then two Inserts
         // It keeps the line count but is not the single-line pair shape the stitcher trusts
         let base = edit_detail("alpha", "ALPHA", 1, "", "beta\ngamma\ndelta\n");
         let multi = edit_detail("beta\ngamma", "BETA\nGAMMA", 2, "ALPHA\n", "delta\n");
         let a = only_hunk(&build_diff_hunks(&[base])).clone();
         let b = only_hunk(&build_diff_hunks(&[multi])).clone();
-=======
-        // Same for a multi-line D,D,I,I replacement run (line-count neutral,
-        // but not the single-line pair shape the stitcher trusts).
-        let base = edit_detail("alpha", "ALPHA", 1, "", "beta\ngamma\ndelta\n");
-        let multi = edit_detail("beta\ngamma", "BETA\nGAMMA", 2, "ALPHA\n", "delta\n");
-        let a = build_diff_hunks(&[base])[0].clone();
-        let b = build_diff_hunks(&[multi])[0].clone();
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
 
         let stitched = stitch_overlapping_hunks(vec![a.clone(), b.clone()]);
         assert_eq!(stitched, vec![a, b], "replacement run keeps both hunks");
@@ -1191,11 +1035,7 @@ mod tests {
                 .remove(0)
         };
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-diff/src/lib.rs
         // Disjoint hunks stay separate, keeping the gap marker the pager draws between them
-=======
-        // Disjoint hunks keep today's gap-marker rendering.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/src/diff.rs
         assert_eq!(stitch_overlapping_hunks(vec![far(5), far(40)]).len(), 2);
         // Later edit above the earlier one: non-monotonic, keep separate.
         assert_eq!(stitch_overlapping_hunks(vec![far(20), far(4)]).len(), 2);

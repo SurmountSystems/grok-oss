@@ -4,10 +4,7 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
-<<<<<<< HEAD
 use std::sync::Arc;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use axum::Json;
 use axum::body::{Body, Bytes};
@@ -20,7 +17,6 @@ use serde_json::Value;
 pub(crate) type BoxWait = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub(crate) type TerminalWait = Box<dyn FnOnce() -> BoxWait + Send>;
 
-<<<<<<< HEAD
 /// An SSE comment the hang body flushes so the response head reaches the client, then the stream
 /// produces no chunk; a comment carries no event, so the client's idle timer runs from here.
 const HANG_OPENING_FRAME: &[u8] = b": grok-mock stream open\n\n";
@@ -29,8 +25,6 @@ const HANG_OPENING_FRAME: &[u8] = b": grok-mock stream open\n\n";
 /// after it, then continues with the next event.
 pub const SSE_HOLD_EVENT: &str = "grok-mock-hold";
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 /// One SSE event as data: optional `event:` name plus the `data:` payload.
 #[derive(Debug, Clone)]
 pub struct SseEvent {
@@ -76,7 +70,6 @@ pub enum ScriptedBody {
     Hang,
 }
 
-<<<<<<< HEAD
 /// Waits until the server's one reply hold is released. A hold that was never armed returns at once.
 #[derive(Clone)]
 pub(crate) struct BodyHold(Arc<dyn Fn() -> BoxWait + Send + Sync>);
@@ -98,10 +91,6 @@ impl BodyHold {
 }
 
 /// A scripted reply; see `inference_override` for where it sits in the tier order.
-=======
-/// A scripted reply served by a matched expectation or compatibility FIFO.
-/// Scripted replies take precedence over required auth and fallback modes.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone)]
 pub struct ScriptedResponse {
     pub status: u16,
@@ -145,7 +134,6 @@ impl ScriptedResponse {
         }
     }
 
-<<<<<<< HEAD
     pub fn dropped() -> Self {
         Self {
             status: 200,
@@ -166,18 +154,11 @@ impl ScriptedResponse {
         }
     }
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn is_sse(&self) -> bool {
         matches!(self.body, ScriptedBody::Sse(_))
     }
 
-<<<<<<< HEAD
     /// Validate status and headers eagerly so a bad script panics at the enqueue call site rather than far away at serve time.
-=======
-    /// Validate status and headers eagerly so a bad script panics at the
-    /// enqueue call site rather than far away at serve time.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn validate(&self) {
         StatusCode::from_u16(self.status).expect("invalid scripted status code");
         for (name, value) in &self.headers {
@@ -186,20 +167,13 @@ impl ScriptedResponse {
         }
     }
 
-<<<<<<< HEAD
     /// Render to HTTP with SSE events paced by `delay` and `before_terminal` awaited before the last event.
     /// Non-SSE bodies await `before_terminal` before returning, so every body mode waits the same way.
-=======
-    /// Render to HTTP with SSE events paced by `delay` and optional terminal
-    /// completion gating. Non-SSE bodies wait before returning so every body
-    /// mode obeys the same release barrier.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) async fn into_response_paced(
         self,
         delay: Option<std::time::Duration>,
         before_terminal: Option<TerminalWait>,
     ) -> Response {
-<<<<<<< HEAD
         let body_hold = self.body_hold;
         let mut response = match self.body {
             ScriptedBody::Json(body_json) => {
@@ -241,47 +215,21 @@ impl ScriptedResponse {
             }
             ScriptedBody::Sse(events) => {
                 let last_index = events.len().checked_sub(1);
-=======
-        let mut resp = match self.body {
-            ScriptedBody::Json(v) => {
-                if let Some(wait) = before_terminal {
-                    wait().await;
-                }
-                Json(v).into_response()
-            }
-            ScriptedBody::Raw(s) => {
-                if let Some(wait) = before_terminal {
-                    wait().await;
-                }
-                s.into_response()
-            }
-            ScriptedBody::Sse(events) => {
-                let last_idx = events.len().checked_sub(1);
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 let mut events: Vec<_> = events.into_iter().enumerate().map(Some).collect();
                 if events.is_empty() && before_terminal.is_some() {
                     events.push(None);
                 }
                 let stream = stream::unfold(
-<<<<<<< HEAD
                     (events.into_iter(), before_terminal, body_hold),
                     move |(mut events, mut before_terminal, body_hold)| async move {
                         loop {
                             let item = events.next()?;
                             let Some((index, scripted_event)) = item else {
-=======
-                    (events.into_iter(), before_terminal),
-                    move |(mut events, mut before_terminal)| async move {
-                        loop {
-                            let item = events.next()?;
-                            let Some((idx, scripted_event)) = item else {
->>>>>>> e3fdf3ed (Merge 2 (#4))
                                 if let Some(wait) = before_terminal.take() {
                                     wait().await;
                                 }
                                 continue;
                             };
-<<<<<<< HEAD
                             if scripted_event.event.as_deref() == Some(SSE_HOLD_EVENT) {
                                 if let Some(hold) = &body_hold {
                                     hold.wait().await;
@@ -292,12 +240,6 @@ impl ScriptedResponse {
                                 tokio::time::sleep(delay).await;
                             }
                             if Some(index) == last_index
-=======
-                            if let Some(d) = delay {
-                                tokio::time::sleep(d).await;
-                            }
-                            if Some(idx) == last_idx
->>>>>>> e3fdf3ed (Merge 2 (#4))
                                 && let Some(wait) = before_terminal.take()
                             {
                                 wait().await;
@@ -308,14 +250,10 @@ impl ScriptedResponse {
                                 Some(name) => event.event(name),
                                 None => event,
                             };
-<<<<<<< HEAD
                             return Some((
                                 Ok::<_, Infallible>(event),
                                 (events, before_terminal, body_hold),
                             ));
-=======
-                            return Some((Ok::<_, Infallible>(event), (events, before_terminal)));
->>>>>>> e3fdf3ed (Merge 2 (#4))
                         }
                     },
                 );

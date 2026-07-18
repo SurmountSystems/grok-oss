@@ -141,41 +141,9 @@ impl ContentController {
         self.sandbox.home()
     }
 
-<<<<<<< HEAD
     /// Filesystem and environment used by content-backed spawns.
     pub fn sandbox(&self) -> &TestSandbox {
         &self.sandbox
-=======
-    /// Env vars to pass to the pager process so it hits the mock server
-    /// with telemetry / feedback disabled.
-    ///
-    /// Mirrors `xai_grok_test_support::env::test_env_cmd_tokio`.
-    pub fn env_for_pager(&self) -> Vec<(String, String)> {
-        let home = self.home.path().to_string_lossy().into_owned();
-        let grok_home = self
-            .home
-            .path()
-            .join(".grok")
-            .to_string_lossy()
-            .into_owned();
-        vec![
-            ("HOME".into(), home),
-            // Explicit GROK_HOME prevents leaking the real user's
-            // config.toml when $HOME alone isn't sufficient (e.g. if
-            // GROK_HOME is set in the test runner's env).
-            ("GROK_HOME".into(), grok_home),
-            ("GROK_CLI_CHAT_PROXY_BASE_URL".into(), self.url()),
-            ("GROK_XAI_API_BASE_URL".into(), self.url()),
-            ("XAI_API_KEY".into(), "test-key-for-ci".into()),
-            ("GROK_TELEMETRY_ENABLED".into(), "false".into()),
-            ("GROK_FEEDBACK_ENABLED".into(), "false".into()),
-            ("GROK_TRACE_UPLOAD".into(), "false".into()),
-            // Keep unrelated autocomplete work out of PTY timing assertions.
-            ("GROK_PROMPT_SUGGESTIONS".into(), "false".into()),
-            // Compatibility set_turns remains request-FIFO, so retries stay off.
-            ("GROK_MAX_RETRIES".into(), "0".into()),
-        ]
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Replace the mocked assistant response.
@@ -202,7 +170,6 @@ impl ContentController {
         self.server.set_chunk_delay(delay);
     }
 
-<<<<<<< HEAD
     /// Register a named response for the next matching inference request.
     pub fn expect_response(
         &self,
@@ -211,15 +178,6 @@ impl ContentController {
         response: ScriptedResponse,
     ) -> InferenceExpectation {
         self.server.expect_response(name, matcher, response)
-=======
-    /// Hold foreground completions until [`release_agent_completions`].
-    /// Prefer [`expect_response_blocked`] for new tests.
-    ///
-    /// [`release_agent_completions`]: Self::release_agent_completions
-    /// [`expect_response_blocked`]: Self::expect_response_blocked
-    pub fn hold_agent_completions(&self) {
-        self.server.hold_agent_completions();
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Register one named response held immediately before its terminal event.
@@ -232,7 +190,6 @@ impl ContentController {
         self.server.expect_response_blocked(name, matcher, response)
     }
 
-<<<<<<< HEAD
     /// Register the same named foreground text turn for both pager backends.
     pub fn expect_agent_turn(
         &self,
@@ -307,31 +264,6 @@ impl ContentController {
                 ),
             ],
         }
-=======
-    /// Register a named response for the next matching inference request.
-    pub fn expect_response(
-        &self,
-        name: impl Into<String>,
-        matcher: InferenceRequestMatcher,
-        response: ScriptedResponse,
-    ) -> InferenceExpectation {
-        self.server.expect_response(name, matcher, response)
-    }
-
-    /// Register one named response held immediately before its terminal event.
-    pub fn expect_response_blocked(
-        &self,
-        name: impl Into<String>,
-        matcher: InferenceRequestMatcher,
-        response: ScriptedResponse,
-    ) -> InferenceExpectation {
-        self.server.expect_response_blocked(name, matcher, response)
-    }
-
-    /// Queue one compatibility response per foreground turn.
-    pub fn set_turns(&self, turns: impl IntoIterator<Item = String>) {
-        self.server.set_agent_turns(turns);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Number of inference requests the pager has made so far.

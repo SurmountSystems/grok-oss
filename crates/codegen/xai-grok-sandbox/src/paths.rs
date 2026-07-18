@@ -35,15 +35,7 @@ pub(crate) const DEVICE_DIRS: &[&str] = &[
 
 /// Temporary directories that need write access.
 ///
-<<<<<<< HEAD
 /// On macOS, programs use both `/tmp` (symlink to `/private/tmp`) and `/private/var/folders/` (the real `TMPDIR` / `NSTemporaryDirectory()`).
-=======
-/// On Linux, `/tmp` is the standard temp directory.
-/// On macOS, programs use both `/tmp` (symlink to `/private/tmp`) and
-/// `/private/var/folders/` (the real `TMPDIR` / `NSTemporaryDirectory()`).
-/// git, compilers, and other tools write temp files to `$TMPDIR` which
-/// resolves to `/private/var/folders/xx/.../T/` on macOS.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn temp_writable_paths() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
 

@@ -91,14 +91,8 @@ impl ResourcesPersistence {
         });
 
         Self {
-<<<<<<< HEAD
             state_path: Some(state_path),
             tx,
-=======
-            state_path,
-            tx,
-            noop: false,
->>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 
@@ -138,11 +132,7 @@ impl ResourcesPersistence {
     /// Save the current Resources state (non-blocking).
     /// Sends a serialized snapshot to the background writer.
     pub fn save(&self, resources: &Resources) {
-<<<<<<< HEAD
         if self.state_path.is_none() {
-=======
-        if self.noop {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             return;
         }
         let snapshot = resources.serialize();
@@ -154,11 +144,7 @@ impl ResourcesPersistence {
         &self,
         snapshot: serde_json::Value,
     ) -> io::Result<tokio::sync::oneshot::Receiver<io::Result<()>>> {
-<<<<<<< HEAD
         if self.state_path.is_none() {
-=======
-        if self.noop {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             let (respond_to, response) = tokio::sync::oneshot::channel();
             let _ = respond_to.send(Ok(()));
             return Ok(response);
@@ -195,24 +181,14 @@ impl ResourcesPersistence {
         Self::await_save_and_flush(self.enqueue_save_and_flush(snapshot)?).await
     }
 
-<<<<<<< HEAD
     /// `None` when this handle writes nothing.
     pub fn state_path(&self) -> Option<&std::path::Path> {
         self.state_path.as_deref()
-=======
-    /// Path to the persisted state file.
-    pub fn state_path(&self) -> &std::path::Path {
-        &self.state_path
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Flush pending writes. Call on graceful shutdown.
     pub async fn flush(&self) {
-<<<<<<< HEAD
         if self.state_path.is_none() {
-=======
-        if self.noop {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             return;
         }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -349,7 +325,6 @@ impl ResourcesPersistence {
 
     #[cfg(not(windows))]
     async fn publish_durable(path: &Path, tmp_path: &Path) -> io::Result<()> {
-<<<<<<< HEAD
         // A bare filename has an empty parent, so the write would land in the server's own directory, shared by every session.
         let parent = path
             .parent()
@@ -362,12 +337,6 @@ impl ResourcesPersistence {
             })?;
 
         Self::replace_state_path(path, tmp_path).await?;
-=======
-        Self::replace_state_path(path, tmp_path).await?;
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "resources state has no parent")
-        })?;
->>>>>>> e3fdf3ed (Merge 2 (#4))
         tokio::fs::File::open(parent).await?.sync_all().await
     }
 

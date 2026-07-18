@@ -50,21 +50,10 @@ pub fn agent_instance_id() -> String {
 }
 
 fn load_or_compute_agent_id() -> String {
-<<<<<<< HEAD
     if let Ok(id) = std::env::var(ENV_AGENT_ID) {
         let id = id.trim();
         if !id.is_empty() {
             return id.to_string();
-=======
-    let cache_path = xai_grok_config::grok_home().join("agent_id");
-
-    // Try to read from cache file first (fast path)
-    if let Ok(cached) = std::fs::read_to_string(&cache_path) {
-        let cached = cached.trim();
-        if !cached.is_empty() {
-            tighten_agent_id_cache_perms(&cache_path);
-            return cached.to_string();
->>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 
@@ -197,26 +186,10 @@ fn compute_machine_hash() -> String {
         }
     } else {
         mid::get("agent_id").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
-<<<<<<< HEAD
     }
 }
 
 /// Owner-only and atomic: the id is a stable device identifier, and rewriting an older world-readable cache must not keep the loose mode.
-=======
-    };
-    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, machine_hash.as_bytes()).to_string();
-
-    // Save to cache file with owner-only perms (best effort).
-    let _ = write_agent_id_cache(&cache_path, &id);
-
-    id
-}
-
-/// Write `$GROK_HOME/agent_id` as owner-read/write only (Unix 0o600) — it is a
-/// stable device identifier and must not be world-readable. Atomic temp+rename,
-/// so overwriting a loose-perms cache from an older build never leaves the id
-/// in a world-readable file.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn write_agent_id_cache(path: &std::path::Path, id: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -224,12 +197,7 @@ fn write_agent_id_cache(path: &std::path::Path, id: &str) -> std::io::Result<()>
     xai_grok_config::fs_atomic::write_atomically(path, id, Some(0o600))
 }
 
-<<<<<<< HEAD
 /// Best effort: tightens caches written world-readable by older builds.
-=======
-/// Best-effort 0o600 on an existing cache: tightens caches written world-readable
-/// by older builds. No-op off Unix or on error (the id itself still loads).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn tighten_agent_id_cache_perms(path: &std::path::Path) {
     #[cfg(unix)]
     {
@@ -261,11 +229,6 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
-=======
-    /// Overwriting an existing loose-perms cache (e.g. an old build's empty or
-    /// torn write) must still land 0600 — mode-at-create alone would keep 0644.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn rewrite_over_loose_perms_cache_lands_owner_only() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -287,7 +250,6 @@ mod tests {
         assert_eq!(mode(&path), 0o600, "legacy cache must be tightened on read");
         assert_eq!(std::fs::read_to_string(&path).expect("read"), "legacy-id");
     }
-<<<<<<< HEAD
 
     #[test]
     fn dangling_agent_id_symlink_is_replaced_not_followed() {
@@ -407,14 +369,6 @@ mod tests {
 }
 
 /// Coarse gate for features that need a full workspace checkout; external installs leave `XAI_ROOT` and `XAI_USER` unset.
-=======
-}
-
-/// Returns true when workspace marker env vars (`XAI_ROOT` and `XAI_USER`) are set.
-///
-/// Used as a coarse local gate for features that require a full workspace
-/// checkout. External installs typically leave both unset.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn has_workspace_env_markers() -> bool {
     std::env::var("XAI_ROOT").is_ok() && std::env::var("XAI_USER").is_ok()
 }

@@ -3,7 +3,6 @@
 use super::verb_group::{RunStep, run_step, scan_run_forward};
 use super::*;
 
-<<<<<<< HEAD
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SettlementFollowPolicy {
     Evaluate,
@@ -13,20 +12,6 @@ pub(super) enum SettlementFollowPolicy {
 /// A width-stable anchor for the content at the viewport top, captured before a width rebuild so the same content
 /// can be re-pinned afterward. The position is stored as `(entry, logical_line, sub_rows)` rather than an absolute
 /// wrapped-row count. It covers vpad and mid-paragraph anchors, but is exact only for a non-wrapping anchor line.
-=======
-/// A width-stable anchor for the content at the viewport top, captured before a
-/// width rebuild so the same content can be re-pinned afterward.
-///
-/// The position is stored as `(entry, logical_line, sub_rows)` rather than an
-/// absolute wrapped-row count: a row count is meaningless after re-wrapping (the
-/// whole transcript can be one giant entry), but the logical (newline-delimited)
-/// line it sits on is width-independent. `sub_rows` is the signed wrapped-row
-/// offset from that logical line's start (covers vpad / mid-paragraph anchors;
-/// zero for the common non-wrapping top line). `sub_rows` is exact only for a
-/// non-wrapping anchor line; if the anchor line itself re-wraps, restore clamps
-/// the offset within the re-resolved line so the top can drift by at most that
-/// one line's wrap delta and never spills into the next logical line.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScrollAnchor {
     entry_idx: usize,

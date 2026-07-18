@@ -37,11 +37,7 @@ mod voice;
 pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;
 pub(crate) use billing::{
-<<<<<<< HEAD
     CREDIT_LIMIT_RETRY_OPTION_ID, UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error,
-=======
-    UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error, is_free_usage_exhausted_error,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 #[cfg(test)]
 pub(crate) use ctx::{SwitchCause, switch_to_agent};
@@ -51,17 +47,8 @@ pub(crate) use notes::FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS;
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
-<<<<<<< HEAD
 pub(in crate::app) use prompt::{
     present_export_copy_tip, show_small_screen_tip, show_ssh_wrap_tip,
-=======
-pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
-#[cfg(test)]
-pub(crate) use queue::maybe_drain_queue;
-pub(super) use queue::{
-    apply_turn_start_shim, arm_send_now_and_paint, maybe_drain_queue_and_note_peek,
-    shim_renders_own_user_block,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 pub(crate) use prompt_ack::reconcile_overdue_prompt_acks;
 pub(super) use queue::{

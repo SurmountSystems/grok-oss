@@ -21,7 +21,6 @@ use super::observation::{
 use super::storage::MemoryStorage;
 use super::watcher::MemoryFileWatcher;
 
-<<<<<<< HEAD
 fn merge_fts_results<E>(
     primary: Result<Vec<super::index::FtsResult>, E>,
     evergreen: Result<Vec<super::index::FtsResult>, E>,
@@ -49,10 +48,6 @@ fn select_search_error_class(
 
 /// Embedding-client credentials scoped to a trusted endpoint.
 /// Only [`Self::for_endpoint`] retains a live credential; the empty default fails closed.
-=======
-/// Embedding-client credentials scoped to a trusted endpoint. Only
-/// [`Self::for_endpoint`] retains a live credential; the empty default fails closed.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Clone, Default)]
 pub struct EndpointScopedCredentials {
     endpoint: Option<reqwest::Url>,
@@ -98,11 +93,7 @@ impl EndpointScopedCredentials {
         }
         if auth_credentials.is_some() || api_key_provider.is_some() {
             tracing::info!(
-<<<<<<< HEAD
                 target: crate::MEMORY_LOG_TARGET,
-=======
-                target: xai_grok_telemetry::memory_log::TARGET,
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 endpoint,
                 "memory embeddings: session credentials withheld for non-first-party endpoint; its own key, if any, still applies"
             );
@@ -134,13 +125,8 @@ pub struct MemoryBackendParams {
     pub session_id: String,
     /// Embedding provider config; `None` forces FTS-only fallback everywhere.
     pub embed_config: Option<xai_grok_config_types::MemoryEmbeddingConfig>,
-<<<<<<< HEAD
     /// Base URL for embedding API calls (CLI proxy).
     /// It must match the endpoint `embedding_credentials` was scoped to; a mismatch fails closed.
-=======
-    /// Base URL for embedding API calls (CLI proxy). Must match the endpoint
-    /// `embedding_credentials` was scoped to; mismatch fails closed.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub embed_base_url: String,
     /// API key for embedding API calls.
     pub embed_api_key: Option<String>,
@@ -150,18 +136,8 @@ pub struct MemoryBackendParams {
     pub watcher: Option<Arc<MemoryFileWatcher>>,
     /// Seconds before a stale reindex claim is forcibly released.
     pub stale_claim_secs: i64,
-<<<<<<< HEAD
     pub search_source: MemorySearchSource,
     pub observation_sink: Arc<dyn MemoryObservationSink>,
-=======
-    /// Telemetry label emitted with every search event from this backend.
-    ///
-    /// Differentiates the three runtime search paths in dashboards and logs:
-    /// - `"tool"` — model-initiated `memory_search` tool call (ToolBridge)
-    /// - `"injection"` — first-turn memory context injection
-    /// - `"compaction_recovery"` — post-compaction context re-injection
-    pub search_source: &'static str,
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub embedding_credentials: EndpointScopedCredentials,
 }
 
@@ -189,20 +165,11 @@ async fn build_embedding_provider(
         return None;
     }
 
-<<<<<<< HEAD
     // Enforce at runtime, in release too: a `debug_assert` compiles out of shipped binaries and lets a scoped credential reach an unapproved URL
     let credentials_approved = credentials.approved_for(base_url);
     if !credentials_approved {
         tracing::error!(
             target: crate::MEMORY_LOG_TARGET,
-=======
-    // Enforce at runtime, in release too: a `debug_assert` would compile out of
-    // shipped binaries and let a scoped credential reach an unapproved URL.
-    let credentials_approved = credentials.approved_for(base_url);
-    if !credentials_approved {
-        tracing::error!(
-            target: xai_grok_telemetry::memory_log::TARGET,
->>>>>>> e3fdf3ed (Merge 2 (#4))
             base_url,
             approved = ?credentials.endpoint,
             "memory embeddings: scoped credentials do not match the request URL; dropping them"
@@ -267,12 +234,8 @@ impl MemoryBackendImpl {
             watcher: None,
             stale_claim_secs: 60,
             session_id: String::new(),
-<<<<<<< HEAD
             search_source: MemorySearchSource::Tool,
             observation_sink: noop_memory_observation_sink(),
-=======
-            search_source: "tool",
->>>>>>> e3fdf3ed (Merge 2 (#4))
             embedding_credentials: EndpointScopedCredentials::none(),
             search_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
@@ -639,12 +602,8 @@ mod factory_tests {
             search_config: MemorySearchConfig::default(),
             watcher: None,
             stale_claim_secs: 60,
-<<<<<<< HEAD
             search_source: MemorySearchSource::Tool,
             observation_sink: noop_memory_observation_sink(),
-=======
-            search_source: "tool",
->>>>>>> e3fdf3ed (Merge 2 (#4))
             embedding_credentials: EndpointScopedCredentials::none(),
         }
     }
@@ -1185,14 +1144,9 @@ mod factory_tests {
             search_config: MemorySearchConfig::default(),
             watcher: None,
             stale_claim_secs: 60,
-<<<<<<< HEAD
             search_source: MemorySearchSource::Tool,
             observation_sink: noop_memory_observation_sink(),
             // Trusted endpoint with no auth_credentials exercises the api_key_provider path
-=======
-            search_source: "tool",
-            // Trusted endpoint + no auth_credentials exercises the api_key_provider path.
->>>>>>> e3fdf3ed (Merge 2 (#4))
             embedding_credentials: EndpointScopedCredentials::for_endpoint(
                 "http://example/v1",
                 |_| true,
@@ -1226,12 +1180,7 @@ mod tests {
     use tempfile::TempDir;
     use xai_grok_config_types::MemoryIndexConfig;
 
-<<<<<<< HEAD
     /// An api-key provider that fails the test if its key is ever resolved, proving a scoped-away credential is never consulted.
-=======
-    /// An api-key provider that fails the test if its key is ever resolved,
-    /// proving a scoped-away credential is never consulted.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     struct PanicKey;
     impl xai_grok_tools::types::ApiKeyProvider for PanicKey {
         fn current_api_key(&self) -> Option<String> {
@@ -1284,14 +1233,8 @@ mod tests {
         assert_send_sync::<MemoryBackendImpl>();
     }
 
-<<<<<<< HEAD
     /// Credentials approved for one endpoint but used against a different URL (a wiring bug) are dropped at build time instead of being sent.
     /// The session provider would panic if resolved.
-=======
-    /// If credentials approved for one endpoint are used to build against a
-    /// different URL (a wiring bug), they are dropped at build time rather than
-    /// sent to the wrong endpoint. The session provider would panic if resolved.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[tokio::test]
     async fn test_build_drops_credentials_when_request_url_differs() {
         let session: xai_grok_tools::types::SharedApiKeyProvider = Arc::new(PanicKey);
@@ -1321,14 +1264,8 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
     /// A trusted, URL-matching endpoint builds the provider from the refresh-capable session credential.
     /// The per-call api-key provider is never consulted; it panics if resolved.
-=======
-    /// A trusted, URL-matching endpoint builds the provider from the
-    /// refresh-capable session credential and never consults the per-call
-    /// api-key provider. The api-key provider panics if resolved.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[tokio::test]
     async fn test_trusted_endpoint_prefers_session_credential() {
         struct StubAuth;

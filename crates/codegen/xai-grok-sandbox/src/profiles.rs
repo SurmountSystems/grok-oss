@@ -18,14 +18,10 @@ use crate::hook_write_deny::profile_hook_write_deny;
 use crate::paths::grok_home;
 #[cfg(all(feature = "enforce", unix))]
 use crate::paths::{DEVICE_DIRS, DEVICE_FILES};
-<<<<<<< HEAD
 use crate::paths::{
     essential_writable_paths, essential_writable_paths_minimal, essential_writable_paths_strict,
 };
 use xai_grok_config::{GlobalHookSource, SANDBOX_CONFIG_FILENAME};
-=======
-use crate::paths::{essential_writable_paths, essential_writable_paths_minimal};
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
 /// A resolved sandbox profile ready to be converted to a `CapabilitySet`.
 #[derive(Debug, Clone)]
@@ -181,7 +177,6 @@ fn load_config_file(path: &Path) -> Option<SandboxConfig> {
     }
 }
 
-<<<<<<< HEAD
 /// `/dev/tty` always exists, but without a controlling terminal `open()` returns ENXIO and nono's apply aborts the entire
 /// ruleset. Other open errors (notably EISDIR on directory nodes) must not drop the path: directories are granted via
 /// [`DEVICE_DIRS`] / `allow_path`. A plain `File::open` EISDIR does not mean Landlock would reject the grant.
@@ -198,8 +193,6 @@ fn device_file_openable(path: &Path) -> bool {
     }
 }
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 impl ProfileName {
     /// Convert this profile into a nono `CapabilitySet` for the given workspace.
     #[cfg(all(feature = "enforce", unix))]
@@ -210,12 +203,7 @@ impl ProfileName {
 
     /// Convert using an already-loaded config (avoids re-reading disk).
     ///
-<<<<<<< HEAD
     /// A custom profile's own `deny` list is kernel-enforced (read and write/rename) on top of the base profile.
-=======
-    /// A custom profile's own `deny` list is kernel-enforced (read + write/rename)
-    /// on top of the base profile.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[cfg(all(feature = "enforce", unix))]
     pub fn to_capability_set_with_config(
         &self,
@@ -231,7 +219,6 @@ impl ProfileName {
     }
 
     #[cfg(all(feature = "enforce", unix))]
-<<<<<<< HEAD
     fn read_write_grant_path(path: &Path, home: &Path) -> Option<PathBuf> {
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => {
@@ -266,8 +253,6 @@ impl ProfileName {
     }
 
     #[cfg(all(feature = "enforce", unix))]
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn capability_set_from_profile(
         workspace: &Path,
         profile: &SandboxProfile,
@@ -638,12 +623,9 @@ mod tests {
 
     #[test]
     fn built_in_network_restriction_values() {
-<<<<<<< HEAD
         if skip_if_host_hook_write_deny_unresolvable() {
             return;
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let workspace = std::env::current_dir().unwrap();
         let config = SandboxConfig::default();
 
@@ -658,63 +640,11 @@ mod tests {
         }
     }
 
-<<<<<<< HEAD
     #[test]
     fn custom_network_restriction_inherits_and_overrides_base() {
         if skip_if_host_hook_write_deny_unresolvable() {
             return;
         }
-=======
-    fn network_inheritance_config() -> SandboxConfig {
-        SandboxConfig {
-            profiles: HashMap::from([
-                (
-                    "strict-inherited".to_string(),
-                    ProfileConfig {
-                        extends: Some("strict".to_string()),
-                        restrict_network: None,
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "read-only-inherited".to_string(),
-                    ProfileConfig {
-                        extends: Some("read-only".to_string()),
-                        restrict_network: None,
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "strict-unrestricted".to_string(),
-                    ProfileConfig {
-                        extends: Some("strict".to_string()),
-                        restrict_network: Some(false),
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "workspace-restricted".to_string(),
-                    ProfileConfig {
-                        extends: Some("workspace".to_string()),
-                        restrict_network: Some(true),
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-            ]),
-        }
-    }
-
-    #[test]
-    fn custom_network_restriction_inherits_and_overrides_base() {
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let workspace = std::env::current_dir().unwrap();
         let config = network_inheritance_config();
 

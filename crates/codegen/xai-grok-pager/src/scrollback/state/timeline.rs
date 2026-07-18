@@ -1,19 +1,9 @@
-<<<<<<< HEAD
 //! Conversation timeline: one entry per turn, for jump navigation UIs (`/jump` picker; the timeline sidebar builds on the same data).
 
 use super::*;
 
 /// Max preview length stored per timeline entry.
 /// Render paths truncate further to the available width; this only bounds the snapshot.
-=======
-//! Conversation timeline: one entry per turn, for jump navigation UIs
-//! (`/jump` picker; the timeline sidebar builds on the same data).
-
-use super::*;
-
-/// Max preview length stored per timeline entry. Render paths truncate
-/// further to the available width; this only bounds the snapshot.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 const PREVIEW_MAX_CHARS: usize = 120;
 
 /// One turn in the conversation timeline.
@@ -21,7 +11,6 @@ const PREVIEW_MAX_CHARS: usize = 120;
 pub struct TimelineEntry {
     /// Turn's display ordinal (snapshot-only; not used to act on the transcript).
     pub turn_idx: usize,
-<<<<<<< HEAD
     /// Stable id of the turn's `UserPrompt` entry: the jump/preview target.
     /// Resolved to an index only at the [`ScrollbackState`] boundary, so a removal (`shift_remove`) can't make a stale index target another block.
     pub prompt_entry_id: EntryId,
@@ -32,20 +21,6 @@ pub struct TimelineEntry {
 /// First non-empty line, capped in chars with a `…` marker.
 /// Bounded single pass: the length probe stops one char past the cap, so a huge one-line prompt costs O(cap), not O(line length).
 /// The cap counts chars (not display width) on purpose: it bounds the stored snapshot, and render paths re-truncate to their width.
-=======
-    /// Stable id of the turn's `UserPrompt` entry — the jump/preview target,
-    /// resolved to an index only at the [`ScrollbackState`] boundary so a
-    /// removal (`shift_remove`) can't make a stale index target another block.
-    pub prompt_entry_id: EntryId,
-    /// First non-empty line of the prompt text, char-capped.
-    pub preview: String,
-}
-
-/// First non-empty line, char-capped with a `…` marker. Bounded single pass:
-/// the length probe stops one char past the cap, so a huge one-line prompt
-/// costs O(cap), not O(line length). Char cap (not display width) on purpose —
-/// this bounds the stored snapshot; render paths re-truncate to their width.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn prompt_preview(text: &str) -> String {
     let line = text
         .lines()
@@ -62,15 +37,8 @@ fn prompt_preview(text: &str) -> String {
 
 impl ScrollbackState {
     /// Timeline entries, one per turn in conversation order (oldest first).
-<<<<<<< HEAD
     /// Each entry carries the prompt's stable [`EntryId`].
     /// Dispatch resolves it to an index at the boundary, so the snapshot stays correct across both appends and removals.
-=======
-    ///
-    /// Each entry carries the prompt's stable [`EntryId`]; dispatch resolves it
-    /// to an index at the boundary, so the snapshot stays correct across both
-    /// appends and removals.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn timeline_entries(&self) -> Vec<TimelineEntry> {
         self.turns
             .iter()
@@ -90,12 +58,7 @@ impl ScrollbackState {
             .collect()
     }
 
-<<<<<<< HEAD
     /// Preview for one turn (avoids building the whole entry list when a single hover needs it, e.g. the sidebar tick popup).
-=======
-    /// Preview for one turn (avoids building the whole entry list when a
-    /// single hover needs it, e.g. the sidebar tick popup).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn turn_preview(&self, turn_idx: usize) -> Option<String> {
         let turn = self.turns.get(turn_idx)?;
         self.entries
@@ -106,17 +69,9 @@ impl ScrollbackState {
             })
     }
 
-<<<<<<< HEAD
     /// The focused turn: the last turn whose prompt is at/above the viewport top, or the first turn while pre-turn content owns the top.
     /// `None` only when there are no turns or no layout.
     /// Trailing turns short enough to never own the top row never become active; they're fully on screen when it matters.
-=======
-    /// The focused turn: the last turn whose prompt is at/above the
-    /// viewport top, or the first turn while pre-turn content owns the top.
-    /// `None` only when there are no turns or no layout. Trailing turns
-    /// short enough to never own the top row never become active — they're
-    /// fully on screen when it matters.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn active_turn_for_viewport(&self) -> Option<usize> {
         if self.view_mode == ViewMode::SingleTurn {
             return self.current_turn;
@@ -127,18 +82,9 @@ impl ScrollbackState {
         Some(self.prompts_above_top(false)?.saturating_sub(1))
     }
 
-<<<<<<< HEAD
     /// The nearest turn an upward scroll can land on: the last turn whose prompt is STRICTLY above the viewport top, `None` when nothing is above.
     /// The ▲ chevron steps here rather than `active - 1`: from mid-turn it first aligns the current turn's own prompt, like the h key.
     /// It can never target a trailing turn that no scroll reaches (the stuck-▲ bug).
-=======
-    /// The nearest turn an upward scroll can land on: the last turn whose
-    /// prompt is STRICTLY above the viewport top, `None` when nothing is
-    /// above. The ▲ chevron steps here rather than `active - 1`: from
-    /// mid-turn it first aligns the current turn's own prompt (like the
-    /// h key), and it can never target a trailing turn that no scroll
-    /// reaches (the stuck-▲ bug).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn turn_above_viewport_top(&self) -> Option<usize> {
         if self.view_mode == ViewMode::SingleTurn {
             return self.current_turn?.checked_sub(1);
@@ -146,13 +92,8 @@ impl ScrollbackState {
         self.prompts_above_top(true)?.checked_sub(1)
     }
 
-<<<<<<< HEAD
     /// The nearest turn below the viewport top.
     /// Before the first prompt, this is the first turn; on a prompt row, it is the following turn.
-=======
-    /// The nearest turn below the viewport top. Before the first prompt,
-    /// this is the first turn; on a prompt row, it is the following turn.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn turn_below_viewport_top(&self) -> Option<usize> {
         if self.view_mode == ViewMode::SingleTurn {
             let next = self.current_turn?.checked_add(1)?;
@@ -162,14 +103,8 @@ impl ScrollbackState {
         (next < self.turns.len()).then_some(next)
     }
 
-<<<<<<< HEAD
     /// Count of turns whose prompt row is above the viewport top (`strict`: strictly above; else at-or-above).
     /// Prompt rows are monotone in turn order, so this is a partition point over cached `virtual_y`.
-=======
-    /// Count of turns whose prompt row is above the viewport top (`strict`:
-    /// strictly above; else at-or-above). Prompt rows are monotone in turn
-    /// order, so this is a partition point over cached `virtual_y`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn prompts_above_top(&self, strict: bool) -> Option<usize> {
         let cache = self.layout_cache.as_ref()?;
         let range = self.visible_entry_range();
@@ -208,7 +143,6 @@ mod tests {
 
         let entries = state.timeline_entries();
         assert_eq!(entries.len(), 2);
-<<<<<<< HEAD
         let [first, second] = entries.as_slice() else {
             panic!("expected two timeline entries: {entries:?}");
         };
@@ -218,14 +152,6 @@ mod tests {
         assert_eq!(second.turn_idx, 1);
         assert_eq!(state.index_of_id(second.prompt_entry_id), Some(3));
         assert_eq!(second.preview, "second question");
-=======
-        assert_eq!(entries[0].turn_idx, 0);
-        assert_eq!(state.index_of_id(entries[0].prompt_entry_id), Some(1));
-        assert_eq!(entries[0].preview, "first question");
-        assert_eq!(entries[1].turn_idx, 1);
-        assert_eq!(state.index_of_id(entries[1].prompt_entry_id), Some(3));
-        assert_eq!(entries[1].preview, "second question");
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -237,18 +163,12 @@ mod tests {
         state.prepare_layout(80, 10);
 
         let entries = state.timeline_entries();
-<<<<<<< HEAD
         let [first, second, ..] = entries.as_slice() else {
             panic!("expected two timeline entries: {entries:?}");
         };
         assert_eq!(first.preview, "leading blanks skipped");
         assert_eq!(second.preview.chars().count(), 120);
         assert!(second.preview.ends_with('\u{2026}'));
-=======
-        assert_eq!(entries[0].preview, "leading blanks skipped");
-        assert_eq!(entries[1].preview.chars().count(), 120);
-        assert!(entries[1].preview.ends_with('\u{2026}'));
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -274,35 +194,14 @@ mod tests {
 
     #[test]
     fn active_turn_stays_top_anchored_at_the_bottom() {
-<<<<<<< HEAD
         // A screenful of short trailing turns: even at the bottom the active turn is the one owning the top row (the web-timeline rule)
         // This replaced a clamp to the newest turn, whose highlight leapt at one step off the bottom and whose ▲ chevron stuck
         let mut state = clustered_trailing_turns();
-=======
-        // A screenful of short trailing turns: even at the bottom the
-        // active turn is the one owning the top row (the web-timeline
-        // rule) — never a newest-turn clamp, whose one-step-off-bottom
-        // highlight leap and stuck-▲ chevron this replaced.
-        let mut state = ScrollbackState::new();
-        state.push_block(user_block("Q1"));
-        state.push_block(tall_agent_block());
-        for i in 2..8 {
-            state.push_block(user_block(&format!("Q{i}")));
-            state.push_block(agent_block("ok"));
-        }
-        state.prepare_layout(80, 12);
-
->>>>>>> e3fdf3ed (Merge 2 (#4))
         state.goto_bottom();
         let at_bottom = state.active_turn_for_viewport().expect("active at bottom");
         assert!(at_bottom < 6, "top-anchored, not the newest: {at_bottom}");
 
-<<<<<<< HEAD
         // Nudging off the bottom moves the highlight at most one boundary (the old clamp leapt from the newest turn to the top-anchored one)
-=======
-        // Nudging off the bottom moves the highlight at most one boundary
-        // (the old clamp leapt from the newest turn to the top-anchored one).
->>>>>>> e3fdf3ed (Merge 2 (#4))
         state.scroll_up(1);
         let nudged = state.active_turn_for_viewport().expect("still in a turn");
         assert!(
@@ -311,15 +210,9 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
     /// One render frame and chevron click, wired exactly like the app.
     /// render.rs builds the rail from viewport state; mouse.rs resolves the hit through `chevron_target` and jumps.
     /// `None` means the chevron was dim.
-=======
-    /// One render-frame + chevron click, wired exactly like the app:
-    /// render.rs builds the rail from viewport state, mouse.rs resolves the
-    /// hit through `chevron_target` and jumps. `None` = the chevron was dim.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn click_chevron(state: &mut ScrollbackState, viewport_height: u16, up: bool) -> Option<usize> {
         use crate::views::timeline::{RailViewport, TimelineHit, chevron_target, compute_rail};
         state.prepare_layout(80, viewport_height);
@@ -341,15 +234,8 @@ mod tests {
         Some(target)
     }
 
-<<<<<<< HEAD
     /// One tall response, then six short trailing turns that cluster in the last 80x12 screenful.
     fn clustered_trailing_turns() -> ScrollbackState {
-=======
-    #[test]
-    fn chevrons_walk_the_conversation_end_to_end_without_sticking() {
-        // The stuck-▲ shape: one tall response, then six short turns that
-        // all cluster inside the final screenful.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut state = ScrollbackState::new();
         state.push_block(user_block("Q1"));
         state.push_block(tall_agent_block());
@@ -358,7 +244,6 @@ mod tests {
             state.push_block(agent_block("ok"));
         }
         state.prepare_layout(80, 12);
-<<<<<<< HEAD
         state
     }
 
@@ -369,12 +254,6 @@ mod tests {
         state.goto_bottom();
 
         // ▲ to the very top: every click moves the viewport up, one boundary per click once on a prompt row, no sticking
-=======
-        state.goto_bottom();
-
-        // ▲ to the very top: every click moves the viewport up, one
-        // boundary per click once on a prompt row, no sticking.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut up_visits = Vec::new();
         while up_visits.len() < 16 {
             let before = state.scroll_offset();
@@ -391,23 +270,14 @@ mod tests {
         assert_eq!(state.scroll_offset(), 0, "▲ walk reaches the top");
         assert_eq!(up_visits.last(), Some(&0), "▲ walk ends at the first turn");
         assert!(
-<<<<<<< HEAD
             up_visits
                 .windows(2)
                 .all(|w| matches!(w, [a, b] if *a - *b == 1)),
-=======
-            up_visits.windows(2).all(|w| w[0] - w[1] == 1),
->>>>>>> e3fdf3ed (Merge 2 (#4))
             "one boundary per click: {up_visits:?}"
         );
         assert_eq!(click_chevron(&mut state, 12, true), None, "▲ dim at top");
 
-<<<<<<< HEAD
         // ▼ back down: strictly forward, never sticking, and it terminates (dims) rather than repeating a turn or running forever
-=======
-        // ▼ back down: strictly forward, never sticking, and it terminates
-        // (dims) rather than repeating a turn or running forever.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut down_visits = Vec::new();
         while down_visits.len() < 16 {
             let Some(target) = click_chevron(&mut state, 12, false) else {
@@ -430,24 +300,9 @@ mod tests {
 
     #[test]
     fn down_chevron_enters_trailing_turns_at_the_bottom() {
-<<<<<<< HEAD
         // Reported bug: short turns cluster in the final screenful and ▼ sat dim at the bottom, even though clicking their ticks jumped to them
         // ▼ now targets the next turn, the same turn a tick click resolves to (both go through jump_to_turn)
         let mut state = clustered_trailing_turns();
-=======
-        // Reported bug: a cluster of short turns fills the final screenful,
-        // leaving ▼ dim at the bottom even though clicking those ticks jumped
-        // to them. ▼ now targets the next turn — the same turn a tick click
-        // resolves to (both go through jump_to_turn).
-        let mut state = ScrollbackState::new();
-        state.push_block(user_block("Q1"));
-        state.push_block(tall_agent_block());
-        for i in 2..8 {
-            state.push_block(user_block(&format!("Q{i}")));
-            state.push_block(agent_block("ok"));
-        }
-        state.prepare_layout(80, 12);
->>>>>>> e3fdf3ed (Merge 2 (#4))
         state.goto_bottom();
 
         let active = state.active_turn_for_viewport().expect("active at bottom");
@@ -466,12 +321,7 @@ mod tests {
 
     #[test]
     fn up_chevron_snaps_to_the_current_prompt_mid_turn() {
-<<<<<<< HEAD
         // Midway through a response ▲ first aligns the current turn's own prompt to the top (matching the h key), then steps to older turns
-=======
-        // Midway through a response ▲ first aligns the current turn's own
-        // prompt to the top (matching the h key), then steps to older turns.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut state = ScrollbackState::new();
         state.push_block(user_block("Q1"));
         state.push_block(tall_agent_block());
@@ -497,14 +347,8 @@ mod tests {
 
     #[test]
     fn chevrons_when_everything_fits_on_one_screen() {
-<<<<<<< HEAD
         // Fits with room to spare: the first turn owns the top
         // ▲ dims (nothing above), but ▼ still enters the next turn, anchoring it to the top like clicking its tick, rather than dimming
-=======
-        // Fits with room to spare: the first turn owns the top. ▲ dims (nothing
-        // above), but ▼ still enters the next turn — anchoring it to the top
-        // like clicking its tick — rather than dimming.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut state = ScrollbackState::new();
         state.push_block(user_block("Q1"));
         state.push_block(agent_block("a1"));
@@ -538,12 +382,7 @@ mod tests {
         state.prepare_layout(80, 12);
         state.goto_top();
 
-<<<<<<< HEAD
         // Pre-turn content focuses the first tick; ▲ is dim while ▼ enters that first turn rather than skipping it
-=======
-        // Pre-turn content focuses the first tick; ▲ is dim while ▼ enters
-        // that first turn rather than skipping it.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(state.active_turn_for_viewport(), Some(0));
         assert_eq!(click_chevron(&mut state, 12, true), None);
         assert_eq!(click_chevron(&mut state, 12, false), Some(0));

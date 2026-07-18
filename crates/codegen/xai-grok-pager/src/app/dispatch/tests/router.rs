@@ -1,7 +1,6 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
 #[test]
-<<<<<<< HEAD
 fn auth_copy_dispatch_preserves_all_delivery_states() {
     for delivery in [
         crate::clipboard::ClipboardDelivery::Confirmed,
@@ -320,18 +319,6 @@ fn config_editor_action_still_uses_typed_request() {
             path: ref queued,
             refresh_agents_modal: Some(crate::views::agents_modal::AgentsTab::Agents),
         }) if queued == &path
-=======
-fn auth_copy_success_requires_confirmed_delivery() {
-    use crate::clipboard::ClipboardDelivery;
-    assert!(crate::app::dispatch::router::auth_copy_was_confirmed(
-        ClipboardDelivery::Confirmed
-    ));
-    assert!(!crate::app::dispatch::router::auth_copy_was_confirmed(
-        ClipboardDelivery::Unverified
-    ));
-    assert!(!crate::app::dispatch::router::auth_copy_was_confirmed(
-        ClipboardDelivery::Failed
->>>>>>> e3fdf3ed (Merge 2 (#4))
     ));
 }
 fn seed_foreign_resume_hint(

@@ -93,7 +93,6 @@ pub const USER_CONFIG_FILENAME: &str = "config.toml";
 /// Managed config filename, shared by the loaders in this module.
 pub const MANAGED_CONFIG_FILENAME: &str = "managed_config.toml";
 
-<<<<<<< HEAD
 /// Requirements (cloud-cache) filename, synced from the server alongside the managed config.
 pub const REQUIREMENTS_FILENAME: &str = "requirements.toml";
 
@@ -110,11 +109,6 @@ pub const TRUSTED_HOOK_PROJECTS_FILENAME: &str = "trusted-hook-projects";
 /// Plugin trust list (`$GROK_HOME/trusted-plugins`).
 pub const TRUSTED_PLUGINS_FILENAME: &str = "trusted-plugins";
 
-=======
-/// Requirements (cloud-cache) filename — the sibling server-synced artifact.
-pub const REQUIREMENTS_FILENAME: &str = "requirements.toml";
-
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn load_managed_config() -> std::io::Result<toml::Value> {
     load_user_config_layer(user_grok_home().as_deref(), MANAGED_CONFIG_FILENAME)
 }

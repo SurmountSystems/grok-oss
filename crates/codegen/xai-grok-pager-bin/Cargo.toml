@@ -1,10 +1,6 @@
 [package]
 name = "xai-grok-pager-bin"
-<<<<<<< HEAD
 version = "1.0.45"
-=======
-version = "0.2.102"
->>>>>>> e3fdf3ed (Merge 2 (#4))
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -120,7 +116,6 @@ stock = [
     "xai-grok-update/default",
 ]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
-<<<<<<< HEAD
 # xai-grok-workspace no longer enables sandbox-enforce by default, so enable it here.
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce", "xai-grok-workspace/sandbox-enforce"]
 local-workspace = ["xai-grok-pager/local-workspace"]
@@ -133,10 +128,3 @@ release-dist = [
     "stock",
     "xai-grok-pager/release-dist",
     ]
-=======
-sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
-release-dist = ["xai-grok-pager/release-dist"]
-
-[lints]
-workspace = true
->>>>>>> e3fdf3ed (Merge 2 (#4))

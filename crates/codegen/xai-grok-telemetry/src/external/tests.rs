@@ -1250,11 +1250,8 @@ fn contextual_tip_maps_every_tip_and_action() {
         (K::SmallScreen, A::Accepted, "small_screen", "accepted"),
         (K::WordSelect, A::Shown, "word_select", "shown"),
         (K::WordSelect, A::Accepted, "word_select", "accepted"),
-<<<<<<< HEAD
         (K::ExportCopy, A::Shown, "export_copy", "shown"),
         (K::ExportCopy, A::Accepted, "export_copy", "accepted"),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         (K::SshWrap, A::Shown, "ssh_wrap", "shown"),
         (K::SshWrap, A::Accepted, "ssh_wrap", "accepted"),
     ];

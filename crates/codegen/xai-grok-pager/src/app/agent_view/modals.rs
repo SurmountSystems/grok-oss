@@ -1760,12 +1760,7 @@ impl AgentView {
                             state.picker_state.search_active = false;
                             return InputOutcome::Changed;
                         }
-<<<<<<< HEAD
                         // Drop repeats while an action is still running on the same row to avoid double-spawning the OAuth browser flow
-=======
-                        // Drop repeats while an action is in flight on the same
-                        // row to avoid double-spawning the OAuth browser flow.
->>>>>>> e3fdf3ed (Merge 2 (#4))
                         let sel = state.picker_state.selected;
                         if state.pending_action.is_some() && state.pending_entry_index == Some(sel)
                         {

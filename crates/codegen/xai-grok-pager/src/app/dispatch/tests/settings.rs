@@ -540,21 +540,12 @@ fn set_timeline_emits_persist_setting_with_correct_payload() {
     let default_on = app.current_ui.show_timeline_enabled();
     let effects = dispatch(Action::SetTimeline(!default_on), &mut app);
     assert_eq!(effects.len(), 1);
-<<<<<<< HEAD
     match effects.first() {
         Some(Effect::PersistSetting {
             key,
             value,
             rollback_value,
         }) => {
-=======
-    match &effects[0] {
-        Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        } => {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             assert_eq!(*key, "show_timeline");
             assert_eq!(value, &SettingValue::Bool(!default_on));
             assert_eq!(rollback_value, &SettingValue::Bool(default_on));
@@ -590,7 +581,6 @@ fn set_timeline_toggles_displayed_state_when_current_ui_diverges() {
     assert_eq!(app.current_ui.show_timeline, Some(false));
 }
 #[test]
-<<<<<<< HEAD
 fn set_confirm_before_rewind_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
@@ -638,8 +628,6 @@ fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
     );
 }
 #[test]
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn set_simple_mode_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
@@ -1652,7 +1640,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let away = !app.current_ui.show_timeline_enabled();
             let _ = dispatch(Action::SetTimeline(away), app);
         }
-<<<<<<< HEAD
         "page_flip_on_send" => {
             let away = !crate::appearance::cache::load_page_flip_on_send();
             let _ = dispatch(Action::SetPageFlipOnSend(away), app);
@@ -1680,8 +1667,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             };
             let _ = dispatch(Action::SetFollowUpBehavior(away), app);
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "simple_mode" => {
             let _ = dispatch(Action::SetSimpleMode(false), app);
         }
@@ -1703,12 +1688,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "contextual_hints.word_select" => {
             let _ = dispatch(Action::SetContextualHintWordSelect(false), app);
         }
-<<<<<<< HEAD
         "contextual_hints.export_copy" => {
             let _ = dispatch(Action::SetContextualHintExportCopy(false), app);
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "contextual_hints.ssh_wrap" => {
             let _ = dispatch(Action::SetContextualHintSshWrap(false), app);
         }
@@ -1828,12 +1810,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "screen_mode" => {
             let _ = dispatch(Action::SetScreenMode("minimal".to_string()), app);
         }
-<<<<<<< HEAD
         "voice_keybind_enabled" => {
             let _ = dispatch(Action::SetVoiceKeybindEnabled(false), app);
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "voice_capture_mode" => {
             let _ = dispatch(Action::SetVoiceCaptureMode("toggle".to_string()), app);
         }
@@ -3349,28 +3328,9 @@ fn set_auto_dark_theme_does_not_apply_when_theme_is_not_auto() {
         assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("grokday"));
     });
 }
-<<<<<<< HEAD
 /// Auto-theme commit DOES apply the live theme when both (a) the parent theme is auto AND (b) the system matches.
 /// Uses `GrokDay` (non-truecolor-requiring) for the dark-mode fixture: the test environment may not report truecolor support.
 /// `Theme::apply_kind` clamps truecolor-only themes (TokyoNight, RosePineMoon) to GrokNight, so a non-truecolor theme avoids the clamp.
-=======
-/// Auto-theme commit DOES apply the live theme when both
-/// (a) parent theme = auto AND (b) system matches.
-///
-/// Uses `GrokDay` (non-truecolor-requiring) for the dark-mode
-/// fixture: the test environment's color detection may not report
-/// truecolor support, and `Theme::apply_kind` clamps
-/// truecolor-only themes (TokyoNight, RosePineMoon) down to
-/// GrokNight. Using a non-truecolor theme avoids the clamp
-/// uncertainty. The "live apply" contract is what we're testing
-/// — the specific theme picked is incidental.
-///
-/// Intermediate kind after `SetTheme("auto")` is intentionally not
-/// pinned to `GrokNight`: under `cargo test` (shared process) other
-/// tests can leave a non-default `AUTO_THEME_CONFIG` until the next
-/// seed. Process-per-test runners (`cargo nextest`) make that rare;
-/// the load-bearing assert is the post-commit `GrokDay` apply.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
     with_theme_test_env(|| {

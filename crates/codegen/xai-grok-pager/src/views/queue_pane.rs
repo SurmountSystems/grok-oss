@@ -311,14 +311,6 @@ impl ListItem for QueuedPromptEntry {
     fn search_text(&self) -> &str {
         &self.text
     }
-<<<<<<< HEAD
-=======
-
-    fn copy_text(&self) -> String {
-        self.text.clone()
-    }
-}
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
     fn copy_text(&self) -> String {
         self.text.clone()
@@ -1656,20 +1648,11 @@ mod tests {
         assert!(text.contains("(+4 lines)"));
     }
 
-<<<<<<< HEAD
     /// `y` on a multiline queue row must copy the full prompt text, not the display line that ends with `(+N lines)`.
     #[test]
     fn copy_text_returns_full_prompt_not_display_suffix() {
         let full = "line one\nline two\nline three\nline four";
         let entry = QueuedPromptEntry::new(&local_prompt(1, full), 1, QueueMutation::PerRowKind);
-=======
-    /// GB-4151: `y` on a multiline queue row must copy the full prompt text,
-    /// not the display line that ends with `(+N lines)`.
-    #[test]
-    fn copy_text_returns_full_prompt_not_display_suffix() {
-        let full = "line one\nline two\nline three\nline four";
-        let entry = QueuedPromptEntry::new(&local_prompt(1, full), 1);
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
         // Precondition: display path still shows the collapsed row indicator.
         let display: String = entry
@@ -1691,12 +1674,7 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
     /// End-to-end: `ListPaneState::copy_selected` (the `y` path) uses `copy_text`, so multiline rows paste the full prompt.
-=======
-    /// End-to-end: `ListPaneState::copy_selected` (the `y` path) uses
-    /// `copy_text`, so multiline rows paste the full prompt.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn yank_selected_multiline_copies_full_text() {
         use std::sync::{Arc, Mutex};

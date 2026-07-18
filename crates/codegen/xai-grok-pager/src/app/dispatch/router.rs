@@ -83,7 +83,6 @@ use super::settings::setters::{
     set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
     set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
     set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-<<<<<<< HEAD
     set_follow_up_behavior, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
     set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
     set_page_flip_on_send, set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
@@ -91,14 +90,6 @@ use super::settings::setters::{
     set_show_thinking_blocks, set_show_tips, set_simple_mode, set_subagent_model_inheritance,
     set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
     set_voice_keybind_enabled, set_voice_stt_language,
-=======
-    set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll,
-    set_keep_text_selection, set_max_thoughts_width, set_multiline_mode, set_prompt_suggestions,
-    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
-    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips,
-    set_simple_mode, set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
-    set_voice_stt_language,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -131,7 +122,6 @@ use crate::app::consent::ConsentState;
 use crate::scrollback::types::DisplayMode;
 use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
 use xai_grok_telemetry::session_ctx::log_event;
-<<<<<<< HEAD
 pub(super) fn dispatch_copy_auth_url(
     app: &mut AppView,
     copy: impl FnOnce(&str) -> crate::clipboard::ClipboardDelivery,
@@ -148,10 +138,6 @@ pub(super) fn dispatch_copy_auth_url(
     vec![Effect::ScheduleClearAuthCopyFeedback {
         generation: app.auth_clipboard_feedback_generation,
     }]
-=======
-pub(super) fn auth_copy_was_confirmed(delivery: crate::clipboard::ClipboardDelivery) -> bool {
-    delivery == crate::clipboard::ClipboardDelivery::Confirmed
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 /// Dispatch an action: mutate state, return effects to execute.
 /// The returned `Vec<Effect>` may be empty (pure state mutation) or contain async work that the event loop should spawn.
@@ -735,39 +721,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             if group_toggled {
                 return vec![];
             }
-<<<<<<< HEAD
             dispatch_open_block_viewer(app);
-=======
-            let mut credit_card: Option<(String, xai_grok_telemetry::events::CreditLimitChoice)> =
-                None;
-            with_scrollback(app, |s| {
-                if let Some(idx) = s.selected()
-                    && let Some(entry) = s.entry(idx)
-                    && let crate::scrollback::block::RenderBlock::CreditLimit(ref blk) = entry.block
-                {
-                    use crate::scrollback::blocks::CreditLimitCardAction;
-                    let choice = match blk.action {
-                        CreditLimitCardAction::PurchaseCredits => {
-                            xai_grok_telemetry::events::CreditLimitChoice::PurchaseCredits
-                        }
-                        CreditLimitCardAction::EnablePayg
-                        | CreditLimitCardAction::IncreasePaygLimit => {
-                            xai_grok_telemetry::events::CreditLimitChoice::PayAsYouGo
-                        }
-                    };
-                    credit_card = Some((blk.url.clone(), choice));
-                }
-            });
-            if let Some((url, choice)) = credit_card {
-                log_event(xai_grok_telemetry::events::CreditLimitUpsellClicked {
-                    surface: xai_grok_telemetry::events::CreditLimitUpsellSurface::InlineCard,
-                    choice,
-                });
-                open_url_or_show(app, &url);
-            } else {
-                dispatch_open_block_viewer(app);
-            }
->>>>>>> e3fdf3ed (Merge 2 (#4))
             vec![]
         }
         Action::OpenExtensionsModal { tab, trigger } => {
@@ -1205,10 +1159,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
         Action::SetScreenMode(s) => set_screen_mode(app, s),
-<<<<<<< HEAD
         Action::SetVoiceKeybindEnabled(v) => set_voice_keybind_enabled(app, v),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         Action::SetVoiceCaptureMode(s) => set_voice_capture_mode(app, s),
         Action::SetVoiceSttLanguage(s) => set_voice_stt_language(app, s),
         Action::ToggleTimestamps => dispatch_toggle_timestamps(app),
@@ -1219,7 +1170,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetCompactMode(v) => set_compact_mode(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
-<<<<<<< HEAD
         Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),
         Action::SetDashboardPreview(enabled) => {
             crate::app::dispatch::settings::dashboard::set_dashboard_preview(app, enabled)
@@ -1227,8 +1177,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetConfirmBeforeRewind(v) => set_confirm_before_rewind(app, v),
         Action::SetCombineQueuedPrompts(v) => set_combine_queued_prompts(app, v),
         Action::SetFollowUpBehavior(v) => set_follow_up_behavior(app, v),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         Action::SetSimpleMode(v) => set_simple_mode(app, v),
         Action::SetContextualHintUndo(v) => set_contextual_hint_undo(app, v),
         Action::SetContextualHintPlanMode(v) => set_contextual_hint_plan_mode(app, v),
@@ -1236,10 +1184,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetContextualHintSendNow(v) => set_contextual_hint_send_now(app, v),
         Action::SetContextualHintSmallScreen(v) => set_contextual_hint_small_screen(app, v),
         Action::SetContextualHintWordSelect(v) => set_contextual_hint_word_select(app, v),
-<<<<<<< HEAD
         Action::SetContextualHintExportCopy(v) => set_contextual_hint_export_copy(app, v),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         Action::SetContextualHintSshWrap(v) => set_contextual_hint_ssh_wrap(app, v),
         Action::SetTheme(v) => set_theme(app, v),
         Action::SetAutoDarkTheme(v) => set_auto_dark_theme(app, v),
@@ -1307,15 +1252,12 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::OpenManagedConnectors => {
-<<<<<<< HEAD
             if let ActiveView::Agent(id) = app.active_view
                 && let Some(agent) = app.agents.get_mut(&id)
                 && let Some(ref mut modal) = agent.extensions_modal
             {
                 modal.begin_managed_connectors_wait();
             }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             let url = crate::views::mcps_modal::managed_connectors_url(app.team_id.as_deref());
             open_url_or_show(app, &url);
             vec![]
@@ -1332,23 +1274,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {
-<<<<<<< HEAD
             dispatch_copy_auth_url(app, crate::clipboard::SystemClipboard::try_set)
-=======
-            if let AuthState::Authenticating {
-                auth_url: Some(url),
-                ..
-            } = &app.auth_state
-            {
-                app.auth_clipboard_copied =
-                    auth_copy_was_confirmed(crate::clipboard::SystemClipboard::try_set(url));
-            }
-            if app.auth_clipboard_copied {
-                vec![Effect::ScheduleClearAuthCopied]
-            } else {
-                vec![]
-            }
->>>>>>> e3fdf3ed (Merge 2 (#4))
         }
         Action::ShowRawAuthUrl => {
             app.auth_show_raw_url = true;
@@ -1701,10 +1627,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::RewindCancelOffer => dispatch_rewind_cancel_offer(app),
         Action::RewindDismiss => dispatch_rewind_dismiss(app),
         Action::RewindDismissError => dispatch_rewind_dismiss_error(app),
-<<<<<<< HEAD
-=======
-        Action::InlineEditSubmit => dispatch_inline_edit_submit(app),
->>>>>>> e3fdf3ed (Merge 2 (#4))
         Action::JumpShowPicker => dispatch_jump_show_picker(app),
         Action::JumpPickerSelect(turn_idx) => dispatch_jump_picker_select(app, turn_idx),
         Action::JumpDismiss => dispatch_jump_dismiss(app),

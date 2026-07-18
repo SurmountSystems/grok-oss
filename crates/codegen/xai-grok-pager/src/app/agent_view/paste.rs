@@ -1317,39 +1317,11 @@ pub(super) mod paste_key_tests {
         };
         let unclamped: u16 = area.height + 3 + 5;
         assert!(unclamped > area.height);
-<<<<<<< HEAD
         let clamped = unclamped.min(AgentViewLayout::rows_available_for_prompt(params));
         let layout = AgentViewLayout::compute(AgentViewLayoutParams {
             prompt_height: clamped,
             ..params
         });
-=======
-        let clamped = unclamped.min(area.height.saturating_sub(reserved));
-        assert!(clamped + reserved <= area.height);
-        let layout_cfg = LayoutConfig::default();
-        let scrollbar_cfg = ScrollbarConfig::default();
-        let layout = AgentViewLayout::compute(
-            area,
-            &layout_cfg,
-            &scrollbar_cfg,
-            0,
-            clamped,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            false,
-        );
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(layout.prompt.y + layout.prompt.height <= area.height);
     }
     /// Wiping a substantial main-prompt draft routes `Action::ShowUndoTip`: the end-to-end happy path the whole feature exists for.
@@ -1664,10 +1636,7 @@ pub(super) mod paste_key_tests {
         assert!(
             toast.starts_with("Copied")
                 || toast.starts_with("Copy sent")
-<<<<<<< HEAD
                 || toast.starts_with("Clipboard unreachable")
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 || toast.starts_with("Copy failed"),
             "copy-source emits a clipboard toast, got {toast:?}",
         );

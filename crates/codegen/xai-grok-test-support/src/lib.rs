@@ -69,11 +69,8 @@ mod feedback_endpoint;
 mod gated_upload_proxy;
 pub mod headless;
 mod inference_override;
-<<<<<<< HEAD
 mod inference_request;
 mod inference_route;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[cfg(unix)]
 pub mod leader;
 mod loopback;
@@ -133,7 +130,6 @@ pub use headless::{
     run_headless_in_sandbox_borrowed_with_env, run_headless_in_sandbox_with_env,
     run_headless_with_env, stderr_tail,
 };
-<<<<<<< HEAD
 pub use inference_override::{
     ArmedReplyHold, InferenceExpectation, InferenceRequestMatcher, ReceivedWait,
 };
@@ -165,7 +161,3 @@ pub use resources::{ResourceGrowth, ResourceSnapshot, RssMeasurement, RssOutcome
 pub use sandbox::{TestSandbox, TestSandboxBuilder};
 pub use sse::UsageReport;
 pub use tools::{DAEMON_SPAWN_TOOL, GROK_BUILD_SPAWN_TOOL, Tool};
-=======
-pub use inference_override::{InferenceEndpoint, InferenceExpectation, InferenceRequestMatcher};
-pub use mock_server::{MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent};
->>>>>>> e3fdf3ed (Merge 2 (#4))

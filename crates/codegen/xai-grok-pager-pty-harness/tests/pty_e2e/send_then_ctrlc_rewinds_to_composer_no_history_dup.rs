@@ -27,13 +27,8 @@ async fn send_then_ctrlc_rewinds_to_composer_no_history_dup() {
         .inject_keys(format!("{REWIND_PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/send_then_ctrlc_rewinds_to_composer_no_history_dup.rs
     // The optimistic "❯ " block committed and the composer cleared
     // The turn is running but no token has arrived yet, so the send can still be rewound
-=======
-    // The optimistic "❯ " block committed (composer cleared) and the turn is
-    // running but pre-first-token — the rewindable window.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/send_then_ctrlc_rewinds_to_composer_no_history_dup.rs
     harness
         .wait_until(
             "prompt block committed and composer cleared",
@@ -47,10 +42,6 @@ async fn send_then_ctrlc_rewinds_to_composer_no_history_dup() {
 
     harness.inject_keys(keys::CTRL_C).expect("Ctrl+C rewind");
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/send_then_ctrlc_rewinds_to_composer_no_history_dup.rs
-=======
-    // Rewind: text back in the composer, scrollback block gone.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/send_then_ctrlc_rewinds_to_composer_no_history_dup.rs
     harness
         .wait_until_stable(
             "rewound prompt restored with its scrollback block removed",
@@ -59,11 +50,7 @@ async fn send_then_ctrlc_rewinds_to_composer_no_history_dup() {
             |h| composer_holds(h, REWIND_PROMPT) && block_lines_containing(h, REWIND_PROMPT) == 0,
         )
         .expect("rewound prompt restored");
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/send_then_ctrlc_rewinds_to_composer_no_history_dup.rs
     // The rewind is silent; it looks like the prompt was never sent
-=======
-    // The rewind is silent — it looks like the prompt was never sent.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/send_then_ctrlc_rewinds_to_composer_no_history_dup.rs
     assert!(
         !harness.contains_text("Turn cancelled by user"),
         "rewind must not render a cancelled marker\nscreen:\n{}",

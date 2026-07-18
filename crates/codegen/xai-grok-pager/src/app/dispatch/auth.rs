@@ -1,12 +1,7 @@
 //! Login, logout, account switching, and auth-code submission dispatchers.
 
-<<<<<<< HEAD
 use super::ctx::{refuse_withheld, restore_auth_return_view, show_welcome};
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
-=======
-use super::ctx::{restore_auth_return_view, show_welcome};
-use super::queue::{maybe_drain_queue, note_peek_page_flip_after_drain};
->>>>>>> e3fdf3ed (Merge 2 (#4))
 use super::router::dispatch;
 use super::session::lifecycle::{clear_startup_actions, drain_startup_actions};
 use crate::app::actions::{Action, Effect};
@@ -56,16 +51,9 @@ fn no_login_method_error(app: &AppView) -> String {
     }
 }
 
-<<<<<<< HEAD
 /// Abort any in-flight Authenticate/SwitchAccount task *and* its URL poll (single-flight).
 /// A new login must not stack device-code mints or let a stale poll steal the successor's URL.
 /// No-op when not authenticating or when the abort handles have not been installed yet.
-=======
-/// Abort any in-flight Authenticate/SwitchAccount task *and* its URL poll so a
-/// new login cannot stack device-code mints or have a stale poll steal the
-/// successor's URL (single-flight). No-op when not authenticating or when the
-/// abort handles have not been installed yet.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn abort_prior_auth(app: &mut AppView) {
     if let AuthState::Authenticating {
         handle,
@@ -269,30 +257,15 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     ]
 }
 
-<<<<<<< HEAD
 /// Only meaningful when `auth_return_view` is set (a mid-session `/login` or 401 re-auth prompt).
 /// Aborts the in-flight auth task and tells the shell to cancel its device/loopback flow so a retry does not race a still-polling prior mint.
 /// Bump the seq so a fresh login does not collide with a late `AuthComplete`/`AuthFailed`.
-=======
-/// Cancel a login that was started from inside a session and restore the
-/// caller's view. Only meaningful when `auth_return_view` is set (a
-/// mid-session `/login` or 401 re-auth prompt). Aborts the in-flight auth
-/// task and tells the shell to cancel its device/loopback flow so a retry
-/// does not race a still-polling prior mint. Bump the seq so a fresh login
-/// does not collide with a late `AuthComplete`/`AuthFailed`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     let Some(return_view) = app.auth_return_view.take() else {
         return vec![];
     };
-<<<<<<< HEAD
     // Capture the attempt's request_seq before abort clears Authenticating, so the shell cancel is scoped to this attempt only
     // A delayed RPC must not cancel a fast re-login
-=======
-    // Capture the attempt's request_seq before abort clears Authenticating so
-    // the shell cancel is scoped to this attempt only (a delayed RPC must not
-    // cancel a fast re-login).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let cancel_seq = match &app.auth_state {
         AuthState::Authenticating { request_seq, .. } => Some(*request_seq),
         _ => None,
@@ -310,13 +283,8 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
         agent.reauth_stashed_prompt = None;
         strip_trailing_auth_error_blocks(agent);
     }
-<<<<<<< HEAD
     // Ask the shell to cancel its in-flight interactive auth (device poll / loopback wait)
     // Fire-and-forget: UI state is already restored
-=======
-    // Ask the shell to cancel its in-flight interactive auth (device poll /
-    // loopback wait). Fire-and-forget: UI state is already restored.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     match cancel_seq {
         Some(request_seq) => vec![Effect::CancelAuth { request_seq }],
         None => vec![],
@@ -370,11 +338,7 @@ pub(super) fn handle_auth_complete(
             // Mirrors how the credit-limit upsell strips its stale blocks
             // Auth is global, so handle every agent (the login may have been started from the dashboard, not the agent that 401'd)
             let mut retry_effects = Vec::new();
-<<<<<<< HEAD
             let mut page_flips = Vec::new();
-=======
-            let mut drained_ids = Vec::new();
->>>>>>> e3fdf3ed (Merge 2 (#4))
             for agent in app.agents.values_mut() {
                 strip_trailing_auth_error_blocks(agent);
                 // Auto-resubmit the prompt that failed on the expired login so the user doesn't have to retype it
@@ -384,7 +348,6 @@ pub(super) fn handle_auth_complete(
                         "Re-authenticated. Retrying\u{2026}".to_string(),
                     ));
                     agent.session.enqueue_in_flight_prompt_front(prompt);
-<<<<<<< HEAD
                     let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
                     retry_effects.extend(drain.effects);
                     page_flips.push((agent.session.id, drain.page_flip_entry));
@@ -392,14 +355,6 @@ pub(super) fn handle_auth_complete(
             }
             for (id, page_flip_entry) in page_flips {
                 note_peek_page_flip(app, id, page_flip_entry);
-=======
-                    retry_effects.extend(maybe_drain_queue(agent));
-                    drained_ids.push(agent.session.id);
-                }
-            }
-            for id in drained_ids {
-                note_peek_page_flip_after_drain(app, id);
->>>>>>> e3fdf3ed (Merge 2 (#4))
             }
             let mut effects = dispatch(Action::RequestBundleStatus, app);
             if app.usage_visible {

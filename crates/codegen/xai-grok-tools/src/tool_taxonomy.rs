@@ -394,14 +394,10 @@ mod tests {
         }
         let mut expected: serde_json::Value =
             serde_json::from_str(tool_meta_json_schema_str()).expect("checked-in schema parses");
-<<<<<<< HEAD
         if let Some(values) = expected
             .pointer_mut("/definitions/ToolNamespace/enum")
             .and_then(|v| v.as_array_mut())
         {
-=======
-        if let Some(values) = expected["definitions"]["ToolNamespace"]["enum"].as_array_mut() {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             use std::collections::HashSet;
             use strum::IntoEnumIterator;
             let compiled: HashSet<String> = ToolNamespace::iter()

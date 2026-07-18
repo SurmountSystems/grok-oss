@@ -44,19 +44,8 @@ pub const DEFAULT_PIDFILE_PATH: &str = "/tmp/workspace-server.pid";
 #[cfg(windows)]
 pub const DEFAULT_PIDFILE_PATH: &str = "C:\\Windows\\Temp\\workspace-server.pid";
 
-<<<<<<< HEAD:crates/codegen/xai-grok-workspace-daemon/src/daemonize.rs
 /// How long a takeover waits for the predecessor to release the pidfile lock before a forceful kill.
 /// Far below the server's SIGTERM drain budget on purpose: the predecessor is already stale, so a bounded replacement matters more than a full drain.
-=======
-/// How long a takeover waits for the gracefully-terminated predecessor to
-/// release the pidfile lock before escalating to a forceful kill.
-///
-/// Intentionally far below the server's own SIGTERM drain budget
-/// (`GROK_WORKSPACE_TERMINATION_GRACE_MS`, default 45s): a takeover only
-/// happens when the orchestrator has already declared the incumbent stale,
-/// so a bounded ready time for the replacement outranks completing the
-/// predecessor's drain.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-workspace/src/daemonize.rs
 pub const TAKEOVER_GRACE: Duration = Duration::from_secs(2);
 
 /// How long a takeover waits for the lock after the forceful kill (process death releases the flock) before declining.

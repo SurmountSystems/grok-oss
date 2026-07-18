@@ -57,10 +57,7 @@ pub struct ViewportSnapshot {
     pub(crate) scroll_offset: usize,
     pub(crate) follow_mode: bool,
     pub(crate) follow_preserve_scroll: bool,
-<<<<<<< HEAD
     pub(crate) follow_preserve_content_generation: u64,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) viewport_height: u16,
     pub(crate) last_width: u16,
     pub(crate) selected: Option<usize>,

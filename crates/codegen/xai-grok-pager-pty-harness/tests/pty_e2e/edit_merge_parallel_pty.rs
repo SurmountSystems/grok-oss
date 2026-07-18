@@ -6,19 +6,10 @@ const DONE_SENTINEL: &str = "EDIT_MERGE_PAR_DONE";
 
 const FIXTURE: &str = "parallel_fix.py";
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/edit_merge_parallel_pty.rs
 /// PTY: with `collapsed_edit_blocks` enabled, two parallel search_replace calls to the same file in one model turn merge into a single Edit row.
 /// The merged row sums both diffstats, whatever order the completions land in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run with cargo test -p xai-grok-pager-pty-harness --test pty_e2e -- --ignored"]
-=======
-/// PTY: with `collapsed_edit_blocks` enabled, TWO search_replace calls to the
-/// same file issued in ONE model turn (parallel tool calls) coalesce into a
-/// single Edit row with the summed diffstat, regardless of the order their
-/// completions land in.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "PTY e2e; run with cargo test -p xai-grok-pager --test pty_e2e -- --ignored"]
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/edit_merge_parallel_pty.rs
 async fn edit_merge_parallel_pty() {
     let content = ContentController::start().await.expect("start content");
     seed_ui_config(&content, "collapsed_edit_blocks = true");
@@ -41,13 +32,8 @@ async fn edit_merge_parallel_pty() {
     .expect("write fixture");
     let abs = dunce::canonicalize(&target).unwrap_or(target.clone());
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/edit_merge_parallel_pty.rs
     // Each replacement swaps one line for one line and the two do not overlap
     // Both calls therefore succeed against the same starting file whatever order the shell runs them in
-=======
-    // Non-overlapping 1:1 replacements so both calls succeed against the
-    // same starting file whatever order the shell runs them in.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/edit_merge_parallel_pty.rs
     let args_a = json!({
         "file_path": abs.to_string_lossy(),
         "old_string": "second = \"two\"",
@@ -95,11 +81,7 @@ async fn edit_merge_parallel_pty() {
             )
         });
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/edit_merge_parallel_pty.rs
     // One merged Edit row sums both calls' diffstats
-=======
-    // One merged row summing both calls' diffstats.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/edit_merge_parallel_pty.rs
     harness
         .wait_for_text(&format!("Edit {FIXTURE} +2/-2"), Duration::from_secs(20))
         .unwrap_or_else(|_| {

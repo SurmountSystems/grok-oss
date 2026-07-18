@@ -24,11 +24,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-<<<<<<< HEAD
-=======
-
-use agent_client_protocol as acp;
->>>>>>> e3fdf3ed (Merge 2 (#4))
 use xai_acp_lib::{AcpAgentTx, AcpClientMessageBox, AcpClientRx, acp_send};
 use xai_grok_shell::agent::auth_method::AuthMethodKind;
 use xai_grok_shell::agent::config::Config as AgentConfig;
@@ -1226,7 +1221,6 @@ pub async fn run_single_turn(
                     break;
                 }
             }
-<<<<<<< HEAD
             if options.wait_for_background
                 && let Some(done_at) = prompt_done_at
                 && done_at.elapsed() >= options.background_wait_timeout
@@ -1305,20 +1299,10 @@ pub async fn run_single_turn(
                     // Drain now so a task_backgrounded around completion is recorded before the empty-check.
                     drain_pending_acp_messages(
                         &mut acp_rx,
-=======
-            res = &mut prompt_fut, if prompt_result.is_none() => {
-                prompt_result = Some(res);
-                prompt_done_at = Some(Instant::now());
-                if !options.wait_for_background {
-                    drain_acp_with_grace(
-                        &mut acp_rx,
-                        Duration::from_millis(750),
->>>>>>> e3fdf3ed (Merge 2 (#4))
                         &mut emitter,
                         t_prompt,
                         &mut ttf_logged,
                         options.yolo,
-<<<<<<< HEAD
                         &mut pending_bg,
                         &mut background_lifecycle,
                     );
@@ -1343,13 +1327,6 @@ pub async fn run_single_turn(
                     .await;
                     prompt_result = Some(Err(err));
                     prompt_unacknowledged = true;
-=======
-                        options.output_format,
-                        &mut pending_bg,
-                        &mut completed_before_bg,
-                    )
-                    .await;
->>>>>>> e3fdf3ed (Merge 2 (#4))
                     break;
                 }
             }
@@ -1435,14 +1412,10 @@ pub async fn run_single_turn(
         Some(Err(err)) => {
             let msg = if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
                 let detail = err.data.as_ref().and_then(error_detail_from_data);
-<<<<<<< HEAD
                 crate::app::sanitize_user_error(&format_rate_limited_user_message(
                     detail.as_deref(),
                     is_api_key_auth,
                 ))
-=======
-                format_rate_limited_user_message(detail.as_deref(), is_api_key_auth)
->>>>>>> e3fdf3ed (Merge 2 (#4))
             } else {
                 err.to_string()
             };
@@ -1704,7 +1677,6 @@ fn track_background_lifecycle(
         ExtEvent::MonitorEvent | ExtEvent::None | ExtEvent::Lifecycle(_) | ExtEvent::Stream(_) => {}
     }
 }
-<<<<<<< HEAD
 /// Non-blocking drain-to-empty of `acp_rx`.
 /// Background work buffered around prompt completion is recorded in `pending_bg` before the empty-check decides whether to exit.
 #[allow(clippy::too_many_arguments)]
@@ -1729,11 +1701,6 @@ fn drain_pending_acp_messages(
         );
     }
 }
-=======
-
-// ── ACP client message handling (select arm + pre-exit drain) ────────────
-
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[allow(clippy::too_many_arguments)]
 async fn drain_acp_with_grace(
     acp_rx: &mut AcpClientRx,
@@ -1742,14 +1709,8 @@ async fn drain_acp_with_grace(
     t_prompt: Instant,
     ttf_logged: &mut bool,
     yolo: bool,
-<<<<<<< HEAD
     pending_bg: &mut HashSet<BackgroundWork>,
     background_lifecycle: &mut BackgroundLifecycleState,
-=======
-    output_format: OutputFormat,
-    pending_bg: &mut HashSet<String>,
-    completed_before_bg: &mut HashSet<String>,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 ) {
     let deadline = Instant::now() + grace;
     loop {
@@ -1760,14 +1721,8 @@ async fn drain_acp_with_grace(
                 t_prompt,
                 ttf_logged,
                 yolo,
-<<<<<<< HEAD
                 pending_bg,
                 background_lifecycle,
-=======
-                output_format,
-                pending_bg,
-                completed_before_bg,
->>>>>>> e3fdf3ed (Merge 2 (#4))
             );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1784,14 +1739,8 @@ async fn drain_acp_with_grace(
                     t_prompt,
                     ttf_logged,
                     yolo,
-<<<<<<< HEAD
                     pending_bg,
                     background_lifecycle,
-=======
-                    output_format,
-                    pending_bg,
-                    completed_before_bg,
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 );
             }
             _ = tokio::time::sleep(remaining) => {
@@ -1800,14 +1749,7 @@ async fn drain_acp_with_grace(
         }
     }
 }
-<<<<<<< HEAD
 /// Process one inbound ACP client message; shared by `recv()` and `try_recv()`.
-=======
-
-/// Process one inbound ACP client message. Used by both `acp_rx.recv()` and
-/// `try_recv()` so buffered `task_backgrounded` is not dropped when
-/// `PromptResponse` completes first.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[allow(clippy::too_many_arguments)]
 fn handle_headless_acp_message(
     msg: AcpClientMessageBox,

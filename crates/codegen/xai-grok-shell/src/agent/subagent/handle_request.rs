@@ -977,18 +977,9 @@ pub(crate) async fn run_shell_child(
     let verbatim_mirror_fork =
         context_source == InitialContextSource::Forked && context_verbatim_fork;
     let task_prompt_text = prompt.clone();
-<<<<<<< HEAD
     let (mut forked_conversation, mut inherited_prefix_len) =
         (forked_conversation, inherited_prefix_len.unwrap_or(0));
     if context_source != InitialContextSource::Resumed
-=======
-    let (mut forked_conversation, mut inherited_prefix_len) = (
-        forked_conversation,
-        inherited_prefix_len.unwrap_or(0),
-    );
-    if !crate::session::is_cursor_user_template(&definition.user_message_template)
-        && context_source != InitialContextSource::Resumed
->>>>>>> e3fdf3ed (Merge 2 (#4))
         && !verbatim_mirror_fork
         && let Some(ref pi) = effective_runtime.persona_instructions
     {
@@ -1685,7 +1676,6 @@ pub(crate) async fn run_shell_child(
             return child_run_output(result, completion_data, None);
         }
     };
-<<<<<<< HEAD
     let session::SessionInitResult {
         handle: child_handle,
         permission_events_rx: mut permission_rx,
@@ -1905,42 +1895,6 @@ pub(crate) async fn run_shell_child(
         drop(spawn_root.take());
         let result = cancel_pending_shell_child(
             &child_handle.cmd_tx,
-=======
-    if cancel_token.is_cancelled() {
-        pending_guard.defuse();
-        ctx.workspace_ops.end_local_session(child_session_id.0.as_ref());
-        cancel_pending_subagent_at_promote(
-                request,
-                &child_handle,
-                &subagent_id,
-                &child_session_id,
-                &subagent_meta_dir,
-                coordinator,
-                gateway,
-                &ctx.parent_session_id,
-                ctx.parent_cmd_tx.as_ref(),
-                worktree_path.as_deref(),
-                worktree_freshly_created,
-                start.elapsed().as_millis() as u64,
-                &gcs_upload_ctx,
-            )
-            .await;
-        return;
-    }
-    pending_guard.defuse();
-    coordinator
-        .borrow_mut()
-        .insert(SubagentTracker {
-            subagent_id: request.id.clone(),
-            parent_session_id: ctx.parent_session_id.clone(),
-            parent_prompt_id: request.parent_prompt_id.clone(),
-            child_session_id: child_session_id.clone(),
-            subagent_type: request.subagent_type.clone(),
-            persona: effective_runtime.persona.clone(),
-            description: request.description.clone(),
-            started_at: start,
-            child_handle: child_handle.clone(),
->>>>>>> e3fdf3ed (Merge 2 (#4))
             child_thread,
             &ctx.workspace_ops,
             &subagent_id,
@@ -2251,17 +2205,12 @@ pub(crate) async fn run_shell_child(
             }
         }
     }
-<<<<<<< HEAD
     let terminal_persistence_allowed = start_artifacts.terminal_persistence_allowed();
     if terminal_persistence_allowed {
         completion_data
             .set_persisted_output_dir(persist_subagent_output(&subagent_meta_dir, &result));
         persist_subagent_completion(&subagent_meta_dir, &result, &gcs_upload_ctx);
     }
-=======
-    let persisted_output_dir = persist_subagent_output(&subagent_meta_dir, &result);
-    persist_subagent_completion(&subagent_meta_dir, &result, &gcs_upload_ctx);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let final_status = result.status().to_string();
     let snapshot_dispose_enabled =
         terminal_persistence_allowed && ctx.resolve_subagent_worktree_snapshot_enabled();
@@ -2357,7 +2306,6 @@ pub(crate) async fn run_shell_child(
         }
         (None, None) => {}
     }
-<<<<<<< HEAD
     {
         let (respond_to, ack) = oneshot::channel();
         if child_handle
@@ -2403,10 +2351,6 @@ pub(crate) async fn run_shell_child(
     }
     ctx.workspace_ops
         .end_local_session(child_session_id.0.as_ref());
-=======
-    let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
-    ctx.workspace_ops.end_local_session(child_session_id.0.as_ref());
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let mut disposed_snapshot_ref: Option<String> = None;
     let mut worktree_removed = false;
     if let Some(ref wt_path) = worktree_path {
@@ -2459,7 +2403,6 @@ pub(crate) async fn run_shell_child(
             "error": &result.error,
         })),
     );
-<<<<<<< HEAD
     crate::waterfall::mark(&request.id, crate::waterfall::stage::CHILD_DONE);
     child_run_output(result, completion_data, disposed_snapshot_ref)
 }
@@ -2479,19 +2422,6 @@ impl Disposal {
                 ..
             }
         )
-=======
-    coordinator
-        .borrow_mut()
-        .move_to_completed(
-            &request.id,
-            request.description.clone(),
-            request.subagent_type.clone(),
-            result.clone(),
-            persisted_output_dir,
-        );
-    if let Some(snapshot_ref) = disposed_snapshot_ref {
-        coordinator.borrow_mut().set_completed_snapshot_ref(&request.id, snapshot_ref);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     pub(crate) fn snapshot_ref(&self) -> Option<&str> {
         match self {

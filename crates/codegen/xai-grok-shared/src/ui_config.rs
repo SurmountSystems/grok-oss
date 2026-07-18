@@ -39,7 +39,6 @@ pub struct UiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_timestamps: Option<bool>,
     /// Timeline sidebar (per-turn tick rail in place of the scrollbar).
-<<<<<<< HEAD
     /// `None` means off (client default; opt-in). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_timeline: Option<bool>,
@@ -54,11 +53,6 @@ pub struct UiConfig {
     /// Written by the pager's settings modal / rewind "Yes, and don't ask again".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_before_rewind: Option<bool>,
-=======
-    /// `None` = off (client default; opt-in). Written by the pager's settings modal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub show_timeline: Option<bool>,
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Theme to use when the OS is in dark mode. Written by the pager's theme persist module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_dark_theme: Option<String>,
@@ -160,11 +154,7 @@ pub struct UiConfig {
     /// steady block. Config-file-only knob (no /settings row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_blink: Option<bool>,
-<<<<<<< HEAD
     /// `"fullscreen"` | `"minimal"`; unset uses the product default, fullscreen.
-=======
-    /// `"fullscreen"` | `"minimal"`; unset → product default fullscreen.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
     /// Retired hidden opt-in for terminal-like double/triple-click word/line selection. Superseded by `keep_text_selection =
@@ -219,15 +209,10 @@ pub struct ContextualHints {
     /// Word-select tip after double-clicking scrollback while Text selection is still fold/nav (`flash` / `hold`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word_select: Option<bool>,
-<<<<<<< HEAD
     /// Export/copy tip after three nearby drag-copies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_copy: Option<bool>,
     /// SSH wrap session-load tip (recommend `grok wrap ssh` when the session runs over SSH without an OSC 52 sink).
-=======
-    /// SSH wrap session-load tip (recommend `grok wrap ssh` when the session
-    /// runs over SSH without an OSC 52 sink).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_wrap: Option<bool>,
 }
@@ -242,10 +227,7 @@ impl ContextualHints {
             && self.send_now.is_none()
             && self.small_screen.is_none()
             && self.word_select.is_none()
-<<<<<<< HEAD
             && self.export_copy.is_none()
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             && self.ssh_wrap.is_none()
     }
 }
@@ -287,12 +269,9 @@ impl Default for UiConfig {
             default_selected_permission: None,
             show_timestamps: None,
             show_timeline: None,
-<<<<<<< HEAD
             dashboard_preview: None,
             page_flip_on_send: None,
             confirm_before_rewind: None,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,
@@ -328,7 +307,6 @@ impl Default for UiConfig {
 }
 
 impl UiConfig {
-<<<<<<< HEAD
     pub fn dashboard_preview_enabled(&self) -> bool {
         self.dashboard_preview.unwrap_or(true)
     }
@@ -340,27 +318,10 @@ impl UiConfig {
 
     /// Resolved timeline-sidebar setting: the configured value, or [`Self::SHOW_TIMELINE_DEFAULT`] when unset.
     /// The one place the default is applied: every layer (cache, appearance config, settings modal) reads through here so they cannot drift.
-=======
-    /// The single source of truth for the timeline-sidebar default (opt-in).
-    /// Flip this one line to change the default everywhere.
-    ///
-    // TODO: migrate the other boolean UI settings (show_timestamps,
-    // simple_mode, show_thinking_blocks, …) to the same const + resolver
-    // pattern. They currently duplicate their default literal across
-    // cache.rs / config.rs / defs.rs / setters.rs / registry.rs and rely on
-    // the registry drift-guard test to catch mismatches.
-    pub const SHOW_TIMELINE_DEFAULT: bool = false;
-
-    /// Resolved timeline-sidebar setting: the configured value, or
-    /// [`Self::SHOW_TIMELINE_DEFAULT`] when unset. The one place the default
-    /// is applied — every layer (cache, appearance config, settings modal)
-    /// reads through here so they cannot drift.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn show_timeline_enabled(&self) -> bool {
         self.show_timeline.unwrap_or(Self::SHOW_TIMELINE_DEFAULT)
     }
 
-<<<<<<< HEAD
     /// Default for [`Self::page_flip_on_send`] when unset.
     pub const PAGE_FLIP_ON_SEND_DEFAULT: bool = true;
 
@@ -395,10 +356,6 @@ impl UiConfig {
     }
 
     /// True when the highlight should not dismiss on a timer (`hold` / `word_select`, or legacy duration 0).
-=======
-    /// True when the highlight should not timer-dismiss (`hold` / `word_select`,
-    /// or legacy duration 0).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn keep_text_selection_enabled(&self) -> bool {
         if let Some(ref s) = self.keep_text_selection {
             return s == "hold" || s == "word_select";

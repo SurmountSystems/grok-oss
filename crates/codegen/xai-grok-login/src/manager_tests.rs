@@ -3106,7 +3106,6 @@ fn apply_user_info_enrichment_overwrites_can_administer_team() {
 }
 /// Regression: async provider calls must drive `auth()` so tool requests get refreshed tokens.
 #[tokio::test]
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
 #[serial_test::serial]
 async fn current_api_key_async_drives_refresh_chain() {
     use xai_grok_test_support::EnvGuard;
@@ -3114,15 +3113,6 @@ async fn current_api_key_async_drives_refresh_chain() {
     let _xai = EnvGuard::unset("XAI_API_KEY");
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let _auth_path = EnvGuard::unset("GROK_AUTH_PATH");
-=======
-#[serial_test::serial] // reaches `resolve_static_api_key`, which reads the key env vars
-async fn current_api_key_async_drives_refresh_chain() {
-    use xai_grok_test_support::EnvGuard;
-    use xai_grok_tools::types::ApiKeyProvider;
-
-    let _xai = EnvGuard::unset("XAI_API_KEY");
-    let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
     mgr.hot_swap(GrokAuth {
@@ -3881,27 +3871,14 @@ async fn shared_api_key_provider_resolves_live_bearer() {
         "provider must follow the manager's refresh chain rather than snapshot at startup"
     );
 }
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
 /// With no OAuth session, voice/tools fall back to env or the auth.json `xai::api_key`.
-=======
-
-/// No OAuth session → env or auth.json `xai::api_key` for voice/tools.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_static_fallthrough() {
     use xai_grok_test_support::EnvGuard;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
     let provider = crate::shared_api_key_provider(mgr.clone());
-=======
-
-    let dir = tempfile::tempdir().unwrap();
-    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    let provider = shared_api_key_provider(mgr.clone());
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     {
         let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
         let _key = EnvGuard::set("XAI_API_KEY", "env-only-key");
@@ -3910,28 +3887,16 @@ async fn shared_api_key_provider_static_fallthrough() {
             Some("env-only-key")
         );
     }
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
     {
         let _xai = EnvGuard::unset("XAI_API_KEY");
         let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
         let _auth_path = EnvGuard::unset("GROK_AUTH_PATH");
         crate::store_api_key(dir.path(), "disk-api-key").unwrap();
-=======
-
-    {
-        let _xai = EnvGuard::unset("XAI_API_KEY");
-        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
-        crate::auth::store_api_key(dir.path(), "disk-api-key").unwrap();
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
         assert_eq!(
             provider.current_api_key_async().await.as_deref(),
             Some("disk-api-key")
         );
     }
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     {
         let _key = EnvGuard::set("XAI_API_KEY", "env-should-lose");
         mgr.hot_swap(GrokAuth {
@@ -3946,18 +3911,10 @@ async fn shared_api_key_provider_static_fallthrough() {
         );
     }
 }
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_kill_switch_blocks_static() {
     use xai_grok_test_support::EnvGuard;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     let _key = EnvGuard::set("XAI_API_KEY", "blocked");
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(
@@ -3968,76 +3925,44 @@ async fn shared_api_key_provider_kill_switch_blocks_static() {
         },
     ));
     assert_eq!(
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
         crate::shared_api_key_provider(mgr)
             .current_api_key_async()
             .await,
         None
     );
 }
-=======
-        shared_api_key_provider(mgr).current_api_key_async().await,
-        None
-    );
-}
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_oidc_preferred_blocks_static() {
     use xai_grok_test_support::EnvGuard;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     let _key = EnvGuard::set("XAI_API_KEY", "should-not-use");
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(
         dir.path(),
         GrokComConfig {
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
             preferred_method: Some(crate::PreferredAuthMethod::Oidc),
-=======
-            preferred_method: Some(crate::auth::PreferredAuthMethod::Oidc),
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
             ..GrokComConfig::default()
         },
     ));
     assert_eq!(
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
         crate::shared_api_key_provider(mgr)
             .current_api_key_async()
             .await,
         None
     );
 }
-=======
-        shared_api_key_provider(mgr).current_api_key_async().await,
-        None
-    );
-}
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 /// preferred_method=api_key: leftover session must not beat static API key.
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_api_key_preferred_skips_session() {
     use xai_grok_test_support::EnvGuard;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let _key = EnvGuard::set("XAI_API_KEY", "static-preferred");
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(
         dir.path(),
         GrokComConfig {
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
             preferred_method: Some(crate::PreferredAuthMethod::ApiKey),
-=======
-            preferred_method: Some(crate::auth::PreferredAuthMethod::ApiKey),
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
             ..GrokComConfig::default()
         },
     ));
@@ -4048,30 +3973,18 @@ async fn shared_api_key_provider_api_key_preferred_skips_session() {
         ..GrokAuth::test_default()
     });
     assert_eq!(
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
         crate::shared_api_key_provider(mgr)
-=======
-        shared_api_key_provider(mgr)
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
             .current_api_key_async()
             .await
             .as_deref(),
         Some("static-preferred")
     );
 }
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 /// Expired OAuth must not block static fallthrough on the sync path.
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_sync_falls_through_when_session_expired() {
     use xai_grok_test_support::EnvGuard;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let _key = EnvGuard::set("XAI_API_KEY", "static-after-expiry");
     let dir = tempfile::tempdir().unwrap();
@@ -4083,11 +3996,7 @@ async fn shared_api_key_provider_sync_falls_through_when_session_expired() {
         expires_at: Some(Utc::now() - Duration::hours(1)),
         ..GrokAuth::test_default()
     });
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
     let provider = crate::shared_api_key_provider(mgr);
-=======
-    let provider = shared_api_key_provider(mgr);
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     assert_eq!(
         provider.current_api_key().as_deref(),
         Some("static-after-expiry"),
@@ -4098,30 +4007,16 @@ async fn shared_api_key_provider_sync_falls_through_when_session_expired() {
         Some("static-after-expiry")
     );
 }
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
 /// A session inside the early-invalidation buffer is still wire-valid and must beat a static key on the sync path.
-=======
-
-/// A session inside the early-invalidation buffer is still wire-valid and
-/// must beat a static key on the sync path.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_sync_buffered_session_beats_static() {
     use xai_grok_test_support::EnvGuard;
     use xai_grok_tools::types::ApiKeyProvider;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let _key = EnvGuard::set("XAI_API_KEY", "leftover-static");
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-    // Two minutes out: inside the 5-minute buffer, but accepted on the wire.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     mgr.hot_swap(GrokAuth {
         key: "buffered-oidc".into(),
         auth_mode: AuthMode::Oidc,
@@ -4129,24 +4024,14 @@ async fn shared_api_key_provider_sync_buffered_session_beats_static() {
         expires_at: Some(Utc::now() + Duration::minutes(2)),
         ..GrokAuth::test_default()
     });
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
     let provider = crate::side_call_bearer::SharedAuthKeyProvider(mgr);
     assert_eq!(provider.current_api_key().as_deref(), Some("buffered-oidc"));
 }
 /// Auth.json create, rewrite (including same-length, caught by the inode in the memo stamp), and logout must all invalidate the disk static-key memo.
-=======
-    let provider = super::SharedAuthKeyProvider(mgr);
-    assert_eq!(provider.current_api_key().as_deref(), Some("buffered-oidc"));
-}
-
-/// Auth.json create, rewrite (including same-length, caught by the inode in
-/// the memo stamp), and logout must all invalidate the disk static-key memo.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_disk_memo_follows_rewrites() {
     use xai_grok_test_support::EnvGuard;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
     let _xai = EnvGuard::unset("XAI_API_KEY");
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let _auth_path = EnvGuard::unset("GROK_AUTH_PATH");
@@ -4161,74 +4046,10 @@ async fn shared_api_key_provider_disk_memo_follows_rewrites() {
     crate::clear_api_key(dir.path()).unwrap();
     assert_eq!(provider.current_api_key_async().await, None);
 }
-=======
-
-    let _xai = EnvGuard::unset("XAI_API_KEY");
-    let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
-    let dir = tempfile::tempdir().unwrap();
-    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    let provider = shared_api_key_provider(mgr);
-
-    assert_eq!(provider.current_api_key_async().await, None);
-
-    for key in ["first-key", "fresh-key", "second-key-rotated"] {
-        crate::auth::store_api_key(dir.path(), key).unwrap();
-        assert_eq!(provider.current_api_key_async().await.as_deref(), Some(key));
-    }
-
-    crate::auth::clear_api_key(dir.path()).unwrap();
-    assert_eq!(provider.current_api_key_async().await, None);
-}
-
-#[tokio::test]
-#[serial_test::serial]
-async fn process_key_from_model_env_key() {
-    use crate::agent::config::{Config, resolve_model_list};
-    use xai_grok_test_support::EnvGuard;
-
-    const ENV: &str = "TEST_MODEL_ENV_KEY";
-    const TOKEN: &str = "model-env-token";
-
-    let _xai = EnvGuard::unset("XAI_API_KEY");
-    let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
-    let _tok = EnvGuard::set(ENV, TOKEN);
-
-    let dm = crate::models::default_model();
-    let cfg = Config::new_from_toml_cfg(
-        &toml::from_str(&format!(
-            r#"
-            [model."{dm}"]
-            model = "{dm}"
-            env_key = "{ENV}"
-            "#
-        ))
-        .unwrap(),
-    )
-    .unwrap();
-    let key = resolve_model_list(&cfg, None)
-        .get(dm)
-        .and_then(|m| m.own_credential())
-        .unwrap();
-
-    let dir = tempfile::tempdir().unwrap();
-    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    assert!(mgr.current().is_none());
-    mgr.set_process_static_api_key(Some(key));
-    assert_eq!(
-        shared_api_key_provider(mgr)
-            .current_api_key_async()
-            .await
-            .as_deref(),
-        Some(TOKEN)
-    );
-}
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 #[tokio::test]
 #[serial_test::serial]
 async fn process_key_precedence() {
     use xai_grok_test_support::EnvGuard;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
     let _xai = EnvGuard::unset("XAI_API_KEY");
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let _auth_path = EnvGuard::unset("GROK_AUTH_PATH");
@@ -4237,35 +4058,15 @@ async fn process_key_precedence() {
     let provider = crate::shared_api_key_provider(mgr.clone());
     assert_eq!(provider.current_api_key_async().await, None);
     crate::store_api_key(dir.path(), "disk").unwrap();
-=======
-
-    let _xai = EnvGuard::unset("XAI_API_KEY");
-    let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
-    let dir = tempfile::tempdir().unwrap();
-    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    let provider = shared_api_key_provider(mgr.clone());
-
-    assert_eq!(provider.current_api_key_async().await, None);
-
-    crate::auth::store_api_key(dir.path(), "disk").unwrap();
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     assert_eq!(
         provider.current_api_key_async().await.as_deref(),
         Some("disk")
     );
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     mgr.set_process_static_api_key(Some("  process  ".into()));
     assert_eq!(
         provider.current_api_key_async().await.as_deref(),
         Some("process")
     );
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     {
         let _key = EnvGuard::set("XAI_API_KEY", "env");
         assert_eq!(
@@ -4273,19 +4074,11 @@ async fn process_key_precedence() {
             Some("env")
         );
     }
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     mgr.set_process_static_api_key(None);
     assert_eq!(
         provider.current_api_key_async().await.as_deref(),
         Some("disk")
     );
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
     let dir_blocked = tempfile::tempdir().unwrap();
     let blocked = Arc::new(AuthManager::new(
         dir_blocked.path(),
@@ -4296,20 +4089,12 @@ async fn process_key_precedence() {
     ));
     blocked.set_process_static_api_key(Some("ignored".into()));
     assert_eq!(
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
         crate::shared_api_key_provider(blocked)
-=======
-        shared_api_key_provider(blocked)
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
             .current_api_key_async()
             .await,
         None
     );
 }
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/manager_tests.rs
-=======
-
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/manager_tests.rs
 fn expired_oidc() -> GrokAuth {
     GrokAuth {
         key: "expired-key".into(),

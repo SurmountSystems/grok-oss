@@ -11,7 +11,6 @@ use crate::terminal::hyperlinks::SchemeFilter;
 /// Outcome of attempting to open a URL in the system browser/handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenUrlResult {
-<<<<<<< HEAD
     /// Opener was launched (or `GROK_TEST_OPEN_URL_FILE` recorded the URL).
     Opened,
     /// Scheme was rejected by the safety filter.
@@ -23,33 +22,11 @@ pub enum OpenUrlResult {
 
 /// Linux/BSD needs non-empty `DISPLAY`, `WAYLAND_DISPLAY`, or `BROWSER`; macOS/Windows always return true.
 /// Pure for a fixed env map. A true result is not a successful spawn.
-=======
-    /// Opener was launched (or the test seam recorded the URL).
-    Opened,
-    /// Scheme was rejected by the safety filter.
-    RejectedScheme,
-    /// Browser cannot run here (headless / no display) or the opener
-    /// failed to spawn. Callers should surface the URL for manual open.
-    BrowserUnavailable,
-}
-
-/// Whether the environment looks capable of opening a GUI browser.
-///
-/// Pure helper for tests. On Linux/BSD, requires a non-empty `DISPLAY` or
-/// `WAYLAND_DISPLAY` (or a non-empty `BROWSER` override). macOS/Windows
-/// are treated as available at the env level (spawn failure is still
-/// reported by [`open_url`]).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn browser_open_likely_available_from_env(env: &HashMap<String, String>) -> bool {
     if cfg!(any(target_os = "macos", target_os = "windows")) {
         return true;
     }
-<<<<<<< HEAD
     // Explicit BROWSER override: allow even without a display server so scripted/headless setups that point at a CLI browser still try
-=======
-    // Explicit BROWSER override: allow even without a display server so
-    // scripted/headless setups that point at a CLI browser still try.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     if env.get("BROWSER").is_some_and(|v| !v.is_empty()) {
         return true;
     }
@@ -63,7 +40,6 @@ pub fn browser_open_likely_available() -> bool {
     browser_open_likely_available_from_env(&env)
 }
 
-<<<<<<< HEAD
 const BROWSER_UNAVAILABLE_NOTICE: &str = "Could not open a browser. Open this URL manually";
 
 /// Multi-line copy for agent scrollback: notice, then the full URL alone so it is easy to select/copy in the TUI.
@@ -86,29 +62,6 @@ pub fn browser_unavailable_line(url: &str, copied: bool) -> String {
 pub fn open_url(url: &str) -> bool {
     // PTY e2e tests must see the open without launching a real browser
     // When this env var is set, append the URL to the file and skip the OS opener
-=======
-/// User-facing copy when the browser opener cannot run. Includes the full
-/// URL on its own line so it is easy to select/copy in the TUI.
-pub fn browser_unavailable_message(url: &str) -> String {
-    format!("Could not open a browser. Open this URL manually:\n{url}")
-}
-
-/// Open a URL in the system's default browser/handler.
-///
-/// Spawns the platform-native opener (`open` on macOS, `xdg-open` on
-/// Linux, `cmd /c start` on Windows) with fully detached stdio so it
-/// cannot block the pager.
-///
-/// Returns `true` when the opener was launched (or the test seam recorded
-/// the URL). Returns `false` when the environment looks headless or spawn
-/// fails — callers should show [`browser_unavailable_message`].
-///
-/// **Callers handling untrusted input** should call [`is_safe_to_open`]
-/// first, or use [`open_url_if_safe`] / [`try_open_url`] which combine both.
-pub fn open_url(url: &str) -> bool {
-    // Test seam: PTY e2e must observe the open without launching a real
-    // browser. When set, append the URL to the file and skip the OS opener.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     if let Ok(path) = std::env::var("GROK_TEST_OPEN_URL_FILE") {
         use std::io::Write;
         // Report the failed write: swallowing it leaves the PTY test failing with a generic timeout and no clue why
@@ -122,17 +75,6 @@ pub fn open_url(url: &str) -> bool {
             return false;
         }
         return true;
-<<<<<<< HEAD
-=======
-    }
-
-    // Skip the doomed spawn on headless Linux VMs (no DISPLAY / Wayland)
-    // so billing Upgrade / Buy-credits clicks can fall back to showing the
-    // URL instead of silently no-op'ing.
-    if !browser_open_likely_available() {
-        tracing::info!("skipping browser open: no display server / BROWSER");
-        return false;
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     // Skip the doomed spawn on headless Linux VMs (no DISPLAY or Wayland)
@@ -142,7 +84,6 @@ pub fn open_url(url: &str) -> bool {
         return false;
     }
 
-<<<<<<< HEAD
     let opened = spawn_url_opener(url);
     if !opened {
         // Redact URL to avoid leaking sensitive query params to logs.
@@ -196,11 +137,6 @@ fn spawn_url_opener(url: &str) -> bool {
     let cmd = "xdg-open";
 
     let mut command = std::process::Command::new(cmd);
-=======
-    let mut command = std::process::Command::new(cmd);
-    #[cfg(target_os = "windows")]
-    command.args(["/c", "start", ""]);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     command
         .arg(url)
         .stdin(std::process::Stdio::null())
@@ -210,19 +146,7 @@ fn spawn_url_opener(url: &str) -> bool {
     match command.spawn() {
         Ok(_) => true,
         Err(e) => {
-<<<<<<< HEAD
             tracing::debug!(error = %e, "URL opener failed to spawn");
-=======
-            // Redact URL to avoid leaking sensitive query params to logs.
-            let redacted = url::Url::parse(url)
-                .map(|mut u| {
-                    u.set_query(None);
-                    u.set_fragment(None);
-                    u.to_string()
-                })
-                .unwrap_or_else(|_| "<unparseable>".to_string());
-            tracing::warn!(url = %redacted, error = %e, "failed to open URL");
->>>>>>> e3fdf3ed (Merge 2 (#4))
             false
         }
     }
@@ -339,27 +263,14 @@ pub fn is_safe_to_open(url: &str, filter: SchemeFilter) -> bool {
     false
 }
 
-<<<<<<< HEAD
 /// `true` only when the scheme is allowed and the opener launched.
 /// Use [`try_open_url`] to tell scheme rejection from a missing browser.
-=======
-/// Validate scheme and open a URL if permitted.
-///
-/// Returns `true` only when the scheme is allowed **and** the opener was
-/// launched. Distinguishes scheme rejection from browser unavailability
-/// via [`try_open_url`].
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn open_url_if_safe(url: &str, filter: SchemeFilter) -> bool {
     matches!(try_open_url(url, filter), OpenUrlResult::Opened)
 }
 
-<<<<<<< HEAD
 /// Validate scheme and attempt to open.
 /// Prefer this when the caller needs to show the URL for manual opening on [`OpenUrlResult::BrowserUnavailable`].
-=======
-/// Validate scheme and attempt to open. Prefer this when the caller needs
-/// to show a manual-URL fallback on [`OpenUrlResult::BrowserUnavailable`].
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn try_open_url(url: &str, filter: SchemeFilter) -> OpenUrlResult {
     if !is_safe_to_open(url, filter) {
         tracing::debug!(url, "URL scheme not permitted");
@@ -647,7 +558,6 @@ mod tests {
     #[test]
     fn browser_unavailable_message_includes_full_url() {
         let url = "https://grok.com/supergrok?referrer=grok-build";
-<<<<<<< HEAD
         assert_eq!(
             browser_unavailable_message(url),
             format!("{BROWSER_UNAVAILABLE_NOTICE}:\n{url}")
@@ -676,13 +586,6 @@ mod tests {
             with_copy.contains("URL copied"),
             "copy claim only when copied=true: {with_copy}"
         );
-=======
-        let msg = browser_unavailable_message(url);
-        assert!(msg.contains("Could not open a browser"));
-        assert!(msg.contains(url));
-        // URL on its own line for easy select/copy in the TUI.
-        assert!(msg.lines().any(|l| l == url));
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]

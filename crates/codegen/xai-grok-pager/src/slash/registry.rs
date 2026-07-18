@@ -11,7 +11,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-<<<<<<< HEAD
 use super::acp_command::{AcpSlashCommand, SkillMeta};
 use super::command::{CommandProvenance, SlashCommand, WorkflowChoice};
 use super::mode_support::ModeSupport;
@@ -28,12 +27,6 @@ pub(crate) const BLOCKED_ACP_NAMES: &[&str] = &[
     "hooks-untrust",
     "reload-plugins",
 ];
-=======
-use xai_grok_tools::implementations::skills::types::SkillScope;
-
-use super::acp_command::AcpSlashCommand;
-use super::command::SlashCommand;
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
 fn client_collision_qualified_name(
     cmd: &agent_client_protocol::AvailableCommand,
@@ -477,7 +470,6 @@ impl CommandRegistry {
                     .any(|b| b.eq_ignore_ascii_case(name))
         };
 
-<<<<<<< HEAD
         // Shadowed builtins are by design; a shadowed skill or workflow breaks `PAGER_COMMAND_KEYS`
         let is_skill_or_workflow = |cmd: &agent_client_protocol::AvailableCommand| {
             matches!(SkillMeta::parse(cmd.meta.as_ref()), SkillMeta::Skill(_))
@@ -497,21 +489,6 @@ impl CommandRegistry {
             if !claimed.insert(name) {
                 if is_skill_or_workflow(acp_cmd) {
                     duplicate.push(acp_cmd.name.to_lowercase());
-=======
-        for acp_cmd in commands {
-            let name_lower = acp_cmd.name.to_lowercase();
-            let name_reserved = builtin_keys.contains(&name_lower)
-                || BLOCKED_NAMES
-                    .iter()
-                    .any(|b| b.eq_ignore_ascii_case(&name_lower));
-            if name_reserved {
-                if let Some(qualified) = client_collision_qualified_name(acp_cmd) {
-                    let mut renamed = acp_cmd.clone();
-                    renamed.name = qualified;
-                    self.commands
-                        .push(Arc::new(AcpSlashCommand::from(&renamed)));
-                    self.sources.push(CommandSource::Acp);
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 }
                 continue;
             }

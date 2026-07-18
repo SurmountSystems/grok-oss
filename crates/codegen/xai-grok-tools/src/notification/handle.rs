@@ -1,22 +1,13 @@
-<<<<<<< HEAD
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-=======
-use std::sync::Arc;
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use super::types::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
     BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed, LspServerReady,
     LspServerRetrying, LspServerStarting, MonitorEvent, PlanModeEntered, PlanModeExited,
-<<<<<<< HEAD
     ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved, SubagentCompleted,
     ToolNotification, UserQuestionAsked,
-=======
-    ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved, ToolNotification,
-    UserQuestionAsked,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 use crate::types::TaskSnapshot;
 
@@ -51,17 +42,9 @@ pub enum NotificationAcknowledgementError {
 #[must_use = "acknowledged notification receipts must be awaited"]
 pub struct NotificationAcknowledgementBatch {
     receipts: Vec<tokio::sync::oneshot::Receiver<Result<(), String>>>,
-<<<<<<< HEAD
     dispatch_closed: usize,
 }
 
-=======
-    durable_targets: usize,
-    dispatch_closed: usize,
-}
-
-/// Whether an acknowledged send has configured durable notification targets.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurableNotificationTargets {
     None,
@@ -69,18 +52,6 @@ pub enum DurableNotificationTargets {
 }
 
 impl NotificationAcknowledgementBatch {
-<<<<<<< HEAD
-=======
-    /// Whether any target was configured for durable acknowledgement.
-    pub fn durable_targets(&self) -> DurableNotificationTargets {
-        if self.durable_targets == 0 {
-            DurableNotificationTargets::None
-        } else {
-            DurableNotificationTargets::Present
-        }
-    }
-
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Wait for every live durable target and report all observed failure classes.
     pub async fn wait(self) -> Result<(), NotificationAcknowledgementError> {
         let mut acknowledgements_dropped = 0;
@@ -121,7 +92,6 @@ impl NotificationAcknowledgementBatch {
 #[derive(Clone)]
 enum ToolNotificationTarget {
     Plain(tokio::sync::mpsc::UnboundedSender<ToolNotification>),
-<<<<<<< HEAD
     Bounded(tokio::sync::mpsc::Sender<ToolNotification>),
     Capped(Arc<CappedNotificationQueue>),
     Acknowledged(tokio::sync::mpsc::UnboundedSender<AcknowledgedToolNotification>),
@@ -203,11 +173,6 @@ impl Drop for CappedToolNotificationReceiver {
     }
 }
 
-=======
-    Acknowledged(tokio::sync::mpsc::UnboundedSender<AcknowledgedToolNotification>),
-}
-
->>>>>>> e3fdf3ed (Merge 2 (#4))
 /// Cloneable notification fan-out with per-target FIFO ordering.
 #[derive(Clone)]
 pub struct ToolNotificationHandle {
@@ -242,7 +207,6 @@ impl ToolNotificationHandle {
         (Self::new(sender), receiver)
     }
 
-<<<<<<< HEAD
     /// Create a capped target that drops the newest event when full.
     pub fn bounded_channel(
         capacity: usize,
@@ -272,8 +236,6 @@ impl ToolNotificationHandle {
         )
     }
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn acknowledged_channel() -> (
         Self,
         tokio::sync::mpsc::UnboundedReceiver<AcknowledgedToolNotification>,
@@ -303,7 +265,6 @@ impl ToolNotificationHandle {
         }
     }
 
-<<<<<<< HEAD
     pub(crate) fn durable_targets(&self) -> DurableNotificationTargets {
         if self.targets.iter().any(|target| {
             matches!(target, ToolNotificationTarget::Acknowledged(sender) if !sender.is_closed())
@@ -314,8 +275,6 @@ impl ToolNotificationHandle {
         }
     }
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn send(&self, notification: ToolNotification) {
         let last = self.targets.len().saturating_sub(1);
         let mut notification = Some(notification);
@@ -335,15 +294,12 @@ impl ToolNotificationHandle {
                 ToolNotificationTarget::Plain(target) => {
                     let _ = target.send(notification);
                 }
-<<<<<<< HEAD
                 ToolNotificationTarget::Bounded(target) => {
                     if target.try_send(notification).is_err() {
                         tracing::warn!("tool notification queue full; dropping newest event");
                     }
                 }
                 ToolNotificationTarget::Capped(target) => target.push(notification),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 ToolNotificationTarget::Acknowledged(target) => {
                     let _ = target.send(AcknowledgedToolNotification {
                         notification,
@@ -362,10 +318,6 @@ impl ToolNotificationHandle {
         let notification = ToolNotification::ScheduledTaskRemoved(removed);
         let mut batch = NotificationAcknowledgementBatch {
             receipts: Vec::new(),
-<<<<<<< HEAD
-=======
-            durable_targets: 0,
->>>>>>> e3fdf3ed (Merge 2 (#4))
             dispatch_closed: 0,
         };
         for target in self.targets.iter() {
@@ -373,7 +325,6 @@ impl ToolNotificationHandle {
                 ToolNotificationTarget::Plain(target) => {
                     let _ = target.send(notification.clone());
                 }
-<<<<<<< HEAD
                 ToolNotificationTarget::Bounded(target) => {
                     if target.try_send(notification.clone()).is_err() {
                         tracing::warn!("tool notification queue full; dropping newest event");
@@ -381,10 +332,6 @@ impl ToolNotificationHandle {
                 }
                 ToolNotificationTarget::Capped(target) => target.push(notification.clone()),
                 ToolNotificationTarget::Acknowledged(target) => {
-=======
-                ToolNotificationTarget::Acknowledged(target) => {
-                    batch.durable_targets += 1;
->>>>>>> e3fdf3ed (Merge 2 (#4))
                     let (acknowledgement, receipt) = tokio::sync::oneshot::channel();
                     if target
                         .send(AcknowledgedToolNotification {
@@ -411,10 +358,7 @@ impl ToolNotificationHandle {
         send_failed, BashExecutionFailed, BashExecutionFailed;
         send_file_written, FileWritten, FileWritten;
         send_task_complete, TaskSnapshot, TaskCompleted;
-<<<<<<< HEAD
         send_subagent_completed, SubagentCompleted, SubagentCompleted;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         send_plan_mode_entered, PlanModeEntered, PlanModeEntered;
         send_plan_mode_exited, PlanModeExited, PlanModeExited;
         send_user_question_asked, UserQuestionAsked, UserQuestionAsked;

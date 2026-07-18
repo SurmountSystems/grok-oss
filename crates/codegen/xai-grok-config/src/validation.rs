@@ -9,11 +9,7 @@ use crate::version_overrides::{VersionOverrideError, apply_version_overrides};
 
 use prod_mc_cli_chat_proxy_types::FAIL_CLOSED_KEY;
 
-<<<<<<< HEAD
 /// `fail_closed` from a requirements table; a non-bool warns once and is treated as false.
-=======
-/// `fail_closed` from a requirements table; non-bool → warn once and treat as false.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn fail_closed_flag(requirements: &toml::Value) -> bool {
     use prod_mc_cli_chat_proxy_types::{FailClosedFlag, fail_closed_flag_status_from_value};
     let status = fail_closed_flag_status_from_value(requirements);

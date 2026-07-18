@@ -383,23 +383,11 @@ pub trait TerminalBackend: Send + Sync {
     /// only the subagent's own tasks are killed — not the parent's.
     async fn kill_all_background_tasks_by_owner(&self, _owner_session_id: &str) {}
 
-<<<<<<< HEAD
     async fn warm_shell(&self, _cwd: &std::path::Path) {}
 
     /// Reparent notification handles for all tasks owned by `old_owner_session_id`. Swaps the dead child session's
     /// notification handle with the parent's live handle so events from surviving processes route correctly. Also re-spawns
     /// monitor pipelines on the caller's runtime so monitor events continue streaming to the parent.
-=======
-    /// Reparent notification handles for all tasks owned by `old_owner_session_id`.
-    /// Swaps the dead child session's notification handle with the parent's
-    /// live handle so events from surviving processes route correctly.
-    /// Also re-spawns monitor pipelines on the caller's runtime so monitor
-    /// events continue streaming to the parent.
-    ///
-    /// `backend_weak` is a [`Weak`](std::sync::Weak) to *this* backend (anchored
-    /// by the parent session's `Arc`); it drives re-spawned monitor pipelines
-    /// without keeping the backend alive. See `run_monitor_pipeline`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     async fn reparent_notifications(
         &self,
         _old_owner_session_id: &str,

@@ -867,23 +867,15 @@ impl StorageMode {
 }
 pub use xai_grok_config::ConfigLayers;
 pub use xai_grok_config::{
-<<<<<<< HEAD
     GROK_CONFIG_ENV, GROK_CONFIG_PATH_ENV, MDM_REQUIREMENTS_SOURCE, OverlaySource,
     RequirementsLayer, RequirementsSource, ResolvedOverlay, ServingIdentity, SyncMarker,
-=======
-    MDM_REQUIREMENTS_SOURCE, RequirementsLayer, RequirementsSource, ServingIdentity, SyncMarker,
->>>>>>> e3fdf3ed (Merge 2 (#4))
     claude_managed_settings_probe_path, confirmed_team_switch, confirmed_team_switch_at,
     is_managed_config_hard_stale_for, is_managed_config_stale_for, load_config_file,
     load_from_disk, load_managed_config, load_merged_requirements, load_system_managed_config,
     load_toml_file, managed_config_identity_changed_at, managed_deployment_id,
     managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
-<<<<<<< HEAD
     normalize_identity, requirements_layers, resolved_env_overlay, system_config_dir,
     user_grok_home,
-=======
-    normalize_identity, requirements_layers, system_config_dir, user_grok_home,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 /// Map of "dotted.path" to which config file the value came from.
 pub(crate) fn config_origins(
@@ -1190,19 +1182,6 @@ fn apply_requirements_inner(
             }
         };
     }
-<<<<<<< HEAD
-=======
-    pin_feature!(feedback);
-    pin_feature!(lsp_tools);
-    pin_feature!(tool_search);
-    pin_feature!(web_fetch);
-    pin_feature!(ask_user_question);
-    pin_requirement_only!(image_gen);
-    pin_requirement_only!(image_edit);
-    pin_feature!(video_gen);
-    pin_feature!(write_file);
-    pin_feature!(voice_mode);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pin_requirement_only!(remote_fetch);
     pin_requirement_only!(title_refresh);
     if let Some(val) = req_bool(req, "telemetry", "trace_upload") {

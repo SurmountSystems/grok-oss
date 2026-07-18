@@ -396,7 +396,6 @@ pub fn repo_config_kinds(cwd: &Path) -> Vec<&'static str> {
     collect_repo_config_kinds(cwd, false)
 }
 
-<<<<<<< HEAD
 /// Whether a project `.grok/config.toml` `[permission]` value would contribute rules to the permission resolver.
 /// Mirrors the shapes `permission::resolution` loads: non-empty `allow`/`deny`/`ask` arrays, or a non-empty verbose `rules` array.
 /// Empty arrays and empty tables do not gate (same as an empty `[mcp_servers]` or `[plugins].paths`).
@@ -424,24 +423,13 @@ fn config_toml_permission_contributes(permission_value: &TomlValue) -> bool {
 fn directory_present_or_uncertain(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(metadata) => metadata.is_dir(),
-=======
-fn path_present_or_uncertain(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => true,
->>>>>>> e3fdf3ed (Merge 2 (#4))
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => true,
     }
 }
 
-<<<<<<< HEAD
 /// Shared scanner behind [`repo_configs_present`] and [`repo_config_kinds`].
 /// With `first_only` it returns immediately after the first marker (the gate's short-circuit); otherwise it collects every distinct kind.
-=======
-/// Shared scanner behind [`repo_configs_present`] and [`repo_config_kinds`]. With
-/// `first_only` it returns immediately after the first marker (the gate's
-/// historical short-circuit); otherwise it collects every distinct kind.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> {
     // Resolve the git root and cwd-to-root chain once; a per-marker discover walks to the filesystem root on non-git dirs
     // `.claude` keeps its own `.git`-existence walk on purpose. Checks run cheap to expensive and short-circuit when `first_only`
@@ -520,13 +508,8 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     // must not resolve trusted. Presence is type-agnostic: a directory or
     // symlink at a vendor hook path must gate too.
     let hook_root = chain.git_root.as_deref().unwrap_or(cwd);
-<<<<<<< HEAD
     if crate::util::path_present_or_uncertain(&hook_root.join(".grok").join("hooks"))
         || crate::util::path_present_or_uncertain(&hook_root.join(".cursor").join("hooks.json"))
-=======
-    if path_present_or_uncertain(&hook_root.join(".grok").join("hooks"))
-        || hook_root.join(".cursor").join("hooks.json").is_file()
->>>>>>> e3fdf3ed (Merge 2 (#4))
     {
         hit!("hooks");
     }
@@ -852,7 +835,6 @@ mod tests {
         assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
     }
 
-<<<<<<< HEAD
     #[test]
     fn repo_configs_present_detects_cursor_hooks_json_directory() {
         let tmp = repo_tmp();
@@ -861,8 +843,6 @@ mod tests {
         assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
     }
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[cfg(unix)]
     #[test]
     fn repo_configs_present_detects_dangling_project_hooks_symlink() {

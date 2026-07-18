@@ -4226,12 +4226,7 @@ async fn data_collection_enabled_for_non_zdr_team_with_unrelated_blocks() {
 fn enable_product_telemetry(agent: &MvpAgent) {
     agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
 }
-<<<<<<< HEAD
 /// Enable trace uploads via config so only the auth-level privacy gate can disable collection in the tests below.
-=======
-/// Enable trace uploads via config so only the auth-level privacy gate
-/// can disable collection in the tests below.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn enable_trace_upload_config(agent: &MvpAgent) {
     let mut cfg = agent.cfg.borrow_mut();
     cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
@@ -4239,25 +4234,15 @@ fn enable_trace_upload_config(agent: &MvpAgent) {
 }
 #[tokio::test]
 async fn product_analytics_enabled_for_normal_user_with_telemetry_on() {
-<<<<<<< HEAD
     let agent = build_agent_with_auth(xai_grok_login::GrokAuth::test_default());
-=======
-    let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
->>>>>>> e3fdf3ed (Merge 2 (#4))
     enable_product_telemetry(&agent);
     assert!(agent.product_analytics_enabled());
 }
 #[tokio::test]
 async fn product_analytics_enabled_despite_coding_retention_opt_out() {
-<<<<<<< HEAD
     let agent = build_agent_with_auth(xai_grok_login::GrokAuth {
         coding_data_retention_opt_out: true,
         ..xai_grok_login::GrokAuth::test_default()
-=======
-    let agent = build_agent_with_auth(crate::auth::GrokAuth {
-        coding_data_retention_opt_out: true,
-        ..crate::auth::GrokAuth::test_default()
->>>>>>> e3fdf3ed (Merge 2 (#4))
     });
     enable_product_telemetry(&agent);
     assert!(agent.is_data_collection_disabled());
@@ -4265,35 +4250,20 @@ async fn product_analytics_enabled_despite_coding_retention_opt_out() {
 }
 #[tokio::test]
 async fn product_analytics_disabled_for_zdr_team() {
-<<<<<<< HEAD
     let agent = build_agent_with_auth(xai_grok_login::GrokAuth {
         team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".into()],
         ..xai_grok_login::GrokAuth::test_default()
-=======
-    let agent = build_agent_with_auth(crate::auth::GrokAuth {
-        team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".into()],
-        ..crate::auth::GrokAuth::test_default()
->>>>>>> e3fdf3ed (Merge 2 (#4))
     });
     enable_product_telemetry(&agent);
     assert!(!agent.product_analytics_enabled());
 }
 #[tokio::test]
 async fn product_analytics_disabled_when_telemetry_off() {
-<<<<<<< HEAD
     let agent = build_agent_with_auth(xai_grok_login::GrokAuth::test_default());
     agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
     assert!(!agent.product_analytics_enabled());
 }
 /// Counting HTTP stub: any request increments the counter and gets a storage-proxy-shaped 200 so the client does not retry.
-=======
-    let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
-    agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
-    assert!(!agent.product_analytics_enabled());
-}
-/// Counting HTTP stub: any request increments the counter and gets a
-/// storage-proxy-shaped 200 so the client does not retry.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 async fn spawn_counting_storage_stub() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count_clone = count.clone();
@@ -5119,7 +5089,6 @@ fn chat_session_spawn_options_matches_thin_profile() {
     );
     assert!(opts.is_chat_kind);
 }
-<<<<<<< HEAD
 /// Drives the real `session/new` path so a later `load_session_inner` is a genuine attach.
 async fn new_root_session(agent: &MvpAgent, cwd: &std::path::Path) -> acp::SessionId {
     agent.set_auth_method(acp::AuthMethodId::new("cached_token"));
@@ -6001,11 +5970,6 @@ async fn spawn_seeds_root_conversation_group_in_turn_config() {
 }
 /// `remove_session` releases the workspace binding and drains the per-session side maps.
 /// Test agents default to `workspace_ops = None`, so no other test reaches the release.
-=======
-/// `remove_session` releases the workspace binding and drains the
-/// per-session side maps. Test agents default to `workspace_ops = None`,
-/// so no other test reaches the release.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[tokio::test]
 async fn remove_session_releases_workspace_binding_and_side_maps() {
     let agent = build_minimal_agent_for_tests();
@@ -6024,7 +5988,6 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
     .expect("bind_local_session must succeed");
     assert!(toolset_weak.upgrade().is_some());
     *agent.workspace_ops.borrow_mut() = Some(ops);
-<<<<<<< HEAD
     agent
         .session_registry
         .set_unavailable_model(&sid, acp::ModelId::new(std::sync::Arc::from("gone-model")));
@@ -6049,28 +6012,10 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
         0,
         "remove_session must evict the live-orphan heal mutex"
     );
-=======
-    agent.model_unavailable_sessions.borrow_mut().insert(
-        sid.0.to_string(),
-        acp::ModelId::new(std::sync::Arc::from("gone-model")),
-    );
-    agent
-        .session_turn_numbers
-        .borrow_mut()
-        .insert(sid.clone(), 3);
-    let (_permission_tx, permission_rx) =
-        tokio::sync::mpsc::unbounded_channel::<xai_grok_workspace::permission::PermissionEvent>();
-    agent
-        .permission_event_receivers
-        .borrow_mut()
-        .insert(sid.clone(), permission_rx);
-    agent.remove_session(&sid);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     assert!(
         toolset_weak.upgrade().is_none(),
         "the workspace binding must release the toolset"
     );
-<<<<<<< HEAD
     assert!(agent.session_registry.unavailable_model(&sid).is_none());
     assert_eq!(agent.session_registry.counts().resident_resources, 0);
     assert_eq!(
@@ -6081,20 +6026,6 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
 }
 /// Without a bridge, `ext_method` falls through to the unchanged local dispatch (`rewind::handle`), which reports the missing session.
 /// That proves the routing hook is skipped in local mode.
-=======
-    assert!(
-        !agent
-            .model_unavailable_sessions
-            .borrow()
-            .contains_key(sid.0.as_ref())
-    );
-    assert!(!agent.session_turn_numbers.borrow().contains_key(&sid));
-    assert!(!agent.permission_event_receivers.borrow().contains_key(&sid));
-}
-/// Without a bridge, `ext_method` falls through to the unchanged local
-/// dispatch (`rewind::handle`), which reports the missing session — proving
-/// the routing hook is skipped in local mode.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn ext_method_rewind_uses_local_dispatch_without_bridge() {
     use acp::Agent as _;
@@ -6137,14 +6068,8 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
         );
     });
 }
-<<<<<<< HEAD
 /// Regression (post-cancel slot hang, first bad release 0.2.101; see `dispatch_lock`).
 /// SDK e2e shape: `test_cancel_ends_in_flight_turn_and_frees_slot` (grok-agent-sdk).
-=======
-/// Regression (post-cancel slot hang, first bad release 0.2.101; see
-/// `dispatch_locks`). SDK e2e shape:
-/// `test_cancel_ends_in_flight_turn_and_frees_slot` (grok-agent-sdk).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn cancel_never_overtakes_in_flight_prompt_intake() {
     use crate::session::SessionCommand;
@@ -6153,11 +6078,7 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-cancel-intake-race");
         let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
-<<<<<<< HEAD
         agent.insert_resident(&sid, handle);
-=======
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let order: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> =
             std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let (intake_parked_tx, intake_parked_rx) = tokio::sync::oneshot::channel::<()>();
@@ -6173,11 +6094,7 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
                         }
                     }
                     SessionCommand::Prompt { .. } => driver_order.borrow_mut().push("prompt"),
-<<<<<<< HEAD
                     SessionCommand::Cancel(..) => driver_order.borrow_mut().push("cancel"),
-=======
-                    SessionCommand::Cancel { .. } => driver_order.borrow_mut().push("cancel"),
->>>>>>> e3fdf3ed (Merge 2 (#4))
                     _ => {}
                 }
             }
@@ -6202,7 +6119,6 @@ fn cancel_never_overtakes_in_flight_prompt_intake() {
         );
     });
 }
-<<<<<<< HEAD
 #[test]
 fn prompt_routes_only_non_send_now_through_human_delivery_handle() {
     use acp::Agent as _;
@@ -6291,8 +6207,6 @@ fn prompt_routes_only_non_send_now_through_human_delivery_handle() {
         }
     });
 }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::session::SessionCommand as TestSessionCommand;
 /// Build a session handle wired to a *live* command channel.
 /// Returns the handle (move into `sessions`) plus a probe `cmd_tx`/`cmd_rx`.

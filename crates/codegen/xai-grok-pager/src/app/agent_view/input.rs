@@ -108,25 +108,9 @@ impl AgentView {
             || self.persona_detail.is_some()
             || self.block_viewer.is_some()
     }
-<<<<<<< HEAD
     /// The dropdown is only open while the draft holds an `@` token, so `text().is_empty()` already covers it.
     /// An open modal or media view ([`Self::modal_owns_input`]) also fails the guard, so those own Esc/Left instead of the overlay back-out stealing them.
     /// An open `/jump` picker fails it too, so the picker owns Esc/Left instead of being left latent.
-=======
-    /// Prompt pane focused with an empty draft and no overlay or prompt-local
-    /// sub-state owning keys — the state where a bare Left backs out of the
-    /// dashboard overlay (mirror of the dashboard's Right = open detail). A
-    /// non-empty draft (Left = caret move), scrollback focus (Left = collapse),
-    /// an active history search, and an open `@` file-search dropdown (which
-    /// owns Right/Up/Down picker nav) all fail the guard, leaving those
-    /// behaviours untouched. The dropdown is only open while the draft holds
-    /// an `@` token, so `text().is_empty()` already covers it — the explicit
-    /// check keeps the predicate honest if that coupling ever changes. An open
-    /// modal or media surface ([`Self::modal_owns_input`]) also fails the guard
-    /// so those own Esc/Left rather than the overlay back-out stealing them. An
-    /// open `/jump` picker fails it too, so the picker owns Esc/Left instead of
-    /// being left latent.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn is_empty_focused_prompt(&self) -> bool {
         self.active_pane == AgentPane::Prompt
             && self.prompt.text().is_empty()
@@ -136,7 +120,6 @@ impl AgentView {
             && !self.modal_owns_input()
             && self.jump_state.is_none()
     }
-<<<<<<< HEAD
     pub(crate) fn workflow_runs_newest_first(
         &self,
     ) -> Vec<&crate::views::workflows::WorkflowRunSnapshot> {
@@ -145,13 +128,6 @@ impl AgentView {
     /// No per-pane `Esc` consumer is pending (text selection, link highlight, goal detail, rewind overlay, open `/btw` panel, or open `/jump` picker).
     /// `Esc` is then free to back out of the dashboard overlay rather than clear or dismiss one of them first.
     /// Shared by both overlay back-out guards so a future Esc consumer is added once here.
-=======
-    /// No per-pane `Esc` consumer is pending (text selection, link highlight,
-    /// goal detail, rewind overlay, open `/btw` panel, or open `/jump` picker),
-    /// so `Esc` is free to back out of the dashboard overlay rather than
-    /// clear/dismiss one of them first. Shared by both overlay back-out guards
-    /// so a future Esc consumer is added once here.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn no_esc_consumer_pending(&self) -> bool {
         self.persistent_text_selection.is_none()
             && self.highlighted_link_idx.is_none()
@@ -893,72 +869,7 @@ impl AgentView {
                 _ => InputOutcome::Changed,
             };
         }
-<<<<<<< HEAD
         if self.focused_card() == Some(BlockingCard::Question) {
-=======
-        if self.rewind_state.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
-                    if key!('q', CONTROL).matches(key) {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_rewind_key(key)
-                }
-                Event::Mouse(mouse) => self.handle_rewind_mouse(mouse),
-                _ => InputOutcome::Unchanged,
-            };
-        }
-        if self.inline_edit.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
-                    if key!('q', CONTROL).matches(key) {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_inline_edit_key(key)
-                }
-                Event::Mouse(mouse) => self.handle_inline_edit_mouse(mouse),
-                Event::Paste(text) => {
-                    if let Some(ref mut edit) = self.inline_edit {
-                        edit.textarea.insert_str(text);
-                    }
-                    InputOutcome::Changed
-                }
-                _ => InputOutcome::Unchanged,
-            };
-        }
-        if self.jump_state.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
-                    if key!('q', CONTROL).matches(key) {
-                        return InputOutcome::Unchanged;
-                    }
-                    if registry.matches_id(ActionId::CancelTurn, key)
-                        && (self.session.state.is_turn_running()
-                            || self.session.state.is_cancelling())
-                    {
-                        self.dismiss_jump_picker();
-                        return self.handle_agent_action(ActionId::CancelTurn);
-                    }
-                    self.handle_jump_key(key)
-                }
-                Event::Mouse(mouse) => self.handle_jump_mouse(mouse),
-                _ => InputOutcome::Unchanged,
-            };
-        }
-        if self.cancel_turn_view.is_some() && self.active_pane != AgentPane::Scrollback {
-            return match ev {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if key!('q', CONTROL).matches(key) {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_cancel_turn_key(key)
-                }
-                Event::Mouse(mouse) => self.handle_cancel_turn_mouse(mouse),
-                _ => InputOutcome::Unchanged,
-            };
-        }
-        if self.question_view.is_some() && self.active_pane != AgentPane::Scrollback {
->>>>>>> e3fdf3ed (Merge 2 (#4))
             return match ev {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if key!('q', CONTROL).matches(key) {
@@ -2291,62 +2202,7 @@ mod focus_gained_restore_tests {
     }
 }
 #[cfg(test)]
-<<<<<<< HEAD
 mod mid_turn_esc_hint_tests {
-=======
-mod jump_backout_key_tests {
-    use super::test_fixtures::make_agent;
-    use super::{AgentPane, AgentView};
-    use crate::views::jump::{JumpRestore, JumpState};
-    fn open_jump(agent: &mut AgentView) {
-        agent.jump_state = Some(JumpState {
-            entries: Vec::new(),
-            selected: 0,
-            restore: JumpRestore {
-                bookmark: None,
-                selected: None,
-                follow_mode: false,
-            },
-        });
-    }
-    /// In the dashboard overlay, a bare Esc backs out via
-    /// `no_esc_consumer_pending`; the open `/jump` picker must count as a
-    /// consumer so Esc dismisses it (restoring the viewport) instead of
-    /// exiting the overlay and leaving the picker latent.
-    #[test]
-    fn jump_picker_is_an_esc_consumer() {
-        let mut agent = make_agent();
-        assert!(
-            agent.no_esc_consumer_pending(),
-            "baseline: no Esc consumer pending"
-        );
-        open_jump(&mut agent);
-        assert!(
-            !agent.no_esc_consumer_pending(),
-            "an open /jump picker consumes Esc"
-        );
-    }
-    /// The Left-arrow mirror: an open picker fails `is_empty_focused_prompt`
-    /// so the overlay Left back-out defers to the picker's own handling.
-    #[test]
-    fn jump_picker_defeats_empty_focused_prompt() {
-        let mut agent = make_agent();
-        agent.set_active_pane(AgentPane::Prompt, true);
-        assert!(
-            agent.is_empty_focused_prompt(),
-            "baseline: empty prompt focused"
-        );
-        open_jump(&mut agent);
-        assert!(
-            !agent.is_empty_focused_prompt(),
-            "an open /jump picker owns Esc/Left in the overlay back-out"
-        );
-    }
-}
-#[cfg(test)]
-mod voice_stop_click_during_plan_review_tests {
-    use super::paste_key_tests::make_plan_approval_view_state;
->>>>>>> e3fdf3ed (Merge 2 (#4))
     use super::test_fixtures::make_agent;
     use super::{AgentPane, AgentView};
     use crate::actions::ActionRegistry;

@@ -360,30 +360,8 @@ pub(crate) fn neutralize_transcript_user_text(s: &str) -> String {
 const CLASSIFIER_TURN_MAX_LEN: usize = xai_grok_workspace::permission::CLASSIFIER_TURN_MAX_LEN;
 const LEGACY_TOOL_IMAGE_FOLLOWUP: &str = "[Image extracted from tool result above]";
 
-<<<<<<< HEAD
 /// Project the complete resident conversation, retaining only trusted user intent and assistant tool calls.
 /// Every projected field is neutralized and capped.
-=======
-/// Recency window (conversation-item count) for the per-permission classifier
-/// transcript REFRESH. Larger than the spawn seed so a mid-session classify sees
-/// enough recent turns to interpret a terse final action in context.
-pub(crate) const CLASSIFIER_REFRESH_TURNS: usize = 16;
-
-/// Per-turn text cap (bytes) for the classifier transcript so one giant pasted
-/// user message or huge tool args can't blow up the per-call classifier request
-/// (token/latency, or context overflow → error → silent heuristic fallback).
-/// Mirrors the laziness classifier's 400-char field cap; truncation appends the
-const CLASSIFIER_TURN_MAX_LEN: usize = xai_grok_workspace::permission::CLASSIFIER_TURN_MAX_LEN;
-
-/// Build the auto-mode classifier transcript from the most recent `max_items`
-/// conversation items, chronological. Captures GENUINE user text (real input or
-/// a Ctrl+Enter interjection) and assistant tool_use only — every other
-/// synthetic user item is dropped (not user intent, and an injection vector),
-/// and assistant free-text and tool results are excluded so the agent can't
-/// prompt-inject its own permission classifier. User text
-/// and tool args are neutralized (one turn = one line, no forgeable role labels)
-/// and length-capped.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn build_classifier_turns(
     items: &[ConversationItem],
 ) -> Vec<xai_grok_workspace::permission::ClassifierTurn> {

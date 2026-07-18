@@ -1,6 +1,5 @@
 //! Single-flight guard for interactive login.
 //!
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
 //! At most one device-code or loopback wait runs at a time.
 //! Starting a new attempt (or an explicit `x.ai/auth/cancel`) cancels the previous one, so a remint or retry cannot stack device-code flows.
 //!
@@ -9,19 +8,6 @@
 //! A cancelled predecessor that finishes late structurally cannot touch its successor's channels.
 //! Generations guard `end()` the same way: a stale finisher must not clear a newer attempt.
 //! Client `request_seq` scopes explicit cancels so a delayed `x.ai/auth/cancel` cannot tear down a successor login.
-=======
-//! At most one device-code / loopback wait runs at a time: starting a new
-//! attempt (or an explicit `x.ai/auth/cancel`) cancels the previous one, so
-//! remint/retry cannot stack device-code mints.
-//!
-//! The attempt owns **all** attempt-scoped state — the cancellation token and
-//! the code/url channels — so replacing an attempt swaps everything
-//! atomically, and a cancelled predecessor that finishes late structurally
-//! cannot touch its successor's channels. Generations guard `end()` the same
-//! way: a stale finisher must not clear a newer attempt. Client `request_seq`
-//! scopes explicit cancels so a delayed `x.ai/auth/cancel` cannot tear down a
-//! successor login.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
 
 use std::cell::{Cell, RefCell};
 use tokio_util::sync::CancellationToken;
@@ -30,20 +16,11 @@ use super::flow::AuthUrlInfo;
 
 /// Channels wired between the ACP ext handlers and one interactive auth flow.
 /// `None` for headless attempts (no URL to show, no code to paste).
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
 pub struct AttemptChannels {
     /// Forwards pasted codes from `x.ai/auth/submit_code` to the flow.
     code_tx: tokio::sync::mpsc::Sender<String>,
     /// Yields the auth URL to `x.ai/auth/get_url`.
     /// `Option` so [`AuthSingleFlight::take_url_rx`] can move it out while the attempt lives on (one-shot read).
-=======
-pub(crate) struct AttemptChannels {
-    /// Forwards pasted codes from `x.ai/auth/submit_code` to the flow.
-    code_tx: tokio::sync::mpsc::Sender<String>,
-    /// Yields the auth URL to `x.ai/auth/get_url`. `Option` so
-    /// [`AuthSingleFlight::take_url_rx`] can move it out while the attempt
-    /// lives on (one-shot read).
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
     url_rx: Option<tokio::sync::oneshot::Receiver<AuthUrlInfo>>,
 }
 
@@ -56,11 +33,7 @@ struct Attempt {
 
 /// Why [`AuthSingleFlight::submit_code`] failed.
 #[derive(Debug)]
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
 pub enum SubmitCodeError {
-=======
-pub(crate) enum SubmitCodeError {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
     /// No interactive attempt is waiting for a code (idle or headless).
     NoPendingAttempt,
     /// Channel send failed (attempt channels already closed).
@@ -68,24 +41,14 @@ pub(crate) enum SubmitCodeError {
 }
 
 #[derive(Default)]
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
 pub struct AuthSingleFlight {
-=======
-pub(crate) struct AuthSingleFlight {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
     active: RefCell<Option<Attempt>>,
     generation: Cell<u64>,
 }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
 /// RAII end for a [`AuthSingleFlight::begin`] generation.
 /// Calls [`AuthSingleFlight::end`] on drop so an aborted authenticate future cannot leak attempt state.
 pub struct AuthAttemptGuard<'a> {
-=======
-/// RAII end for a [`AuthSingleFlight::begin`] generation: calls [`AuthSingleFlight::end`]
-/// on drop so an aborted authenticate future cannot leak attempt state.
-pub(crate) struct AuthAttemptGuard<'a> {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
     sf: &'a AuthSingleFlight,
     generation: u64,
     ended: Cell<bool>,
@@ -93,22 +56,14 @@ pub(crate) struct AuthAttemptGuard<'a> {
 
 impl AuthAttemptGuard<'_> {
     /// Explicit end (same as drop). Idempotent.
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     pub fn end(&self) {
-=======
-    pub(crate) fn end(&self) {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         if !self.ended.replace(true) {
             self.sf.end(self.generation);
         }
     }
 
     #[cfg(test)]
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     pub fn generation(&self) -> u64 {
-=======
-    pub(crate) fn generation(&self) -> u64 {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         self.generation
     }
 }
@@ -120,20 +75,9 @@ impl Drop for AuthAttemptGuard<'_> {
 }
 
 impl AuthSingleFlight {
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     /// Start a new attempt, cancelling any prior in-flight one. Returns the new attempt's token and an [`AuthAttemptGuard`] that ends this generation on drop (the guard is the only closer).
     /// `client_seq` is the pager auth `request_seq`, when known. [`Self::cancel_for_client_seq`] uses it so a delayed cancel cannot kill a successor attempt.
     pub fn begin(
-=======
-    /// Start a new attempt, cancelling any prior in-flight one. Returns the
-    /// new attempt's token and an [`AuthAttemptGuard`] that ends this generation
-    /// on drop (pass no separate `end` — the guard is the only closer).
-    ///
-    /// `client_seq` is the pager auth `request_seq` (when known); used by
-    /// [`Self::cancel_for_client_seq`] so a delayed cancel cannot kill a
-    /// successor attempt.
-    pub(crate) fn begin(
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         &self,
         channels: Option<AttemptChannels>,
         client_seq: Option<u64>,
@@ -159,46 +103,26 @@ impl AuthSingleFlight {
         )
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     /// Finish an attempt: drops its token *and channels* only if `generation` is still the active one.
     /// A stale finisher must not clear a newer attempt's state.
     pub fn end(&self, generation: u64) {
-=======
-    /// Finish an attempt: drops its token *and channels* only if `generation`
-    /// is still the active one (a stale finisher must not clear a newer
-    /// attempt's state).
-    pub(crate) fn end(&self, generation: u64) {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         if self.generation.get() == generation {
             *self.active.borrow_mut() = None;
         }
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     /// Cancel the active attempt, if any. Idempotent.
     /// Prefer [`Self::cancel_for_client_seq`] when the caller has a pager `request_seq` so a delayed cancel cannot tear down a newer login.
     pub fn cancel(&self) {
-=======
-    /// Cancel the active attempt, if any. Idempotent. Prefer
-    /// [`Self::cancel_for_client_seq`] when the caller has a pager `request_seq`
-    /// so a delayed cancel cannot tear down a newer login.
-    pub(crate) fn cancel(&self) {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         if let Some(prev) = self.active.borrow_mut().take() {
             tracing::info!("auth: interactive auth cancelled");
             prev.token.cancel();
         }
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     /// Cancel only if the active attempt was started for `client_seq`.
     /// A stale cancel (successor already began) is a no-op.
     pub fn cancel_for_client_seq(&self, client_seq: u64) {
-=======
-    /// Cancel only if the active attempt was started for `client_seq`. A stale
-    /// cancel (successor already began) is a no-op.
-    pub(crate) fn cancel_for_client_seq(&self, client_seq: u64) {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         let mut active = self.active.borrow_mut();
         match active.as_ref() {
             Some(a) if a.client_seq == Some(client_seq) => {
@@ -227,11 +151,7 @@ impl AuthSingleFlight {
     }
 
     /// Forward a pasted code to the active attempt's flow.
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     pub fn submit_code(&self, code: String) -> Result<(), SubmitCodeError> {
-=======
-    pub(crate) fn submit_code(&self, code: String) -> Result<(), SubmitCodeError> {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         match self
             .active
             .borrow()
@@ -246,14 +166,8 @@ impl AuthSingleFlight {
         }
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     /// Take the active attempt's URL receiver (one-shot; subsequent calls return `None`, as does an idle or headless attempt).
     pub fn take_url_rx(&self) -> Option<tokio::sync::oneshot::Receiver<AuthUrlInfo>> {
-=======
-    /// Take the active attempt's URL receiver (one-shot; subsequent calls
-    /// return `None`, as does an idle or headless attempt).
-    pub(crate) fn take_url_rx(&self) -> Option<tokio::sync::oneshot::Receiver<AuthUrlInfo>> {
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         self.active
             .borrow_mut()
             .as_mut()
@@ -262,11 +176,7 @@ impl AuthSingleFlight {
 }
 
 impl AttemptChannels {
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     pub fn new(
-=======
-    pub(crate) fn new(
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         code_tx: tokio::sync::mpsc::Sender<String>,
         url_rx: tokio::sync::oneshot::Receiver<AuthUrlInfo>,
     ) -> Self {
@@ -302,11 +212,7 @@ mod tests {
         let (token, _g) = sf.begin(None, None);
         sf.cancel();
         assert!(token.is_cancelled());
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
         sf.cancel(); // no active attempt, must not panic
-=======
-        sf.cancel(); // no active attempt — must not panic
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
     }
 
     #[test]
@@ -329,20 +235,11 @@ mod tests {
         let sf = AuthSingleFlight::default();
         let (token, guard) = sf.begin(None, None);
         guard.end();
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
         sf.cancel(); // nothing active, must not cancel the finished attempt
         assert!(!token.is_cancelled());
     }
 
     /// The race the attempt object exists to prevent: a cancelled predecessor finishing late must not drop the successor's channels.
-=======
-        sf.cancel(); // nothing active — must not cancel the finished attempt
-        assert!(!token.is_cancelled());
-    }
-
-    /// The race the attempt object exists to prevent: a cancelled
-    /// predecessor finishing late must not drop the successor's channels.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
     #[test]
     fn stale_end_leaves_successor_channels_intact() {
         let sf = AuthSingleFlight::default();
@@ -412,14 +309,8 @@ mod tests {
         ));
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
     /// Headless (and interactive) authenticate `select!`s on this token.
     /// Cancel must interrupt a long wait rather than leaving it racing (the logout and unscoped cancel path).
-=======
-    /// Headless (and interactive) authenticate `select!`s on this token —
-    /// cancel must interrupt a long wait rather than leaving it racing
-    /// (logout / unscoped cancel path).
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
     #[tokio::test]
     async fn cancel_interrupts_waiting_select() {
         let sf = AuthSingleFlight::default();
@@ -432,11 +323,7 @@ mod tests {
             }
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-<<<<<<< HEAD:crates/codegen/xai-grok-login/src/single_flight.rs
         sf.cancel(); // same as handle_logout or an unscoped cancel
-=======
-        sf.cancel(); // same as handle_logout / unscoped cancel
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/auth/single_flight.rs
         assert_eq!(waiter.await.expect("join"), "cancelled");
     }
 

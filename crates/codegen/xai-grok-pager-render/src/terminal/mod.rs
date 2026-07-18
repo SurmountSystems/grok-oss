@@ -655,20 +655,7 @@ fn is_official_vscode_remote_askpass(path: &str) -> bool {
     })
 }
 
-<<<<<<< HEAD
 /// A new marker must also go into the PTY harness strip list so the host terminal cannot leak into tests.
-=======
-/// Detect the terminal brand from an injected environment map.
-///
-/// This is the pure equivalent of the original `detect_terminal_info`.
-///
-/// Adding a new env marker to this brand chain (or to
-/// [`detect_byobu_from_env`] / [`detect_multiplexer_from_env`] below)
-/// requires extending `HOST_TERMINAL_ENV_VARS` in
-/// `xai-grok-pager-pty-harness/src/pty.rs` (test-env hygiene — the PTY
-/// harness strips every marker read here so the host terminal can't leak
-/// into tests).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn detect_terminal_brand_from_env(env: &HashMap<String, String>) -> TerminalName {
     // Fork-specific markers first: they set TERM_PROGRAM=vscode, and they survive SSH/tmux where TERM_PROGRAM does not.
     if env_get(env, "CURSOR_TRACE_ID").is_some() {

@@ -3544,7 +3544,6 @@ fn apply_requirements_pins_voice_mode_false() {
         path: std::path::PathBuf::from("/test/requirements.toml"),
     };
     apply_requirements_inner(&mut cfg, &req, &source);
-<<<<<<< HEAD
     assert_eq!(
             cfg.requirements
                 .pinned_feature(crate::agent::config::Feature::VoiceMode),
@@ -3627,15 +3626,6 @@ fn malformed_requirements_pin_is_ignored() {
 /// Requirements enforcement beats a campaign-supplied default.
 /// The on-disk `Config` arrives campaign-overlaid (`models.default` holds a campaign value).
 /// A requirements layer enforcing `[models] default` clamps it back.
-=======
-    assert_eq!(cfg.requirements.voice_mode.pinned(), Some(false));
-    assert_eq!(cfg.features.voice_mode, Some(false));
-    assert!(! cfg.resolve_voice_mode().value);
-}
-/// Requirements enforcement beats a campaign-supplied default. The on-disk
-/// `Config` arrives campaign-overlaid (`models.default` = a campaign value);
-/// a requirements layer enforcing `[models] default` clamps it back.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn apply_requirements_default_beats_campaign_default() {
     let raw: toml::Value = toml::from_str("[models]\ndefault = \"campaign-model\"\n")

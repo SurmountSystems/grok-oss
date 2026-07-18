@@ -10,12 +10,8 @@ use super::actions::{
 use super::agent::AgentId;
 use crate::unified_log as ulog;
 use xai_grok_shell::sampling::error::{
-<<<<<<< HEAD
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, error_kind_str_from_error,
     format_rate_limited_user_message, http_status_from_error,
-=======
-    RATE_LIMITED_ERROR_CODE, error_detail_from_data, format_rate_limited_user_message,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::helpers::session_compact::{
@@ -271,7 +267,6 @@ pub(super) async fn fetch_plugin_cta_mcps(
     }
 }
 /// Convert an ACP error to a user-friendly string for display.
-<<<<<<< HEAD
 /// Rate-limit errors render the free-usage paywall, else the server detail, else the auth-aware fallback (see [`format_rate_limited_user_message`]).
 /// The server detail is rewritten for API-key auth when the body pushes personal SuperGrok.
 pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
@@ -358,23 +353,6 @@ pub(super) async fn memory_command_request<T: serde::de::DeserializeOwned>(
         }
         Err(e) => Err(sanitize_user_error(&e.to_string())),
     }
-=======
-/// Rate-limit errors: free-usage paywall, else server detail (with API-key
-/// rewrite when the body pushes personal SuperGrok), else auth-aware fallback
-/// (see [`format_rate_limited_user_message`]).
-/// All other errors are sanitized to remove internal service names and jargon.
-pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
-    if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
-        let detail = err.data.as_ref().and_then(error_detail_from_data);
-        return format_rate_limited_user_message(detail.as_deref(), is_api_key_auth);
-    }
-    if err.code == acp::ErrorCode::InvalidParams && let Some(data) = &err.data
-        && let Some(msg) = error_detail_from_data(data) && !msg.is_empty()
-    {
-        return msg;
-    }
-    sanitize_user_error(&err.to_string())
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 /// Format a Duration for user-visible restore progress messages.
 pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
@@ -746,12 +724,7 @@ pub(crate) struct EffectMeta {
     /// Auth abort handle and its request sequence.
     /// The event loop must install this into `AppView.auth_state` if the current auth state still matches the sequence.
     pub auth_abort_handle: Option<(u64, tokio::task::AbortHandle)>,
-<<<<<<< HEAD
     /// Auth URL poll abort handle and request sequence (installed on `AppView.auth_url_poll_handle` when the seq still matches).
-=======
-    /// Auth URL poll abort handle + request sequence (installed on
-    /// `AppView.auth_url_poll_handle` when the seq still matches).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub auth_url_poll_handle: Option<(u64, tokio::task::AbortHandle)>,
 }
 /// Extract the first user prompt text from a session's `chat_history.jsonl`.
@@ -839,34 +812,20 @@ pub(super) async fn send_logout(tx: &AcpAgentTx) {
         tracing::warn!(error = %e, "logout failed");
     }
 }
-<<<<<<< HEAD
 /// Best-effort `x.ai/auth/cancel`: stops the shell's device/loopback wait so a later login is single-flight.
 /// Errors are ignored; the UI already left `Authenticating`.
 /// `request_seq` scopes the cancel to the abandoned attempt.
-=======
-/// Best-effort `x.ai/auth/cancel`: stops the shell's device/loopback wait so a
-/// later login is single-flight. Errors are ignored — UI already left
-/// `Authenticating`. `request_seq` scopes the cancel to the abandoned attempt.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskResult {
     let req = acp::ExtRequest::new(
         "x.ai/auth/cancel",
         serde_json::value::to_raw_value(
-<<<<<<< HEAD
                 &serde_json::json!({ "request_seq": request_seq }),
-=======
-                &serde_json::json!({ "request_seq" : request_seq }),
->>>>>>> e3fdf3ed (Merge 2 (#4))
             )
             .expect("serialize auth/cancel params")
             .into(),
     );
     if let Err(e) = acp_send(req, tx).await {
-<<<<<<< HEAD
         tracing::debug!(error = %e, "auth cancel ext request failed (ignored)");
-=======
-        tracing::debug!(error = % e, "auth cancel ext request failed (ignored)");
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     TaskResult::AuthCancelComplete
 }
@@ -992,20 +951,12 @@ pub(super) async fn send_authenticate(
     use_oauth: bool,
     force_interactive: bool,
 ) -> TaskResult {
-<<<<<<< HEAD
     let mut meta = serde_json::json!({
         "use_oauth": use_oauth,
         "request_seq": request_seq,
     });
     if force_interactive && let Some(obj) = meta.as_object_mut() {
         obj.insert("force_interactive".into(), serde_json::json!(true));
-=======
-    let mut meta = serde_json::json!(
-        { "use_oauth" : use_oauth, "request_seq" : request_seq, }
-    );
-    if force_interactive {
-        meta["force_interactive"] = serde_json::json!(true);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     let req = acp::AuthenticateRequest::new(method_id).meta(meta.as_object().cloned());
     match acp_send(req, tx).await {
@@ -1074,7 +1025,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-<<<<<<< HEAD
         "dashboard_preview" => {
             let SettingValue::Bool(enabled) = value else {
                 return Err(kind_mismatch("dashboard_preview", "Bool", &value));
@@ -1115,8 +1065,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "show_timeline" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_timeline", "Bool", &value));
@@ -1187,7 +1135,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-<<<<<<< HEAD
         "contextual_hints.export_copy" => {
             let SettingValue::Bool(b) = value else {
                 return Err(
@@ -1198,8 +1145,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "contextual_hints.ssh_wrap" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("contextual_hints.ssh_wrap", "Bool", &value));
@@ -1415,7 +1360,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-<<<<<<< HEAD
         "voice_keybind_enabled" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("voice_keybind_enabled", "Bool", &value));
@@ -1424,8 +1368,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         "voice_capture_mode" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("voice_capture_mode", "Enum", &value));

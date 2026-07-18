@@ -376,18 +376,11 @@
         }
     }
 
-<<<<<<< HEAD
     /// Production `RetryState::Exhausted.reason` is `SamplingError::Api`'s Display: `API error (status 429 Too Many Requests): …`.
     #[test]
     fn retry_exhausted_rate_limited_surfaces_server_detail() {
         let body = "The model is currently at capacity due to high demand. Please try again.";
         let reason = format!("API error (status 429 Too Many Requests): {body}");
-=======
-    #[test]
-    fn retry_exhausted_rate_limited_surfaces_server_detail() {
-        let reason =
-            "The model is currently at capacity due to high demand. Please try again.".to_string();
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let exhausted = RetryState::Exhausted {
             attempts: 3,
             reason: reason.clone(),
@@ -399,12 +392,8 @@
         apply_retry_state(&exhausted, &mut session, &mut scrollback, false);
         match last_session_event(&scrollback) {
             Some(SessionEvent::RetryFailed { error, .. }) => {
-<<<<<<< HEAD
                 assert_eq!(error, body);
                 assert!(!error.contains("API error (status"));
-=======
-                assert_eq!(error, reason);
->>>>>>> e3fdf3ed (Merge 2 (#4))
             }
             other => panic!("expected detail RetryFailed, got {other:?}"),
         }
@@ -416,12 +405,8 @@
 
         let rpm = RetryState::Exhausted {
             attempts: 2,
-<<<<<<< HEAD
             reason: "API error (status 429 Too Many Requests): \
                      Some resource has been exhausted: You are sending requests too quickly. \
-=======
-            reason: "Some resource has been exhausted: You are sending requests too quickly. \
->>>>>>> e3fdf3ed (Merge 2 (#4))
                      Please slow down, or upgrade to a Grok subscription for higher limits: \
                      https://grok.com/supergrok"
                 .into(),
@@ -794,7 +779,6 @@
                     .into(),
             },
             &mut session,
-<<<<<<< HEAD
             &mut scrollback,
             false,
         );
@@ -810,13 +794,6 @@
             }
             other => panic!("expected RequestFailed, got {other:?}"),
         }
-=======
-            &mut scrollback, false);
-        assert!(matches!(
-            last_session_event(&scrollback),
-            Some(SessionEvent::RetryFailed { .. })
-        ));
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// A context overflow shows the actionable `ContextTooLarge` prompt (not the raw `RetryFailed`).

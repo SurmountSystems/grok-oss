@@ -1,10 +1,6 @@
 //! Subscription tier checks, credit-limit upsells, and auto-topup handling.
 
-<<<<<<< HEAD
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
-=======
-use super::queue::{maybe_drain_queue, note_peek_page_flip_after_drain};
->>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
@@ -78,7 +74,6 @@ pub(crate) fn is_credit_limit_error(http_status: Option<u16>, message: &str) -> 
     }
 }
 
-<<<<<<< HEAD
 /// Option id for Try Again. Submit routes on this sentinel, not on position in the telemetry `choices` vec.
 /// position in the telemetry `choices` vec.
 pub(crate) const CREDIT_LIMIT_RETRY_OPTION_ID: &str = "retry-last-prompt";
@@ -95,17 +90,6 @@ struct CreditLimitCopy {
 /// Open the credit-limit upsell Q&A on the given agent.
 /// Non-max-tier: Upgrade tier + buy-credits (or PAYG) + Try Again.
 /// Max-tier (SuperGrok Heavy): buy-credits (or PAYG) + Try Again — no upgrade option. URL options carry the target in `id` so the submit handler is position-independent.
-=======
-/// Open the credit-limit upsell on the given agent.
-///
-/// **`max_tier = false`** (default): shows the Q&A question modal with
-/// two options ("Upgrade tier" + buy-credits or PAYG). Each option's `id`
-/// carries the target URL so the submit handler is position-independent.
-///
-/// **`max_tier = true`** (positively identified as SuperGrok Heavy):
-/// pushes an inline scrollback card (`CreditLimitBlock`) with a single
-/// continue action. No Q&A modal — the user can't upgrade further.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(super) fn open_credit_limit_upsell(
     agent: &mut AgentView,
     mode: CreditLimitUpsellMode,
@@ -520,7 +504,6 @@ pub(super) fn handle_credit_limit_recheck_complete(
         silent: true,
         nonce: Default::default(),
     });
-<<<<<<< HEAD
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects
 }
@@ -558,10 +541,6 @@ pub(super) fn dispatch_retry_credit_limit_prompt(app: &mut AppView) -> Vec<Effec
     }
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects
-=======
-    note_peek_page_flip_after_drain(app, agent_id);
-    effects
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 // Action handlers.

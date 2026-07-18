@@ -50,12 +50,8 @@ use xai_grok_sampling_types::{
     supports_reasoning_effort_meta,
 };
 use crate::agent::update_chunk_merge;
-<<<<<<< HEAD
 use xai_grok_login::AuthManager;
 use xai_grok_login::backend::AuthBackend as _;
-=======
-use crate::auth::AuthManager;
->>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::config::StorageMode;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use xai_grok_telemetry::id::{agent_id, agent_instance_id};
@@ -669,42 +665,11 @@ pub struct MvpAgent {
     /// Expires when the actor exits.
     /// See [`crate::agent::activity::AgentActivity`].
     pub(crate) activity: crate::agent::activity::AgentActivity,
-<<<<<<< HEAD
     /// LEADER-SAFE(per-session).
     session_registry: SessionRegistry,
     /// `(title, last_turn_summary)` per resident session id, refreshed each `build_roster`.
     /// Lets the synchronous roster deltas reuse both instead of emitting empty ones; `resident_roster_entry` can't read disk.
     resident_roster_titles: RefCell<RosterDisplayCache>,
-=======
-    /// Sessions with a `session/load` currently in flight. LEADER-SAFE(per-session).
-    ///
-    /// Inserted by [`Self::begin_session_load`] at the top of `load_session`
-    /// and removed when the returned RAII guard drops (any exit path). Lets
-    /// racing session-scoped requests — notably `session/prompt` sent right
-    /// behind a reconnect-replayed `session/load` after a leader restart —
-    /// wait for the load via [`Self::wait_for_in_flight_session_load`]
-    /// instead of failing with "unknown session id". The watch channel closes
-    /// when the guard drops, waking all waiters.
-    loading_sessions: RefCell<
-        HashMap<acp::SessionId, tokio::sync::watch::Receiver<bool>>,
-    >,
-    /// Per-session lock ordering dispatch onto the actor's mailbox:
-    /// [`Self::prompt`] holds it across its intake preamble and
-    /// [`Self::cancel`] around its `Cancel` send, so prompts land in
-    /// submission order and a cancel cannot overtake the prompt it targets
-    /// (see `cancel_never_overtakes_in_flight_prompt_intake`). Cancels wait
-    /// out preambles held ahead of them — keep preambles lean; bridge cancels
-    /// are unordered. LEADER-SAFE(per-session): mirrors `sessions` lifecycle.
-    dispatch_locks: RefCell<
-        HashMap<acp::SessionId, std::rc::Rc<tokio::sync::Mutex<()>>>,
-    >,
-    /// LEADER-SAFE(per-session): keyed by SessionId. Mirrors `sessions` lifecycle.
-    session_threads: RefCell<HashMap<acp::SessionId, SessionThread>>,
-    /// Title per resident session id, refreshed each `build_roster`. Lets the
-    /// synchronous roster deltas reuse the title instead of emitting an empty
-    /// one — `resident_roster_entry` can't read disk.
-    resident_roster_titles: RefCell<HashMap<String, String>>,
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) initialize_request: OnceLock<acp::InitializeRequest>,
     pub(crate) gateway: GatewaySender,
     /// Agent configuration. LEADER-SAFE(init-once): never mutated after construction.
@@ -720,33 +685,12 @@ pub struct MvpAgent {
     pub(crate) models_manager: crate::agent::remote_config::ModelsManager,
     /// grok.com chat-product catalog (`/rest/modes`) for chat sessions; distinct from `models_manager` (the build `/v1/models` catalog).
     pub(crate) chat_modes: crate::agent::chat_modes::ChatModesManager,
-<<<<<<< HEAD
     /// Single-flight guard for interactive login (device poll / loopback wait).
     /// Owns the active attempt's cancel token and its code/url channels; a new `authenticate` or `x.ai/auth/cancel` cancels the prior attempt.
     pub(crate) interactive_auth: xai_grok_login::single_flight::AuthSingleFlight,
     /// Client type. LEADER-SAFE(init-once): set once during `initialize` from `_meta.clientIdentifier` (injected by the IPC server in leader mode).
     /// **Known limitation (leader mode)**: with multiple concurrent clients, the last `initialize` call wins and overwrites the global value.
     /// Per-client telemetry attribution (AB experiments, analytics, worktree-pool eligibility) then uses whichever client most recently initialized. That may not be the client that owns the current session. This is considered acceptable because `client_type` is used only for non-safety-critical telemetry and experiment filtering.
-=======
-    /// Single-flight guard for interactive login (device poll / loopback
-    /// wait). Owns the active attempt's cancel token and its code/url
-    /// channels; a new `authenticate` or `x.ai/auth/cancel` cancels the
-    /// prior attempt.
-    pub(crate) interactive_auth: crate::auth::single_flight::AuthSingleFlight,
-    /// Client type. LEADER-SAFE(init-once): set once during `initialize` from
-    /// `_meta.clientIdentifier` (injected by the IPC server in leader mode).
-    ///
-    /// **Known limitation (leader mode)**: in a session with multiple concurrent
-    /// clients, the last `initialize` call wins and overwrites the global value.
-    /// This means per-client telemetry attribution (AB experiments, analytics,
-    /// worktree-pool eligibility) uses the identity of whichever client most
-    /// recently initialized — not the client that owns the current session.
-    ///
-    /// This is considered acceptable because `client_type` is used only for
-    /// non-safety-critical telemetry and experiment filtering.  Fully per-session
-    /// attribution would require threading `clientIdentifier` from `_meta` through
-    /// every session handler, which is deferred to future work.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     client_type: RefCell<ClientType>,
     /// Whether the current client advertised `x.ai/codeNavigation.enabled`.
     /// Updated on every `initialize()` call, with the same last-client-wins rule as `client_type`.
@@ -802,21 +746,7 @@ pub struct MvpAgent {
     buffering_settings: RefCell<Option<update_chunk_merge::BufferingSettings>>,
     /// Context for managing background copy operations (e.g., copying ignored files)
     pub(crate) background_copy_context: BackgroundCopyContext,
-<<<<<<< HEAD
     /// LEADER-SAFE(shared): agent-level code-nav index manager, keyed by cwd, no per-client state.
-=======
-    /// LEADER-SAFE(per-session): keyed by SessionId, no cross-session iteration.
-    /// Released by `remove_session`.
-    pub(crate) session_turn_numbers: RefCell<HashMap<acp::SessionId, u64>>,
-    /// LEADER-SAFE(per-session): keyed by SessionId, no cross-session iteration.
-    /// Released by `remove_session`.
-    permission_event_receivers: RefCell<
-        HashMap<acp::SessionId, tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>>,
-    >,
-    /// Agent-level codebase index manager for code navigation.
-    /// Indexes are shared across sessions with the same cwd.
-    /// LEADER-SAFE(shared): keyed internally by cwd. No per-client state.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     codebase_indexes: Arc<parking_lot::Mutex<CodebaseIndexManager>>,
     /// LEADER-SAFE(init-once): one index for the process.
     /// Empty until [`MvpAgent::start_search_index_once`] decides, so reading cannot decide.
@@ -834,18 +764,6 @@ pub struct MvpAgent {
     agent_mcp_state: std::sync::Arc<
         tokio::sync::Mutex<crate::session::mcp_servers::McpState>,
     >,
-<<<<<<< HEAD
-=======
-    /// Sessions whose persisted model was unavailable at `session/load` time
-    /// with no same-family fallback, keyed by session id → the unavailable
-    /// model id. Prompts to these sessions are blocked until either
-    /// (a) the model reappears in the catalog — the catalog can be
-    /// transiently degraded when a reconnect replays `session/load` (e.g.
-    /// fetch still in flight after a leader restart), so the prompt path
-    /// re-checks and self-heals — or (b) the user explicitly switches
-    /// models via `set_session_model`. Released by `remove_session`.
-    model_unavailable_sessions: RefCell<std::collections::HashMap<String, acp::ModelId>>,
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Unified sender for all subagent coordinator events.
     /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
     subagent_event_tx: xai_grok_tools::implementations::grok_build::task::backend::SubagentCoordinatorSender,
@@ -1161,13 +1079,8 @@ struct AuthRequestMeta {
     /// Unlike `reauth`, this does NOT clear existing credentials: if the user abandons the browser flow, the current session continues.
     #[serde(default)]
     force_interactive: bool,
-<<<<<<< HEAD
     /// Pager auth `request_seq` for this attempt.
     /// Scopes `x.ai/auth/cancel` so a delayed cancel cannot tear down a successor login.
-=======
-    /// Pager auth `request_seq` for this attempt. Scopes `x.ai/auth/cancel`
-    /// so a delayed cancel cannot tear down a successor login.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[serde(default)]
     request_seq: Option<u64>,
 }
@@ -2198,32 +2111,11 @@ async fn handle_synthetic_turn_trace(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let client_version = this.cfg.borrow().client_version.clone();
-<<<<<<< HEAD
         let model = this
             .resident_handle(&request.session_id)
             .map(|h| h.model_id.0.to_string())
             .unwrap_or_else(|| this.models_manager.current_model_id().0.to_string());
         (info, turn_number, user_id, user_email, client_source, client_version, model)
-=======
-        let model = {
-            let sessions = this.sessions.borrow();
-            sessions
-                .get(&request.session_id)
-                .map(|h| h.model_id.0.to_string())
-                .unwrap_or_else(|| this.models_manager.current_model_id().0.to_string())
-        };
-        let agent_config = this.cfg.borrow().clone();
-        (
-            info,
-            turn_number,
-            agent_config,
-            user_id,
-            user_email,
-            client_source,
-            client_version,
-            model,
-        )
->>>>>>> e3fdf3ed (Merge 2 (#4))
     };
     let this = agent_ref.get();
     let trace_context = this.get_trace_context(&info, turn_number).await;

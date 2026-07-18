@@ -218,12 +218,7 @@ pub(crate) struct TerminalState {
     pub relaunched_into_minimal: bool,
     /// One-shot `/fullscreen` re-exec (env override already consumed).
     pub relaunched_into_fullscreen: bool,
-<<<<<<< HEAD
     /// Do NOT re-resolve via `theme::cache::resolve_initial_theme()` here: its OSC 11 fallback reads stdin and competes with the input reader.
-=======
-    /// Do NOT re-resolve via `theme::cache::resolve_initial_theme()` here:
-    /// its OSC 11 fallback reads stdin and competes with the input reader.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub initial_theme: ThemeKind,
     /// Type-ahead captured by `init_terminal` AFTER raw mode was enabled (the one field here computed post-takeover).
     /// Replayed into the composer by [`run`] when it is the active consumer at launch, else dropped; see [`capture_startup_typeahead`].
@@ -1205,7 +1200,6 @@ pub(crate) async fn run(
     app.plugin_cta_enabled = xai_grok_config::env_bool("GROK_PLUGIN_CTA")
         .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
         .unwrap_or(false);
-<<<<<<< HEAD
     app.plugin_cta_marketplace = launch_effective_config
         .as_ref()
         .and_then(plugin_cta_marketplace_from);
@@ -1216,9 +1210,6 @@ pub(crate) async fn run(
                 .and_then(|s| s.workspace_dashboard_enabled)
         })
         .unwrap_or(false);
-=======
-    // Voice is applied after auth_meta so API-key detection is accurate.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     app.session_picker_grouped = std::env::var("GROK_SESSION_PICKER_GROUPED")
         .ok()
         .and_then(|v| match v.as_str() {
@@ -1315,21 +1306,11 @@ pub(crate) async fn run(
         app.is_api_key_auth = app.auth_methods.iter().any(|m| {
             m.id().0.as_ref() == xai_grok_shell::agent::auth_method::XAI_API_KEY_METHOD_ID
         });
-<<<<<<< HEAD
         if !app.consumer_account() {
             app.usage_visible = false;
             app.sync_billing_surface_to_agents();
         }
     }
-=======
-        // No AuthMeta on this path — hide `/usage` for API keys.
-        if app.is_api_key_auth {
-            app.usage_visible = false;
-        }
-    }
-
-    // After auth so API-key + managed policy resolve correctly.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let voice_mode_enabled = crate::app::resolve_voice_mode_live(
         remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
         app.is_api_key_auth,
@@ -1339,15 +1320,9 @@ pub(crate) async fn run(
         app.voice_ui_active = false;
     }
     app.apply_voice_mode_enabled(voice_mode_enabled);
-<<<<<<< HEAD
     crate::views::dock::set_enabled(crate::app::resolve_dock_enabled(
         remote_settings.as_ref().and_then(|s| s.dock_enabled),
     ));
-=======
-
-    // Fallback: prefetch may have gate info the shell's AuthMeta missed.
-    // Errs on the side of blocking if stale.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     if app.gate.is_none()
         && let Some(rs) = remote_settings.as_ref()
     {
@@ -1385,11 +1360,6 @@ pub(crate) async fn run(
             app.escape_writer.clone(),
         );
         if let Some(table) = raw.as_table() {
-<<<<<<< HEAD
-=======
-            // Voice inherits the same resolved endpoints base as chat
-            // (config > GROK_XAI_API_BASE_URL env > default).
->>>>>>> e3fdf3ed (Merge 2 (#4))
             let endpoints_base =
                 xai_grok_shell::agent::config::EndpointsConfig::from_config_value(raw)
                     .xai_api_base_url;
@@ -1564,14 +1534,7 @@ pub(crate) async fn run(
     crate::appearance::set_tab_width(initial_config.scrollback.display.tab_width);
     app.set_appearance(initial_config);
     app.current_ui = load_initial_ui_config();
-<<<<<<< HEAD
     crate::app::status_line::metrics::global().report_config(&app.current_ui.status_line);
-=======
-    // Field-tolerant: a whole-`UiConfig` default (malformed unrelated `[ui]`
-    // field) must not wipe a valid `show_timeline` or leave appearance /
-    // cache / `current_ui` disagreeing — `/timeline` and the rail all read
-    // the same canonical value after this sync + `prime` below.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let show_timeline = crate::appearance::cache::load_show_timeline();
     app.current_ui.show_timeline = Some(show_timeline);
     if app.appearance.show_timeline != show_timeline {
@@ -1579,16 +1542,8 @@ pub(crate) async fn run(
         config.show_timeline = show_timeline;
         app.set_appearance(config);
     }
-<<<<<<< HEAD
     let page_flip_on_send = crate::appearance::cache::load_page_flip_on_send();
     app.current_ui.page_flip_on_send = Some(page_flip_on_send);
-=======
-    // Disk load replaces `current_ui`. Assign one policy-clamped resolved
-    // launch mode unconditionally (CLI > TOML > remote > Ask) so disk Auto
-    // cannot win over `--permission-mode ask`, and a policy-clamped remote
-    // AlwaysApprove cannot leave the UI claiming AlwaysApprove while
-    // enforcement is Ask.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let display_mode: &'static str = if launch_auto {
         "auto"
     } else if launch_yolo.yolo {
@@ -3133,7 +3088,6 @@ fn sync_appearance_watcher(watcher: &mut Option<SystemAppearanceWatcher>) {
         *watcher = SystemAppearanceWatcher::start_if_auto(should_auto);
     }
 }
-<<<<<<< HEAD
 fn emit_event_loop_stall(window: super::event_loop_stall::StallWindow) {
     xai_grok_telemetry::session_ctx::log_event(super::event_loop_stall::event_loop_stall_event(
         window,
@@ -3155,21 +3109,6 @@ fn finish_run_with_stall_flush(
 /// Summaries are fullscreen-only and always read the root agent.
 fn finish_run(app: &mut AppView) -> RunResult {
     app.abandon_startup();
-=======
-
-/// Build [`ExitInfo`] from the active agent's session (if any).
-///
-/// Sole construction site of [`super::ExitSummary`]: fullscreen quits only
-/// (leaving the alt screen wipes the transcript; inline/minimal quits keep it
-/// visible in native scrollback), and only with at least one conversation
-/// line (a bare title is noise). Deliberately the root agent even when a
-/// subagent view is focused — `--resume` restores the root session, and a
-/// subagent's latest "prompt" is the parent's task brief, not user input.
-///
-/// `exit_info` is only consumed on the plain-quit path; a pending `relaunch`
-/// short-circuits before it is read and carries its own session id.
-fn make_run_result(app: &AppView) -> RunResult {
->>>>>>> e3fdf3ed (Merge 2 (#4))
     let exit_info = app.active_agent().and_then(|agent| {
         let sid = agent.session.session_id.as_ref()?;
         let summary = if app.screen_mode.is_fullscreen() {
@@ -4043,11 +3982,6 @@ fn process_effects(
         {
             *handle = Some(abort_handle);
         }
-<<<<<<< HEAD
-=======
-        // Install URL-poll abort handle when the seq still matches (or is the
-        // current Authenticating attempt). Aborted in `abort_prior_auth`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         if let Some((seq, abort_handle)) = meta.auth_url_poll_handle {
             let still_current = matches!(
                 &app.auth_state,

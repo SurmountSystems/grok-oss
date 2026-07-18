@@ -53,23 +53,10 @@ impl AgentView {
             }
         });
     }
-<<<<<<< HEAD
-=======
-    /// Return the semantic target of the currently highlighted link, if any.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn highlighted_link_target(&self) -> Option<&crate::render::osc8::LinkTarget> {
         self.highlighted_link_idx
             .and_then(|idx| self.visible_link_map.links().get(idx))
             .map(|link| &link.target)
-<<<<<<< HEAD
-=======
-    }
-    /// Return the current OSC 8 URL for the highlighted link preview.
-    pub fn highlighted_link_url(&self) -> Option<std::sync::Arc<str>> {
-        self.highlighted_link_target()
-            .and_then(crate::render::osc8::resolve_link_target)
-            .and_then(|resolved| resolved.osc8_url)
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     /// Return the current OSC 8 URL for the highlighted link preview.
     pub fn highlighted_link_url(&self) -> Option<std::sync::Arc<str>> {
@@ -1425,14 +1412,8 @@ mod link_click_tests {
             other => panic!("expected Action::OpenLink, got {other:?}"),
         }
     }
-<<<<<<< HEAD
     /// A modifier+click on a file link opens via our handler with the filesystem target intact.
     /// (Ctrl on Linux/Windows; macOS polls CoreGraphics, so the Down step is not reproducible in a unit test.)
-=======
-    /// A modifier+click preserves a filesystem target through app activation
-    /// (Ctrl on Linux/Windows; macOS polls CoreGraphics so the Down step isn't
-    /// reproducible in a unit test).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn modifier_click_on_file_link_opens_via_our_handler() {
@@ -1980,31 +1961,6 @@ mod link_click_tests {
             "expected fall-through to OpenBlockViewer, got {outcome:?}"
         );
     }
-<<<<<<< HEAD
-=======
-    /// Double-click on a user prompt enters inline edit mode (replacing the
-    /// old fold-toggle for editable prompts).
-    #[test]
-    fn double_click_on_user_prompt_enters_inline_edit() {
-        let mut agent = make_agent();
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
-                "fix the bug",
-            ));
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::agent_message("done"));
-        agent.scrollback.prepare_layout(80, 40);
-        let now = std::time::Instant::now();
-        (agent.last_click, _, _) = agent.handle_scrollback_click(now, 0, false);
-        let _ = agent.handle_scrollback_click(now + std::time::Duration::from_millis(10), 0, false);
-        assert!(
-            agent.inline_edit.is_some(),
-            "double-click must start inline edit"
-        );
-    }
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn enter_on_subagent_group_header_falls_through_to_group_toggle() {
         let mut agent = make_agent();

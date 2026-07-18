@@ -101,12 +101,7 @@ impl VisibleLinkMap {
         self.push_overlay_links(overlay, start_len, crate::terminal::terminal_context());
     }
 
-<<<<<<< HEAD
     /// Push overlay segments, merging same-id, same-target links only with entries at indices `>= merge_from` (0 for rebuild; map length for append).
-=======
-    /// Push overlay segments, merging same-`id` only with entries at
-    /// indices `>= merge_from` (0 for rebuild; map length for append).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn push_overlay_links(
         &mut self,
         overlay: &LinkOverlay,
@@ -245,27 +240,18 @@ mod tests {
         let mut map = VisibleLinkMap::default();
         map.rebuild(1, &overlay, vec![]);
 
-<<<<<<< HEAD
         assert_eq!(
             nth_link(&map, 0).target,
             LinkTarget::File(Arc::clone(&path))
         );
         let resolved =
             resolve_link_target(&nth_link(&map, 0).target).expect("resolved file target");
-=======
-        assert_eq!(map.links()[0].target, LinkTarget::File(Arc::clone(&path)));
-        let resolved = resolve_link_target(&map.links()[0].target).expect("resolved file target");
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(resolved.open_target, Some(LinkTarget::File(path)));
         assert_eq!(
             resolved.osc8_url.unwrap().as_ref(),
             "file:///tmp/non-display-target/file%20name.rs"
         );
-<<<<<<< HEAD
         assert!(!nth_link(&map, 0).looks_like_bare_url_text());
-=======
-        assert!(!map.links()[0].looks_like_bare_url_text());
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -297,11 +283,7 @@ mod tests {
         map.rebuild_for_context(1, &overlay, vec![], &terminal);
 
         assert_eq!(map.links().len(), 1);
-<<<<<<< HEAD
         assert_eq!(nth_link(&map, 0).target, web);
-=======
-        assert_eq!(map.links()[0].target, web);
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(map.link_at(5, 3).is_none());
         assert!(map.link_at(5, 4).is_some());
     }
@@ -412,11 +394,7 @@ mod tests {
         map.rebuild(2, &overlay2, vec![]);
         assert_eq!(map.links().len(), 2);
         assert_eq!(
-<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&map, 0).target)
-=======
-            &*resolve_link_target(&map.links()[0].target)
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 .unwrap()
                 .osc8_url
                 .unwrap(),
@@ -434,11 +412,7 @@ mod tests {
         map.rebuild(1, &overlay, vec![]);
         assert_eq!(map.links().len(), 1);
         assert_eq!(
-<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&map, 0).target)
-=======
-            &*resolve_link_target(&map.links()[0].target)
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 .unwrap()
                 .osc8_url
                 .unwrap(),
@@ -524,15 +498,9 @@ mod tests {
 
         // One logical link with 2 rects
         assert_eq!(map.links().len(), 1);
-<<<<<<< HEAD
         assert_eq!(nth_link(&map, 0).rects.len(), 2);
         assert_eq!(
             &*resolve_link_target(&nth_link(&map, 0).target)
-=======
-        assert_eq!(map.links()[0].rects.len(), 2);
-        assert_eq!(
-            &*resolve_link_target(&map.links()[0].target)
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 .unwrap()
                 .osc8_url
                 .unwrap(),

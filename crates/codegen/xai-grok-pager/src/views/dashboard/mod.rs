@@ -27,10 +27,7 @@ mod chrome;
 pub mod layout;
 pub mod peek;
 pub mod peek_tail;
-<<<<<<< HEAD
 mod preview;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub mod render;
 pub mod row;
 mod row_activity;

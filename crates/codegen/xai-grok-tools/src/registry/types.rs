@@ -2675,10 +2675,7 @@ mod tests {
             .into_iter()
             .map(|id| ToolConfig::from_id(format!("GrokBuild:{id}")))
             .chain(std::iter::empty::<ToolConfig>())
-<<<<<<< HEAD
             .chain(std::iter::empty::<ToolConfig>())
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             .collect(),
             behavior_preset: None,
         };

@@ -4,11 +4,8 @@ mod billing;
 mod cta_e2e;
 mod dashboard;
 mod jump;
-<<<<<<< HEAD
 mod mid_text_btw;
 mod mid_text_goal;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 mod modes;
 mod notes;
 mod permissions;

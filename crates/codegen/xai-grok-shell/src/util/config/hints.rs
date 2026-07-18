@@ -87,10 +87,7 @@ pub struct ResolvedContextualHints {
     pub send_now: bool,
     pub small_screen: bool,
     pub word_select: bool,
-<<<<<<< HEAD
     pub export_copy: bool,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub ssh_wrap: bool,
 }
 
@@ -103,10 +100,7 @@ impl Default for ResolvedContextualHints {
             send_now: true,
             small_screen: true,
             word_select: true,
-<<<<<<< HEAD
             export_copy: true,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             ssh_wrap: true,
         }
     }
@@ -134,10 +128,7 @@ pub fn resolve_contextual_hints(
         send_now: resolve_tip(ui.send_now, remote.and_then(|r| r.send_now)),
         small_screen: resolve_tip(ui.small_screen, remote.and_then(|r| r.small_screen)),
         word_select: resolve_tip(ui.word_select, remote.and_then(|r| r.word_select)),
-<<<<<<< HEAD
         export_copy: resolve_tip(ui.export_copy, remote.and_then(|r| r.export_copy)),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         ssh_wrap: resolve_tip(ui.ssh_wrap, remote.and_then(|r| r.ssh_wrap)),
     }
 }
@@ -229,10 +220,7 @@ mod tests {
             send_now: None,
             small_screen: None,
             word_select,
-<<<<<<< HEAD
             export_copy: None,
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             ssh_wrap: None,
         }
     }
@@ -247,10 +235,7 @@ mod tests {
         assert!(resolved.send_now, "send_now defaults ON");
         assert!(resolved.small_screen, "small_screen defaults ON");
         assert!(resolved.word_select, "word_select defaults ON");
-<<<<<<< HEAD
         assert!(resolved.export_copy, "export_copy defaults ON");
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(resolved.ssh_wrap, "ssh_wrap defaults ON");
     }
 
@@ -268,30 +253,18 @@ mod tests {
         assert!(resolved.send_now);
         assert!(resolved.small_screen);
         assert!(resolved.word_select);
-<<<<<<< HEAD
         assert!(resolved.export_copy);
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(resolved.ssh_wrap);
     }
 
     #[test]
     fn contextual_hints_remote_tier_controls_default_per_tip() {
         let _g = contextual_hints_guard();
-<<<<<<< HEAD
         // Disabling two distinct fields catches a cross-wired resolver line (reading one remote field into another's gate)
         let r = ContextualHintsRemote {
             ssh_wrap: Some(false),
             export_copy: Some(false),
             ..remote(None, Some(false), None, None)
-=======
-        // Remote disables plan_mode + ssh_wrap; absent tips fall through to
-        // default ON. Setting two distinct fields also catches a cross-wired
-        // resolver line (reading one remote field into another's gate).
-        let r = ContextualHintsRemote {
-            ssh_wrap: Some(false),
-            ..remote(None, Some(false), None, None, None)
->>>>>>> e3fdf3ed (Merge 2 (#4))
         };
         let resolved = resolve_contextual_hints(&ContextualHints::default(), Some(&r));
         assert!(resolved.undo, "absent remote tip → default ON");
@@ -299,13 +272,10 @@ mod tests {
         assert!(resolved.image_input);
         assert!(resolved.send_now);
         assert!(resolved.word_select);
-<<<<<<< HEAD
         assert!(
             !resolved.export_copy,
             "remote `false` soft-disables export_copy"
         );
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(!resolved.ssh_wrap, "remote `false` soft-disables ssh_wrap");
     }
 
@@ -335,10 +305,7 @@ mod tests {
             send_now: Some(false),
             small_screen: Some(false),
             word_select: Some(false),
-<<<<<<< HEAD
             export_copy: Some(false),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             ssh_wrap: Some(false),
         };
         let r = remote(Some(false), Some(false), Some(false), Some(false));
@@ -350,10 +317,7 @@ mod tests {
                 && resolved.send_now
                 && resolved.small_screen
                 && resolved.word_select
-<<<<<<< HEAD
                 && resolved.export_copy
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 && resolved.ssh_wrap
         );
         unsafe { std::env::remove_var(ENV_CONTEXTUAL_HINTS) };
@@ -370,10 +334,7 @@ mod tests {
             send_now: Some(true),
             small_screen: Some(true),
             word_select: Some(true),
-<<<<<<< HEAD
             export_copy: Some(true),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             ssh_wrap: Some(true),
         };
         let r = remote(Some(true), Some(true), Some(true), Some(true));
@@ -385,10 +346,7 @@ mod tests {
                 && !resolved.send_now
                 && !resolved.small_screen
                 && !resolved.word_select
-<<<<<<< HEAD
                 && !resolved.export_copy
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 && !resolved.ssh_wrap
         );
         unsafe { std::env::remove_var(ENV_CONTEXTUAL_HINTS) };

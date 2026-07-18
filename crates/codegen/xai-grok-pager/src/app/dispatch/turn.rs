@@ -2,12 +2,8 @@
 
 use super::ctx::{active_subagent_view_mut, get_active_agent_mut};
 use super::permissions::drain_permission_queue;
-<<<<<<< HEAD
 use super::queue::{apply_turn_start_shim, maybe_drain_queue, note_peek_page_flip};
 use crate::app::acp_handler::task_view_by_session_id;
-=======
-use super::queue::{apply_turn_start_shim, maybe_drain_queue, note_peek_page_flip_after_drain};
->>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::app::actions::Effect;
 use crate::app::agent::{AgentId, AgentSession};
 use crate::app::agent_view::{ActivePane, AgentView};
@@ -692,20 +688,12 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         if clean_success {
             crate::app::auto_implement::on_successful_turn_end(agent);
         }
-<<<<<<< HEAD
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         effects.extend(drain.effects);
         drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
     }
     for (id, page_flip_entry) in drained_ids {
         note_peek_page_flip(app, id, page_flip_entry);
-=======
-        effects.extend(maybe_drain_queue(agent));
-        drained_ids.push(id);
-    }
-    for id in drained_ids {
-        note_peek_page_flip_after_drain(app, id);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     fired.then_some(effects)
 }

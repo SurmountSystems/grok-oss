@@ -9,7 +9,6 @@ use super::common::*;
 #[ignore]
 async fn empty_enter_force_sends_top_queued() {
     let content = ContentController::start().await.expect("start content");
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/empty_enter_force_sends_top_queued.rs
     content
         .server()
         .set_settings(json!({ "allow_access": true, "dock_enabled": true }));
@@ -23,19 +22,6 @@ async fn empty_enter_force_sends_top_queued() {
     let mut turn_two = content.expect_agent_turn(
         "promoted queued follow-up",
         "TURNTWO reply to the promoted follow-up.",
-=======
-    let mut turn_one = content.expect_response_blocked(
-        "running turn before send-now",
-        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-        ScriptedResponse::sse(chat_completions_message_events(&slow_turn_text("TURNONE"))),
-    );
-    let mut turn_two = content.expect_response(
-        "promoted queued follow-up",
-        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-        ScriptedResponse::sse(chat_completions_message_events(
-            "TURNTWO reply to the promoted follow-up.",
-        )),
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/empty_enter_force_sends_top_queued.rs
     );
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -79,14 +65,8 @@ async fn empty_enter_force_sends_top_queued() {
     // The shell cancels turn 1 (the abort beats the held completion) and promotes the row to run as turn 2
     harness.inject_keys(b"\r").expect("empty Enter send-now");
     turn_one.release();
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/empty_enter_force_sends_top_queued.rs
     // The promoted row renders as a standard "❯ " prompt block via the turn-start adoption
     // The arrow prefix distinguishes the committed block from the prefix-less queue row
-=======
-    // The promoted row renders as a standard "❯ " prompt block via the
-    // turn-start adoption (the arrow prefix distinguishes the committed block
-    // from the prefix-less queue row).
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/empty_enter_force_sends_top_queued.rs
     harness
         .wait_for_text(
             "\u{276F} please also check the logs",

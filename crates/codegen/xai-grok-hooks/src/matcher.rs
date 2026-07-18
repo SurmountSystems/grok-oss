@@ -12,13 +12,8 @@ pub struct HookMatcher {
 #[derive(Debug, Clone)]
 enum MatcherKind {
     All,
-<<<<<<< HEAD
     /// Matches no tool names.
     /// Used when a configured matcher fails to compile after deserialization; fail closed rather than widen to match-all.
-=======
-    /// Matches no tool names. Used when a configured matcher fails to compile
-    /// after deserialization — fail closed rather than widen to match-all.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     Never,
     Exact(Vec<String>),
     Regex(Regex),
@@ -38,13 +33,8 @@ impl HookMatcher {
         Ok(Self { kind })
     }
 
-<<<<<<< HEAD
     /// Matcher that never matches.
     /// Prefer this over `None` on a [`HookSpec`] when a pattern was configured but could not be compiled (fail-closed).
-=======
-    /// Matcher that never matches. Prefer this over `None` on a [`HookSpec`] when a
-    /// pattern was configured but could not be compiled (fail-closed).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn never() -> Self {
         Self {
             kind: MatcherKind::Never,

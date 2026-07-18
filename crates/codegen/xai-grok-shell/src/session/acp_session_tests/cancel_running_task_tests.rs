@@ -614,12 +614,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 search_config: crate::config::MemorySearchConfig::default(),
                 watcher: None,
                 stale_claim_secs: 60,
-<<<<<<< HEAD
                 search_source: crate::session::memory::MemorySearchSource::Tool,
                 observation_sink: crate::session::memory::noop_memory_observation_sink(),
-=======
-                search_source: "tool",
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
             };
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();

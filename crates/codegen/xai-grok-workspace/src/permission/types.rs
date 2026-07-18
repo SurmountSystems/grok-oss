@@ -28,16 +28,6 @@ pub struct PermissionEvent {
     pub subagent_description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
-<<<<<<< HEAD
-=======
-    /// The trigger that produced this decision, distinct from `prompt_outcome`
-    /// (which records the user's choice when prompted). Lets a trace show *why*
-    /// a request reached a prompt even when `user_prompted=true`. Values:
-    /// yolo, policy_allow, policy_deny, policy_ask, auto_fast_path,
-    /// auto_classifier_allow, auto_classifier_block, sandbox_auto,
-    /// persisted_grant, session_grant, static_allowlist, safe_command,
-    /// session_deny, prompt_deny, needs_user, requester_gone.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

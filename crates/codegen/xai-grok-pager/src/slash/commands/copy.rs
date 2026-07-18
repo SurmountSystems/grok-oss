@@ -14,7 +14,6 @@ use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_m
 pub struct CopyCommand;
 
 impl SlashCommand for CopyCommand {
-<<<<<<< HEAD
     slash_meta! {
         name: "copy",
         description: "Copy last response to clipboard or file (/copy [N] [file])",
@@ -22,30 +21,6 @@ impl SlashCommand for CopyCommand {
         takes_args: true,
         session_scoped: true,
         arg_placeholder: "[N] [file]",
-=======
-    fn name(&self) -> &str {
-        "copy"
-    }
-
-    fn description(&self) -> &str {
-        "Copy last response to clipboard (/copy N for Nth-latest)"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/copy [N]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("[N]")
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -196,15 +171,4 @@ mod tests {
             other => panic!("expected Action(CopyAssistantMessage), got {other:?}"),
         }
     }
-<<<<<<< HEAD
-=======
-
-    #[test]
-    fn available_in_minimal_by_default() {
-        // Clipboard copy from scrollback does not need the fullscreen pane —
-        // same path as `/export` and useful when native selection is awkward
-        // for multi-page assistant messages.
-        assert!(CopyCommand.available_in_minimal());
-    }
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }

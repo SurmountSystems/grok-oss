@@ -116,18 +116,12 @@ pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
     }
 }
 
-<<<<<<< HEAD
 /// A full commit sha (40-hex SHA-1 or 64-hex SHA-256), the only form the pin policy accepts.
 /// Branches, tags, and short prefixes are mutable or forgeable.
-=======
-/// A full commit sha (40-hex SHA-1 or 64-hex SHA-256) — the only thing the
-/// pin policy accepts; branches, tags, and short prefixes are mutable or forgeable.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn is_full_commit_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-<<<<<<< HEAD
 fn validate_git_operand<'a>(value: &'a str, kind: &str) -> Result<&'a str, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -170,25 +164,16 @@ pub fn validate_git_sha(sha: &str) -> Result<&str, String> {
 
 /// The require-sha gate every remote plugin fetch goes through: with the policy on and no full-hex pin, it returns a typed refusal.
 /// Local-directory installs are exempt (the operator controls that disk; nothing is fetched).
-=======
-/// The require-sha gate every remote plugin fetch goes through: policy on + no
-/// full-hex pin → typed refusal. Local-directory installs are exempt (the
-/// operator controls that disk; nothing is fetched).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn ensure_pinned(
     require_sha: bool,
     sha: Option<&str>,
     plugin: &str,
     url: &str,
 ) -> Result<(), InstallError> {
-<<<<<<< HEAD
     if !require_sha {
         return Ok(());
     }
     if sha.map(str::trim).is_some_and(is_full_commit_sha) {
-=======
-    if !require_sha || sha.map(str::trim).is_some_and(is_full_commit_sha) {
->>>>>>> e3fdf3ed (Merge 2 (#4))
         return Ok(());
     }
     tracing::warn!(
@@ -202,23 +187,13 @@ pub fn ensure_pinned(
     })
 }
 
-<<<<<<< HEAD
 /// Prefer an explicit supplied SHA; if only `git_ref` is a full commit SHA, hoist it into the SHA slot so the verified clone path is used.
 /// Catalog pins published as `ref` still need this.
-=======
-/// Prefer an explicit full-sha pin; if only `git_ref` is a full commit sha,
-/// hoist it into the sha slot so the verified clone path is used. Catalog pins
-/// published as `ref` still need this.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn hoist_pin_slots<'a>(
     git_ref: Option<&'a str>,
     git_sha: Option<&'a str>,
 ) -> (Option<&'a str>, Option<&'a str>) {
-<<<<<<< HEAD
     match git_sha.map(str::trim) {
-=======
-    match git_sha.map(str::trim).filter(|s| !s.is_empty()) {
->>>>>>> e3fdf3ed (Merge 2 (#4))
         Some(s) => (git_ref, Some(s)),
         None => match git_ref.map(str::trim).filter(|s| is_full_commit_sha(s)) {
             Some(s) => (None, Some(s)),
@@ -227,14 +202,7 @@ pub fn hoist_pin_slots<'a>(
     }
 }
 
-<<<<<<< HEAD
 /// Returns `true` for strings like `user/repo` or `user/repo@v1.0` that should be expanded to `https://github.com/user/repo`.
-=======
-/// Check if a string looks like a GitHub `owner/repo` shorthand.
-///
-/// Returns `true` for strings like `user/repo` or `user/repo@v1.0`
-/// that should be expanded to `https://github.com/user/repo`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 /// Avoids false positives for local paths (`/abs`, `./rel`, `~/home`).
 fn is_github_shorthand(s: &str) -> bool {
     // Local path indicators.
@@ -278,39 +246,14 @@ pub fn install_from_source(
     install_from_source_with_label(source, registry, require_sha, None)
 }
 
-<<<<<<< HEAD
 /// Like [`install_from_source`]; when `plugin_label` is set it appears in pin-refusal errors instead of the git URL (marketplace catalog names).
-=======
-/// Like [`install_from_source`]; when `plugin_label` is set it appears in
-/// pin-refusal errors instead of the git URL (marketplace catalog names).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn install_from_source_with_label(
     source: &InstallSource,
     registry: &InstallRegistry,
     require_sha: bool,
     plugin_label: Option<&str>,
 ) -> Result<InstallResult, InstallError> {
-<<<<<<< HEAD
     let source = &normalize_install_source(source)?;
-=======
-    let source = &match source {
-        InstallSource::Git {
-            url,
-            git_ref,
-            git_sha,
-            subdir,
-        } => {
-            let (r, s) = hoist_pin_slots(git_ref.as_deref(), git_sha.as_deref());
-            InstallSource::Git {
-                url: url.clone(),
-                git_ref: r.map(str::to_owned),
-                git_sha: s.map(str::to_owned),
-                subdir: subdir.clone(),
-            }
-        }
-        other => other.clone(),
-    };
->>>>>>> e3fdf3ed (Merge 2 (#4))
     if let InstallSource::Git { url, git_sha, .. } = source {
         let label = plugin_label.unwrap_or(url.as_str());
         ensure_pinned(require_sha, git_sha.as_deref(), label, url)?;
@@ -733,18 +676,8 @@ pub enum UpdateStatus {
     LiveLocal,
 }
 
-<<<<<<< HEAD
 /// Branch installs fetch and fast-forward; tag and commit installs are pinned no-ops.
 /// Local installs are a no-op here; [`super::local_refresh`] re-copies on session spawn / reload.
-=======
-/// Update an installed repo by fetching latest changes.
-///
-/// Update semantics (from design decision #6):
-/// - Branch installs: `git fetch` + fast-forward to remote branch head
-/// - Tag installs: pinned — no-op
-/// - Commit installs: pinned — no-op
-/// - Local installs: no-op (explicit update); [`super::local_refresh`] re-copies on session spawn / reload
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn update_repo(
     repo_key: &str,
     repo: &InstalledRepo,
@@ -760,12 +693,7 @@ pub fn update_repo(
         } => {
             // Check if pinned
             if let Some(r) = git_ref {
-<<<<<<< HEAD
                 // Heuristic: if the ref looks like a commit hash or a version tag (starts with v and contains dots), it's pinned
-=======
-                // Heuristic: if the ref looks like a commit hash
-                // or a version tag (starts with v and contains dots), it's pinned.
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 let is_tag_or_commit =
                     is_full_commit_sha(r) || (r.starts_with('v') && r.contains('.'));
                 if is_tag_or_commit {
@@ -774,12 +702,7 @@ pub fn update_repo(
                     });
                 }
             }
-<<<<<<< HEAD
             // An update pulls whatever the mutable ref now points at, the same unpinned fetch the install gate refuses
-=======
-            // An update pulls whatever the mutable ref now points at — the same
-            // unpinned fetch the install gate refuses.
->>>>>>> e3fdf3ed (Merge 2 (#4))
             ensure_pinned(require_sha, None, repo_key, url)?;
 
             let old_commit = Some(commit.clone());
@@ -1430,7 +1353,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn git_operand_validators_preserve_supported_inputs() {
         for url in [
             "https://example.com/repo.git",
@@ -1480,29 +1402,6 @@ mod tests {
             ensure_pinned(true, None, "p", "u"),
             Err(InstallError::UnpinnedRemoteRefused { .. })
         ));
-=======
-    fn ensure_pinned_accepts_only_full_hex_shas() {
-        let sha1 = "a".repeat(40);
-        let sha256 = "b".repeat(64);
-        assert!(ensure_pinned(false, None, "p", "u").is_ok());
-        assert!(ensure_pinned(true, Some(&sha1), "p", "u").is_ok());
-        assert!(ensure_pinned(true, Some(&sha256), "p", "u").is_ok());
-        for bad in [
-            None,
-            Some("main"),
-            Some("deadbeef"),
-            Some(""),
-            Some("v1.2.3"),
-        ] {
-            assert!(
-                matches!(
-                    ensure_pinned(true, bad, "p", "u"),
-                    Err(InstallError::UnpinnedRemoteRefused { .. })
-                ),
-                "{bad:?} must be refused"
-            );
-        }
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -1519,18 +1418,12 @@ mod tests {
         assert_eq!(hoist_pin_slots(Some("main"), None), (Some("main"), None));
         assert_eq!(
             hoist_pin_slots(Some(sha.as_str()), Some("  ")),
-<<<<<<< HEAD
             (Some(sha.as_str()), Some("")),
             "a supplied blank SHA remains a SHA field and must fail validation"
-=======
-            (None, Some(sha.as_str())),
-            "blank sha is treated as absent so a full-sha ref can still hoist"
->>>>>>> e3fdf3ed (Merge 2 (#4))
         );
     }
 
     #[test]
-<<<<<<< HEAD
     fn normalized_git_kind_stays_pinned_in_durable_metadata() {
         for (git_ref, git_sha, expected_pin) in [
             (Some(" v1.2.3 "), None, "v1.2.3".to_string()),
@@ -1610,8 +1503,6 @@ mod tests {
     }
 
     #[test]
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn install_from_source_gates_and_hoists_sha_pins() {
         let install = tempfile::tempdir().unwrap();
         let registry = InstallRegistry::empty(install.path().join("installed-plugins"));
@@ -1636,13 +1527,8 @@ mod tests {
             return;
         }
 
-<<<<<<< HEAD
         // Real pinned install from a local origin
         // allowAnySHA1InWant matches make_local_repo so fetch-by-sha against file:// succeeds
-=======
-        // Real pinned install from a local origin. allowAnySHA1InWant matches
-        // make_local_repo so fetch-by-sha against file:// succeeds.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let (origin, sha) = make_local_repo();
         let pinned_via_ref = InstallSource::Git {
             url: format!("file://{}", origin.path().display()),

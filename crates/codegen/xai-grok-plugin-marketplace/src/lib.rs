@@ -15,13 +15,8 @@ pub mod scanner;
 pub mod types;
 
 pub use config::{
-<<<<<<< HEAD
     env_require_sha, foreign_settings_roots, load_extra_sources_from_settings,
     load_extra_sources_from_settings_in, load_require_sha, load_sources, native_settings_roots,
-=======
-    env_require_sha, load_extra_sources_from_settings, load_extra_sources_from_settings_in,
-    load_require_sha, load_sources,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 pub use error::MarketplaceError;
 pub use scanner::scan_marketplace;

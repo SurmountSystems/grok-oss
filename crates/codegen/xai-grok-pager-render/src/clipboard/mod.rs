@@ -1,23 +1,12 @@
 //! Re-exports [`ClipboardProvider`] and [`InternalClipboard`] from `xai-ratatui-textarea`, and adds [`SystemClipboard`] backed by `arboard`.
 //!
-<<<<<<< HEAD
 //! A copy writes every active leg (native / tmux / OSC 52); [`ClipboardDelivery`] is the evidence the write reached its destination.
-=======
-//! Re-exports [`ClipboardProvider`] and [`InternalClipboard`] from
-//! `xai-ratatui-textarea`, and adds [`SystemClipboard`] backed by `arboard`.
-//!
-//! Multi-fire writes (native / tmux / OSC 52); delivery evidence is [`ClipboardDelivery`].
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
 mod trust;
 
 pub use trust::{
-<<<<<<< HEAD
     ClipboardDelivery, ClipboardEnvironment, NativeClipboardPreflight, Osc52Capability,
     expected_delivery, native_clipboard_preflight,
-=======
-    ClipboardDelivery, NativeClipboardPreflight, expected_delivery, native_clipboard_preflight,
->>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 pub use xai_ratatui_textarea::{ClipboardProvider, InternalClipboard};
 
@@ -199,17 +188,10 @@ fn write_tmux_buffer(text: &str) -> bool {
 pub struct SystemClipboard;
 
 impl SystemClipboard {
-<<<<<<< HEAD
     /// Runs the full write route and classifies the result via the environment-based delivery policy.
     pub fn try_set(text: &str) -> ClipboardDelivery {
         let legs = clipboard_write_with_route(text, clipboard_route());
         decision_for_legs(&legs, text).delivery()
-=======
-    /// Full write route classified by the environment-based delivery policy.
-    pub fn try_set(text: &str) -> ClipboardDelivery {
-        let legs = clipboard_write_with_route(text, clipboard_route());
-        decision_for_legs(&legs, text).delivery
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 }
 
@@ -299,14 +281,8 @@ pub struct CopyResult {
 
 /// Kind of clipboard feedback (success route, unverified send, or failure).
 ///
-<<<<<<< HEAD
 /// Telemetry labels come from `IntoStaticStr` (`snake_case`); user-facing copy lives in [`ClipboardFeedback::message`] (intentionally different).
 #[derive(Debug, Clone, Copy, Eq, PartialEq, strum::AsRefStr, strum::IntoStaticStr)]
-=======
-/// Telemetry labels come from `IntoStaticStr` (`snake_case`); user-facing copy
-/// lives in [`ClipboardFeedback::message`] (intentionally different).
-#[derive(Debug, Clone, Copy, Eq, PartialEq, strum::IntoStaticStr)]
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum ClipboardFeedback {
     /// Plain successful copy (native clipboard).
@@ -321,11 +297,7 @@ pub(crate) enum ClipboardFeedback {
     UnverifiedOscRemote,
     /// OSC 52 emitted from a displayless container with unknown outer support.
     UnverifiedOscContainer,
-<<<<<<< HEAD
     /// VS Code over SSH/remote with non-ASCII text: OSC 52 may garble it.
-=======
-    /// VS Code over SSH/remote + non-ASCII: OSC 52 may mojibake.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     VsCodeSshNonAscii,
     /// No route reached the user's local clipboard from a remote/container topology.
     FailedRemote,
@@ -334,7 +306,6 @@ pub(crate) enum ClipboardFeedback {
 }
 
 impl ClipboardFeedback {
-<<<<<<< HEAD
     pub(crate) fn delivery(self) -> ClipboardDelivery {
         match self {
             Self::Copied
@@ -349,8 +320,6 @@ impl ClipboardFeedback {
         }
     }
 
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// User-facing toast message for this kind.
     ///
     /// Must start with [`Self::message_lead`] (asserted in tests) so the path-bearing toast built from the lead never rewords the static copy.
@@ -366,11 +335,7 @@ impl ClipboardFeedback {
             Self::VsCodeSshNonAscii => {
                 "Copied. VS Code over SSH may garble non-ASCII; use /minimal if needed."
             }
-<<<<<<< HEAD
             Self::FailedRemote | Self::Failed => "Copy failed. Try /doctor or /minimal.",
-=======
-            Self::FailedRemote | Self::Failed => "Copy failed. Try /terminal-setup or /minimal.",
->>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 
@@ -402,25 +367,16 @@ impl ClipboardFeedback {
         }
     }
 
-<<<<<<< HEAD
     fn to_result(self) -> CopyResult {
-=======
-    fn to_result(self, delivery: ClipboardDelivery) -> CopyResult {
->>>>>>> e3fdf3ed (Merge 2 (#4))
         CopyResult {
             message: self.message(),
             message_lead: self.message_lead(),
             ticks: self.ticks(),
-<<<<<<< HEAD
             delivery: self.delivery(),
-=======
-            delivery,
->>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 }
 
-<<<<<<< HEAD
 fn clipboard_environment(legs: &ClipboardWriteLegs) -> ClipboardEnvironment {
     ClipboardEnvironment {
         brand: crate::terminal::terminal_context().brand,
@@ -436,25 +392,6 @@ fn clipboard_environment(legs: &ClipboardWriteLegs) -> ClipboardEnvironment {
 
 fn decision_for_legs(legs: &ClipboardWriteLegs, text: &str) -> ClipboardFeedback {
     trust::resolve_copy_decision(legs, text, clipboard_environment(legs))
-=======
-fn decision_for_legs(legs: &ClipboardWriteLegs, text: &str) -> trust::ClipboardDecision {
-    let remote = is_remote();
-    let container = is_container_no_display();
-    let mut decision = trust::resolve_copy_decision(
-        legs,
-        text,
-        crate::terminal::terminal_context().brand,
-        crate::host::HostOs::current(),
-        crate::host::DisplayServer::current(),
-        remote,
-        container,
-        osc52_sink_active(),
-    );
-    if decision.delivery == ClipboardDelivery::Failed && (remote || container) {
-        decision.feedback = ClipboardFeedback::FailedRemote;
-    }
-    decision
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 /// Write text and return a toast; emits `grok-shell-clipboard_copy` when enabled.
@@ -462,28 +399,17 @@ pub fn copy_text(text: &str) -> CopyResult {
     let started = std::time::Instant::now();
     let route = clipboard_route();
     let legs = clipboard_write_with_route(text, route);
-<<<<<<< HEAD
     let feedback = decision_for_legs(&legs, text);
     if feedback.delivery().is_failed() {
-=======
-    let decision = decision_for_legs(&legs, text);
-    if decision.delivery.is_failed() {
->>>>>>> e3fdf3ed (Merge 2 (#4))
         tracing::warn!(
             len = text.len(),
             display_server = %crate::host::DisplayServer::current(),
             "clipboard write failed on all trusted backends"
         );
     }
-<<<<<<< HEAD
     let result = feedback.to_result();
     let toast_kind: &'static str = feedback.into();
     log_clipboard_copy_event(text, route, &legs, feedback, toast_kind, started);
-=======
-    let result = decision.feedback.to_result(decision.delivery);
-    let toast_kind: &'static str = decision.feedback.into();
-    log_clipboard_copy_event(text, route, &legs, decision, toast_kind, started);
->>>>>>> e3fdf3ed (Merge 2 (#4))
     result
 }
 
@@ -672,11 +598,7 @@ fn log_clipboard_copy_event(
     text: &str,
     route: &ClipboardRoute,
     legs: &ClipboardWriteLegs,
-<<<<<<< HEAD
     feedback: ClipboardFeedback,
-=======
-    decision: trust::ClipboardDecision,
->>>>>>> e3fdf3ed (Merge 2 (#4))
     toast_kind: &'static str,
     started: std::time::Instant,
 ) {
@@ -698,17 +620,10 @@ fn log_clipboard_copy_event(
         data_control: legs.data_control,
         tmux_ok: legs.tmux_ok,
         osc52_ok: legs.osc52_ok,
-<<<<<<< HEAD
         delivery: feedback.delivery().telemetry_label(),
         osc52_sink: osc52_sink_active(),
         container_no_display: is_container_no_display(),
         reported_success: feedback.delivery().reported_success(),
-=======
-        delivery: decision.delivery.telemetry_label(),
-        osc52_sink: osc52_sink_active(),
-        container_no_display: is_container_no_display(),
-        reported_success: decision.delivery.reported_success(),
->>>>>>> e3fdf3ed (Merge 2 (#4))
         toast_kind,
         duration_ms: started.elapsed().as_millis() as u64,
     });
@@ -2372,39 +2287,26 @@ mod tests {
             (
                 ClipboardFeedback::FailedRemote,
                 ClipboardDelivery::Failed,
-<<<<<<< HEAD
                 "Copy failed. Try /doctor or /minimal.",
-=======
-                "Copy failed. Try /terminal-setup or /minimal.",
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 "failed_remote",
                 120,
             ),
             (
                 ClipboardFeedback::Failed,
                 ClipboardDelivery::Failed,
-<<<<<<< HEAD
                 "Copy failed. Try /doctor or /minimal.",
-=======
-                "Copy failed. Try /terminal-setup or /minimal.",
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 "failed",
                 120,
             ),
         ];
         for (feedback, delivery, message, telemetry, ticks) in cases {
-<<<<<<< HEAD
             let result = feedback.to_result();
             assert_eq!(feedback.delivery(), delivery);
-=======
-            let result = feedback.to_result(delivery);
->>>>>>> e3fdf3ed (Merge 2 (#4))
             assert_eq!(feedback.message(), message);
             assert_eq!(Into::<&'static str>::into(feedback), telemetry);
             assert_eq!(result.message, message);
             assert_eq!(result.ticks, ticks);
             assert_eq!(result.delivery, delivery);
-<<<<<<< HEAD
             // The lead must prefix the full message so the path-bearing toast never rewords the static copy
             assert!(
                 message.starts_with(result.message_lead),
@@ -2656,23 +2558,6 @@ mod tests {
                 assert_eq!(file, Some(path));
             }
             other => panic!("expected Clipboard delivery, got {other:?}"),
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
-        }
-    }
-
-    #[test]
-    fn clipboard_fallbacks_are_short_and_actionable() {
-        for feedback in [
-            ClipboardFeedback::UnverifiedOscRemote,
-            ClipboardFeedback::UnverifiedOscContainer,
-            ClipboardFeedback::FailedRemote,
-            ClipboardFeedback::Failed,
-        ] {
-            assert!(feedback.message().chars().count() + 4 < 80, "{feedback:?}");
-            assert!(!feedback.message().contains("Shift"), "{feedback:?}");
-            assert!(!feedback.message().contains("Fn"), "{feedback:?}");
-            assert!(feedback.message().contains("/minimal"), "{feedback:?}");
         }
         assert!(
             ClipboardFeedback::UnverifiedOscRemote

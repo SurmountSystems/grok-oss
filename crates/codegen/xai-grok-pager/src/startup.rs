@@ -62,25 +62,9 @@ pub enum WarningSeverity {
     Info,
 }
 
-<<<<<<< HEAD
 /// Pick the warning the single-slot welcome banner shows: the first `Warning`-severity entry, else the last entry.
 /// A plain `first()` would let an old Info at index 0 hide a Warning pushed behind it. A Warning-less list falls
 /// back to the last entry because the newest Info is direct feedback on what the user just did.
-=======
-/// Pick the warning the single-slot welcome banner shows: the first
-/// `Warning`-severity entry, else the last entry.
-///
-/// `startup_warnings` is appended to at runtime while the user sits on the
-/// welcome screen (session-start failures, Claude import results), so a plain
-/// `first()` lets an early entry mask that later feedback — e.g. an import
-/// Info result at index 0 hides a session-start Warning pushed behind it.
-/// Severity decides first (a real Warning always beats an Info; among
-/// Warnings, assemble order stays authoritative); a Warning-less list falls
-/// back to the **last** entry because later Info pushes are direct
-/// user-action feedback that must not be masked by an older Info. Every
-/// banner surface (height calc + render) must pick through here so they
-/// cannot disagree.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn banner_warning(warnings: &[StartupWarning]) -> Option<&StartupWarning> {
     warnings
         .iter()
@@ -95,11 +79,7 @@ mod tests {
     fn entry(severity: WarningSeverity, message: &str) -> StartupWarning {
         StartupWarning {
             severity,
-<<<<<<< HEAD
             message: message.to_owned(),
-=======
-            message: message.to_string(),
->>>>>>> e3fdf3ed (Merge 2 (#4))
             action: None,
         }
     }
@@ -117,14 +97,8 @@ mod tests {
 
     #[test]
     fn banner_warning_runtime_pushed_warning_displaces_info() {
-<<<<<<< HEAD
         // An Info entry holds index 0 (e.g. a Claude import result).
         // A Warning pushed later (e.g. "Not inside a git repository") must still win the single banner slot.
-=======
-        // An Info entry holds index 0 (e.g. a Claude import result). A
-        // Warning pushed later (e.g. "Not inside a git repository") must
-        // still win the single banner slot.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let list = [
             entry(WarningSeverity::Info, "info note"),
             entry(WarningSeverity::Warning, "real problem"),
@@ -134,12 +108,7 @@ mod tests {
 
     #[test]
     fn banner_warning_runtime_pushed_info_displaces_earlier_info() {
-<<<<<<< HEAD
         // Warning-less list: a later Info push is direct feedback on a user action (e.g. a Claude import result) and wins over an older Info.
-=======
-        // Warning-less list: a later Info push is direct user-action
-        // feedback (e.g. a Claude import result) and wins over an older Info.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let list = [
             entry(WarningSeverity::Info, "info note"),
             entry(WarningSeverity::Info, "import result"),

@@ -148,12 +148,9 @@ mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
 mod interactions;
 mod jump;
-<<<<<<< HEAD
 mod key_owner;
 pub(crate) use key_owner::{BlockingCard, EscStep, KeyOwner};
 mod kept_plan;
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 mod links;
 mod media;
 mod modals;
@@ -1034,11 +1031,7 @@ pub struct AgentView {
     /// Pending link click: (col, row, target). Set on Down(Left) when a link is hit,
     /// consumed on Up(Left) at the same position, cleared on drag.
     pub pending_link_click: Option<(u16, u16, crate::render::osc8::LinkTarget)>,
-<<<<<<< HEAD
     /// Absolute paths of media generated in this transcript, used to resolve the short relative paths the model prints (`images/1.jpg`) to clickable links. Rebuilt from scrollback only when its generation changes.
-=======
-    /// Absolute paths of media generated in this transcript, used to resolve the
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// short relative paths the model prints (`images/1.jpg`) to clickable
     /// links. Rebuilt from scrollback only when its generation changes.
     pub media_link_paths: Vec<std::path::PathBuf>,
@@ -1382,27 +1375,12 @@ pub struct AgentView {
     pub(crate) cancel_trigger_hint: Option<crate::app::actions::CancelTrigger>,
     pub(crate) rewind_state: Option<crate::views::rewind::RewindState>,
     pub(crate) rewind_points: Option<Vec<crate::views::rewind::RewindPointInfo>>,
-<<<<<<< HEAD
     /// `/jump` picker overlay (pure client-side turn navigation).
     pub(crate) jump_state: Option<crate::views::jump::JumpState>,
     /// Timeline sidebar rail geometry for the current frame (`None` means
     /// hidden). Set by the renderer, consumed by mouse hit-testing.
     pub(crate) timeline_rail: Option<crate::views::timeline::TimelineRail>,
     /// Rail part under the mouse; drives hover styling and the tick
-=======
-    /// In-place edit of a previous user prompt. See `inline_edit.rs`.
-    pub(crate) inline_edit: Option<crate::app::inline_edit::InlineEditState>,
-    /// Edited text awaiting its rewind; `dispatch_rewind_success` resubmits it.
-    /// Set only when the rewind flow emits `Effect::RewindExecute` while the
-    /// inline editor is open (see `stash_inline_resubmit_if_editing`).
-    pub(crate) pending_inline_resubmit: Option<String>,
-    /// `/jump` picker overlay (pure client-side turn navigation).
-    pub(crate) jump_state: Option<crate::views::jump::JumpState>,
-    /// Timeline sidebar rail geometry for the current frame (`None` =
-    /// hidden). Set by the renderer, consumed by mouse hit-testing.
-    pub(crate) timeline_rail: Option<crate::views::timeline::TimelineRail>,
-    /// Rail part under the mouse — drives hover styling + the tick
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// preview popup.
     pub(crate) timeline_hover: Option<crate::views::timeline::TimelineHit>,
     /// Cached tick-hover preview `(turn_idx, text)`. Filled when hover
@@ -1506,17 +1484,10 @@ pub struct AgentView {
     /// Compat fallback only: a wire `_meta.cancelTrigger` on the turn end is trusted over this flag (`"send_now"` suppresses, anything else renders). Consumed at every driver turn end. Kept across the matching send-now prompt's turn start (so the outgoing turn's cancel
     /// PromptResponse can still suppress the marker when it races behind the adopt), but cleared on a non-matching turn start / interactive cancel / replay-window entry, so a stale expectation can never eat a later real
     pub(crate) expect_send_now_cancel: Option<String>,
-<<<<<<< HEAD
     /// Cleared at turn start; set on the first live non-echo update. Defaults true.
     pub(crate) front_message_committed: bool,
     /// Send-now promote: skip `scroll_to_entry_top` on next matching adoption.
     /// Survives cancel-rail `take()` of [`Self::expect_send_now_cancel`].
-=======
-    /// Send-now promote id pin (mirrors [`Self::expect_send_now_cancel`]).
-    /// Cleared on adopt / clear; no longer skips scroll — send-now jumps to
-    /// the painted user prompt like a normal turn. Kept for failure-path
-    /// identity checks that survive cancel-rail `take()` of the expect flag.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) follow_without_jump_prompt_id: Option<String>,
     /// Ids of THIS client's server-queue rows that are still optimistic echoes: the `session/prompt` RPC is in flight and no `x.ai/queue/changed` broadcast has confirmed the row yet. Inserted by the echo push, drained when a broadcast lists the id (queued or running) or the RPC resolves without the row landing.
     pub(crate) optimistic_queue_ids: std::collections::HashSet<String>,

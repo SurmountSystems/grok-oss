@@ -267,15 +267,8 @@ const SCREEN_MODE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
-<<<<<<< HEAD
 // Voice-capture-mode catalog. Alacritty 0.14 and earlier negotiates the protocol yet never reports releases, so
 // hold stays hidden there.
-=======
-// Voice-capture-mode catalog. SHELL-owned, persisted to `[ui].voice_capture_mode`.
-// `hold` is only offered on terminals that report key releases (Kitty keyboard
-// protocol); `effective_enum_choices` hides it elsewhere, and it falls back to
-// `toggle` at runtime.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 const VOICE_CAPTURE_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "toggle",
@@ -469,10 +462,7 @@ const CONTEXTUAL_HINTS_CHILDREN: &[&str] = &[
     "contextual_hints.send_now",
     "contextual_hints.small_screen",
     "contextual_hints.word_select",
-<<<<<<< HEAD
     "contextual_hints.export_copy",
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     "contextual_hints.ssh_wrap",
 ];
 
@@ -556,7 +546,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             hidden_in_minimal: true,
         },
         SettingMeta {
-<<<<<<< HEAD
             key: "dashboard_preview",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
@@ -647,11 +636,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
         SettingMeta {
             // The persisted key stays `simple_mode`
             // The user-facing label distinguishes the PROMPT vim-mode (this setting) from the scrollback `vim_mode` keybindings below
-=======
-            // Persisted key stays `simple_mode`; the user-facing label
-            // distinguishes the PROMPT vim-mode (this setting) from the
-            // scrollback `vim_mode` keybindings below.
->>>>>>> e3fdf3ed (Merge 2 (#4))
             key: "simple_mode",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
@@ -1380,10 +1364,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "ssh",
                 "wrap",
                 "remote",
-<<<<<<< HEAD
                 // copy/export/transcript stay on the export_copy child so a "copy" query does not match the group.
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             ],
             kind: SettingKind::Group {
                 children: CONTEXTUAL_HINTS_CHILDREN,
@@ -1612,7 +1593,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             hidden_in_minimal: false,
         },
         SettingMeta {
-<<<<<<< HEAD
             key: "contextual_hints.export_copy",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
@@ -1627,18 +1607,11 @@ pub fn default_settings() -> Vec<SettingMeta> {
             hidden_in_minimal: false,
         },
         SettingMeta {
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
             key: "contextual_hints.ssh_wrap",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
             label: "SSH wrap",
-<<<<<<< HEAD
             description: "Show a `/doctor` tip when an SSH session is not using `grok wrap`.",
-=======
-            description: "At session load over SSH, recommend `grok wrap ssh` for \
-                          clipboard forwarding and terminal restore.",
->>>>>>> e3fdf3ed (Merge 2 (#4))
             keywords: &[
                 "ssh",
                 "wrap",
@@ -1654,21 +1627,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-<<<<<<< HEAD
         // Only the CLI flag (`--todo-gate`) is wired. Those arms don't yet have a place to land. `restart_required: false`
         // because the config-reloader rebroadcasts UI changes.
-=======
-        // ── TodoGate (runtime turn-end backstop) ──────────────────────
-        //
-        // Only the CLI flag (`--todo-gate`) is wired. Settings-modal
-        // entries for `[reminder.todo_gate]` are deferred — the modal
-        // dispatcher requires per-key action arms in
-        // `settings_modal.rs` + `app/dispatch.rs` + `settings/registry.rs`
-        // that don't yet have a place to land.
-        // SHELL-owned. `restart_required: false` — the config-reloader
-        // rebroadcasts UI changes; mid-session forks pick up new values.
-        // Empty-string default = "no opinion" / use shell's resolution.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         SettingMeta {
             key: "fork_secondary_model",
             category: SettingCategory::Models,

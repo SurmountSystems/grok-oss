@@ -99,14 +99,8 @@ fn first_user_prompt_text(agent: &AgentView) -> Option<String> {
     None
 }
 
-<<<<<<< HEAD
 /// First line of the most recent user prompt (`RenderBlock::UserPrompt`) in the agent's scrollback, ANSI-stripped and sanitised.
 /// `None` when the user hasn't sent any prompts yet.
-=======
-/// First line of the most recent user prompt (`RenderBlock::UserPrompt`) in
-/// the agent's scrollback, ANSI-stripped + sanitised; `None` when the user
-/// hasn't sent any prompts yet.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn last_user_prompt_line(agent: &AgentView) -> Option<String> {
     let len = agent.scrollback.len();
     for idx in (0..len).rev() {
@@ -124,15 +118,7 @@ pub(crate) fn last_user_prompt_line(agent: &AgentView) -> Option<String> {
     None
 }
 
-<<<<<<< HEAD
 /// First renderable line of the newest agent message, ANSI-stripped and sanitised.
-=======
-/// First renderable line of the newest agent message, ANSI-stripped +
-/// sanitised. Pairing guarantee: returns `None` when a `UserPrompt` is newer
-/// than every agent message (that prompt is unanswered — an older reply would
-/// misrepresent the latest exchange), or when the message has no renderable
-/// line (older messages are not scanned).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn last_agent_message_line(agent: &AgentView) -> Option<String> {
     let len = agent.scrollback.len();
     for idx in (0..len).rev() {
@@ -154,11 +140,7 @@ pub(crate) fn last_agent_message_line(agent: &AgentView) -> Option<String> {
                 }
                 return None;
             }
-<<<<<<< HEAD
             // The user's latest prompt marks the turn boundary; no reply yet
-=======
-            // The user's latest prompt marks the turn boundary — no reply yet.
->>>>>>> e3fdf3ed (Merge 2 (#4))
             RenderBlock::UserPrompt(_) => return None,
             _ => {}
         }
@@ -166,14 +148,8 @@ pub(crate) fn last_agent_message_line(agent: &AgentView) -> Option<String> {
     None
 }
 
-<<<<<<< HEAD
 /// Take the first `MAX_TITLE_CHARS` chars and append an ellipsis when truncated.
 /// Char-based (not byte-based) so multi-byte codepoints don't get split.
-=======
-/// Take the first `MAX_TITLE_CHARS` chars and append an ellipsis when
-/// truncated. Char-based (not byte-based) so multi-byte codepoints
-/// don't get split.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 fn truncate_title(text: &str) -> String {
     if text.chars().count() <= MAX_TITLE_CHARS {
         return text.to_string();

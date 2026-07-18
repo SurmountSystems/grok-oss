@@ -102,12 +102,7 @@ impl AgentView {
         self.update_scrollback_selection_state(Default::default(), Default::default());
     }
     /// Keep [`Self::timeline_hover_preview`] in sync with [`Self::timeline_hover`].
-<<<<<<< HEAD
     /// Called when hover changes (mouse Moved or rail rebuild under a stationary pointer) so render can borrow the cached text.
-=======
-    /// Called when hover changes (mouse Moved or rail rebuild under a
-    /// stationary pointer) so render can borrow the cached text.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn sync_timeline_hover_preview(&mut self) {
         match self.timeline_hover {
             Some(crate::views::timeline::TimelineHit::Tick(turn_idx)) => {
@@ -124,17 +119,6 @@ impl AgentView {
                     .map(|text| (turn_idx, text));
             }
             _ => self.timeline_hover_preview = None,
-<<<<<<< HEAD
-=======
-        }
-    }
-    /// Open the fullscreen subagent view for `child_sid`, replaying child
-    /// `updates.jsonl` when scrollback only has the injected task prompt.
-    pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
-        if self.subagent_views.contains_key(&child_sid) {
-            crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
-            self.active_subagent = Some(child_sid);
->>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
     /// Shortcut hints for the plan-approval prompt/comment focus states.
@@ -877,15 +861,12 @@ impl AgentView {
             } else {
                 0
             };
-<<<<<<< HEAD
         let cancel_turn_view_h =
             if slot_card == Some(BlockingCard::CancelTurn) && rewind_view_h == 0 {
                 modal::cancel_turn_panel_height(area.height)
             } else {
                 0
             };
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let jump_view_h = if !self.jump_slot_taken() {
             if let Some(ref js) = self.jump_state {
                 crate::views::jump::jump_overlay_height(js, area.height)
@@ -1105,7 +1086,6 @@ impl AgentView {
             _ => 1,
         };
         let follow_ups_height = u16::from(self.follow_ups.is_some());
-<<<<<<< HEAD
         let mut dock_data = (dock_on && !self.dock_hidden).then(|| self.dock_snapshot());
         let dock_height = dock_data
             .as_ref()
@@ -1125,18 +1105,6 @@ impl AgentView {
             area,
             layout_cfg: *layout_cfg,
             scrollbar_cfg: *scrollbar_cfg,
-=======
-        let timeline_width = crate::views::timeline::rail_width(
-            appearance.show_timeline,
-            self.is_subagent_view,
-            area.width,
-            self.scrollback.turn_count(),
-        );
-        let mut layout = AgentViewLayout::compute(
-            area,
-            layout_cfg,
-            scrollbar_cfg,
->>>>>>> e3fdf3ed (Merge 2 (#4))
             timeline_width,
             prompt_height,
             tasks_height,
@@ -1173,21 +1141,11 @@ impl AgentView {
         }
         let overlay_blocks_rail_hover = self.jump_state.is_some()
             || self.rewind_state.is_some()
-<<<<<<< HEAD
             || self.blocking_card().is_some()
-=======
-            || self.question_view.is_some()
-            || !self.permission_queue.is_empty()
-            || self.cancel_turn_view.is_some()
->>>>>>> e3fdf3ed (Merge 2 (#4))
             || self.block_viewer.is_some();
         if layout.timeline_width > 0 {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
-<<<<<<< HEAD
-=======
-            let _ = self.sync_inline_edit_layout(layout.scrollback_content.width);
->>>>>>> e3fdf3ed (Merge 2 (#4))
             self.scrollback.prepare_layout(
                 layout.scrollback_content.width,
                 layout.scrollback_content.height,
@@ -1222,34 +1180,10 @@ impl AgentView {
                     self.timeline_rail = None;
                     self.timeline_hover = None;
                     self.timeline_hover_preview = None;
-<<<<<<< HEAD
                     layout = AgentViewLayout::compute(AgentViewLayoutParams {
                         timeline_width: 0,
                         ..layout_params
                     });
-=======
-                    layout = AgentViewLayout::compute(
-                        area,
-                        layout_cfg,
-                        scrollbar_cfg,
-                        0,
-                        prompt_height,
-                        tasks_height,
-                        catalog_height,
-                        todo_height,
-                        queue_height,
-                        btw_height,
-                        turn_status_height,
-                        banner_height,
-                        cta_height,
-                        follow_ups_height,
-                        0,
-                        prompt_gap,
-                        voice_recording_height,
-                        1,
-                        compact,
-                    );
->>>>>>> e3fdf3ed (Merge 2 (#4))
                     if search_reserved_rows > 0 {
                         layout.scrollback.height -= search_reserved_rows;
                         layout.scrollback_content.height = layout
@@ -1268,7 +1202,6 @@ impl AgentView {
             self.timeline_hover = None;
             self.timeline_hover_preview = None;
         }
-<<<<<<< HEAD
         if let Some(data) = &mut dock_data {
             if layout.dock.height > 0 {
                 data.max_rows =
@@ -1286,8 +1219,6 @@ impl AgentView {
                 layout.queue = body;
             }
         }
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
         agent::fill_background(buf, area, layout_cfg, compact, &theme);
         let mut status_line_link_spans: Vec<xai_ratatui_inline::LinkSpan> = Vec::new();
         if let Some(padding) = status_line.padding()
@@ -1576,20 +1507,11 @@ impl AgentView {
         {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
-<<<<<<< HEAD
-=======
-            let inline_edit_dim_from =
-                self.sync_inline_edit_layout(layout.scrollback_content.width);
->>>>>>> e3fdf3ed (Merge 2 (#4))
             self.scrollback.prepare_layout(
                 layout.scrollback_content.width,
                 layout.scrollback_content.height,
             );
-<<<<<<< HEAD
             let rewind_dim_from = self.rewind_dim_from_entry();
-=======
-            let rewind_dim_from = self.rewind_dim_from_entry().or(inline_edit_dim_from);
->>>>>>> e3fdf3ed (Merge 2 (#4))
             let sb_focused = self.active_pane == ActivePane::Scrollback && !overlay_focused;
             let search_highlight = if search_active {
                 self.scrollback_search

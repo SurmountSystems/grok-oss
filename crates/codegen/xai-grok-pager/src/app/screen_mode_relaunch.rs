@@ -295,27 +295,9 @@ pub(crate) fn exec_screen_mode_relaunch(session_id: &str, want_minimal: bool) ->
     }
 }
 
-<<<<<<< HEAD
 /// Parse a [`GROK_SCREEN_MODE_ENV`] or config `[ui] screen_mode` value (pure; unit-tested directly).
 /// Case- and whitespace-insensitive for the known tokens, matching [`crate::settings::canonical_screen_mode`].
 /// Unlike the settings canonicalizer, unknown / absent / legacy values (`default`, `auto`, empty) return `None`.
-=======
-/// Parse a [`GROK_SCREEN_MODE_ENV`] or config `[ui] screen_mode` value
-/// (pure; unit-tested directly).
-///
-/// Case- and whitespace-insensitive for the known tokens, matching
-/// [`crate::settings::canonical_screen_mode`] so a hand-edited
-/// `Minimal` / `FULLSCREEN` is honored at startup the same way settings
-/// displays it. Unlike the settings canonicalizer, unknown / absent /
-/// legacy values (`default`, `auto`, empty) return `None` so soft
-/// defaults (mouse-leak, pager.toml) still apply.
-///
-/// | Value | Mode |
-/// |---|---|
-/// | `minimal` | [`super::ScreenMode::Minimal`] |
-/// | `fullscreen` / `full` | [`super::ScreenMode::Fullscreen`] |
-/// | anything else / absent | `None` — normal resolution continues |
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn parse_screen_mode(value: Option<&str>) -> Option<super::ScreenMode> {
     let raw = value?.trim();
     if raw.is_empty() {
@@ -343,17 +325,8 @@ pub(crate) fn take_screen_mode_env_override() -> Option<super::ScreenMode> {
 }
 
 /// CLI > `[ui] screen_mode` > pager.toml `[terminal] minimal` > no preference.
-<<<<<<< HEAD
 /// `Some(true)` means minimal, `Some(false)` means not minimal (explicit fullscreen).
 /// Choosing Fullscreen writes an explicit value so that soft default no longer applies.
-=======
-///
-/// `Some(true)` = minimal, `Some(false)` = not minimal (explicit fullscreen).
-/// `None` = no sticky preference — caller may apply soft defaults (JediTerm
-/// mouse-leak auto-minimal). Settings UI still *displays* Fullscreen when the
-/// key is unset; choosing Fullscreen writes an explicit value so that soft
-/// default no longer applies.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn effective_minimal_preference(
     cli_minimal: bool,
     cli_fullscreen: bool,
@@ -441,12 +414,7 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
     /// The fullscreen direction appends an explicit `--fullscreen` so mode resolution still works without the env override.
-=======
-    /// The fullscreen direction appends an explicit `--fullscreen` so mode
-    /// resolution still works without the env override.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn adds_fullscreen_and_resume() {
         let out = build_screen_mode_relaunch_args(args(&["grok", "--no-leader"]), "abc", false);
@@ -734,12 +702,7 @@ mod tests {
             parse_screen_mode(Some("full")),
             Some(ScreenMode::Fullscreen)
         );
-<<<<<<< HEAD
         // Case / whitespace must match settings' case-insensitive path so a hand-edited config.toml is not treated as unset at startup
-=======
-        // Case / whitespace must match settings' case-insensitive path so a
-        // hand-edited config.toml is not treated as unset at startup.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(
             parse_screen_mode(Some("Minimal")),
             Some(ScreenMode::Minimal)
@@ -821,15 +784,9 @@ mod tests {
 
     #[test]
     fn failed_relaunch_hint_includes_screen_mode_env() {
-<<<<<<< HEAD
         // Recovery command must carry GROK_SCREEN_MODE so following the hint
         // after a failed `/fullscreen` does not reopen minimal or inline.
         // The explicit flag keeps the resume in the right mode if the env is dropped.
-=======
-        // Recovery command must carry GROK_SCREEN_MODE so following the
-        // hint after a failed `/fullscreen` does not reopen minimal/inline. The
-        // explicit flag keeps the resume in the right mode if the env is dropped.
->>>>>>> e3fdf3ed (Merge 2 (#4))
         let cli = cli_hint_name();
         let full = screen_mode_relaunch_resume_hint("abc-sid", false);
         assert_eq!(
@@ -911,11 +868,7 @@ mod tests {
             effective_minimal_preference(false, false, None, true),
             Some(true)
         );
-<<<<<<< HEAD
         // No sticky preference; caller may apply soft defaults (mouse-leak)
-=======
-        // No sticky preference — caller may apply soft defaults (mouse-leak).
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(
             effective_minimal_preference(false, false, None, false),
             None

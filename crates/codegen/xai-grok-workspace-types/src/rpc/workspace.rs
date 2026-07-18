@@ -169,12 +169,7 @@ impl WorkspaceRpc for ListBackgroundTasksReq {
     type Response = ListBackgroundTasksResponse;
 }
 
-<<<<<<< HEAD
 /// One outstanding background terminal task, with the fields client task UI needs (a slim DTO over `xai_grok_tools`'s `TaskSnapshot`).
-=======
-/// One outstanding background terminal task, with the fields client task UI
-/// needs (a slim DTO over `xai_grok_tools`'s `TaskSnapshot`).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundTaskSnapshotWire {
     /// Background task registry id (pairs with the `task.*` push events).
@@ -185,19 +180,12 @@ pub struct BackgroundTaskSnapshotWire {
     pub kind: String,
     /// RFC3339 start timestamp.
     pub started_at: String,
-<<<<<<< HEAD
     /// Model-supplied label when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
 /// One live scheduled task (`/loop`), a slim DTO over the scheduler's `ScheduledTask` (pairs with the `scheduled_task.*` push events).
-=======
-}
-
-/// One live scheduled task (`/loop`), a slim DTO over the scheduler's
-/// `ScheduledTask` (pairs with the `scheduled_task.*` push events).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTaskSnapshotWire {
     pub task_id: String,
@@ -211,28 +199,15 @@ pub struct ScheduledTaskSnapshotWire {
     pub created_at: String,
 }
 
-<<<<<<< HEAD
 /// Response of `workspace.tasks_snapshot`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TasksSnapshotResponse {
     /// Incomplete and backgrounded only (not in-flight foreground runs).
-=======
-/// Response of `workspace.tasks_snapshot` — outstanding background tasks and
-/// live scheduled tasks.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TasksSnapshotResponse {
->>>>>>> e3fdf3ed (Merge 2 (#4))
     pub background_tasks: Vec<BackgroundTaskSnapshotWire>,
     pub scheduled_tasks: Vec<ScheduledTaskSnapshotWire>,
 }
 
-<<<<<<< HEAD
 /// Clients call `workspace.tasks_snapshot` on attach/reconnect to rebuild the task UI.
-=======
-/// `workspace.tasks_snapshot` — point-in-time snapshot of the session's
-/// outstanding background tasks and scheduled tasks, for task
-/// UI rebuild on client attach/reconnect.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TasksSnapshotReq {
     pub session_id: String,
@@ -240,7 +215,6 @@ pub struct TasksSnapshotReq {
 
 impl WorkspaceRpc for TasksSnapshotReq {
     const METHOD: &'static str = "workspace.tasks_snapshot";
-<<<<<<< HEAD
     const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = TasksSnapshotResponse;
 }
@@ -299,13 +273,6 @@ impl WorkspaceRpc for DeleteScheduledTaskReq {
 
 /// One TODO list item (slim DTO over `xai_grok_tools`'s `TodoState`).
 /// `status` is the snake_case tag: `pending` | `in_progress` | `completed` | `cancelled`.
-=======
-    type Response = TasksSnapshotResponse;
-}
-
-/// One TODO list item (slim DTO over `xai_grok_tools`'s `TodoState`). `status`
-/// is the snake_case tag: `pending` | `in_progress` | `completed` | `cancelled`.
->>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoSummaryWire {
     pub id: String,

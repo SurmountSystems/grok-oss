@@ -242,7 +242,6 @@ impl AgentView {
         false
     }
 
-<<<<<<< HEAD
     /// Copy text to clipboard (a backup file is always written too; see `copy_text_or_file`) and show the result toast.
     /// When every trusted clipboard backend fails (common on Apple Terminal over SSH), the toast points at the backup file
     /// (`~/.grok/last-copy.txt`, or `GROK_COPY_FILE`) instead. The returned
@@ -250,13 +249,6 @@ impl AgentView {
         let delivery = crate::clipboard::copy_text_or_file(text);
         self.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
         delivery
-=======
-    /// Copy text to clipboard and show the result toast.
-    pub fn copy_to_clipboard(&mut self, text: &str) -> crate::clipboard::ClipboardDelivery {
-        let result = crate::clipboard::copy_text(text);
-        self.show_toast_ticks(result.message, result.ticks);
-        result.delivery
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Like [`copy_to_clipboard`] but debounces the toast to prevent rapid flickering during quick word/line selections.
@@ -327,16 +319,8 @@ impl AgentView {
             .is_some_and(|m| m.tick_result_notice())
     }
 
-<<<<<<< HEAD
     /// When the opener cannot run (headless Linux VM, missing `xdg-open`, etc.), push a system message with the full URL so the user can copy it.
     /// Also best-effort copy to the clipboard, since OSC 52 works over SSH even without a local display.
-=======
-    /// Open `url` in the system browser. When the opener cannot run (headless
-    /// Linux VM, missing `xdg-open`, etc.), push a scrollback system message
-    /// with the full URL so the user can copy it, and best-effort copy to the
-    /// clipboard (OSC 52 works over SSH even without a local display).
-    ///
->>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Unsafe schemes are rejected silently (same as [`open_url_if_safe`]).
     pub(crate) fn open_url_or_show(&mut self, url: &str) {
         use crate::app::link_opener::{OpenUrlResult, browser_unavailable_message, try_open_url};
@@ -348,18 +332,12 @@ impl AgentView {
             OpenUrlResult::BrowserUnavailable => {
                 self.scrollback
                     .push_block(RenderBlock::system(browser_unavailable_message(url)));
-<<<<<<< HEAD
                 // Best-effort clipboard so SSH/VM users can paste into a browser on another machine without selecting TUI text
-=======
-                // Best-effort clipboard so SSH/VM users can paste into a
-                // browser on another machine without selecting TUI text.
->>>>>>> e3fdf3ed (Merge 2 (#4))
                 let _ = crate::clipboard::SystemClipboard::try_set(url);
                 self.show_toast("Browser unavailable - URL shown above");
             }
         }
     }
-<<<<<<< HEAD
 
     /// [`Self::open_url_or_show`] minus the automatic clipboard copy, for server-controlled URLs (MCP elicitation).
     /// Silently seeding the clipboard invites pasting attacker-chosen text into a shell on the headless fallback path.
@@ -476,8 +454,6 @@ fn image_number_list(display_numbers: &[usize]) -> String {
         .map(|n| format!("#{n}"))
         .collect::<Vec<_>>()
         .join(", ")
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 #[cfg(test)]

@@ -177,11 +177,7 @@ pub(crate) async fn submit_feedback_workflow(
     let request_id = submission.request_id.clone();
     let appearance_id = request_id.clone();
 
-<<<<<<< HEAD
     // Send the full submission: the feedback backend shows these triage fields, so session context and metadata are intentionally not stripped here
-=======
-    // Keep client-enriched triage fields; do not strip_metadata (Slack shows Option fields when set).
->>>>>>> e3fdf3ed (Merge 2 (#4))
 
     let outcome = if let Some(client) = feedback_client {
         let result = if let Some(req_id) = request_id {

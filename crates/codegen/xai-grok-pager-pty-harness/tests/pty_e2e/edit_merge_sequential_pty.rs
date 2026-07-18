@@ -15,12 +15,7 @@ const EDIT_THREE_MARK: &str = "EDIT_THREE_MARK";
 
 const FIXTURE: &str = "merge_fix.py";
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/edit_merge_sequential_pty.rs
 /// One line of the fixture per word, so each edit is a 1:1 line replacement (`+1/-1`) and line numbers stay stable across the scripted turn.
-=======
-/// One line of the fixture per word, so each edit is a 1:1 line replacement
-/// (`+1/-1`) and line numbers stay stable across the whole scripted turn.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/edit_merge_sequential_pty.rs
 fn fixture_text() -> String {
     let words = [
         "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
@@ -52,23 +47,10 @@ fn edit_header_rows(screen: &str) -> usize {
         .count()
 }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/edit_merge_sequential_pty.rs
 /// PTY: with `collapsed_edit_blocks` enabled, three sequential same-file edits coalesce into ONE
 /// Edit row whose header sums the diffstat (`+3/-3`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run with cargo test -p xai-grok-pager-pty-harness --test pty_e2e -- --ignored"]
-=======
-/// PTY: with `collapsed_edit_blocks` enabled, three sequential same-file
-/// edits coalesce into ONE Edit row whose header sums the diffstat (`+3/-3`);
-/// expanding it shows every hunk with `… N unchanged lines` gap markers
-/// between them. A fourth edit arriving after intervening agent text stays a
-/// separate second Edit row — counted after wheeling back above the second
-/// submit's page-flip, which pins the new prompt to the pane top and scrolls
-/// turn 1 out of view by design. (Flag off, coalescing is disabled entirely —
-/// pinned by the tracker unit test.)
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "PTY e2e; run with cargo test -p xai-grok-pager --test pty_e2e -- --ignored"]
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/edit_merge_sequential_pty.rs
 async fn edit_merge_sequential_pty() {
     let content = ContentController::start().await.expect("start content");
     seed_ui_config(&content, "collapsed_edit_blocks = true");
@@ -77,7 +59,6 @@ async fn edit_merge_sequential_pty() {
     std::fs::write(&target, fixture_text()).expect("write fixture");
     let abs = dunce::canonicalize(&target).unwrap_or(target.clone());
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/edit_merge_sequential_pty.rs
     // Three 1:1 replacements at widely separated, increasing lines so every merged-hunk gap is computable (~11 lines apart, 3 context lines)
     let _edit_turns: [AgentTurnExpectation; 3] = [
         expect_tool_turn(
@@ -103,38 +84,6 @@ async fn edit_merge_sequential_pty() {
     let break_text = format!("{BREAK_TEXT_SENTINEL} first batch settled.");
     let _break_turn: AgentTurnExpectation =
         content.expect_agent_turn("first batch settled", &break_text);
-=======
-    // Three 1:1 replacements at widely separated, increasing lines so every
-    // merged-hunk gap is computable (edits sit ~11 lines apart, context ±3).
-    enqueue_tool_turn(
-        &content,
-        "call_sr_1",
-        "search_replace",
-        edit_args(&abs, "v03", "charlie", EDIT_ONE_MARK),
-    );
-    enqueue_tool_turn(
-        &content,
-        "call_sr_2",
-        "search_replace",
-        edit_args(&abs, "v14", "november", "EDIT_TWO_MARK"),
-    );
-    enqueue_tool_turn(
-        &content,
-        "call_sr_3",
-        "search_replace",
-        edit_args(&abs, "v25", "yankee", EDIT_THREE_MARK),
-    );
-    // The first prompt's turn ends on agent text — the break for the run.
-    let break_text = format!("{BREAK_TEXT_SENTINEL} first batch settled.");
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_message_events(&break_text)),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_message_events(&break_text)),
-    );
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/edit_merge_sequential_pty.rs
     content.set_response(DONE_SENTINEL);
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -236,20 +185,11 @@ async fn edit_merge_sequential_pty() {
         harness.update(Duration::from_millis(100));
     }
 
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/edit_merge_sequential_pty.rs
     // BREAK case: a fourth same-file edit after the agent-text turn stays a separate row instead of merging across the visible text entry
     harness
         .wait_for_turn_idle(Duration::from_secs(15))
         .expect("turn idle after break-case edit");
     let _edit_four = expect_tool_turn(
-=======
-    // BREAK case: a fourth same-file edit after the agent-text turn stays a
-    // separate row instead of merging across the visible text entry.
-    harness
-        .wait_for_turn_idle(Duration::from_secs(15))
-        .expect("turn idle after break-case edit");
-    enqueue_tool_turn(
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/edit_merge_sequential_pty.rs
         &content,
         "call_sr_4",
         "search_replace",
@@ -274,17 +214,9 @@ async fn edit_merge_sequential_pty() {
                 harness.screen_contents()
             )
         });
-<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/edit_merge_sequential_pty.rs
     // The second submit page-flipped the viewport, so turn 1 legitimately sits above the fold
     // (The new prompt pins to the pane top: dispatch/queue.rs `scroll_to_entry_top` and `enable_follow_with_preserve`.)
     // Wheel back to the transcript top (the whole thing fits one screen) before counting rows across both turns
-=======
-    // The second submit page-flipped the viewport (the new prompt pins to the
-    // pane top — dispatch/queue.rs `scroll_to_entry_top` +
-    // `enable_follow_with_preserve`), so turn 1 legitimately sits above the
-    // fold. Wheel back to the transcript top — the whole thing fits one
-    // screen — before counting rows across both turns.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/edit_merge_sequential_pty.rs
     send_wheel_burst(
         &mut harness,
         SGR_SCROLL_UP,

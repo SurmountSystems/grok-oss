@@ -109,19 +109,10 @@ struct Args {
     /// Propagated to `ServerInfo.metadata` in `servers.list` responses.
     #[arg(long)]
     metadata: Option<String>,
-<<<<<<< HEAD
     /// Deprecated no-op, accepted for one release so existing callers don't trip clap: nothing writes or reads this path.
     #[arg(long, hide = true)]
     ready_file: Option<PathBuf>,
     /// Unix-socket path for the in-guest diagnostics HTTP server (`/ready`, `/statusz`).
-=======
-    /// Deprecated no-op, accepted for one release so existing callers don't
-    /// trip clap: nothing writes or reads this path.
-    #[arg(long, hide = true)]
-    ready_file: Option<PathBuf>,
-    /// Unix-socket path for the in-guest diagnostics HTTP server
-    /// (`/ready`, `/statusz`).
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[cfg(unix)]
     #[arg(long, default_value = diag_server::DEFAULT_DIAG_SOCKET_PATH)]
     diag_socket: PathBuf,
@@ -143,12 +134,7 @@ struct Args {
         action = clap::ArgAction::Set,
     )]
     upload_queue_enabled: bool,
-<<<<<<< HEAD
     /// Fail `session.bind`s without an explicit toolset closed (RPC-only) instead of widening to the built-in default catalog.
-=======
-    /// Fail `session.bind`s without an explicit toolset closed (RPC-only)
-    /// instead of widening to the built-in default catalog.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     #[arg(long)]
     require_explicit_toolset: bool,
     /// Trust project-scoped LSP servers from `<repo>/.grok/lsp.json`.
@@ -420,16 +406,10 @@ async fn run(
                 "Workspace server sandbox NOT active"
             };
             tracing::info!(
-<<<<<<< HEAD
                 profile = %profile_name,
                 active,
                 restrict_network_at_known_linux_launches = xai_grok_sandbox::should_restrict_child_network(),
                 "{status_msg}"
-=======
-                profile = % profile_name, active,
-                restrict_network_at_known_linux_launches =
-                xai_grok_sandbox::should_restrict_child_network(), "{status_msg}"
->>>>>>> e3fdf3ed (Merge 2 (#4))
             );
         }
     }
@@ -557,7 +537,6 @@ async fn run(
         cwd,
         url,
         auth_provider,
-<<<<<<< HEAD
         xai_grok_workspace::LocalWorkspaceConnectOptions {
             metadata,
             server_id: server_id.clone(),
@@ -574,18 +553,6 @@ async fn run(
             host_kind,
             sandbox: None,
         },
-=======
-        metadata,
-        server_id.clone(),
-        None,
-        args.allow_insecure_ws,
-        status_config,
-        args.upload_queue_enabled,
-        project_lsp_trusted,
-        Some(diag_handle.clone()),
-        args.require_explicit_toolset,
-        args.confine_fs_to_workspace_root,
->>>>>>> e3fdf3ed (Merge 2 (#4))
     )
     .await
     {
@@ -1098,7 +1065,6 @@ mod tests {
         assert_eq!(args.ready_file, None);
     }
     #[test]
-<<<<<<< HEAD
     fn should_set_reset_child_oom_truth_table() {
         assert!(!should_set_reset_child_oom(false, false));
         assert!(should_set_reset_child_oom(true, false));
@@ -1118,8 +1084,6 @@ mod tests {
         assert!(args.oom_protect);
     }
     #[test]
-=======
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn ready_file_is_accepted_as_a_deprecated_no_op() {
         let args =
             Args::try_parse_from(["xai-workspace-server", "--ready-file", "/tmp/x.ready"]).unwrap();

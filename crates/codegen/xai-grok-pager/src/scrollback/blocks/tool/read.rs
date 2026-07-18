@@ -228,13 +228,6 @@ impl ReadToolCallBlock {
     }
 
     /// Header line with only the path (or skill name) span selectable.
-<<<<<<< HEAD
-=======
-    ///
-    /// Spans: `["Read ", path, optional_range_suffix, optional_extra_suffix]`
-    /// or `["Skill ", skill_name]`. Prefix/suffixes excluded (no `selection_text`
-    /// override). Attaches a semantic filesystem target for non-skill paths.
->>>>>>> e3fdf3ed (Merge 2 (#4))
     fn header_block_line(&self, line: Line<'static>, cwd: Option<&std::path::Path>) -> BlockLine {
         let path_end = 2.min(line.spans.len()).max(1);
         let link_target = if self.skill_name().is_some() {
@@ -642,29 +635,8 @@ mod tests {
         ctx.cwd = Some(std::path::PathBuf::from("/Users/me/project"));
 
         let collapsed = block.output(&ctx);
-<<<<<<< HEAD
         let collapsed_header = first_line(&collapsed);
         let target = collapsed_header.link_target.as_ref().expect("link target");
-=======
-        let target = collapsed.lines[0]
-            .link_target
-            .as_ref()
-            .expect("link target");
-        assert_eq!(
-            target,
-            &crate::render::osc8::LinkTarget::File(
-                std::sync::Arc::from(std::path::Path::new(abs),)
-            )
-        );
-        assert_eq!(
-            crate::render::osc8::resolve_link_target(target)
-                .unwrap()
-                .osc8_url
-                .unwrap()
-                .as_ref(),
-            "file:///Users/me/project/src/main.rs"
-        );
->>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(
             target,
             &crate::render::osc8::LinkTarget::File(
@@ -683,17 +655,9 @@ mod tests {
 
         ctx.mode = DisplayMode::Expanded;
         let expanded = block.output(&ctx);
-<<<<<<< HEAD
         let expanded_header = first_line(&expanded);
         assert_eq!(span_text(expanded_header, 1), "src/main.rs");
         assert_eq!(expanded_header.link_target.as_ref(), Some(target));
-=======
-        assert_eq!(
-            expanded.lines[0].content.spans[1].content.as_ref(),
-            "src/main.rs"
-        );
-        assert_eq!(expanded.lines[0].link_target.as_ref(), Some(target));
->>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]

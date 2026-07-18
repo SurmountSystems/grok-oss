@@ -156,16 +156,9 @@ impl ApprovedRoot {
 
     fn relative_path(&self, path: &Path) -> Option<PathBuf> {
         let relative = if path.is_absolute() {
-<<<<<<< HEAD:crates/codegen/xai-grok-foreign-sessions/src/capability/mod.rs
             // `self.path` is always canonical
             // Prefer a pure strip so openat paths still resolve after the on-disk entry is replaced (symlink swap)
             // Fall back to canonicalize for non-canonical absolute inputs
-=======
-            // `self.path` is always canonical. Prefer a pure strip so openat
-            // paths still resolve after the on-disk entry is replaced
-            // (symlink swap); fall back to canonicalize for non-canonical
-            // absolute inputs.
->>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-workspace/src/foreign_sessions/capability/mod.rs
             path.strip_prefix(&self.path)
                 .ok()
                 .map(|r| r.to_path_buf())
