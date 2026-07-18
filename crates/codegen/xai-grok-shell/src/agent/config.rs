@@ -3750,22 +3750,35 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
 /// Built-in OpenRouter Grok 4.5 catalog entry (chat completions, BYOK).
 fn openrouter_grok_45_default_entry() -> ModelEntryConfig {
     use crate::auth::openrouter::{
-        OPENROUTER_API_KEY_ENV, OPENROUTER_API_URL, OPENROUTER_GROK_45_CATALOG_ID,
-        OPENROUTER_GROK_45_CONTEXT_WINDOW, OPENROUTER_GROK_45_MODEL, OPENROUTER_HTTP_REFERER,
-        OPENROUTER_X_TITLE,
+        OPENROUTER_API_KEY_ENV, OPENROUTER_API_URL, OPENROUTER_CATEGORIES,
+        OPENROUTER_GROK_45_CATALOG_ID, OPENROUTER_GROK_45_CONTEXT_WINDOW, OPENROUTER_GROK_45_MODEL,
+        OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPENROUTER_TITLE_HEADER, OPENROUTER_X_TITLE,
+        OPENROUTER_X_TITLE_HEADER,
     };
     let mut extra_headers = IndexMap::new();
-    extra_headers.insert("HTTP-Referer".to_owned(), OPENROUTER_HTTP_REFERER.to_owned());
-    extra_headers.insert("X-Title".to_owned(), OPENROUTER_X_TITLE.to_owned());
+    extra_headers.insert(
+        "HTTP-Referer".to_owned(),
+        OPENROUTER_HTTP_REFERER.to_owned(),
+    );
+    extra_headers.insert(
+        OPENROUTER_X_OPENROUTER_TITLE_HEADER.to_owned(),
+        OPENROUTER_X_TITLE.to_owned(),
+    );
+    extra_headers.insert(
+        OPENROUTER_X_TITLE_HEADER.to_owned(),
+        OPENROUTER_X_TITLE.to_owned(),
+    );
+    extra_headers.insert(
+        "X-OpenRouter-Categories".to_owned(),
+        OPENROUTER_CATEGORIES.to_owned(),
+    );
     ModelEntryConfig {
         id: Some(OPENROUTER_GROK_45_CATALOG_ID.to_owned()),
         model: OPENROUTER_GROK_45_MODEL.to_owned(),
         base_url: OPENROUTER_API_URL.to_owned(),
         api_base_url: None,
         name: Some("Grok 4.5 (OpenRouter)".to_owned()),
-        description: Some(
-            "Grok 4.5 via OpenRouter (bring your own OpenRouter API key)".to_owned(),
-        ),
+        description: Some("Grok 4.5 via OpenRouter (bring your own OpenRouter API key)".to_owned()),
         context_window: NonZeroU64::new(OPENROUTER_GROK_45_CONTEXT_WINDOW)
             .expect("openrouter context window is non-zero"),
         auto_compact_threshold_percent: None,
@@ -5157,12 +5170,22 @@ pub fn inject_url_derived_headers(
             .or_insert_with(|| crate::http::process_client_mode().to_string());
     }
     if crate::auth::openrouter::is_openrouter_base_url(base_url) {
-        headers.entry("HTTP-Referer".to_string()).or_insert_with(|| {
-            crate::auth::openrouter::OPENROUTER_HTTP_REFERER.to_string()
-        });
+        use crate::auth::openrouter::{
+            OPENROUTER_CATEGORIES, OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPENROUTER_TITLE_HEADER,
+            OPENROUTER_X_TITLE, OPENROUTER_X_TITLE_HEADER,
+        };
         headers
-            .entry("X-Title".to_string())
-            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_X_TITLE.to_string());
+            .entry("HTTP-Referer".to_string())
+            .or_insert_with(|| OPENROUTER_HTTP_REFERER.to_string());
+        headers
+            .entry(OPENROUTER_X_OPENROUTER_TITLE_HEADER.to_string())
+            .or_insert_with(|| OPENROUTER_X_TITLE.to_string());
+        headers
+            .entry(OPENROUTER_X_TITLE_HEADER.to_string())
+            .or_insert_with(|| OPENROUTER_X_TITLE.to_string());
+        headers
+            .entry("X-OpenRouter-Categories".to_string())
+            .or_insert_with(|| OPENROUTER_CATEGORIES.to_string());
     }
     let _ = (alpha_test_key, base_url);
 }
@@ -6738,8 +6761,14 @@ if n == name && f.as_deref() == field
         let entry = models
             .get(or_id)
             .unwrap_or_else(|| panic!("missing {or_id} in defaults"));
-        assert_eq!(entry.info.model, crate::auth::openrouter::OPENROUTER_GROK_45_MODEL);
-        assert_eq!(entry.info.base_url, crate::auth::openrouter::OPENROUTER_API_URL);
+        assert_eq!(
+            entry.info.model,
+            crate::auth::openrouter::OPENROUTER_GROK_45_MODEL
+        );
+        assert_eq!(
+            entry.info.base_url,
+            crate::auth::openrouter::OPENROUTER_API_URL
+        );
         assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
         assert!(entry.supported_in_api);
         assert_eq!(
@@ -6748,7 +6777,9 @@ if n == name && f.as_deref() == field
         );
         // Native default remains grok-build (not OpenRouter).
         assert_eq!(crate::models::default_model(), "grok-build");
-        assert!(models.contains_key("grok-build") || models.values().any(|m| m.model == "grok-build"));
+        assert!(
+            models.contains_key("grok-build") || models.values().any(|m| m.model == "grok-build")
+        );
     }
 
     #[test]
@@ -6797,11 +6828,61 @@ if n == name && f.as_deref() == field
             Some(crate::auth::openrouter::OPENROUTER_HTTP_REFERER)
         );
         assert_eq!(
-            headers.get("X-Title").map(String::as_str),
+            headers
+                .get(crate::auth::openrouter::OPENROUTER_X_OPENROUTER_TITLE_HEADER)
+                .map(String::as_str),
             Some(crate::auth::openrouter::OPENROUTER_X_TITLE)
+        );
+        assert_eq!(
+            headers
+                .get(crate::auth::openrouter::OPENROUTER_X_TITLE_HEADER)
+                .map(String::as_str),
+            Some(crate::auth::openrouter::OPENROUTER_X_TITLE)
+        );
+        assert_eq!(
+            headers.get("X-OpenRouter-Categories").map(String::as_str),
+            Some(crate::auth::openrouter::OPENROUTER_CATEGORIES)
         );
         // Does not add proxy headers.
         assert!(!headers.contains_key("X-XAI-Token-Auth"));
+        // Must not claim x.ai (would attribute as WebSummarizer / wrong app).
+        assert_ne!(
+            headers.get("HTTP-Referer").map(String::as_str),
+            Some("https://x.ai")
+        );
+        assert!(
+            headers
+                .get("HTTP-Referer")
+                .is_some_and(|u| u.contains("SurmountSystems/grok-oss")),
+            "referer should be Surmount Grok OSS URL"
+        );
+        assert_eq!(
+            headers
+                .get(crate::auth::openrouter::OPENROUTER_X_OPENROUTER_TITLE_HEADER)
+                .map(String::as_str),
+            Some("Grok OSS")
+        );
+    }
+
+    #[test]
+    fn openrouter_catalog_entry_has_attribution_headers() {
+        let entry = openrouter_grok_45_default_entry();
+        assert_eq!(
+            entry.extra_headers.get("HTTP-Referer").map(String::as_str),
+            Some(crate::auth::openrouter::OPENROUTER_HTTP_REFERER)
+        );
+        assert_eq!(
+            entry
+                .extra_headers
+                .get(crate::auth::openrouter::OPENROUTER_X_OPENROUTER_TITLE_HEADER)
+                .map(String::as_str),
+            Some("Grok OSS")
+        );
+        assert_eq!(entry.name.as_deref(), Some("Grok 4.5 (OpenRouter)"));
+        assert_eq!(
+            entry.model.as_str(),
+            crate::auth::openrouter::OPENROUTER_GROK_45_MODEL
+        );
     }
     fn api_key_creds(base_url: &str) -> ResolvedCredentials {
         ResolvedCredentials {
@@ -12078,6 +12159,9 @@ default = "grok-4.5"
             p.insert(dm.to_string(), e);
         }
         let resolved = resolve_model_list(&cfg, Some(p));
+        // First-party prefetch entry + additive OpenRouter default (survives
+        // replace). OpenRouter is `supported_in_api` so it appears for API-key
+        // auth users too; grok-build is session-only in the bundled defaults.
         let sess: Vec<_> = resolved
             .values()
             .filter(|e| e.visible_for_auth(true))
@@ -12086,8 +12170,14 @@ default = "grok-4.5"
             .values()
             .filter(|e| e.visible_for_auth(false))
             .collect();
-        assert_eq!(sess.len(), 1);
-        assert_eq!(api.len(), 1);
+        assert!(resolved.contains_key("grok-build"));
+        assert!(resolved.contains_key(crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID));
+        assert_eq!(sess.len(), 2, "grok-build + openrouter-grok-4.5");
+        assert_eq!(api.len(), 1, "only openrouter is supported_in_api");
+        assert!(
+            api[0].info.base_url.contains("openrouter.ai"),
+            "api-visible entry should be OpenRouter"
+        );
     }
     #[test]
     fn resolve_model_list_keeps_prefetch_only_entries_and_prunes_defaults() {
@@ -12115,7 +12205,10 @@ default = "grok-4.5"
     fn resolve_model_list_empty_prefetch_yields_empty_base() {
         let cfg = Config::default();
         let resolved = resolve_model_list(&cfg, Some(IndexMap::new()));
-        assert!(resolved.is_empty());
+        // Empty remote catalog replaces first-party defaults, but additive
+        // OpenRouter (third-party BYOK) is preserved client-side.
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved.contains_key(crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID));
     }
     /// Regression: enterprise managed config overlays env_key on an oauth-only
     /// catalog entry. BYOK must force visibility for API-key users so a

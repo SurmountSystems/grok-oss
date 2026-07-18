@@ -325,6 +325,31 @@ where
         Err(_) => StreamStep::IdleTimeout,
     }
 }
+/// Build the `(client tools, hosted tools, Responses tool_choice)` triple for
+/// a compaction summarizer request.
+///
+/// Client-side tool definitions are retained so the request prefix stays
+/// aligned with turn requests (KV-cache reuse). Tool *use* is disabled via
+/// `tool_choice: none` on backends that support it (ChatCompletions,
+/// Responses). Hosted/server-side tools (`web_search`, `x_search`, …) are
+/// always stripped: the Responses API rejects `tool_choice: 'none'` when any
+/// server-side tool is present, and compaction must never invoke tools on
+/// any backend (Messages has no `none` either, so stripping is the only
+/// hard guarantee there).
+fn compaction_request_tools(
+    tools: Vec<ToolSpec>,
+    _hosted_tools: Vec<HostedTool>,
+) -> (
+    Vec<ToolSpec>,
+    Vec<HostedTool>,
+    Option<ConversationToolChoice>,
+) {
+    let tool_choice = (!tools.is_empty()).then_some(ConversationToolChoice::None);
+    // Always clear hosted/server-side tools on compact. Responses rejects
+    // `tool_choice: none` with web_search/x_search; Messages has no `none`.
+    (tools, Vec::new(), tool_choice)
+}
+
 /// Generates a summary of the conversation for compaction.
 /// Accepts `Vec<ConversationItem>` so the Responses path can preserve
 /// encrypted reasoning. ChatCompletions converts at point of use.
@@ -731,6 +756,73 @@ pub(crate) async fn generate_session_compact(
         Ok(output)
     }
 }
+/// Policy tests for [`compaction_request_tools`]: client tools + tool_choice
+/// none for prefix alignment; hosted/server-side tools always stripped so
+/// Responses never sees `tool_choice: none` with web_search/x_search.
+#[cfg(test)]
+mod compaction_request_tools_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn client_tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            description: Some(format!("{name} tool")),
+            parameters: json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    #[test]
+    fn strips_hosted_tools_when_client_tools_and_tool_choice_none() {
+        let tools = vec![client_tool("read_file")];
+        let hosted = vec![
+            HostedTool::WebSearch {
+                allowed_domains: None,
+            },
+            HostedTool::XSearch,
+        ];
+        let (out_tools, out_hosted, choice) = compaction_request_tools(tools, hosted);
+        assert_eq!(out_tools.len(), 1);
+        assert_eq!(out_tools[0].name, "read_file");
+        assert!(
+            out_hosted.is_empty(),
+            "hosted/server-side tools must not ride with tool_choice none; got {out_hosted:?}"
+        );
+        assert!(
+            matches!(choice, Some(ConversationToolChoice::None)),
+            "Responses compact must forbid tool use when client tools are attached; got {choice:?}"
+        );
+    }
+
+    #[test]
+    fn strips_hosted_tools_even_when_no_client_tools() {
+        let hosted = vec![
+            HostedTool::WebSearch {
+                allowed_domains: Some(vec!["example.com".into()]),
+            },
+            HostedTool::XSearch,
+        ];
+        let (out_tools, out_hosted, choice) = compaction_request_tools(vec![], hosted);
+        assert!(out_tools.is_empty());
+        assert!(
+            out_hosted.is_empty(),
+            "compact must never attach hosted tools on any backend; got {out_hosted:?}"
+        );
+        assert!(
+            choice.is_none(),
+            "tool_choice without client tools is rejected by some backends; got {choice:?}"
+        );
+    }
+
+    #[test]
+    fn empty_inputs_yield_empty_tools_and_no_choice() {
+        let (out_tools, out_hosted, choice) = compaction_request_tools(vec![], vec![]);
+        assert!(out_tools.is_empty());
+        assert!(out_hosted.is_empty());
+        assert!(choice.is_none());
+    }
+}
+
 /// Tests for `classify_sampling_error` and `classify_response_event_error`.
 /// Pin the deterministic-vs-transient mapping for every `SamplingError`
 /// variant and for the meaningful branches of the response-event classifier

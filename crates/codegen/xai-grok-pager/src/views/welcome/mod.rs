@@ -438,7 +438,7 @@ pub(super) fn render_version_badge(
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
-                "Grok Build  ",
+                "Grok OSS  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -467,7 +467,7 @@ pub(super) fn render_version_badge(
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
-                "Grok Build Beta  ",
+                "Grok OSS  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
