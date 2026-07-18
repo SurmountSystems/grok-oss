@@ -100,26 +100,28 @@ See ~/.grok/README.md for more information.
     /// Export or upload session trace data
     Trace(crate::trace_cmd::TraceArgs),
     /// Check for updates or install a specific version
+    /// Check freshness vs Surmount main (git SHA), or print how to rebuild.
+    ///
+    /// Grok OSS has no binary release train. `update --check` compares this
+    /// build’s commit to github.com/SurmountSystems/grok-oss `main`.
     Update {
-        /// Check for updates without installing.
+        /// Compare embedded git SHA to Surmount `main` (no install).
         #[arg(long)]
         check: bool,
         /// Emit machine-readable JSON output (for --check).
         #[arg(long)]
         json: bool,
-        /// Force re-download and install even if already up to date.
-        #[arg(long)]
+        /// Force re-download via xAI updater (requires GROK_OSS_ENABLE_XAI_UPDATER=1).
+        #[arg(long, hide = true)]
         force_reinstall: bool,
-        /// Install a specific version (e.g. 0.1.150 or 0.1.151-alpha.2).
-        #[arg(long)]
+        /// Install a specific version via xAI updater (requires GROK_OSS_ENABLE_XAI_UPDATER=1).
+        #[arg(long, hide = true)]
         version: Option<String>,
-        /// Switch to the alpha release channel (faster updates, may have bugs).
-        #[arg(long, conflicts_with_all = ["stable", "enterprise"])]
+        /// xAI channel switch (hidden; requires GROK_OSS_ENABLE_XAI_UPDATER=1).
+        #[arg(long, conflicts_with_all = ["stable", "enterprise"], hide = true)]
         alpha: bool,
-        /// Switch to the stable release channel (default, weekly releases).
-        #[arg(long, conflicts_with_all = ["alpha", "enterprise"])]
+        #[arg(long, conflicts_with_all = ["alpha", "enterprise"], hide = true)]
         stable: bool,
-        /// Switch to the enterprise release channel.
         #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
         enterprise: bool,
         /// Internal: what spawned this `grok update` (`user_command`, `auto_background`, `leader_converge`). Hidden.
@@ -408,9 +410,9 @@ pub struct LeaderArgs {
 }
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "grok",
+    name = "grok-oss",
     version = xai_grok_version::full_version(),
-    about = "Grok Build TUI",
+    about = "Grok OSS TUI (unofficial Surmount fork of Grok Build)",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
@@ -1412,14 +1414,9 @@ mod tests {
 
     #[test]
     fn login_openrouter_parses_api_key() {
-        let args = PagerArgs::try_parse_from([
-            "grok",
-            "login",
-            "--openrouter",
-            "--api-key",
-            "sk-or-test",
-        ])
-        .expect("login --openrouter parses");
+        let args =
+            PagerArgs::try_parse_from(["grok", "login", "--openrouter", "--api-key", "sk-or-test"])
+                .expect("login --openrouter parses");
         match args.command {
             Some(Command::Login {
                 openrouter: true,

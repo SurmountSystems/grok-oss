@@ -143,8 +143,8 @@ pub fn classify_error(
     }
 
     if err.is_retryable() {
-        let next_attempt = retry_count + 1;
-        if next_attempt >= max_retries {
+        let next_attempt = retry_count.saturating_add(1);
+        if !is_unlimited_retries(max_retries) && next_attempt >= max_retries {
             return RetryDecision::Fatal(clone_error(err));
         }
         if next_attempt == 1 {
@@ -410,7 +410,60 @@ mod tests {
         assert!(r2 >= Duration::from_millis(3200) && r2 <= Duration::from_millis(4800));
 
         let r10 = retry_backoff_with_jitter(10);
-        assert!(r10 >= Duration::from_millis(24_000) && r10 <= Duration::from_millis(36_000));
+        let cap_ms = MAX_BACKOFF_SECS * 1000;
+        assert!(
+            r10 >= Duration::from_millis(cap_ms * 4 / 5)
+                && r10 <= Duration::from_millis(cap_ms * 6 / 5),
+            "expected ~{cap_ms}ms cap, got {r10:?}"
+        );
+    }
+
+    #[test]
+    fn unlimited_retries_never_fatals_on_5xx() {
+        let err = api_err(StatusCode::BAD_GATEWAY, "proxy blip");
+        match classify_error(&err, 100, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { .. } | RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("expected Retry under unlimited budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unlimited_retries_never_fatals_on_429() {
+        let err = api_err(StatusCode::TOO_MANY_REQUESTS, "slow down");
+        match classify_error(&err, 50, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                is_rate_limited: true,
+                ..
+            } => {}
+            other => panic!("expected rate-limit Retry under unlimited budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_max_retries_is_unlimited() {
+        assert_eq!(DEFAULT_MAX_RETRIES, u32::MAX);
+        assert!(is_unlimited_retries(DEFAULT_MAX_RETRIES));
+        assert_eq!(resolve_max_retries_with_env(None, None), u32::MAX);
+    }
+
+    #[test]
+    fn resolve_max_retries_env_can_cap() {
+        assert_eq!(resolve_max_retries_with_env(Some("3"), None), 3);
+        assert_eq!(resolve_max_retries_with_env(Some("3"), Some(99)), 3);
+    }
+
+    #[test]
+    fn long_retry_after_on_429_is_used() {
+        let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 3600);
+        match classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                backoff,
+                is_rate_limited: true,
+            } => {
+                assert_eq!(backoff, Duration::from_secs(3600));
+            }
+            other => panic!("expected 3600s Retry-After, got {other:?}"),
+        }
     }
 
     #[test]

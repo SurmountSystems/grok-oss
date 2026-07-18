@@ -269,10 +269,11 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
     // Import writes those dirs to [paths] extra_skill_dirs for the source UI.
     // list_skills_with_plugins still does not read extra_skill_dirs.
     let imported = crate::claude_import::is_claude_import_marked();
+    // `.agents` before `.grok` — same order as skill discovery (agents override).
     let local_dir_names: &[&str] = if imported {
-        &[".grok", ".agents"]
+        &[".agents", ".grok"]
     } else {
-        &[".grok", ".agents", ".claude"]
+        &[".agents", ".grok", ".claude"]
     };
 
     let mut sources: Vec<(String, usize)> = Vec::new();
@@ -312,6 +313,12 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
         for subdir in &subdirs {
             try_add_source(home_path.join(".agents").join(subdir), None);
         }
+    }
+    for subdir in &subdirs {
+        try_add_source(grok_home.join(subdir), None);
+    }
+    if let Some(ref h) = home {
+        let home_path = std::path::PathBuf::from(h);
         if !imported {
             for subdir in &subdirs {
                 try_add_source(home_path.join(".claude").join(subdir), None);

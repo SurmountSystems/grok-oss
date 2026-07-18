@@ -143,6 +143,15 @@ pub struct UiConfig {
     /// Startup cursor style: `None` (default) inherits the terminal's own style.
     /// `Some(true)` forces the legacy blinking block, `Some(false)` a steady block.
     /// Config-file-only knob (no /settings row).
+    /// After a successful turn, auto-run a follow-up `/implement …` sentence
+    /// from the prior user prompt (sentence-leading only; skipped when the
+    /// turn itself was already `/implement`). `None` = on (client default).
+    /// Written by the pager's settings modal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_run_implement: Option<bool>,
+    /// Startup cursor style: `None` (default) inherits the terminal's own
+    /// style; `Some(true)` forces the legacy blinking block, `Some(false)` a
+    /// steady block. Config-file-only knob (no /settings row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_blink: Option<bool>,
     /// `"fullscreen"` | `"minimal"`; unset uses the product default, fullscreen.
@@ -284,6 +293,7 @@ impl Default for UiConfig {
             group_tool_verbs: None,
             collapsed_edit_blocks: None,
             prompt_suggestions: None,
+            auto_run_implement: None,
             cursor_blink: None,
             screen_mode: None,
             double_click_action: None,

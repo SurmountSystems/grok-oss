@@ -2088,7 +2088,12 @@ mod tests {
             return;
         }
 
-        let spec = make_shell_spec("exec 3>/dev/tty 2>/dev/null && exit 1 || exit 0");
+        // Probe: exit 0 if /dev/tty cannot be opened (detached), exit 1 if it
+        // can. Prefer `(: >/dev/tty)` over bare `exec 3>/dev/tty` — on bash
+        // 5.x a failed `exec`-only redirection aborts the shell with status 1
+        // before `|| exit 0` runs, so a correctly detached child looked like a
+        // failure. A colon-command redirect continues and hits `|| exit 0`.
+        let spec = make_shell_spec("(: >/dev/tty) 2>/dev/null && exit 1 || exit 0");
         let envelope = make_envelope();
         let ctx = make_ctx();
 
@@ -2097,7 +2102,8 @@ mod tests {
 
         assert!(
             matches!(result, HookRunnerResult::Success),
-            "hook child should not be able to open /dev/tty after setsid(), got {:?}",
+            "hook child should not be able to open /dev/tty after detach \
+             (setsid + TIOCNOTTY), got {:?}",
             result
         );
     }

@@ -2636,6 +2636,10 @@ async fn run_update_blocking(update_config: &UpdateConfig) -> bool {
 }
 /// Central gate for auto-update checks; add new suppression rules here, not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
+    // Grok OSS does not use the xAI release updater unless this process opts in.
+    if std::env::var_os("GROK_OSS_ENABLE_XAI_UPDATER").is_none() {
+        return false;
+    }
     if cfg!(debug_assertions) {
         return false;
     }
@@ -2714,14 +2718,22 @@ async fn run_update_command(
     if json && !check {
         anyhow::bail!("--json requires --check");
     }
-    let mut update_config = base_update_config.clone();
+
+    // Default path: git-based freshness vs Surmount main (no binary download).
     if check {
         if version.is_some() {
             anyhow::bail!("--version cannot be used with --check");
         }
-        auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
-        let status = auto_update::check_update_status(&update_config).await;
-        auto_update::print_update_status(&status, json)?;
+        if channel_switch.is_some() {
+            anyhow::bail!(
+                "Grok OSS has no alpha/stable/enterprise channels. \
+                 Use `grok-oss update --check` without channel flags."
+            );
+        }
+        let status =
+            xai_grok_update::check_against_main(env!("CARGO_PKG_VERSION"), env!("GROK_GIT_SHA"))
+                .await;
+        xai_grok_update::print_oss_update_status(&status, json)?;
         return Ok(());
     }
     if let Some(ref v) = version

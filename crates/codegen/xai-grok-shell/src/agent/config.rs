@@ -3288,22 +3288,35 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
 /// Built-in OpenRouter Grok 4.5 catalog entry (chat completions, BYOK).
 fn openrouter_grok_45_default_entry() -> ModelEntryConfig {
     use crate::auth::openrouter::{
-        OPENROUTER_API_KEY_ENV, OPENROUTER_API_URL, OPENROUTER_GROK_45_CATALOG_ID,
-        OPENROUTER_GROK_45_CONTEXT_WINDOW, OPENROUTER_GROK_45_MODEL, OPENROUTER_HTTP_REFERER,
-        OPENROUTER_X_TITLE,
+        OPENROUTER_API_KEY_ENV, OPENROUTER_API_URL, OPENROUTER_CATEGORIES,
+        OPENROUTER_GROK_45_CATALOG_ID, OPENROUTER_GROK_45_CONTEXT_WINDOW, OPENROUTER_GROK_45_MODEL,
+        OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPENROUTER_TITLE_HEADER, OPENROUTER_X_TITLE,
+        OPENROUTER_X_TITLE_HEADER,
     };
     let mut extra_headers = IndexMap::new();
-    extra_headers.insert("HTTP-Referer".to_owned(), OPENROUTER_HTTP_REFERER.to_owned());
-    extra_headers.insert("X-Title".to_owned(), OPENROUTER_X_TITLE.to_owned());
+    extra_headers.insert(
+        "HTTP-Referer".to_owned(),
+        OPENROUTER_HTTP_REFERER.to_owned(),
+    );
+    extra_headers.insert(
+        OPENROUTER_X_OPENROUTER_TITLE_HEADER.to_owned(),
+        OPENROUTER_X_TITLE.to_owned(),
+    );
+    extra_headers.insert(
+        OPENROUTER_X_TITLE_HEADER.to_owned(),
+        OPENROUTER_X_TITLE.to_owned(),
+    );
+    extra_headers.insert(
+        "X-OpenRouter-Categories".to_owned(),
+        OPENROUTER_CATEGORIES.to_owned(),
+    );
     ModelEntryConfig {
         id: Some(OPENROUTER_GROK_45_CATALOG_ID.to_owned()),
         model: OPENROUTER_GROK_45_MODEL.to_owned(),
         base_url: OPENROUTER_API_URL.to_owned(),
         api_base_url: None,
         name: Some("Grok 4.5 (OpenRouter)".to_owned()),
-        description: Some(
-            "Grok 4.5 via OpenRouter (bring your own OpenRouter API key)".to_owned(),
-        ),
+        description: Some("Grok 4.5 via OpenRouter (bring your own OpenRouter API key)".to_owned()),
         context_window: NonZeroU64::new(OPENROUTER_GROK_45_CONTEXT_WINDOW)
             .expect("openrouter context window is non-zero"),
         auto_compact_threshold_percent: None,
@@ -4843,12 +4856,22 @@ pub(crate) fn inject_url_derived_headers(
         .entry(crate::http::CLIENT_MODE_HEADER.to_string())
         .or_insert_with(|| crate::http::process_client_mode().to_string());
     if crate::auth::openrouter::is_openrouter_base_url(base_url) {
-        headers.entry("HTTP-Referer".to_string()).or_insert_with(|| {
-            crate::auth::openrouter::OPENROUTER_HTTP_REFERER.to_string()
-        });
+        use crate::auth::openrouter::{
+            OPENROUTER_CATEGORIES, OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPENROUTER_TITLE_HEADER,
+            OPENROUTER_X_TITLE, OPENROUTER_X_TITLE_HEADER,
+        };
         headers
-            .entry("X-Title".to_string())
-            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_X_TITLE.to_string());
+            .entry("HTTP-Referer".to_string())
+            .or_insert_with(|| OPENROUTER_HTTP_REFERER.to_string());
+        headers
+            .entry(OPENROUTER_X_OPENROUTER_TITLE_HEADER.to_string())
+            .or_insert_with(|| OPENROUTER_X_TITLE.to_string());
+        headers
+            .entry(OPENROUTER_X_TITLE_HEADER.to_string())
+            .or_insert_with(|| OPENROUTER_X_TITLE.to_string());
+        headers
+            .entry("X-OpenRouter-Categories".to_string())
+            .or_insert_with(|| OPENROUTER_CATEGORIES.to_string());
     }
     let _ = (alpha_test_key, base_url);
 }

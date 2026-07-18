@@ -2645,6 +2645,7 @@ mod tests {
             SEND_SUBAGENT_MESSAGE_TOOL_NAME,
         };
         let builder = ToolRegistryBuilder::new();
+        // Note: deploy_app is a no-op stub in OSS builds and is not registered.
         let config = ToolServerConfig {
             tools: [
                 "read_file",

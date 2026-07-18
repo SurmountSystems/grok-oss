@@ -718,6 +718,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetCollapsedEditBlocks(*b))
         }
         ("prompt_suggestions", SettingValue::Bool(b)) => Some(Action::SetPromptSuggestions(*b)),
+        ("auto_run_implement", SettingValue::Bool(b)) => Some(Action::SetAutoRunImplement(*b)),
         ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
         ("default_selected_permission", SettingValue::Enum(s)) => {
             Some(Action::SetDefaultSelectedPermission((*s).to_owned()))
@@ -1043,6 +1044,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             set_collapsed_edit_blocks_inner(app, *b)
         }
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
+        ("auto_run_implement", SettingValue::Bool(b)) => set_auto_run_implement_inner(app, *b),
         // keep_text_selection: restore the cache mirror to the canonical value.
         ("keep_text_selection", SettingValue::Enum(s)) => {
             if let Some(kind) = crate::appearance::TextSelection::from_canonical(s) {

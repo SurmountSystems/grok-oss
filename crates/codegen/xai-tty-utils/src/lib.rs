@@ -91,13 +91,45 @@ pub fn detach_from_tty() -> io::Result<()> {
     use nix::unistd::{Pid, setpgid, setsid};
 
     match setsid() {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // New session has no controlling TTY; clear is a no-op if open fails.
+            clear_controlling_tty();
+            Ok(())
+        }
         Err(Errno::EPERM) => {
+            // Already a process-group leader: cannot setsid. Still isolate the
+            // process group, then drop the controlling TTY via ioctl.
             setpgid(Pid::from_raw(0), Pid::from_raw(0))
                 .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+            clear_controlling_tty();
             Ok(())
         }
         Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+    }
+}
+
+/// Best-effort drop of the controlling terminal via `TIOCNOTTY`.
+///
+/// No-op when `/dev/tty` cannot be opened (already detached / no ctty).
+/// Safe to call from `pre_exec` after `setsid` or the `EPERM` fallback.
+#[cfg(unix)]
+fn clear_controlling_tty() {
+    // NUL-terminated path for libc::open (no allocation in pre_exec).
+    const DEV_TTY: &[u8] = b"/dev/tty\0";
+    // SAFETY: open/ioctl/close on a path we control; fds are local to the child.
+    let fd = unsafe {
+        libc::open(
+            DEV_TTY.as_ptr().cast::<libc::c_char>(),
+            libc::O_RDWR | libc::O_NOCTTY,
+        )
+    };
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: fd is open; TIOCNOTTY detaches the calling process from its ctty.
+    unsafe {
+        libc::ioctl(fd, libc::TIOCNOTTY as libc::c_ulong, 0i32);
+        libc::close(fd);
     }
 }
 

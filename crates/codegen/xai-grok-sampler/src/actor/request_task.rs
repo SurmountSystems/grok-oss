@@ -35,6 +35,25 @@ use crate::stream::responses::stream_responses_tracked;
 use crate::stream::{stream_chat_completions, stream_messages};
 use crate::types::RequestId;
 
+use grok_rate_limit::{ProviderKey, SharedRateLimitStore, fingerprint_secret};
+
+fn provider_key_for_config(config: &SamplerConfig) -> ProviderKey {
+    match config.api_key.as_deref() {
+        Some(k) if !k.is_empty() => {
+            ProviderKey::from_base_url_and_key_fingerprint(&config.base_url, &fingerprint_secret(k))
+        }
+        _ => ProviderKey::from_base_url(&config.base_url),
+    }
+}
+
+/// Before each HTTP attempt: honor any shared cross-process cooldown.
+async fn wait_before_attempt(config: &SamplerConfig) {
+    let store = SharedRateLimitStore::process_default();
+    store
+        .wait_if_limited(&provider_key_for_config(config))
+        .await;
+}
+
 /// Default per-chunk idle timeout when neither config nor caller supplies one.
 /// Matches the shell's session-level default of 5 minutes.
 /// That is long enough for cold-start reasoning and short enough to detect dead streams before the user gives up.
@@ -137,6 +156,12 @@ pub(crate) async fn run_request_task(
             return request_id;
         }
 
+        // Cross-process rate-limit coordination: wait until peers say the provider is open.
+        wait_before_attempt(&config).await;
+        if cancel_token.is_cancelled() {
+            handle_cancellation(&event_tx, &request_id, &mut completion);
+            return request_id;
+        }
         // Once the resample budget is spent, the attempt runs with the abort disarmed so it can complete and be accepted as-is
         let doom_check = doom_policy.filter(|_| doom_retry_count < doom_max_retries);
         let outcome = run_one_attempt(
@@ -290,6 +315,7 @@ pub(crate) async fn run_request_task(
                         doom_retry_count,
                         doom_max_retries,
                         &error,
+                        &config,
                     );
                     if sleep_or_cancel(backoff, &cancel_token, doom_retry_count, &sampling_span)
                         .await
@@ -433,7 +459,7 @@ async fn apply_retry_decision(
             );
             emit_images_stripped(event_tx, request_id, stripped_urls, reason);
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
             true
         }
         RetryDecision::RetryWithClientRebuild { backoff } => {
@@ -471,9 +497,12 @@ async fn apply_retry_decision(
             // A server `x-should-retry: false` or a non-retryable error is also Fatal but is not "exhausted"
             let next_attempt = *retry_count + 1;
             let server_said_stop = matches!(err.should_retry_header(), Some(false));
+            // Unlimited (u32::MAX) never exhausts by budget.
             let budget_exhausted = !server_said_stop
+                && !retry_mod::is_unlimited_retries(max_retries)
                 && if err.is_rate_limited() {
-                    next_attempt >= max_retries.min(rate_limit_threshold)
+                    let cap = max_retries.min(rate_limit_threshold);
+                    !retry_mod::is_unlimited_retries(cap) && next_attempt >= cap
                 } else {
                     err.is_retryable() && next_attempt >= max_retries
                 };
@@ -903,8 +932,21 @@ fn emit_retrying(
     attempt: u32,
     max_retries: u32,
     err: &SamplingError,
+    config: &SamplerConfig,
 ) {
     let info = SamplingErrorInfo::from(err);
+    let mut reason = err.to_string();
+    if err.is_rate_limited() {
+        let key = provider_key_for_config(config);
+        let rem = SharedRateLimitStore::process_default().remaining(&key);
+        if let Some(secs) = err.retry_after() {
+            reason = format!("{reason} · wait {secs}s (shared across grok-oss processes)");
+        } else if !rem.is_zero() {
+            reason = format!("{reason} · shared wait {}s", rem.as_secs().max(1));
+        } else {
+            reason = format!("{reason} · coordinating with other grok-oss sessions");
+        }
+    }
     let _ = event_tx.send(SamplingEvent::Retrying {
         request_id: request_id.clone(),
         attempt,

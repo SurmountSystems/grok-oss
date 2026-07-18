@@ -49,7 +49,7 @@ pub(crate) fn default_shell_path() -> &'static str {
     }
     #[cfg(not(unix))]
     {
-        "/bin/bash"
+        "/bin/bash".to_string()
     }
 }
 

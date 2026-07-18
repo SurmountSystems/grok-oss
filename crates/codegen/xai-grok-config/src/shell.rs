@@ -345,19 +345,59 @@ pub fn detect_unix_shell_kind() -> UnixShellKind {
 /// Absolute path to the requested Unix shell binary, computed via the cascade above.
 /// The result is cached for the process lifetime.
 #[cfg(unix)]
-pub fn unix_shell_path(kind: UnixShellKind) -> &'static str {
-    use std::sync::OnceLock;
-    static BASH: OnceLock<String> = OnceLock::new();
-    static ZSH: OnceLock<String> = OnceLock::new();
-    let cache = match kind {
-        UnixShellKind::Bash => &BASH,
-        UnixShellKind::Zsh => &ZSH,
-    };
-    cache.get_or_init(|| {
-        let path = resolve_unix_shell_path(kind);
-        tracing::debug!(kind = ?kind, resolved = %path, "resolved Unix shell path");
-        path
-    })
+fn shell_path_cache(kind: UnixShellKind) -> &'static std::sync::Mutex<Option<String>> {
+    use std::sync::{Mutex, OnceLock};
+    static BASH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    static ZSH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    match kind {
+        UnixShellKind::Bash => BASH.get_or_init(|| Mutex::new(None)),
+        UnixShellKind::Zsh => ZSH.get_or_init(|| Mutex::new(None)),
+    }
+}
+
+/// Absolute path to the requested Unix shell binary, computed via the cascade
+/// above. Cached, but **re-resolved** when the cached path no longer exists
+/// (e.g. a Nix store path was GC'd, or a temporary PATH entry vanished).
+///
+/// Returns an owned [`String`] so callers can keep the path across a cache
+/// refresh without dangling references.
+#[cfg(unix)]
+pub fn unix_shell_path(kind: UnixShellKind) -> String {
+    let cache = shell_path_cache(kind);
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref path) = *guard {
+        // Cheap liveness check: if the binary vanished, drop the cache entry
+        // and re-resolve. Avoids process-lifetime ENOENT after GC/PATH churn.
+        if std::path::Path::new(path).is_file() {
+            return path.clone();
+        }
+        tracing::warn!(
+            kind = ?kind,
+            stale = %path,
+            "cached Unix shell path is gone; re-resolving"
+        );
+        *guard = None;
+    }
+    let path = resolve_unix_shell_path(kind);
+    tracing::debug!(kind = ?kind, resolved = %path, "resolved Unix shell path");
+    *guard = Some(path.clone());
+    path
+}
+
+/// Force a fresh resolution even if the cached path still exists as a file.
+/// Use after spawn returns ENOENT (broken symlink, unreadable, wrong kind).
+#[cfg(unix)]
+pub fn refresh_unix_shell_path(kind: UnixShellKind) -> String {
+    let path = resolve_unix_shell_path(kind);
+    let cache = shell_path_cache(kind);
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    tracing::warn!(
+        kind = ?kind,
+        resolved = %path,
+        "forced refresh of Unix shell path"
+    );
+    *guard = Some(path.clone());
+    path
 }
 
 #[cfg(unix)]
@@ -448,7 +488,10 @@ mod tests {
         // The resolver guarantees the result's file_name matches the requested kind, even for the hardcoded `/bin/bash` fallback
         let p = unix_shell_path(UnixShellKind::Bash);
         assert!(
-            std::path::Path::new(p).file_name().and_then(|n| n.to_str()) == Some("bash"),
+            std::path::Path::new(&p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                == Some("bash"),
             "expected a path ending in 'bash', got {p}"
         );
     }

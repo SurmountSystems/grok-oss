@@ -380,6 +380,7 @@ impl AgentView {
                 // Park the intent; the confirming `x.ai/queue/changed` broadcast fires it with the row's authoritative version.
                 if self.optimistic_queue_ids.contains(&server_id) {
                     self.send_now_awaiting_confirm = Some(server_id);
+                    self.show_toast("Send now armed — waiting for queue confirm");
                     return InputOutcome::Changed;
                 }
                 return InputOutcome::Action(Action::QueueInterjectShared {
@@ -388,6 +389,7 @@ impl AgentView {
                     new_text: None,
                 });
             }
+            self.show_toast("Queued prompt is gone");
             return InputOutcome::Changed;
         }
         // Local rows: only plain prompts and raw skill rows can re-send (others would send display text, not payload)
@@ -402,6 +404,7 @@ impl AgentView {
                 image_notice: None,
             });
         }
+        self.show_toast("Queued prompt is gone");
         InputOutcome::Changed
     }
 

@@ -102,6 +102,13 @@ pub fn is_trusted_cli_chat_proxy_url(url: &str) -> bool {
     if is_prod_cli_chat_proxy_url(url) {
         return true;
     }
+    if std::env::var_os(TRUST_LOOPBACK_CLI_CHAT_PROXY_ENV).is_some()
+        && let Ok(u) = reqwest::Url::parse(url)
+        && matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+        && (u.path() == "/v1" || u.path().starts_with("/v1/"))
+    {
+        return true;
+    }
     false
 }
 /// True for cli-chat-proxy URLs (production, plus local-dev hosts when the optional non-production feature is enabled).

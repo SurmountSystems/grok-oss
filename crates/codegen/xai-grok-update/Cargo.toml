@@ -8,6 +8,7 @@ edition.workspace = true
 dunce = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
+grok-rate-limit = { workspace = true }
 indicatif = { workspace = true }
 reqwest = { workspace = true }
 xai-grok-extra-ca = { workspace = true }

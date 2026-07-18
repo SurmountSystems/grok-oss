@@ -193,6 +193,10 @@ fn collect_skill_config_dirs_from_sources(
     try_add(grok_home);
     if let Some(home) = xai_dirs::home_dir() {
         try_add(home.join(".agents"));
+    }
+    try_add(grok_home);
+    #[allow(deprecated)]
+    if let Some(home) = std::env::home_dir() {
         if compat.claude.skills {
             try_add(home.join(".claude"));
         }
@@ -2143,6 +2147,75 @@ mod tests {
         assert!(
             names.contains(&"commit"),
             "Expected bundled 'commit' skill, got: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_home_skills_shadow_grok_user_skills() {
+        // When both ~/.agents/skills and ~/.grok/skills define the same name,
+        // agents wins (first-seen after Priority-3 order: agents then grok_home).
+        let tmp = tempfile::tempdir().unwrap();
+        let grok_home = tmp.path().join("grok_home");
+        let real_home = tmp.path().join("real_home");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        init_git_repo(&repo_root);
+
+        write_skill_md(&grok_home.join("skills").join("commit"), "commit");
+        // Agents copy: same frontmatter name, different path — must win.
+        write_skill_md(
+            &real_home.join(".agents").join("skills").join("commit"),
+            "commit",
+        );
+
+        // Point HOME at real_home so collect_skill_config_dirs finds .agents.
+        // grok_home is the separate Grok data root (skills under skills/).
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: test-only; single-threaded for this assertion path.
+        unsafe {
+            std::env::set_var("HOME", &real_home);
+        }
+
+        let raw = list_skills_with_options(
+            Some(repo_root.to_str().unwrap()),
+            None,
+            &grok_home,
+            CompatConfig::default(),
+        )
+        .await;
+
+        if let Some(h) = prev_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("HOME");
+            }
+        }
+
+        // Both paths are discovered (different files); first-seen must be agents.
+        let first = raw
+            .iter()
+            .find(|s| s.name == "commit")
+            .expect("commit skill present");
+        assert!(
+            first.path.contains(".agents"),
+            "agents path must be first-seen, got {}",
+            first.path
+        );
+
+        let deduped = dedupe_skills(raw);
+        let commits: Vec<_> = deduped.iter().filter(|s| s.name == "commit").collect();
+        assert_eq!(
+            commits.len(),
+            1,
+            "expected one commit after dedup, got {commits:?}"
+        );
+        assert!(
+            commits[0].path.contains(".agents"),
+            "agents must override grok user skill, got path {}",
+            commits[0].path
         );
     }
 

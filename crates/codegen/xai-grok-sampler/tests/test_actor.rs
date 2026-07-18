@@ -1002,7 +1002,12 @@ async fn rate_limit_exhausts_at_default_threshold_and_yields_failed() {
     let server = MockServer::spawn(app).await;
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let cfg = test_config(server.base_url(), "test-model");
-    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+    // Finite policy: prove caps still work when configured.
+    let policy = RetryPolicy {
+        max_retries: 2,
+        rate_limit_retry_threshold: 2,
+    };
+    let handle = SamplerActor::spawn(cfg, policy, event_tx);
 
     let rid = RequestId::from("req-429-default");
     handle.submit(rid, user_request("hi"));

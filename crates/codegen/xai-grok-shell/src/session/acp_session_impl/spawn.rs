@@ -651,6 +651,8 @@ pub(crate) async fn spawn_session_actor(
             snap.last_compaction_prompt_index = initial_last_compaction;
             chat_state_handle.restore_snapshot(snap);
         }
+        snap.last_compaction_prompt_index = initial_last_compaction;
+        chat_state_handle.restore_snapshot(snap);
     }
     .instrument(chat_state_span)
     .await;

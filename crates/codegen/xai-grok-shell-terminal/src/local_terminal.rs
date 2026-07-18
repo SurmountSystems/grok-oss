@@ -234,7 +234,9 @@ mod tests {
 
         let result = LocalTerminalRunner
             .run(make_request(
-                "(exec 3>/dev/tty && echo ATTACHED || echo DETACHED) 2>/dev/null",
+                // Prefer `(: >/dev/tty)` over bare `exec 3>/dev/tty`: bash 5.x aborts
+                // the shell on a failed exec-only redirect, so DETACHED never prints.
+                "(: >/dev/tty) 2>/dev/null && echo ATTACHED || echo DETACHED",
             ))
             .await
             .unwrap();

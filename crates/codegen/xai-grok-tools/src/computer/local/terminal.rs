@@ -3343,8 +3343,9 @@ fn spawn_shell_command(
     // Keep unix-only args live on Windows to avoid unused-arg warnings.
     #[cfg(not(unix))]
     let _ = (&login_env, &search_shadows);
+
     #[cfg(unix)]
-    let mut cmd = {
+    {
         let shell = shell_state::ShellKind::detect();
         let wrapped_command = {
             let inject = super::embedded_search_tools::search_injection(search_shadows);
@@ -3451,10 +3452,13 @@ fn spawn_shell_command(
         }
     };
 
-    if let Err(e) = group.attach(&child) {
-        tracing::debug!("Failed to attach child to ProcessGroup: {e}");
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = group.attach(&child) {
+            tracing::debug!("Failed to attach child to ProcessGroup: {e}");
+        }
+        Ok((child, group))
     }
-    Ok((child, group))
 }
 
 fn extract_exit_status(status: std::process::ExitStatus) -> ExitStatus {

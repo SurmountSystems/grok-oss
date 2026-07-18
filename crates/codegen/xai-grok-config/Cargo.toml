@@ -41,7 +41,9 @@ core-foundation = { workspace = true }
 tempfile = { workspace = true }
 
 [features]
-default-bazel = []
+# Integration tests (e.g. shell signed_managed_config) inject throwaway keys.
+test-support = []
+default-bazel = ["test-support"]
 # TS bindings for the announcement types only; see xai-grok-announcements/generate.sh.
 ts = ["dep:ts-rs"]
 

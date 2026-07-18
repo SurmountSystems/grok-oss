@@ -119,10 +119,12 @@ pub fn to_theme_kind(
 }
 
 /// Polling interval for system appearance detection.
-/// Test builds shorten it so polling tests complete quickly.
-#[cfg(not(test))]
+///
+/// In test builds, a shorter interval (50ms) is used so polling tests
+/// complete quickly.
+#[cfg(not(any(test, feature = "test-support")))]
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Polls via [`detect()`] only (no OSC 11) and never mutates `theme_cache::CURRENT` or `AUTO_MODE`.
@@ -193,12 +195,13 @@ pub fn set_mock(value: Option<SystemAppearance>) {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner()) = Some(value);
 }
 
+/// Clear the mock override, restoring real detection behavior.
 #[cfg(any(test, feature = "test-support"))]
 pub fn clear_mock() {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::super::cache as theme_cache;
     use super::*;

@@ -105,6 +105,8 @@ macro_rules! require_git {
 /// Initialise a fresh git repository at `path` with a dummy user config.
 ///
 /// Calls [`ensure_hermetic_git_on_path`] first so the hermetic binary is used.
+/// Masks global/system git config so host `commit.gpgsign` / hooks cannot leave
+/// an empty repo without a HEAD commit.
 pub fn init_git_repo(path: &Path) {
     run_git(path, &["init"]);
     run_git(path, &["config", "user.email", "test@test.com"]);

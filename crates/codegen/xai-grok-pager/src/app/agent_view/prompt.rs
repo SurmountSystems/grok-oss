@@ -1604,6 +1604,70 @@ mod history_browse_panel_tests {
     }
 }
 
+/// Send-now (InterjectPrompt) must never silent-no-op: toast or action.
+#[cfg(test)]
+mod send_now_key_tests {
+    use super::*;
+    use crate::app::agent::AgentState;
+    use crate::app::agent_view::test_fixtures::{make_agent, make_running_agent};
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn ctrl_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn send_now_with_text_while_idle_toasts() {
+        let mut agent = make_agent();
+        agent.session.state = AgentState::Idle;
+        agent.prompt.set_text("please fix this");
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_enter());
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Nothing running to interrupt — press Enter to send")
+        );
+        assert_eq!(agent.prompt.text(), "please fix this", "draft preserved");
+    }
+
+    #[test]
+    fn send_now_empty_while_running_with_empty_queue_toasts() {
+        let mut agent = make_running_agent();
+        // Drop local + shared queue so nothing is force-sendable.
+        agent.session.pending_prompts.clear();
+        agent.shared_queue.clear();
+        agent.queue.sync_from_merged(
+            &agent.session.pending_prompts,
+            &agent.shared_queue,
+            None,
+            None,
+            &agent.send_now_painted_blocks,
+        );
+        agent.prompt.set_text("");
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_enter());
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Nothing queued to send now")
+        );
+    }
+
+    #[test]
+    fn send_now_with_text_while_running_emits_send_prompt_now() {
+        let mut agent = make_running_agent();
+        agent.prompt.set_text("steer left");
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_enter());
+        match outcome {
+            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+                assert_eq!(text, "steer left");
+            }
+            other => panic!("expected SendPromptNow, got {other:?}"),
+        }
+        assert!(agent.prompt.text().is_empty());
+    }
+}
+
 #[cfg(test)]
 mod rewind_grace_tests {
     use super::*;
