@@ -2288,8 +2288,8 @@ async fn handle_synthetic_turn_trace(
     };
     let trace_context = {
         let this = agent_ref.get();
-        let ctx = this.get_trace_context(&info, turn_number).await;
-        ctx
+        
+        this.get_trace_context(&info, turn_number).await
     };
     let Some(ctx) = trace_context else {
         tracing::info!(

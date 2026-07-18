@@ -13,6 +13,8 @@ pub mod actions;
 pub mod agent;
 pub mod agent_view;
 pub mod app_view;
+/// Auto-run `/implement` follow-ups from the prior user prompt after a turn ends.
+pub mod auto_implement;
 pub mod bundle;
 pub mod cli;
 pub use crate::link_opener;
@@ -709,12 +711,13 @@ pub async fn run(
 /// Plain-quit "Resume this session with…" lines (after terminal restore).
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
 fn print_exit_resume_hint(session_id: &str, minimal: bool, w: &mut impl Write) {
+    let cli = screen_mode_relaunch::cli_hint_name();
     let _ = writeln!(w);
     let _ = writeln!(w, "Resume this session with:");
     if minimal {
-        let _ = writeln!(w, "  grok --minimal --resume {session_id}");
+        let _ = writeln!(w, "  {cli} --minimal --resume {session_id}");
     } else {
-        let _ = writeln!(w, "  grok --resume {session_id}");
+        let _ = writeln!(w, "  {cli} --resume {session_id}");
     }
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).
@@ -1271,10 +1274,10 @@ pub(crate) fn set_terminal_title(title: &str) {
 fn terminal_title_string(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
-        "grok".into()
+        "grok-oss".into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 6).collect();
-        format!("{} - grok", truncated)
+        let truncated: String = sanitized.chars().take(80 - 10).collect();
+        format!("{truncated} - grok-oss")
     }
 }
 fn set_panic_hook(mode: ScreenMode) {
@@ -1317,11 +1320,11 @@ mod tests {
     fn terminal_title_strips_control_characters() {
         assert_eq!(
             terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
-            "evil]52;c;payloadtitle - grok"
+            "evil]52;c;payloadtitle - grok-oss"
         );
-        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok");
-        assert_eq!(terminal_title_string(""), "grok");
-        assert_eq!(terminal_title_string("My chat"), "My chat - grok");
+        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok-oss");
+        assert_eq!(terminal_title_string(""), "grok-oss");
+        assert_eq!(terminal_title_string("My chat"), "My chat - grok-oss");
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {
@@ -1691,7 +1694,7 @@ mod tests {
     #[test]
     fn cli_command_name_is_grok() {
         use clap::CommandFactory;
-        assert_eq!(PagerArgs::command().get_name(), "grok");
+        assert_eq!(PagerArgs::command().get_name(), "grok-oss");
     }
     #[test]
     fn cli_help_output_header() {
@@ -1701,9 +1704,9 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "Grok Build TUI",
+                "Grok OSS TUI (unofficial Surmount fork of Grok Build)",
                 "",
-                "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
+                "Usage: grok-oss [OPTIONS] [PROMPT] [COMMAND]",
                 "",
                 "Arguments:",
             ]
@@ -1739,19 +1742,31 @@ mod tests {
     fn print_exit_resume_hint_writes_expected_lines() {
         let mut buf = Vec::new();
         print_exit_resume_hint("sess-abc", false, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
+        let out = String::from_utf8(buf).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok --resume sess-abc\n"
+            out,
+            format!("\nResume this session with:\n  {cli} --resume sess-abc\n")
+        );
+        // Cargo-test binaries are not product-named → Surmount default.
+        assert_eq!(cli, screen_mode_relaunch::DEFAULT_CLI_HINT_NAME);
+        assert_eq!(cli, "grok-oss");
+        assert!(
+            !out.contains("  grok --resume"),
+            "must not recommend upstream `grok` binary:\n{out}"
         );
     }
     #[test]
     fn print_exit_resume_hint_includes_minimal_flag() {
         let mut buf = Vec::new();
         print_exit_resume_hint("sess-abc", true, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
+        let out = String::from_utf8(buf).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok --minimal --resume sess-abc\n"
+            out,
+            format!("\nResume this session with:\n  {cli} --minimal --resume sess-abc\n")
         );
+        assert!(!out.contains("  grok --minimal"), "{out}");
     }
     #[test]
     fn print_relaunch_failure_hint_writes_expected_lines() {

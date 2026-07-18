@@ -1604,13 +1604,8 @@ async fn async_main() -> Result<()> {
                     );
                     println!("{}", serde_json::to_string(&payload)?);
                 } else {
-                    println!(
-                        "grok {}",
-                        xai_grok_version::display_version_with_commit(
-                            env!("VERSION_WITH_COMMIT"),
-                            xai_grok_update::channel_label(),
-                        )
-                    );
+                    // Identity: upstream package version + short SHA (no release channel).
+                    println!("grok-oss {}", env!("VERSION_WITH_COMMIT"));
                 }
                 return Ok(());
             }
@@ -1626,7 +1621,9 @@ async fn async_main() -> Result<()> {
                          Use `grok-pager agent {flag}` instead."
                     );
                 }
-                enforce_minimum_version_or_exit(&update_config).await;
+                if should_check_for_updates(false) {
+                    enforce_minimum_version_or_exit(&update_config).await;
+                }
                 return run_agent_command(
                     agent_args,
                     args.permission_mode_flag.clone(),
@@ -1748,11 +1745,8 @@ async fn async_main() -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 if openrouter {
                     let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                    xai_grok_shell::auth::run_openrouter_login(
-                        &grok_home,
-                        api_key.as_deref(),
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    xai_grok_shell::auth::run_openrouter_login(&grok_home, api_key.as_deref())
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                     println!();
                     xai_grok_shell::instrumentation::finalize_and_exit(0);
                 }
@@ -1800,7 +1794,9 @@ async fn async_main() -> Result<()> {
     if let Some(prompt) = headless_prompt {
         init_tracing_simple(HEADLESS_ENTRYPOINT);
         let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-        enforce_minimum_version_or_exit(&update_config).await;
+        if should_check_for_updates(false) {
+            enforce_minimum_version_or_exit(&update_config).await;
+        }
         let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
             args.yolo,
             args.permission_mode_flag.as_deref(),
@@ -1863,7 +1859,9 @@ async fn async_main() -> Result<()> {
         )
         .await;
     }
-    enforce_minimum_version_or_exit(&update_config).await;
+    if should_check_for_updates(args.no_auto_update) {
+        enforce_minimum_version_or_exit(&update_config).await;
+    }
     let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
     type UpdateWaitHandle = tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>;
     let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =
@@ -1975,6 +1973,12 @@ fn build_update_config() -> UpdateConfig {
 }
 /// Centralized gate for all auto-update checks. Add new suppression
 /// rules here — not at each call site.
+///
+/// Grok OSS does **not** use xAI's GCS/npm update channel (`x.ai/cli`,
+/// `@xai-official/grok`). Those advertise official SpaceXAI builds (e.g.
+/// v0.2.x) which would overwrite or confuse this fork. Install/update via
+/// git + `cargo install`, Nix, or AUR instead. Opt in later with
+/// `GROK_OSS_ENABLE_XAI_UPDATER=1` only for debugging against upstream.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     if cfg!(debug_assertions) {
         return false;
@@ -1983,6 +1987,10 @@ fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
         return false;
     }
     if std::env::var_os("GROK_DISABLE_AUTOUPDATER").is_some() {
+        return false;
+    }
+    // Default off for Grok OSS (this binary). Upstream xAI updater is wrong here.
+    if std::env::var_os("GROK_OSS_ENABLE_XAI_UPDATER").is_none() {
         return false;
     }
     true
@@ -2011,7 +2019,11 @@ fn get_channel_switch(alpha: bool, stable: bool, enterprise: bool) -> Option<&'s
         None
     }
 }
-/// Handle `grok-pager update [--check] [--json] [--force-reinstall] [--version X] [--alpha|--stable|--enterprise]`.
+/// Handle `grok-oss update [--check] [--json] …`.
+///
+/// Grok OSS does not install SpaceXAI release binaries. `--check` compares the
+/// embedded git SHA to Surmount `main` on GitHub. Other flags either require
+/// `GROK_OSS_ENABLE_XAI_UPDATER=1` (debug) or print how to rebuild.
 async fn run_update_command(
     check: bool,
     json: bool,
@@ -2023,34 +2035,61 @@ async fn run_update_command(
     if json && !check {
         anyhow::bail!("--json requires --check");
     }
-    let mut update_config = base_update_config.clone();
+
+    // Default path: git-based freshness vs Surmount main (no binary download).
     if check {
         if version.is_some() {
             anyhow::bail!("--version cannot be used with --check");
         }
-        auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
-        let status = auto_update::check_update_status(&update_config).await;
-        auto_update::print_update_status(&status, json)?;
+        if channel_switch.is_some() {
+            anyhow::bail!(
+                "Grok OSS has no alpha/stable/enterprise channels. \
+                 Use `grok-oss update --check` without channel flags."
+            );
+        }
+        let status =
+            xai_grok_update::check_against_main(env!("CARGO_PKG_VERSION"), env!("GROK_GIT_SHA"))
+                .await;
+        xai_grok_update::print_oss_update_status(&status, json)?;
         return Ok(());
     }
-    if let Some(ref v) = version
-        && semver::Version::parse(v).is_err()
-    {
-        anyhow::bail!(
-            "'{}' is not a valid version. Expected semver like 0.1.150",
-            v
-        );
+
+    // Explicit opt-in only: upstream xAI installer path (wrong product for most users).
+    if std::env::var_os("GROK_OSS_ENABLE_XAI_UPDATER").is_some() {
+        let mut update_config = base_update_config.clone();
+        if let Some(ref v) = version
+            && semver::Version::parse(v).is_err()
+        {
+            anyhow::bail!(
+                "'{}' is not a valid version. Expected semver like 0.1.150",
+                v
+            );
+        }
+        let installed = auto_update::run_update(
+            force_reinstall,
+            version.as_deref(),
+            channel_switch,
+            &mut update_config,
+        )
+        .await?;
+        if let Some(installed_version) = installed {
+            signal_leaders_to_relaunch(&installed_version).await;
+        }
+        return Ok(());
     }
-    let installed = auto_update::run_update(
-        force_reinstall,
-        version.as_deref(),
-        channel_switch,
-        &mut update_config,
-    )
-    .await?;
-    if let Some(installed_version) = installed {
-        signal_leaders_to_relaunch(&installed_version).await;
-    }
+
+    let _ = (force_reinstall, version, channel_switch, base_update_config);
+    println!(
+        "Grok OSS  {}",
+        xai_grok_update::format_build_id(env!("CARGO_PKG_VERSION"), env!("GROK_GIT_SHA"))
+    );
+    println!();
+    println!("This fork does not auto-install updates (no SpaceXAI release channel).");
+    println!("Check whether you're behind Surmount main:");
+    println!();
+    println!("  grok-oss update --check");
+    println!();
+    println!("{}", xai_grok_update::how_to_update_message());
     Ok(())
 }
 /// After a successful `grok update`, ask any running leader on this machine that

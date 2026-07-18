@@ -647,7 +647,6 @@ impl AgentView {
                     if mouse.row >= scroll_top && mouse.row < scroll_bottom {
                         self.apply_question_scroll(delta);
                     }
-                } else {
                 }
                 InputOutcome::Changed
             }

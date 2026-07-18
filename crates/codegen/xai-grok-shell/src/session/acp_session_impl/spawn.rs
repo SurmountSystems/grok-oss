@@ -432,19 +432,18 @@ pub(crate) async fn spawn_session_actor(
         chat_state_event_tx,
         tokio_util::sync::CancellationToken::new(),
     );
-    if !initial_prompt_texts.is_empty()
+    if (!initial_prompt_texts.is_empty()
         || initial_total_tokens > 0
-        || initial_last_compaction.is_some()
+        || initial_last_compaction.is_some())
+        && let Some(mut snap) = chat_state_handle.snapshot().await
     {
-        if let Some(mut snap) = chat_state_handle.snapshot().await {
-            snap.prompt_index = initial_prompt_texts.len();
-            snap.prompt_texts = initial_prompt_texts;
-            if initial_total_tokens > 0 {
-                snap.total_tokens = initial_total_tokens;
-            }
-            snap.last_compaction_prompt_index = initial_last_compaction;
-            chat_state_handle.restore_snapshot(snap);
+        snap.prompt_index = initial_prompt_texts.len();
+        snap.prompt_texts = initial_prompt_texts;
+        if initial_total_tokens > 0 {
+            snap.total_tokens = initial_total_tokens;
         }
+        snap.last_compaction_prompt_index = initial_last_compaction;
+        chat_state_handle.restore_snapshot(snap);
     }
     chat_state_handle.update_credentials(credentials);
     let state = TokioMutex::new(State {

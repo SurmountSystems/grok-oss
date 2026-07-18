@@ -2158,10 +2158,11 @@ mod tests {
     #[tokio::test]
     async fn full_toolset_descriptions_render_cleanly() {
         use crate::implementations::grok_build::{
-            DEPLOY_APP_TOOL_NAME, IMAGE_GEN_TOOL_NAME, IMAGE_TO_VIDEO_TOOL_NAME,
-            REFERENCE_TO_VIDEO_TOOL_NAME, SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_DELETE_TOOL_NAME,
+            IMAGE_GEN_TOOL_NAME, IMAGE_TO_VIDEO_TOOL_NAME, REFERENCE_TO_VIDEO_TOOL_NAME,
+            SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_DELETE_TOOL_NAME,
         };
         let builder = ToolRegistryBuilder::new();
+        // Note: deploy_app is a no-op stub in OSS builds and is not registered.
         let config = ToolServerConfig {
             tools: vec![
                 "read_file",
@@ -2180,7 +2181,6 @@ mod tests {
                 "web_fetch",
                 "lsp",
                 IMAGE_GEN_TOOL_NAME,
-                DEPLOY_APP_TOOL_NAME,
                 IMAGE_TO_VIDEO_TOOL_NAME,
                 REFERENCE_TO_VIDEO_TOOL_NAME,
                 "monitor",
