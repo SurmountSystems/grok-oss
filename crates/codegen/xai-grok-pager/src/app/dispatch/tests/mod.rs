@@ -3,6 +3,7 @@ mod auth;
 mod billing;
 mod cta_e2e;
 mod dashboard;
+mod jump;
 mod modes;
 mod notes;
 mod permissions;
@@ -112,6 +113,7 @@ fn test_app() -> AppView {
         auto_mode_gate: true,
         yolo_policy_block: None,
         yolo_launch_block_notice: None,
+        screen_mode_switch_hint: None,
         require_plan_approval: false,
         plan_mode: false,
         chat_mode: false,
@@ -124,6 +126,7 @@ fn test_app() -> AppView {
         tip_seen_counts: Default::default(),
         last_known_terminal_rows: 0,
         small_screen_tip_evaluated: false,
+        ssh_wrap_tip_evaluated: false,
         clipboard_focus_tip: Default::default(),
         new_session_worktree_mode: crate::app::app_view::WorktreeMode::Never,
         fork_worktree_mode: crate::app::app_view::WorktreeMode::Ask,
@@ -141,6 +144,7 @@ fn test_app() -> AppView {
         auth_start_mode: AuthMode::Pending,
         auth_code_input: String::new(),
         next_auth_request_seq: 1,
+        auth_url_poll_handle: None,
         deferred_startup: Default::default(),
         auth_use_oauth: false,
         auth_clipboard_copied: false,
@@ -421,6 +425,9 @@ fn cta_mcp_server(
         status,
         tool_count: 0,
         auth_required: matches!(status, McpServerDisplayStatus::NeedsAuth),
+        setup_required: false,
+        setup: None,
+        setup_values: std::collections::HashMap::new(),
         tools: vec![],
         enabled: true,
         source: plugin

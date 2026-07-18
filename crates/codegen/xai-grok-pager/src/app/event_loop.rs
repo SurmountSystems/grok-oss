@@ -32,10 +32,10 @@ use super::{PagerArgs, PagerTerminal, acp_handler, dispatch, effects};
 pub(crate) struct TerminalState {
     pub is_control_mode: bool,
     pub screen_mode: super::ScreenMode,
-    /// This process was re-exec'd by `/minimal` (one-shot env override, already
-    /// consumed). Queues the minimal welcome card so the viewport re-anchors at
-    /// the top of the freshly cleared main screen.
+    /// One-shot `/minimal` re-exec (env override already consumed).
     pub relaunched_into_minimal: bool,
+    /// One-shot `/fullscreen` re-exec (env override already consumed).
+    pub relaunched_into_fullscreen: bool,
     /// Do NOT re-resolve via `theme::cache::resolve_initial_theme()` here:
     /// its OSC 11 fallback reads stdin and competes with the input reader.
     pub initial_theme: ThemeKind,
@@ -501,13 +501,13 @@ pub(crate) async fn run(
     // (`apply_app_scoped_gates` / `ensure_dashboard_state`); the welcome prompt
     // already exists, so inject here.
     app.welcome_prompt.set_screen_mode(term_state.screen_mode);
-    // Screen-mode relaunch into minimal (`/minimal` from fullscreen): queue the
-    // same top-of-screen welcome card `/new` uses so the first draw re-homes the
-    // viewport to row 0 and the resumed session starts cleanly under it. The
-    // `is_minimal` guard covers a Minimal→Inline probe downgrade in
-    // `init_terminal`, where the card must not be queued.
     if app.screen_mode.is_minimal() && term_state.relaunched_into_minimal {
         app.minimal_state.welcome_pending = true;
+    }
+    if term_state.relaunched_into_minimal && app.screen_mode.is_minimal() {
+        app.screen_mode_switch_hint = Some("Switched to minimal mode · /fullscreen to go back");
+    } else if term_state.relaunched_into_fullscreen && !app.screen_mode.is_minimal() {
+        app.screen_mode_switch_hint = Some("Switched to fullscreen mode · /minimal to go back");
     }
     let remote_permission_mode = remote_settings
         .as_ref()
@@ -607,14 +607,7 @@ pub(crate) async fn run(
     app.plugin_cta_enabled = xai_grok_config::env_bool("GROK_PLUGIN_CTA")
         .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
         .unwrap_or(false);
-    // Voice is GA-on by default. Remote `voice_mode_enabled: false` is a kill
-    // switch; `GROK_VOICE_MODE` overrides for local dev (env > remote > default on).
-    // Free/X Basic still hit SuperGrok upsell via tier gates (separate).
-    let voice_mode_enabled = crate::app::resolve_voice_mode_enabled(
-        xai_grok_config::env_bool("GROK_VOICE_MODE"),
-        remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
-    );
-    app.apply_voice_mode_enabled(voice_mode_enabled);
+    // Voice is applied after auth_meta so API-key detection is accurate.
     app.session_picker_grouped = std::env::var("GROK_SESSION_PICKER_GROUPED")
         .ok()
         .and_then(|v| match v.as_str() {
@@ -723,12 +716,22 @@ pub(crate) async fn run(
         app.is_api_key_auth = app.auth_methods.iter().any(|m| {
             m.id().0.as_ref() == xai_grok_shell::agent::auth_method::XAI_API_KEY_METHOD_ID
         });
-        // No AuthMeta on this path — hide `/usage` and enable voice for API keys.
+        // No AuthMeta on this path — hide `/usage` for API keys.
         if app.is_api_key_auth {
             app.usage_visible = false;
-            app.ensure_voice_for_api_key();
         }
     }
+
+    // After auth so API-key + managed policy resolve correctly.
+    let voice_mode_enabled = crate::app::resolve_voice_mode_live(
+        remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
+        app.is_api_key_auth,
+    );
+    if !voice_mode_enabled {
+        app.voice_reset();
+        app.voice_ui_active = false;
+    }
+    app.apply_voice_mode_enabled(voice_mode_enabled);
 
     // Fallback: prefetch may have gate info the shell's AuthMeta missed.
     // Errs on the side of blocking if stale.
@@ -778,7 +781,13 @@ pub(crate) async fn run(
             crate::notifications::load_notification_config(raw),
         );
         if let Some(table) = raw.as_table() {
-            app.voice_config = xai_grok_voice::VoiceConfig::from_config_table(table);
+            // Voice inherits the same resolved endpoints base as chat
+            // (config > GROK_XAI_API_BASE_URL env > default).
+            let endpoints_base =
+                xai_grok_shell::agent::config::EndpointsConfig::from_config_value(raw)
+                    .xai_api_base_url;
+            app.voice_config =
+                xai_grok_voice::VoiceConfig::from_config_table(table, Some(&endpoints_base));
         }
     }
     // Stamp request-identity headers so the STT handshake attributes voice usage
@@ -978,6 +987,7 @@ pub(crate) async fn run(
         app.last_known_terminal_rows,
     );
     initial_config.show_timestamps = crate::appearance::cache::load_timestamps();
+    initial_config.show_timeline = crate::appearance::cache::load_show_timeline();
     let tick_interval = initial_config.animation.tick_interval();
     crate::appearance::set_tab_width(initial_config.scrollback.display.tab_width);
     app.set_appearance(initial_config);
@@ -985,6 +995,17 @@ pub(crate) async fn run(
     // Seed app state from disk once at the I/O boundary so dispatch
     // stays sans-IO.
     app.current_ui = load_initial_ui_config();
+    // Field-tolerant: a whole-`UiConfig` default (malformed unrelated `[ui]`
+    // field) must not wipe a valid `show_timeline` or leave appearance /
+    // cache / `current_ui` disagreeing — `/timeline` and the rail all read
+    // the same canonical value after this sync + `prime` below.
+    let show_timeline = crate::appearance::cache::load_show_timeline();
+    app.current_ui.show_timeline = Some(show_timeline);
+    if app.appearance.show_timeline != show_timeline {
+        let mut config = app.appearance.clone();
+        config.show_timeline = show_timeline;
+        app.set_appearance(config);
+    }
     // Disk load replaces `current_ui`. Assign one policy-clamped resolved
     // launch mode unconditionally (CLI > TOML > remote > Ask) so disk Auto
     // cannot win over `--permission-mode ask`, and a policy-clamped remote
@@ -2010,6 +2031,7 @@ pub(crate) async fn run(
                 // `PromptWidget.compact`).
                 config.prompt.compact = app.appearance.prompt.compact;
                 config.show_timestamps = app.appearance.show_timestamps;
+                config.show_timeline = app.appearance.show_timeline;
                 tick_interval = config.animation.tick_interval();
                 crate::appearance::set_tab_width(config.scrollback.display.tab_width);
                 app.set_appearance(config);
@@ -2540,14 +2562,38 @@ fn sync_appearance_watcher(watcher: &mut Option<SystemAppearanceWatcher>) {
 
 /// Build [`ExitInfo`] from the active agent's session (if any).
 ///
+/// Sole construction site of [`super::ExitSummary`]: fullscreen quits only
+/// (leaving the alt screen wipes the transcript; inline/minimal quits keep it
+/// visible in native scrollback), and only with at least one conversation
+/// line (a bare title is noise). Deliberately the root agent even when a
+/// subagent view is focused — `--resume` restores the root session, and a
+/// subagent's latest "prompt" is the parent's task brief, not user input.
+///
 /// `exit_info` is only consumed on the plain-quit path; a pending `relaunch`
 /// short-circuits before it is read and carries its own session id.
 fn make_run_result(app: &AppView) -> RunResult {
-    RunResult {
-        exit_info: app.active_session_id().map(|sid| super::ExitInfo {
-            session_id: sid.to_string(),
+    let exit_info = app.active_agent().and_then(|agent| {
+        let sid = agent.session.session_id.as_ref()?;
+        let summary = if app.screen_mode.is_fullscreen() {
+            use crate::views::session_title;
+            let last_prompt = session_title::last_user_prompt_line(agent);
+            let last_response = session_title::last_agent_message_line(agent);
+            (last_prompt.is_some() || last_response.is_some()).then(|| super::ExitSummary {
+                title: session_title::entry_title(agent),
+                last_prompt,
+                last_response,
+            })
+        } else {
+            None
+        };
+        Some(super::ExitInfo {
+            session_id: sid.0.to_string(),
             minimal: app.screen_mode.is_minimal(),
-        }),
+            summary,
+        })
+    });
+    RunResult {
+        exit_info,
         quit_for_update: app.quit_for_update,
         relaunch: app.relaunch.clone(),
     }
@@ -3215,6 +3261,18 @@ fn process_effects(
             && *request_seq == seq
         {
             *handle = Some(abort_handle);
+        }
+        // Install URL-poll abort handle when the seq still matches (or is the
+        // current Authenticating attempt). Aborted in `abort_prior_auth`.
+        if let Some((seq, abort_handle)) = meta.auth_url_poll_handle {
+            let still_current = matches!(
+                &app.auth_state,
+                super::app_view::AuthState::Authenticating { request_seq, .. }
+                    if *request_seq == seq
+            );
+            if still_current {
+                app.auth_url_poll_handle = Some((seq, abort_handle));
+            }
         }
         if quit {
             return true;
@@ -4114,5 +4172,91 @@ mod tests {
         let result = coalesce_rapid_keys(events);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], Event::Paste(r"C:\foo.png".to_string()));
+    }
+
+    // ── make_run_result exit info ────────────────────────────────────────
+
+    /// App focused on an agent (session `test-session`) with a seeded
+    /// prompt → prompt → response exchange in its scrollback.
+    fn seeded_quit_app(screen_mode: crate::app::ScreenMode) -> AppView {
+        use crate::scrollback::block::RenderBlock;
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.screen_mode = screen_mode;
+        let ActiveView::Agent(id) = app.active_view else {
+            panic!("test app must start on an agent");
+        };
+        let scrollback = &mut app.agents.get_mut(&id).unwrap().scrollback;
+        scrollback.push_block(RenderBlock::user_prompt("fix the flaky CI test"));
+        scrollback.push_block(RenderBlock::user_prompt("make the suite deterministic"));
+        scrollback.push_block(RenderBlock::agent_message("Pinned the seed.\nSecond line."));
+        app
+    }
+
+    #[test]
+    fn make_run_result_fullscreen_quit_builds_summary() {
+        let app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
+        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        assert_eq!(info.session_id, "test-session");
+        assert!(!info.minimal);
+        let summary = info.summary.expect("summary on fullscreen quit");
+        // Deliberate: title comes from the first prompt, last_prompt from the newest.
+        assert_eq!(summary.title, "fix the flaky CI test");
+        assert_eq!(
+            summary.last_prompt.as_deref(),
+            Some("make the suite deterministic")
+        );
+        assert_eq!(summary.last_response.as_deref(), Some("Pinned the seed."));
+    }
+
+    #[test]
+    fn make_run_result_unanswered_prompt_omits_stale_response() {
+        use crate::scrollback::block::RenderBlock;
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
+        let ActiveView::Agent(id) = app.active_view else {
+            panic!("test app must start on an agent");
+        };
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .scrollback
+            .push_block(RenderBlock::user_prompt("now rerun the whole suite"));
+        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        let summary = info.summary.expect("prompt alone still summarizes");
+        assert_eq!(
+            summary.last_prompt.as_deref(),
+            Some("now rerun the whole suite")
+        );
+        // The earlier reply answered an older prompt — it must not appear here.
+        assert!(summary.last_response.is_none());
+    }
+
+    #[test]
+    fn make_run_result_inline_and_minimal_quits_omit_summary() {
+        let app = seeded_quit_app(crate::app::ScreenMode::Inline);
+        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        assert!(info.summary.is_none());
+        assert!(!info.minimal);
+
+        let app = seeded_quit_app(crate::app::ScreenMode::Minimal);
+        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        assert!(info.summary.is_none());
+        assert!(info.minimal);
+    }
+
+    #[test]
+    fn make_run_result_empty_session_omits_summary() {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        app.screen_mode = crate::app::ScreenMode::Fullscreen;
+        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        assert!(info.summary.is_none());
+    }
+
+    #[test]
+    fn make_run_result_non_agent_views_have_no_exit_info() {
+        for view in [ActiveView::Welcome, ActiveView::AgentDashboard] {
+            let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
+            app.active_view = view;
+            assert!(make_run_result(&app).exit_info.is_none());
+        }
     }
 }

@@ -367,6 +367,7 @@ impl acp::Agent for MvpAgent {
             );
             self.set_auth_method(default_id);
         }
+        self.sync_process_static_api_key(None);
         let current_working_directory = self.launch_cwd.clone();
         let hostname = gethostname::gethostname();
         let mcp_servers: Vec<crate::extensions::mcp::McpServerEntry> = Vec::new();
@@ -429,7 +430,8 @@ impl acp::Agent for MvpAgent {
                         ::session::slash_commands::builtin_commands(self
                         .command_availability()), "cancelRewind" : self.cfg.borrow()
                         .resolve_cancel_rewind().value, "sessionRecap" : self.cfg
-                        .borrow().is_session_recap_enabled(), }
+                        .borrow().is_session_recap_enabled(), "voiceMode" : self.cfg
+                        .borrow().is_voice_mode_enabled(), }
                     )
                         .as_object()
                         .cloned()
@@ -512,6 +514,7 @@ impl acp::Agent for MvpAgent {
                     }
                 }
                 self.set_auth_method(arguments.method_id.clone());
+                self.sync_process_static_api_key(None);
                 self.ensure_telemetry_client();
                 if crate::agent::chat_modes::process_chat_mode_enabled() {
                     self.chat_modes.warm_in_background();
@@ -717,44 +720,52 @@ impl acp::Agent for MvpAgent {
                     ),
                 );
                 let login_override = auth_meta.login_override();
-                let (auth, _did_auth) = if !auth_meta.headless {
+                let mut cancelled = false;
+                let client_seq = auth_meta.request_seq;
+                let auth_result = if !auth_meta.headless {
                     let (url_tx, url_rx) = tokio::sync::oneshot::channel();
                     let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
-                    *self.auth_code_tx.borrow_mut() = Some(code_tx);
-                    *self.auth_url_rx.borrow_mut() = Some(url_rx);
-                    let result = crate::auth::run_auth_flow_with_stderr_bridge(
-                            &self.auth_manager,
-                            grok_ctx,
-                            crate::auth::AuthChannels {
-                                url_tx: Some(url_tx),
-                                code_rx,
-                            },
-                            auth_meta.reauth,
-                            auth_meta.force_interactive,
-                            login_override,
-                        )
-                        .await;
-                    *self.auth_code_tx.borrow_mut() = None;
-                    *self.auth_url_rx.borrow_mut() = None;
-                    result
+                    let (cancel, _guard) = self
+                        .interactive_auth
+                        .begin(
+                            Some(
+                                crate::auth::single_flight::AttemptChannels::new(
+                                    code_tx,
+                                    url_rx,
+                                ),
+                            ),
+                            client_seq,
+                        );
+                    tokio::select! {
+                        biased; _ = cancel.cancelled() => { cancelled = true;
+                        Err(anyhow::anyhow!("Authentication cancelled")) } r = crate
+                        ::auth::run_auth_flow_with_stderr_bridge(& self.auth_manager,
+                        grok_ctx, crate ::auth::AuthChannels { url_tx : Some(url_tx),
+                        code_rx, }, auth_meta.reauth, auth_meta.force_interactive,
+                        login_override,) => r,
+                    }
                 } else {
-                    crate::auth::run_auth_flow(
-                                &self.auth_manager,
-                                grok_ctx,
-                                auth_meta.reauth,
-                                None,
-                                None,
-                                None,
-                                login_override,
-                            )
-                            .await
-                }
+                    let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
+                    tokio::select! {
+                        biased; _ = cancel.cancelled() => { cancelled = true;
+                        Err(anyhow::anyhow!("Authentication cancelled")) } r = crate
+                        ::auth::run_auth_flow(& self.auth_manager, grok_ctx, auth_meta
+                        .reauth, None, None, None, login_override,) => r,
+                    }
+                };
+                let (auth, _did_auth) = auth_result
                     .map_err(|e| {
                         emit_login_span(
                             false,
                             arguments.method_id.0.as_ref(),
                             None,
-                            Some("login_flow_failed"),
+                            Some(
+                                if cancelled {
+                                    "login_cancelled"
+                                } else {
+                                    "login_flow_failed"
+                                },
+                            ),
                         );
                         let mut err = acp::Error::auth_required();
                         err.message = e.to_string();
@@ -1079,9 +1090,8 @@ impl acp::Agent for MvpAgent {
             remote_settings.as_ref(),
         );
         let bridge_attach = BridgeAttach::NotAttached;
-        if !self.is_data_collection_disabled()
-            || xai_grok_telemetry::external::is_active()
-        {
+        let product_analytics = self.product_analytics_enabled();
+        if product_analytics || xai_grok_telemetry::external::is_active() {
             let sid = session_id.0.to_string();
             let ci = client_identifier.clone();
             let cv = self.client_version();
@@ -1095,7 +1105,6 @@ impl acp::Agent for MvpAgent {
             } else {
                 xai_grok_telemetry::enums::PermissionMode::Ask
             };
-            let internal_gate_open = !self.is_data_collection_disabled();
             tokio::spawn(async move {
                 let git = xai_grok_telemetry::context::collect_git_context(&cwd_str);
                 let ev = xai_grok_telemetry::events::SessionNew {
@@ -1105,7 +1114,7 @@ impl acp::Agent for MvpAgent {
                     is_git_repo: git.is_git_repo,
                     permission_mode: perm,
                 };
-                xai_grok_telemetry::session_ctx::log_event_dual(internal_gate_open, ev);
+                xai_grok_telemetry::session_ctx::log_event_dual(product_analytics, ev);
             });
         }
         if let Some(model_id) = resolved_custom_model {
@@ -1941,7 +1950,7 @@ impl acp::Agent for MvpAgent {
                 let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
         }
-        if !self.is_data_collection_disabled() {
+        if self.product_analytics_enabled() {
             log_event(xai_grok_telemetry::events::SessionLoad {
                 session_id: session_id.0.to_string(),
                 compaction_count: restored_compaction_count,
@@ -2082,8 +2091,8 @@ impl acp::Agent for MvpAgent {
                 return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
             }
         }
-        let intake_lock = self.prompt_intake_lock(&arguments.session_id);
-        let intake_guard = intake_lock.lock().await;
+        let dispatch_lock = self.dispatch_lock(&arguments.session_id);
+        let dispatch_guard = dispatch_lock.lock().await;
         let meta_prompt_mode = arguments
             .meta
             .as_ref()
@@ -2313,7 +2322,7 @@ impl acp::Agent for MvpAgent {
                 acp::Error::internal_error()
                     .data(format!("failed to dispatch prompt to session: {e}"))
             })?;
-        drop(intake_guard);
+        drop(dispatch_guard);
         self.push_roster_activity_delta(
             &arguments.session_id,
             crate::agent::roster::RosterActivity::Working,
@@ -3082,6 +3091,8 @@ impl acp::Agent for MvpAgent {
                 .and_then(|m| m.get("rewindIfPristine"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let dispatch_lock = self.dispatch_lock(&args.session_id);
+            let _dispatch_guard = dispatch_lock.lock().await;
             let _ = handle
                 .cmd_tx
                 .send(SessionCommand::Cancel {

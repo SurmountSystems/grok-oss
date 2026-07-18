@@ -24,6 +24,13 @@ pub mod keys {
     pub const ESC: &[u8] = b"\x1b";
 }
 
+#[derive(Debug)]
+pub(crate) enum PtyRead {
+    Chunk(Vec<u8>),
+    Timeout,
+    Closed,
+}
+
 /// Low-level PTY controller: spawns a child process inside a PTY and provides
 /// methods to inject input, resize, and drain output.
 pub struct PtyController {
@@ -144,18 +151,28 @@ impl PtyController {
         }
     }
 
-    /// Receive a single chunk from the reader channel, blocking up to `timeout`.
+    /// Receive one chunk, distinguishing timeout from reader EOF.
     ///
-    /// Returns `None` on timeout or channel disconnect (child exited).
-    /// Use this instead of [`drain_output`] when timing accuracy matters —
-    /// processing each chunk inline preserves inter-chunk timing.
-    pub fn recv_chunk(&self, timeout: Duration) -> Option<Vec<u8>> {
-        self.reader_rx.recv_timeout(timeout).ok()
+    /// Processing each chunk inline preserves inter-chunk timing.
+    pub(crate) fn recv_chunk(&self, timeout: Duration) -> PtyRead {
+        match self.reader_rx.recv_timeout(timeout) {
+            Ok(chunk) => PtyRead::Chunk(chunk),
+            Err(mpsc::RecvTimeoutError::Timeout) => PtyRead::Timeout,
+            Err(mpsc::RecvTimeoutError::Disconnected) => PtyRead::Closed,
+        }
     }
 
     /// Check whether the child process is still running.
     pub fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Poll child status once, preserving process-query errors.
+    pub(crate) fn try_exit_code(&mut self) -> Result<Option<u32>> {
+        self.child
+            .try_wait()
+            .map(|status| status.map(|status| status.exit_code()))
+            .context("failed to query PTY child status")
     }
 
     /// Wait up to `timeout` for the child to exit, returning its exit code
@@ -210,6 +227,8 @@ impl Drop for PtyController {
         let _ = self.child.wait();
     }
 }
+
+const CLIPBOARD_SINK_ENV_VARS: &[&str] = &["GROK_OSC52_SINK", "LC_GROK_OSC52_SINK"];
 
 /// Host terminal identity markers stripped from the child environment.
 ///
@@ -288,6 +307,12 @@ fn apply_child_env(cmd: &mut CommandBuilder, env: &[(&str, &str)]) {
     for ssh_var in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_AUTH_SOCK"] {
         cmd.env_remove(ssh_var);
     }
+    // A harness launched under `grok wrap` must not silently confirm clipboard
+    // delivery for no-sink scenarios. Explicit sink tests re-inject a marker
+    // through `env` after this hygiene pass.
+    for sink_var in CLIPBOARD_SINK_ENV_VARS {
+        cmd.env_remove(sink_var);
+    }
     // Neutralize parent-terminal identity bleed: agent hosts often export
     // TERM_PROGRAM=ghostty/iTerm/etc. (and mux/editor markers) which make
     // the child pager adopt that host's key/modifier/clipboard quirks even
@@ -345,6 +370,9 @@ mod tests {
         for color_var in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
             cmd.env(color_var, "polluted");
         }
+        for sink_var in CLIPBOARD_SINK_ENV_VARS {
+            cmd.env(sink_var, "polluted");
+        }
         // Unrelated vars must survive the hygiene pass untouched.
         cmd.env("GROK_SCROLL_LOG", "/tmp/scroll.jsonl");
 
@@ -366,6 +394,12 @@ mod tests {
             assert!(
                 cmd.get_env(color_var).is_none(),
                 "color override {color_var} leaked into the child env"
+            );
+        }
+        for sink_var in CLIPBOARD_SINK_ENV_VARS {
+            assert!(
+                cmd.get_env(sink_var).is_none(),
+                "clipboard sink marker {sink_var} leaked into the child env"
             );
         }
         assert_eq!(
@@ -394,6 +428,7 @@ mod tests {
                 ("TERM_PROGRAM", "vscode"),
                 ("NVIM", "/tmp/fake-nvim.sock"),
                 ("TERM", "xterm-kitty"),
+                ("GROK_OSC52_SINK", "1"),
             ],
         );
 
@@ -413,6 +448,11 @@ mod tests {
         assert_eq!(
             cmd.get_env("TERM").and_then(|v| v.to_str()),
             Some("xterm-kitty")
+        );
+        assert_eq!(
+            cmd.get_env("GROK_OSC52_SINK").and_then(|v| v.to_str()),
+            Some("1"),
+            "explicit sink scenarios must be able to re-inject the marker"
         );
     }
 }

@@ -548,6 +548,53 @@ fn set_timestamps_emits_persist_setting_with_correct_payload() {
     assert_eq!(app.current_ui.show_timestamps, Some(false));
 }
 #[test]
+fn set_timeline_emits_persist_setting_with_correct_payload() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let default_on = app.current_ui.show_timeline_enabled();
+    let effects = dispatch(Action::SetTimeline(!default_on), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "show_timeline");
+            assert_eq!(value, &SettingValue::Bool(!default_on));
+            assert_eq!(rollback_value, &SettingValue::Bool(default_on));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert_eq!(app.current_ui.show_timeline, Some(!default_on));
+    assert_eq!(
+        crate::appearance::cache::load_show_timeline(),
+        !default_on,
+        "set_timeline must update the appearance cache"
+    );
+    assert_eq!(
+        app.appearance.show_timeline, !default_on,
+        "set_timeline must update the live appearance config"
+    );
+}
+#[test]
+fn set_timeline_toggles_displayed_state_when_current_ui_diverges() {
+    let mut app = test_app_with_agent();
+    app.appearance.show_timeline = true;
+    crate::appearance::cache::set_show_timeline(true);
+    app.current_ui.show_timeline = None;
+    assert!(
+        !app.current_ui.show_timeline_enabled(),
+        "current_ui resolves to the OFF default (the divergence)"
+    );
+    let new = !crate::appearance::cache::load_show_timeline();
+    assert!(!new, "toggle target is OFF");
+    let effects = dispatch(Action::SetTimeline(new), &mut app);
+    assert_eq!(effects.len(), 1, "toggle must persist, not silently no-op");
+    assert!(!app.appearance.show_timeline, "the rail is now hidden");
+    assert_eq!(app.current_ui.show_timeline, Some(false));
+}
+#[test]
 fn set_simple_mode_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
@@ -1140,6 +1187,10 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "show_timestamps" => {
             let _ = dispatch(Action::SetTimestamps(false), app);
         }
+        "show_timeline" => {
+            let away = !app.current_ui.show_timeline_enabled();
+            let _ = dispatch(Action::SetTimeline(away), app);
+        }
         "simple_mode" => {
             let _ = dispatch(Action::SetSimpleMode(false), app);
         }
@@ -1160,6 +1211,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "contextual_hints.word_select" => {
             let _ = dispatch(Action::SetContextualHintWordSelect(false), app);
+        }
+        "contextual_hints.ssh_wrap" => {
+            let _ = dispatch(Action::SetContextualHintSshWrap(false), app);
         }
         "multiline_mode" => {
             let _ = dispatch(Action::SetMultilineMode(true), app);
@@ -1270,6 +1324,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "hunk_tracker_mode" => {
             let _ = dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
+        }
+        "screen_mode" => {
+            let _ = dispatch(Action::SetScreenMode("minimal".to_string()), app);
         }
         "voice_capture_mode" => {
             let _ = dispatch(Action::SetVoiceCaptureMode("toggle".to_string()), app);
@@ -2845,18 +2902,33 @@ fn set_auto_dark_theme_does_not_apply_when_theme_is_not_auto() {
 /// GrokNight. Using a non-truecolor theme avoids the clamp
 /// uncertainty. The "live apply" contract is what we're testing
 /// — the specific theme picked is incidental.
+///
+/// Intermediate kind after `SetTheme("auto")` is intentionally not
+/// pinned to `GrokNight`: under `cargo test` (shared process) other
+/// tests can leave a non-default `AUTO_THEME_CONFIG` until the next
+/// seed. Process-per-test runners (`cargo nextest`) make that rare;
+/// the load-bearing assert is the post-commit `GrokDay` apply.
 #[test]
 fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
     with_theme_test_env(|| {
         crate::theme::system_appearance::set_mock(Some(
             crate::theme::system_appearance::SystemAppearance::Dark,
         ));
+        // Re-seed under the held test lock so resolve_auto cannot
+        // observe another test's AUTO_THEME_CONFIG between setup and
+        // SetTheme("auto").
+        crate::theme::cache::seed_auto_theme_defaults_for_test();
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetTheme("auto".into()), &mut app);
-        assert!(crate::theme::cache::is_auto_mode());
-        assert_eq!(
-            crate::theme::cache::current_kind(),
-            crate::theme::ThemeKind::GrokNight,
+        assert!(
+            crate::theme::cache::is_auto_mode(),
+            "SetTheme(auto) must enable auto mode before auto_dark_theme commit",
+        );
+        let before = crate::theme::cache::current_kind();
+        assert_ne!(
+            before,
+            crate::theme::ThemeKind::GrokDay,
+            "pre-commit kind must differ from the grokday value we are about to apply",
         );
         let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
         assert_eq!(

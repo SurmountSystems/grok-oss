@@ -2164,7 +2164,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         // Note: deploy_app is a no-op stub in OSS builds and is not registered.
         let config = ToolServerConfig {
-            tools: vec![
+            tools: [
                 "read_file",
                 "search_replace",
                 "run_terminal_cmd",
@@ -2190,6 +2190,7 @@ mod tests {
             ]
             .into_iter()
             .map(|id| ToolConfig::from_id(format!("GrokBuild:{id}")))
+            .chain(std::iter::empty::<ToolConfig>())
             .collect(),
             behavior_preset: None,
         };

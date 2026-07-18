@@ -37,39 +37,19 @@ pub fn custom_bridge_disabled() -> bool {
         })
         .unwrap_or(false)
 }
-/// Parse `GROK_GATEWAY_URL` into a [`url::Url`]. Unset, empty, or
-/// malformed → `None` (malformed is warned and falls back to local
-/// mode so the shell doesn't refuse to start).
+/// Parse `GROK_GATEWAY_URL` into a [`url::Url`].
 ///
-/// The malformed-URL warning intentionally does **not** log the raw
-/// env-var value — a mistyped credential URL of the form
-/// `wss://user:pass@host` would leak `pass` if the parse failed. The
-/// operator can inspect their own env var directly.
-///
-/// Hard-off (always `None`) without the `chat` feature so release
-/// builds can't activate the bridge via env.
+/// This build ignores the variable and stays in local mode (warns if set).
 pub fn parse_gateway_url() -> Option<url::Url> {
     let raw = std::env::var(GROK_GATEWAY_URL_ENV).ok()?;
     if raw.is_empty() {
         return None;
     }
-    if true {
-        tracing::warn!(
-            env = GROK_GATEWAY_URL_ENV,
-            "GROK_GATEWAY_URL is set but this build lacks the `chat` feature; staying in local mode"
-        );
-        return None;
-    }
-    match url::Url::parse(&raw) {
-        Ok(url) => Some(url),
-        Err(err) => {
-            tracing::warn!(
-                env = GROK_GATEWAY_URL_ENV, error = % err,
-                "GROK_GATEWAY_URL is not a valid URL; falling back to local mode (raw value omitted to avoid leaking userinfo)"
-            );
-            None
-        }
-    }
+    tracing::warn!(
+        env = GROK_GATEWAY_URL_ENV,
+        "GROK_GATEWAY_URL is set but this build does not support gateway-bridge mode; staying in local mode"
+    );
+    None
 }
 #[cfg(test)]
 mod tests {
@@ -85,11 +65,11 @@ mod tests {
         assert!(parse_gateway_url().is_none());
     }
     #[test]
-    fn parse_gateway_url_returns_none_for_malformed_url() {
-        let _env = EnvVarGuard::set(GROK_GATEWAY_URL_ENV, "not a url");
+    fn parse_gateway_url_hard_off_without_gateway_bridge() {
+        let _env = EnvVarGuard::set(GROK_GATEWAY_URL_ENV, "wss://gateway.example.com/ws");
         assert!(
             parse_gateway_url().is_none(),
-            "malformed URL falls back to None"
+            "valid URL must still be ignored in this build"
         );
     }
     #[test]

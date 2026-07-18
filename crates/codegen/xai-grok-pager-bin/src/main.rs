@@ -30,8 +30,8 @@ use std::env;
 use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::{
-    AgentCmd, Command, HeadlessArgs, LeaderTargetArgs, PagerArgs, join_early_prefetch,
-    resolve_use_leader,
+    AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderTargetArgs,
+    PagerArgs, join_early_prefetch, resolve_use_leader,
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use xai_grok_pager::client_identity::PAGER_CLIENT_VERSION;
@@ -200,11 +200,101 @@ async fn run_setup_command(json: bool) {
                 "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
             );
         }
+        SetupOutcome::Skipped => {
+            eprintln!(
+                "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `grok setup` again."
+            );
+        }
         SetupOutcome::Failed(e) => {
             eprintln!("Couldn't apply managed configuration. {e}");
             std::process::exit(1);
         }
     }
+}
+async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
+    match args.command {
+        LeaderMgmtCommand::Kill => kill_leaders().await,
+        LeaderMgmtCommand::List { json } => {
+            let leaders = xai_grok_shell::leader::discover_leaders().await;
+            if json {
+                let payload: Vec<_> = leaders.iter().map(leader_descriptor_json).collect();
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::Value::Array(payload))?
+                );
+            } else if leaders.is_empty() {
+                println!("No leader candidates found.");
+            } else {
+                for d in &leaders {
+                    print_leader_descriptor(d);
+                }
+            }
+            Ok(())
+        }
+        LeaderMgmtCommand::Info { target, json } => {
+            let (descriptor, client) = connect_to_leader(&target).await?;
+            let info = match ensure_control_caps(client.registration()) {
+                Ok(_) => client
+                    .send_control(ControlCommand::GetLeaderInfo)
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok()),
+                Err(_) => None,
+            };
+            if json {
+                let payload = leader_info_json(&descriptor, client.registration(), info.as_ref())?;
+                println!("{}", serde_json::to_string(&payload)?);
+            } else if let Some(info) = info {
+                println!("{info:#?}");
+            } else {
+                print_leader_descriptor(&descriptor);
+                eprintln!(
+                    "  (detailed info unavailable — leader does not advertise control capabilities)"
+                );
+            }
+            client.cancel();
+            Ok(())
+        }
+    }
+}
+async fn kill_leaders() -> Result<()> {
+    let leaders = xai_grok_shell::leader::discover_leaders().await;
+    if leaders.is_empty() {
+        eprintln!("No leader candidates found.");
+        return Ok(());
+    }
+    let mut killed = 0u32;
+    let mut cleaned = 0u32;
+    for d in &leaders {
+        let Some(pid) = leader_pid(d) else {
+            continue;
+        };
+        if !xai_grok_shell::util::is_grok_process(pid) {
+            if let Some(ref lock) = d.lock_path {
+                eprintln!("  PID {pid} is not a grok process, removing stale lock");
+                let _ = std::fs::remove_file(lock);
+                cleaned += 1;
+            }
+            if let Some(ref sock) = d.socket_path {
+                let _ = std::fs::remove_file(sock);
+            }
+            continue;
+        }
+        eprintln!("  Killing leader PID {pid}");
+        if let Err(e) = xai_grok_shell::util::kill_process_by_pid(pid) {
+            eprintln!("  warning: failed to terminate PID {pid}: {e}");
+            continue;
+        }
+        killed += 1;
+    }
+    if killed > 0 {
+        eprintln!("Killed {killed} leader process(es).");
+    } else if cleaned > 0 {
+        eprintln!("No live leader processes found (cleaned up {cleaned} stale lock(s)).");
+    } else {
+        eprintln!("No live leader processes found.");
+    }
+    Ok(())
 }
 fn resolve_target(args: &LeaderTargetArgs) -> LeaderTarget {
     match args.pid {
@@ -230,6 +320,43 @@ async fn connect_to_leader(
     )
     .await?;
     Ok((selection.descriptor, client))
+}
+/// Prefer socket-verified live PID over a possibly-recycled lock file PID.
+fn leader_pid(d: &LeaderDescriptor) -> Option<u32> {
+    d.live_info.as_ref().map(|li| li.pid).or(d.pid_from_lock)
+}
+fn print_leader_descriptor(d: &LeaderDescriptor) {
+    let pid = leader_pid(d)
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "?".into());
+    let sock = d
+        .socket_path
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "?".into());
+    let state = format!("{:?}", d.classification);
+    eprintln!("  PID {pid} ({state}) -- {sock}");
+}
+fn leader_descriptor_json(d: &LeaderDescriptor) -> serde_json::Value {
+    serde_json::json!(
+        { "pid" : leader_pid(d), "pidFromLock" : d.pid_from_lock, "pidLive" : d.live_info
+        .as_ref().map(| li | li.pid), "classification" : format!("{:?}", d
+        .classification), "socketPath" : d.socket_path.as_deref().map(| p | p.display()
+        .to_string()), "lockPath" : d.lock_path.as_deref().map(| p | p.display()
+        .to_string()), "wsUrlSuffix" : d.ws_url_suffix, }
+    )
+}
+fn leader_info_json(
+    d: &LeaderDescriptor,
+    reg: &LeaderRegistration,
+    info: Option<&xai_grok_shell::leader::ControlPayload>,
+) -> Result<serde_json::Value> {
+    let mut val = leader_descriptor_json(d);
+    val["clientId"] = serde_json::json!(reg.client_id);
+    if let Some(info) = info {
+        val["info"] = serde_json::to_value(info)?;
+    }
+    Ok(val)
 }
 fn ensure_control_caps(reg: &LeaderRegistration) -> Result<&LeaderCapabilities> {
     reg.leader_capabilities
@@ -959,9 +1086,16 @@ async fn run_agent_command(
         leader_eligible,
     );
     tracing::info!(use_leader, ?policy_disable_reason, "leader mode resolved");
-    if stdio_direct_update_eligible(is_stdio, use_leader)
-        && should_check_for_updates(no_auto_update)
-    {
+    let managed_install = is_managed_install(
+        std::env::current_exe().ok(),
+        &xai_grok_shell::util::grok_home::grok_home(),
+    );
+    if stdio_auto_update_enabled(
+        is_stdio,
+        use_leader,
+        should_check_for_updates(no_auto_update),
+        managed_install,
+    ) {
         let update_config = update_config.clone();
         tokio::spawn(async move {
             auto_update::run_update_if_available(
@@ -972,6 +1106,8 @@ async fn run_agent_command(
             .await
             .ok();
         });
+    } else if is_stdio && !use_leader && !managed_install {
+        tracing::debug!("stdio auto-update skipped: not the managed install");
     }
     if use_leader {
         if !agent_args.plugin_dirs.is_empty() {
@@ -1604,8 +1740,13 @@ async fn async_main() -> Result<()> {
                     );
                     println!("{}", serde_json::to_string(&payload)?);
                 } else {
-                    // Identity: upstream package version + short SHA (no release channel).
-                    println!("grok-oss {}", env!("VERSION_WITH_COMMIT"));
+                    println!(
+                        "grok {}",
+                        xai_grok_version::display_version_with_commit(
+                            env!("VERSION_WITH_COMMIT"),
+                            xai_grok_update::channel_label(),
+                        )
+                    );
                 }
                 return Ok(());
             }
@@ -1621,9 +1762,7 @@ async fn async_main() -> Result<()> {
                          Use `grok-pager agent {flag}` instead."
                     );
                 }
-                if should_check_for_updates(false) {
-                    enforce_minimum_version_or_exit(&update_config).await;
-                }
+                enforce_minimum_version_or_exit(&update_config).await;
                 return run_agent_command(
                     agent_args,
                     args.permission_mode_flag.clone(),
@@ -1662,6 +1801,11 @@ async fn async_main() -> Result<()> {
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                 return xai_grok_pager::models::list_available_models(&agent_config).await;
+            }
+            Command::Leader(leader_args) => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return run_leader_mgmt(leader_args).await;
             }
             Command::Worktree(worktree_args) => {
                 init_tracing_simple("cli");
@@ -1794,9 +1938,7 @@ async fn async_main() -> Result<()> {
     if let Some(prompt) = headless_prompt {
         init_tracing_simple(HEADLESS_ENTRYPOINT);
         let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-        if should_check_for_updates(false) {
-            enforce_minimum_version_or_exit(&update_config).await;
-        }
+        enforce_minimum_version_or_exit(&update_config).await;
         let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
             args.yolo,
             args.permission_mode_flag.as_deref(),
@@ -1859,9 +2001,7 @@ async fn async_main() -> Result<()> {
         )
         .await;
     }
-    if should_check_for_updates(args.no_auto_update) {
-        enforce_minimum_version_or_exit(&update_config).await;
-    }
+    enforce_minimum_version_or_exit(&update_config).await;
     let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
     type UpdateWaitHandle = tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>;
     let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =
@@ -1975,36 +2115,47 @@ fn build_update_config() -> UpdateConfig {
 /// rules here — not at each call site.
 ///
 /// Grok OSS does **not** use xAI's GCS/npm update channel (`x.ai/cli`,
-/// `@xai-official/grok`). Those advertise official SpaceXAI builds (e.g.
-/// v0.2.x) which would overwrite or confuse this fork. Install/update via
-/// git + `cargo install`, Nix, or AUR instead. Opt in later with
-/// `GROK_OSS_ENABLE_XAI_UPDATER=1` only for debugging against upstream.
+/// `@xai-official/grok`). Opt in only with `GROK_OSS_ENABLE_XAI_UPDATER=1`.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
+    // Grok OSS: do not use xAI GCS/npm update channel unless explicitly opted in.
+    if std::env::var_os("GROK_OSS_ENABLE_XAI_UPDATER").is_none() {
+        return false;
+    }
     if cfg!(debug_assertions) {
         return false;
     }
     if no_auto_update_flag {
         return false;
     }
-    if std::env::var_os("GROK_DISABLE_AUTOUPDATER").is_some() {
-        return false;
-    }
-    // Default off for Grok OSS (this binary). Upstream xAI updater is wrong here.
-    if std::env::var_os("GROK_OSS_ENABLE_XAI_UPDATER").is_none() {
-        return false;
-    }
-    true
+    !std::env::var_os("GROK_DISABLE_AUTOUPDATER")
+        .is_some_and(|v| env_flag_enabled(&v.to_string_lossy()))
 }
-/// Mode-gate for the direct stdio agent's background auto-update.
-///
-/// Only the *direct* stdio agent is newly eligible: every other agent mode
-/// already self-updates at the top of `run_agent_command`, and a leader-backed
-/// stdio process is a thin bridge whose updates are owned by the leader
-/// (`LeaderAutoUpdateConfig`). Update suppression (`--no-auto-update`,
-/// `GROK_DISABLE_AUTOUPDATER`, debug builds) is layered on separately via
-/// [`should_check_for_updates`].
-fn stdio_direct_update_eligible(is_stdio: bool, use_leader: bool) -> bool {
-    is_stdio && !use_leader
+/// Gate for the stdio agent's background auto-update: only the direct stdio
+/// agent, from the managed install. Other modes update in `run_agent_command`.
+fn stdio_auto_update_enabled(
+    is_stdio: bool,
+    use_leader: bool,
+    updates_enabled: bool,
+    managed_install: bool,
+) -> bool {
+    is_stdio && !use_leader && updates_enabled && managed_install
+}
+/// True when `exe` is the binary `<grok_home>/bin/grok` resolves to, the
+/// install that adopts a staged update on respawn. Both sides are
+/// canonicalized; any failure reports unmanaged and skips the update. The
+/// npm shim hardcodes `~/.grok`, so a custom `GROK_HOME` skips here too.
+fn is_managed_install(exe: Option<std::path::PathBuf>, grok_home: &std::path::Path) -> bool {
+    if grok_home.as_os_str().is_empty() {
+        return false;
+    }
+    let Some(exe) = exe else {
+        return false;
+    };
+    let managed = xai_grok_config::grok_application_in(grok_home);
+    match (dunce::canonicalize(&exe), dunce::canonicalize(&managed)) {
+        (Ok(exe), Ok(managed)) => exe == managed,
+        _ => false,
+    }
 }
 /// Map the mutually-exclusive channel flags to a channel name. clap enforces
 /// that at most one is set, so the order is irrelevant.
@@ -2019,11 +2170,7 @@ fn get_channel_switch(alpha: bool, stable: bool, enterprise: bool) -> Option<&'s
         None
     }
 }
-/// Handle `grok-oss update [--check] [--json] …`.
-///
-/// Grok OSS does not install SpaceXAI release binaries. `--check` compares the
-/// embedded git SHA to Surmount `main` on GitHub. Other flags either require
-/// `GROK_OSS_ENABLE_XAI_UPDATER=1` (debug) or print how to rebuild.
+/// Handle `grok-pager update [--check] [--json] [--force-reinstall] [--version X] [--alpha|--stable|--enterprise]`.
 async fn run_update_command(
     check: bool,
     json: bool,
@@ -2035,61 +2182,34 @@ async fn run_update_command(
     if json && !check {
         anyhow::bail!("--json requires --check");
     }
-
-    // Default path: git-based freshness vs Surmount main (no binary download).
+    let mut update_config = base_update_config.clone();
     if check {
         if version.is_some() {
             anyhow::bail!("--version cannot be used with --check");
         }
-        if channel_switch.is_some() {
-            anyhow::bail!(
-                "Grok OSS has no alpha/stable/enterprise channels. \
-                 Use `grok-oss update --check` without channel flags."
-            );
-        }
-        let status =
-            xai_grok_update::check_against_main(env!("CARGO_PKG_VERSION"), env!("GROK_GIT_SHA"))
-                .await;
-        xai_grok_update::print_oss_update_status(&status, json)?;
+        auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
+        let status = auto_update::check_update_status(&update_config).await;
+        auto_update::print_update_status(&status, json)?;
         return Ok(());
     }
-
-    // Explicit opt-in only: upstream xAI installer path (wrong product for most users).
-    if std::env::var_os("GROK_OSS_ENABLE_XAI_UPDATER").is_some() {
-        let mut update_config = base_update_config.clone();
-        if let Some(ref v) = version
-            && semver::Version::parse(v).is_err()
-        {
-            anyhow::bail!(
-                "'{}' is not a valid version. Expected semver like 0.1.150",
-                v
-            );
-        }
-        let installed = auto_update::run_update(
-            force_reinstall,
-            version.as_deref(),
-            channel_switch,
-            &mut update_config,
-        )
-        .await?;
-        if let Some(installed_version) = installed {
-            signal_leaders_to_relaunch(&installed_version).await;
-        }
-        return Ok(());
+    if let Some(ref v) = version
+        && semver::Version::parse(v).is_err()
+    {
+        anyhow::bail!(
+            "'{}' is not a valid version. Expected semver like 0.1.150",
+            v
+        );
     }
-
-    let _ = (force_reinstall, version, channel_switch, base_update_config);
-    println!(
-        "Grok OSS  {}",
-        xai_grok_update::format_build_id(env!("CARGO_PKG_VERSION"), env!("GROK_GIT_SHA"))
-    );
-    println!();
-    println!("This fork does not auto-install updates (no SpaceXAI release channel).");
-    println!("Check whether you're behind Surmount main:");
-    println!();
-    println!("  grok-oss update --check");
-    println!();
-    println!("{}", xai_grok_update::how_to_update_message());
+    let installed = auto_update::run_update(
+        force_reinstall,
+        version.as_deref(),
+        channel_switch,
+        &mut update_config,
+    )
+    .await?;
+    if let Some(installed_version) = installed {
+        signal_leaders_to_relaunch(&installed_version).await;
+    }
     Ok(())
 }
 /// After a successful `grok update`, ask any running leader on this machine that
@@ -2310,27 +2430,55 @@ mod tests {
         xai_grok_shell::heap_profile::dump_to_path(dump.path()).expect("shell dump");
         dump.assert_nonempty_dump();
     }
-    /// Only the direct (non-leader) stdio agent is newly eligible for the
-    /// background auto-update. Leader-backed stdio defers to the leader's own
-    /// updater, and non-stdio modes already update at the top of
-    /// `run_agent_command`.
+    #[cfg(unix)]
     #[test]
-    fn stdio_direct_update_eligible_only_for_non_leader_stdio() {
+    fn is_managed_install_matches_only_the_bin_grok_target() {
+        let home =
+            std::env::temp_dir().join(format!("grok-pager-managed-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::create_dir_all(home.join("downloads")).unwrap();
+        assert!(!is_managed_install(
+            Some(home.join("bin").join("grok")),
+            &home
+        ));
+        assert!(!is_managed_install(None, &home));
+        assert!(!is_managed_install(
+            Some(home.join("bin").join("grok")),
+            std::path::Path::new("")
+        ));
+        let target = home.join("downloads").join("grok-1.2.3");
+        std::fs::write(&target, b"binary").unwrap();
+        std::os::unix::fs::symlink(&target, home.join("bin").join("grok")).unwrap();
+        assert!(is_managed_install(
+            Some(home.join("bin").join("grok")),
+            &home
+        ));
+        assert!(is_managed_install(Some(target.clone()), &home));
+        let pinned = home.join("bin").join("grok-9.9.9");
+        std::fs::write(&pinned, b"binary").unwrap();
+        assert!(!is_managed_install(Some(pinned), &home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+    /// Pins the gate composition; a dropped conjunct fails its named case.
+    #[test]
+    fn stdio_auto_update_requires_direct_stdio_enabled_and_managed() {
+        assert!(stdio_auto_update_enabled(true, false, true, true));
         assert!(
-            stdio_direct_update_eligible(true, false),
-            "direct stdio agent should be eligible",
+            !stdio_auto_update_enabled(true, true, true, true),
+            "leader bridge"
         );
         assert!(
-            !stdio_direct_update_eligible(true, true),
-            "leader-backed stdio defers to the leader's updater",
+            !stdio_auto_update_enabled(false, false, true, true),
+            "non-stdio"
         );
         assert!(
-            !stdio_direct_update_eligible(false, false),
-            "non-stdio modes update at the top of run_agent_command",
+            !stdio_auto_update_enabled(true, false, false, true),
+            "updates off"
         );
         assert!(
-            !stdio_direct_update_eligible(false, true),
-            "non-stdio leader path is not stdio-eligible",
+            !stdio_auto_update_enabled(true, false, true, false),
+            "pinned binary"
         );
     }
     use clap::Parser as _;

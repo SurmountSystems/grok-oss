@@ -1256,6 +1256,7 @@ pub(super) mod paste_key_tests {
             area,
             &layout_cfg,
             &scrollbar_cfg,
+            0,
             clamped,
             0,
             0,
@@ -1599,7 +1600,9 @@ pub(super) mod paste_key_tests {
             .map(|(m, _)| m.clone())
             .unwrap_or_default();
         assert!(
-            toast.starts_with("Copied") || toast.starts_with("Copy failed"),
+            toast.starts_with("Copied")
+                || toast.starts_with("Copy sent")
+                || toast.starts_with("Copy failed"),
             "copy-source emits a clipboard toast, got {toast:?}",
         );
         assert!(

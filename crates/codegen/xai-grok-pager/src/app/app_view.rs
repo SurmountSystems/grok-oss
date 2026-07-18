@@ -868,6 +868,8 @@ pub struct AppView {
     pub yolo_policy_block: Option<&'static str>,
     /// One-shot notice that a launch `--yolo` was pinned off; shown on the first agent view.
     pub yolo_launch_block_notice: Option<&'static str>,
+    /// One-shot switch-back toast after a screen-mode re-exec.
+    pub screen_mode_switch_hint: Option<&'static str>,
     /// Require explicit plan approval via the plan viewer UI even in
     /// always-approve (YOLO) mode. Loaded from `[ui] require_plan_approval`
     /// in config.toml at startup.
@@ -913,6 +915,10 @@ pub struct AppView {
     /// first evaluation at a stable agent-view draw (regardless of outcome),
     /// so later resizes can never re-trigger the tip within this run.
     pub small_screen_tip_evaluated: bool,
+    /// One-shot gate for the SSH `grok wrap` tip: set after the first
+    /// evaluation at a stable agent-view draw (the environment gates are
+    /// process-constant, so one evaluation decides the run).
+    pub ssh_wrap_tip_evaluated: bool,
     /// Focus-scoped, opportunistically-polled clipboard-image tip state: poll
     /// throttle, changeCount delta-detection, fire cooldown, and changeCount
     /// dedup (macOS-only at the probe layer).
@@ -953,6 +959,9 @@ pub struct AppView {
     pub auth_code_input: String,
     /// Monotonically increasing sequence number for auth requests.
     pub next_auth_request_seq: u64,
+    /// Abort handle for the in-flight `PollAuthUrl` task (with its request_seq).
+    /// Aborted alongside the Authenticate task in single-flight re-login.
+    pub auth_url_poll_handle: Option<(u64, tokio::task::AbortHandle)>,
     /// Every session/chat/worktree/prompt action deferred behind startup gates.
     pub deferred_startup: crate::app::session_startup::DeferredStartupActions,
     /// Whether deferred welcome-screen login should force OAuth.
@@ -1147,8 +1156,13 @@ impl AppView {
             self.show_resolved_model = show;
         }
     }
+    /// Force voice on for API-key sessions when only a remote rule left it off.
+    /// Requirement / env / config pins still win.
     pub(crate) fn ensure_voice_for_api_key(&mut self) {
-        if self.is_api_key_auth && !self.voice_mode_enabled {
+        if !self.is_api_key_auth || self.voice_mode_enabled {
+            return;
+        }
+        if crate::app::resolve_voice_mode_live(None, false) {
             self.apply_voice_mode_enabled(true);
         }
     }
@@ -1255,6 +1269,7 @@ impl AppView {
             auto_mode_gate: xai_grok_shell::util::config::auto_permission_mode_enabled_from_disk(),
             yolo_policy_block: None,
             yolo_launch_block_notice: None,
+            screen_mode_switch_hint: None,
             require_plan_approval: false,
             plan_mode: false,
             subagents: false,
@@ -1267,6 +1282,7 @@ impl AppView {
             tip_seen_counts: Default::default(),
             last_known_terminal_rows: 0,
             small_screen_tip_evaluated: false,
+            ssh_wrap_tip_evaluated: false,
             clipboard_focus_tip: Default::default(),
             new_session_worktree_mode: WorktreeMode::Never,
             fork_worktree_mode: WorktreeMode::Ask,
@@ -1281,6 +1297,7 @@ impl AppView {
             auth_start_mode: AuthMode::Pending,
             auth_code_input: String::new(),
             next_auth_request_seq: 1,
+            auth_url_poll_handle: None,
             deferred_startup: Default::default(),
             auth_use_oauth: false,
             auth_clipboard_copied: false,
@@ -1372,16 +1389,25 @@ impl AppView {
     pub fn voice_can_start_pipeline(&self) -> bool {
         self.voice_mode_enabled && xai_grok_voice::AUDIO_SUPPORTED
     }
-    /// Sync voice availability into the execution gate and every slash surface
-    /// (so `/voice` is hidden/shown in lockstep). Callers resolve the gate via
-    /// [`crate::app::resolve_voice_mode_enabled`] (env > remote > default on);
-    /// `false` is a kill switch. Mirrors `apply_session_recap_available` for
-    /// `/recap`.
+    /// Sync voice availability into slash surfaces, cheatsheet, and settings.
+    /// Mirrors `apply_session_recap_available` for `/recap`.
     pub fn apply_voice_mode_enabled(&mut self, enabled: bool) {
         self.voice_mode_enabled = enabled;
         crate::app::VOICE_MODE_ENABLED.store(enabled, std::sync::atomic::Ordering::Release);
         for agent in self.agents.values_mut() {
             agent.set_voice_mode_available(enabled);
+            match agent.active_modal.as_mut() {
+                Some(crate::views::modal::ActiveModal::Settings { state }) => {
+                    state.rebuild_rows();
+                }
+                Some(crate::views::modal::ActiveModal::ResetSettingsConfirm {
+                    settings_state,
+                    ..
+                }) => {
+                    settings_state.rebuild_rows();
+                }
+                _ => {}
+            }
         }
         self.welcome_prompt.set_voice_visible(enabled);
         if let Some(dashboard) = self.dashboard.as_mut() {
@@ -1628,6 +1654,16 @@ impl AppView {
             Some(InputOutcome::Changed)
         } else {
             None
+        }
+    }
+    /// The active agent's view, when an agent tab is focused.
+    ///
+    /// Always the root agent, even when a subagent view is focused within the
+    /// tab; for subagent-aware resolution use `dispatch::ctx::get_active_agent`.
+    pub fn active_agent(&self) -> Option<&AgentView> {
+        match self.active_view {
+            ActiveView::Agent(id) => self.agents.get(&id),
+            _ => None,
         }
     }
     /// Session ID of the active agent, if one exists and has an established session.
@@ -3724,6 +3760,7 @@ impl AppView {
             }
         }
         self.maybe_trigger_small_screen_tip();
+        self.maybe_trigger_ssh_wrap_tip();
         let compact = self.appearance.prompt.compact;
         let (header_pad_left, header_pad_right, header_pad_top) = {
             let layout_cfg = &self.appearance.scrollback.layout;
@@ -4058,6 +4095,11 @@ impl AppView {
                             d.overlay_close_hit.set(header.and_then(|c| c.close_rect));
                             d.overlay_prev_hit.set(header.and_then(|c| c.prev_rect));
                             d.overlay_next_hit.set(header.and_then(|c| c.next_rect));
+                        }
+                        if let Some(d) = self.dashboard.as_mut()
+                            && d.peek_viewport.is_some()
+                        {
+                            d.restore_peek_viewport(agents);
                         }
                         if let Some(agent) = agents.get_mut(&id) {
                             let announcement_banner_h =
@@ -4407,6 +4449,59 @@ impl AppView {
         }
         self.small_screen_tip_evaluated = true;
         super::dispatch::show_small_screen_tip(self);
+    }
+    /// One-shot SSH `grok wrap` tip trigger, run at the top of every `draw`
+    /// right after [`Self::maybe_trigger_small_screen_tip`]. The welcome
+    /// screen has no ephemeral-tip row, so the first stable agent-view draw
+    /// is the earliest surface that can paint a session-load tip. Reads the
+    /// live environment (cached statics) and delegates to the injectable
+    /// inner so tests never depend on the host's SSH shape.
+    pub(crate) fn maybe_trigger_ssh_wrap_tip(&mut self) {
+        if self.ssh_wrap_tip_evaluated {
+            return;
+        }
+        static ENV_RECOMMENDS_WRAP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let env_recommends_wrap = *ENV_RECOMMENDS_WRAP.get_or_init(|| {
+            let ctx = crate::terminal::terminal_context();
+            crate::diagnostics::ssh_wrap_hint(
+                ctx.is_ssh,
+                crate::clipboard::osc52_sink_active(),
+                ctx.is_official_vscode_remote,
+            )
+            .is_some()
+        });
+        self.maybe_trigger_ssh_wrap_tip_inner(env_recommends_wrap);
+    }
+    /// Inner trigger with the environment verdict injected
+    /// (`diagnostics::ssh_wrap_hint` on the live path). Same
+    /// defer-vs-consume rules as the small-screen trigger above, with two
+    /// deltas: the environment gates are process-constant, so a failing
+    /// verdict consumes the one-shot; and a busy tip slot defers instead of
+    /// replacing — both session-load tips can qualify on the same first
+    /// draw, and replacing would burn the other tip's once-per-session show,
+    /// while this one loses nothing by waiting for a later draw.
+    pub(crate) fn maybe_trigger_ssh_wrap_tip_inner(&mut self, env_recommends_wrap: bool) {
+        if self.ssh_wrap_tip_evaluated {
+            return;
+        }
+        let ActiveView::Agent(id) = self.active_view else {
+            return;
+        };
+        let Some(agent) = self.agents.get(&id) else {
+            return;
+        };
+        if agent.terminal_size_stale || agent.last_terminal_size == (0, 0) {
+            return;
+        }
+        if !env_recommends_wrap {
+            self.ssh_wrap_tip_evaluated = true;
+            return;
+        }
+        if !agent.ephemeral_tip_can_render() || agent.ephemeral_tip.is_active() {
+            return;
+        }
+        self.ssh_wrap_tip_evaluated = true;
+        super::dispatch::show_ssh_wrap_tip(self);
     }
     /// Whether the clipboard-image tip may poll right now — the single in-window
     /// gate. Outside it the poll touches the pasteboard ZERO times: contextual
@@ -5080,6 +5175,7 @@ pub(crate) mod tests {
             auto_mode_gate: true,
             yolo_policy_block: None,
             yolo_launch_block_notice: None,
+            screen_mode_switch_hint: None,
             require_plan_approval: false,
             plan_mode: false,
             subagents: false,
@@ -5092,6 +5188,7 @@ pub(crate) mod tests {
             tip_seen_counts: Default::default(),
             last_known_terminal_rows: 0,
             small_screen_tip_evaluated: false,
+            ssh_wrap_tip_evaluated: false,
             clipboard_focus_tip: Default::default(),
             new_session_worktree_mode: WorktreeMode::Never,
             fork_worktree_mode: WorktreeMode::Ask,
@@ -5106,6 +5203,7 @@ pub(crate) mod tests {
             auth_start_mode: AuthMode::Pending,
             auth_code_input: String::new(),
             next_auth_request_seq: 1,
+            auth_url_poll_handle: None,
             deferred_startup: Default::default(),
             auth_use_oauth: false,
             auth_clipboard_copied: false,
@@ -5222,7 +5320,7 @@ pub(crate) mod tests {
             voice_state: VoiceState::Idle,
         }
     }
-    fn test_app_with_agent() -> AppView {
+    pub(crate) fn test_app_with_agent() -> AppView {
         let mut app = test_app();
         let id = super::super::agent::AgentId(0);
         let mut agent = AgentView::new(
@@ -5635,7 +5733,8 @@ pub(crate) mod tests {
                 screen_row: 2,
                 col_start: 0,
                 col_end: 10,
-                url: Arc::from("https://example.com"),
+                target: crate::render::osc8::LinkTarget::Url(Arc::from("https://example.com")),
+                presentation: crate::render::osc8::LinkPresentation::Opaque,
                 id: Some(1),
             });
             agent.visible_link_map.rebuild(1, &overlay, vec![]);
@@ -8403,6 +8502,9 @@ pub(crate) mod tests {
             .push_block(crate::scrollback::RenderBlock::agent_message(
                 "hello world this should wrap across lines",
             ));
+        // push_block may auto-select; clear so mouse-up is a select, not
+        // OpenBlockViewer (click-already-selected open parity).
+        agent.scrollback.set_selected(None);
         agent.scrollback.prepare_layout(40, 10);
         let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 20));
         let _ = agent.draw(
@@ -8458,6 +8560,9 @@ pub(crate) mod tests {
         agent
             .scrollback
             .push_block(crate::scrollback::RenderBlock::agent_message("hello world"));
+        // push_block may auto-select; clear so mouse-up performs selection
+        // (not OpenBlockViewer for an already-selected openable row).
+        agent.scrollback.set_selected(None);
         agent.scrollback.prepare_layout(40, 10);
         let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 20));
         let _ = agent.draw(

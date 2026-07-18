@@ -15,6 +15,9 @@ Terminal AI coding agent: full-screen TUI, headless/CI mode, and ACP for editors
 [Build from source](#build-from-source) ·
 [Upstream](#relationship-to-upstream)
 
+A small `SOURCE_REV` file at the root records the full monorepo commit SHA
+for the version of the code present in this tree.
+
 </div>
 
 ---
@@ -84,8 +87,22 @@ That path is SpaceXAI’s release channel, **not** Grok OSS.
 
 Requirements:
 
-- **Rust** — pinned by [`rust-toolchain.toml`](rust-toolchain.toml) (`rustup` installs on first build)
-- **protoc** — repo [`bin/protoc`](bin/protoc) or `PATH` / `$PROTOC`
+- **Rust** — the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml);
+  `rustup` installs it automatically on first build.
+- **[DotSlash](https://dotslash-cli.com)** — required so hermetic tools under
+  [`bin/`](bin/) (notably [`bin/protoc`](bin/protoc)) can download and run.
+  Install it and ensure `dotslash` is on your `PATH` **before** building:
+
+  ```sh
+  cargo install dotslash
+  # or: prebuilt packages — https://dotslash-cli.com/docs/installation/
+  /usr/bin/env dotslash --help   # sanity check
+  ```
+
+- **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) via DotSlash,
+  or falls back to a `protoc` on `PATH` / `$PROTOC`.
+- macOS and Linux are supported build hosts; Windows builds are best-effort
+  and not currently tested from this tree.
 
 ```bash
 cargo run -p xai-grok-pager-bin                 # build + launch

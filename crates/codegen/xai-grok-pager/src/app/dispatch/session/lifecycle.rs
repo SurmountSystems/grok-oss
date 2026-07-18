@@ -13,7 +13,7 @@ use crate::app::dispatch::ctx::{
 };
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{consume_chat_kind, dispatch_initial_prompt};
-use crate::app::dispatch::queue::maybe_drain_queue;
+use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip_after_drain};
 use crate::app::dispatch::router::dispatch;
 use crate::app::dispatch::status::notify_session_ready;
 use crate::app::dispatch::task_result::unregister_session_effect;
@@ -884,6 +884,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
+        note_peek_page_flip_after_drain(app, agent_id);
         return effects;
     }
     vec![]
@@ -974,6 +975,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
+        note_peek_page_flip_after_drain(app, agent_id);
         return effects;
     }
     vec![]
@@ -1088,6 +1090,7 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
             }
         };
         effects.extend(maybe_drain_queue(agent));
+        note_peek_page_flip_after_drain(app, agent_id);
         effects
     } else {
         vec![]

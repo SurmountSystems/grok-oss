@@ -3,6 +3,18 @@
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
+/// `preferred` model, else catalog `current`, else first with own credentials.
+fn byok_from_models(
+    models: &indexmap::IndexMap<String, ModelEntry>,
+    preferred: Option<&str>,
+    current: &str,
+) -> Option<String> {
+    preferred
+        .and_then(|id| models.get(id))
+        .and_then(|m| m.own_credential())
+        .or_else(|| models.get(current).and_then(|m| m.own_credential()))
+        .or_else(|| models.values().find_map(|m| m.own_credential()))
+}
 impl MvpAgent {
     pub(super) fn resolve_image_description_model(&self) -> String {
         self.cfg
@@ -77,6 +89,20 @@ impl MvpAgent {
     /// running session's per-turn auth gate observes it on its next turn.
     pub(super) fn set_auth_method(&self, id: acp::AuthMethodId) {
         self.auth_method_id.store(Some(std::sync::Arc::new(id)));
+    }
+    /// Publish model-owned credentials for voice/tools static fallthrough.
+    /// Only [`ModelEntry::own_credential`] — not `sampling_config.api_key` (may be a session JWT).
+    pub(crate) fn sync_process_static_api_key(&self, preferred_model_id: Option<&str>) {
+        if self.cfg.borrow().grok_com_config.api_key_auth_disabled() {
+            self.auth_manager.set_process_static_api_key(None);
+            return;
+        }
+        let models = self.models_manager.models();
+        let current = self.models_manager.current_model_id();
+        self.auth_manager
+            .set_process_static_api_key(
+                byok_from_models(&models, preferred_model_id, current.0.as_ref()),
+            );
     }
     /// Return auth for sync config construction.
     pub(super) fn current_or_buffered_auth(&self) -> Option<crate::auth::GrokAuth> {
@@ -541,6 +567,11 @@ impl MvpAgent {
     /// [`AuthManager::is_data_collection_disabled`].
     pub(crate) fn is_data_collection_disabled(&self) -> bool {
         self.auth_manager.is_data_collection_disabled()
+    }
+    /// Telemetry enabled and not ZDR. Same gate as session `telemetry_enabled`.
+    pub(crate) fn product_analytics_enabled(&self) -> bool {
+        self.cfg.borrow().is_telemetry_enabled()
+            && !self.auth_manager.current_or_expired().is_some_and(|a| a.is_zdr_team())
     }
     /// Re-sync the `Send` mirror of `cfg.is_trace_upload_enabled()` that the
     /// per-session collection gates read (`cfg` is `!Send`; the gates run on
@@ -1409,6 +1440,14 @@ impl MvpAgent {
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
         let sampling_config = models_manager.sampling_config();
+        if !cfg.grok_com_config.api_key_auth_disabled() {
+            let models = models_manager.models();
+            let current = models_manager.current_model_id();
+            auth_manager
+                .set_process_static_api_key(
+                    byok_from_models(&models, None, current.0.as_ref()),
+                );
+        }
         crate::upload::trace::spawn_purge_stale_upload_scratch();
         let storage_mode = cfg.storage_mode;
         let default_yolo_mode = cfg.default_yolo_mode;
@@ -1463,7 +1502,7 @@ impl MvpAgent {
             sessions: RefCell::new(HashMap::new()),
             activity,
             loading_sessions: RefCell::new(HashMap::new()),
-            prompt_intake_locks: RefCell::new(HashMap::new()),
+            dispatch_locks: RefCell::new(HashMap::new()),
             session_threads: RefCell::new(HashMap::new()),
             resident_roster_titles: RefCell::new(HashMap::new()),
             initialize_request: OnceLock::new(),
@@ -1499,8 +1538,7 @@ impl MvpAgent {
             auth_method_id: crate::agent::auth_method::new_shared_auth_method_id(None),
             sampling_config: RefCell::new(sampling_config),
             auth_manager,
-            auth_code_tx: RefCell::new(None),
-            auth_url_rx: RefCell::new(None),
+            interactive_auth: Default::default(),
             client_type: RefCell::new(ClientType::default()),
             code_nav_enabled: std::cell::Cell::new(false),
             interactive_trust_client: std::cell::Cell::new(false),
@@ -3108,8 +3146,7 @@ impl MvpAgent {
         tool_ctx.subagent_depth = 0;
         tool_ctx.auto_wake_enabled = self.cfg.borrow().auto_wake_enabled;
         let support_permission = self.cfg.borrow().features.support_permission;
-        let telemetry_enabled = self.cfg.borrow().is_telemetry_enabled()
-            && !self.auth_manager.current_or_expired().is_some_and(|a| a.is_zdr_team());
+        let telemetry_enabled = self.product_analytics_enabled();
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
         let sampling_config = self
             .resolve_sampling_config_for_model(&session_model_id, origin_client.clone());
