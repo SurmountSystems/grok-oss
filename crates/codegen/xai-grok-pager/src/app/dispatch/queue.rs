@@ -507,10 +507,11 @@ fn trailing_user_prompt_matching(
 /// queue row, and the shell echo is swallowed at adoption (`expect_user_echo`)
 /// or swept as a duplicate — so without this the message has no visible
 /// representation until the turn-start adoption (which reuses the block via
-/// `send_now_painted_blocks`). Call wherever the
-/// expectation is armed, only for rows whose adoption paints its own block;
-/// `kind` must build the same block the shim would. `edited` marks an
-/// edit-interject override (fresher than the mirror text the adoption sees).
+/// `send_now_painted_blocks`). Scrolls the new prompt to the top of the
+/// viewport so cancel-and-send is obvious after the composer clears. Call
+/// wherever the expectation is armed, only for rows whose adoption paints its
+/// own block; `kind` must build the same block the shim would. `edited` marks
+/// an edit-interject override (fresher than the mirror text the adoption sees).
 pub(super) fn push_send_now_user_block(
     agent: &mut AgentView,
     prompt_id: &str,
@@ -545,8 +546,13 @@ pub(super) fn push_send_now_user_block(
         _ => RenderBlock::user_prompt(text.to_string()),
     };
     let entry_id = agent.scrollback.push_block(block);
-    // Send-now keeps the viewport where it is (no entry-top jump).
-    agent.scrollback.enable_follow_mode();
+    // Pin the new user prompt at the top of the viewport so cancel-and-send
+    // is obvious (composer already cleared; toast alone is easy to miss if
+    // the bubble only appears off-screen at the bottom).
+    let prompt_idx = agent.scrollback.len().saturating_sub(1);
+    agent.scrollback.set_selected(Some(prompt_idx));
+    agent.scrollback.scroll_to_entry_top(prompt_idx);
+    agent.scrollback.enable_follow_with_preserve();
     agent
         .send_now_painted_blocks
         .insert(prompt_id.to_string(), (entry_id, edited));
@@ -604,17 +610,10 @@ pub(crate) fn apply_turn_start_shim(
     // longer a one-way latch) — that drives `handle_prompt_complete` + the
     // viewer chrome correctly.
     let adopted_from_other_client = !agent.is_self_originated_prompt(&prompt_id);
-    // Sticky pin + still-armed send-now expect (not cleared on adopt — the
-    // cancel rail may still need it). Either covers adopt-before-cancel.
-    let skip_entry_top = agent
-        .follow_without_jump_prompt_id
-        .as_ref()
-        .is_some_and(|id| id == &prompt_id)
-        || agent
-            .expect_send_now_cancel
-            .as_ref()
-            .is_some_and(|id| id == &prompt_id);
-    // Always drop pin (hit or miss) so a stale queue-row id cannot skip later.
+    // Drop any leftover no-entry-top pin (legacy arm field). Send-now now
+    // jumps to the painted user prompt like a normal turn adoption so the
+    // cancel-and-send is visible; cancel-marker suppression still uses
+    // `expect_send_now_cancel` alone.
     agent.follow_without_jump_prompt_id = None;
     tracing::debug!(
         target: "qtrace",
@@ -623,7 +622,6 @@ pub(crate) fn apply_turn_start_shim(
         prompt_id = %prompt_id,
         kind,
         adopted_from_other_client,
-        skip_entry_top,
         prev_current_prompt_id = agent.session.current_prompt_id.as_deref().unwrap_or(""),
         shared_queue_len = agent.shared_queue.len(),
         text = %text.as_deref().unwrap_or("").chars().take(48).collect::<String>(),
@@ -724,12 +722,11 @@ pub(crate) fn apply_turn_start_shim(
             });
         }
         agent.scrollback.set_selected(Some(prompt_idx));
-        if skip_entry_top {
-            agent.scrollback.enable_follow_mode();
-        } else {
-            agent.scrollback.scroll_to_entry_top(prompt_idx);
-            agent.scrollback.enable_follow_with_preserve();
-        }
+        // Always pin the adopted user prompt at the top (including send-now):
+        // the chord clears the composer immediately, so the transcript jump
+        // is the main visual confirmation that the message landed.
+        agent.scrollback.scroll_to_entry_top(prompt_idx);
+        agent.scrollback.enable_follow_with_preserve();
     } else {
         // No local block to render — this is a synthetic/cron/bash adoption with
         // no shared-queue text. `start_turn` above called `expect_user_echo`,
@@ -1264,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn send_now_shim_skips_scroll_to_entry_top() {
+    fn send_now_shim_scrolls_to_entry_top_like_normal_adoption() {
         fn seed_tall_scrollback(agent: &mut crate::app::agent_view::AgentView) -> usize {
             for i in 0..40 {
                 agent
@@ -1295,13 +1292,15 @@ mod tests {
             "normal adoption should leave bottom via scroll_to_entry_top"
         );
 
+        // Send-now used to skip entry-top (stay at bottom); it now pins the
+        // user prompt like a normal adoption so cancel-and-send is visible.
         let mut app_send = test_app_with_agent();
         let agent_s = app_send.agents.get_mut(&AgentId(0)).unwrap();
-        seed_tall_scrollback(agent_s);
+        let bottom_s = seed_tall_scrollback(agent_s);
         agent_s.note_self_originated_prompt("p-send-now");
         agent_s.arm_send_now_expectation("p-send-now".into());
         assert!(agent_s.follow_without_jump_prompt_id.is_some());
-        // Cancel-rail take: only sticky pin remains.
+        // Cancel-rail take: pin field remains until shim clears it.
         let _ = agent_s.expect_send_now_cancel.take();
         apply_turn_start_shim(
             agent_s,
@@ -1311,10 +1310,10 @@ mod tests {
         );
         assert!(agent_s.follow_without_jump_prompt_id.is_none());
         assert!(agent_s.scrollback.is_follow_mode());
-        let send_now_offset = agent_s.scrollback.scroll_offset();
         assert_ne!(
-            send_now_offset, normal_offset,
-            "send-now must not use scroll_to_entry_top"
+            agent_s.scrollback.scroll_offset(),
+            bottom_s,
+            "send-now adoption must scroll_to_entry_top so the user prompt is visible"
         );
 
         // Miss: armed for A, adopt B — entry-top path, pin still dropped.
@@ -1477,6 +1476,11 @@ mod tests {
         );
         assert!(matches!(effects.as_slice(), [Effect::SendPromptNow { .. }]));
         assert_eq!(user_prompt_count(&app.agents[&id], "hurry"), 1);
+        assert_eq!(
+            app.agents[&id].toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Send now — interrupting current turn"),
+            "send-now must toast so clearing the composer is not a silent no-op"
+        );
     }
 
     /// The reuse scan looks past turn-boundary chrome landing between the

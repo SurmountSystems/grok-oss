@@ -1433,8 +1433,10 @@ pub struct AgentView {
     /// replay-window entry, so a stale expectation can never eat a later real
     /// Ctrl+C marker.
     pub(crate) expect_send_now_cancel: Option<String>,
-    /// Send-now promote: skip `scroll_to_entry_top` on next matching adoption.
-    /// Survives cancel-rail `take()` of [`Self::expect_send_now_cancel`].
+    /// Send-now promote id pin (mirrors [`Self::expect_send_now_cancel`]).
+    /// Cleared on adopt / clear; no longer skips scroll — send-now jumps to
+    /// the painted user prompt like a normal turn. Kept for failure-path
+    /// identity checks that survive cancel-rail `take()` of the expect flag.
     pub(crate) follow_without_jump_prompt_id: Option<String>,
     /// Ids of THIS client's server-queue rows that are still optimistic
     /// echoes — the `session/prompt` RPC is in flight and no
