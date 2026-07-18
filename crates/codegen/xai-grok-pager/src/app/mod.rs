@@ -781,8 +781,9 @@ pub async fn run(
 /// each, width-truncated — precedes the command so a glance at the pane
 /// shows which session lives there and where it left off.
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
-fn print_exit_resume_hint(session_id: &str, minimal: bool, w: &mut impl Write) {
+fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
     let cli = screen_mode_relaunch::cli_hint_name();
+    use crate::render::line_utils::truncate_str;
     let _ = writeln!(w);
     if let Some(summary) = &info.summary {
         let _ = writeln!(w, "{}", truncate_str(&summary.title, max_width));
@@ -799,10 +800,10 @@ fn print_exit_resume_hint(session_id: &str, minimal: bool, w: &mut impl Write) {
         let _ = writeln!(w);
     }
     let _ = writeln!(w, "Resume this session with:");
-    if minimal {
-        let _ = writeln!(w, "  {cli} --minimal --resume {session_id}");
+    if info.minimal {
+        let _ = writeln!(w, "  {cli} --minimal --resume {}", info.session_id);
     } else {
-        let _ = writeln!(w, "  {cli} --resume {session_id}");
+        let _ = writeln!(w, "  {cli} --resume {}", info.session_id);
     }
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).
@@ -1378,10 +1379,10 @@ pub(crate) fn set_terminal_title(title: &str) {
 fn terminal_title_string(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
-        "grok-oss".into()
+        "grok".into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 10).collect();
-        format!("{truncated} - grok-oss")
+        let truncated: String = sanitized.chars().take(80 - 6).collect();
+        format!("{} - grok", truncated)
     }
 }
 fn set_panic_hook(mode: ScreenMode) {
@@ -1457,11 +1458,11 @@ mod tests {
     fn terminal_title_strips_control_characters() {
         assert_eq!(
             terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
-            "evil]52;c;payloadtitle - grok-oss"
+            "evil]52;c;payloadtitle - grok"
         );
-        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok-oss");
-        assert_eq!(terminal_title_string(""), "grok-oss");
-        assert_eq!(terminal_title_string("My chat"), "My chat - grok-oss");
+        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok");
+        assert_eq!(terminal_title_string(""), "grok");
+        assert_eq!(terminal_title_string("My chat"), "My chat - grok");
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {
@@ -1886,32 +1887,65 @@ mod tests {
     #[test]
     fn print_exit_resume_hint_writes_expected_lines() {
         let mut buf = Vec::new();
-        print_exit_resume_hint("sess-abc", false, &mut buf);
-        let cli = screen_mode_relaunch::cli_hint_name();
-        let out = String::from_utf8(buf).unwrap();
+        print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, &mut buf);
         assert_eq!(
-            out,
-            format!("\nResume this session with:\n  {cli} --resume sess-abc\n")
-        );
-        // Cargo-test binaries are not product-named → Surmount default.
-        assert_eq!(cli, screen_mode_relaunch::DEFAULT_CLI_HINT_NAME);
-        assert_eq!(cli, "grok-oss");
-        assert!(
-            !out.contains("  grok --resume"),
-            "must not recommend upstream `grok` binary:\n{out}"
+            String::from_utf8(buf).unwrap(),
+            "\nResume this session with:\n  grok-oss --resume sess-abc\n"
         );
     }
     #[test]
     fn print_exit_resume_hint_includes_minimal_flag() {
         let mut buf = Vec::new();
-        print_exit_resume_hint("sess-abc", true, &mut buf);
-        let cli = screen_mode_relaunch::cli_hint_name();
-        let out = String::from_utf8(buf).unwrap();
+        print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, &mut buf);
         assert_eq!(
-            out,
-            format!("\nResume this session with:\n  {cli} --minimal --resume sess-abc\n")
+            String::from_utf8(buf).unwrap(),
+            "\nResume this session with:\n  grok-oss --minimal --resume sess-abc\n"
         );
-        assert!(!out.contains("  grok --minimal"), "{out}");
+    }
+    #[test]
+    fn print_exit_resume_hint_includes_session_summary() {
+        let info = ExitInfo {
+            session_id: "sess-abc".to_string(),
+            minimal: false,
+            summary: Some(ExitSummary {
+                title: "Fix flaky CI test".to_string(),
+                last_prompt: Some("make the suite deterministic".to_string()),
+                last_response: Some("Pinned the seed; 200 consecutive green runs.".to_string()),
+            }),
+        };
+        let mut buf = Vec::new();
+        print_exit_resume_hint(&info, 80, &mut buf);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            concat!(
+                "\n",
+                "Fix flaky CI test\n",
+                "> make the suite deterministic\n",
+                "  Pinned the seed; 200 consecutive green runs.\n",
+                "\n",
+                "Resume this session with:\n",
+                "  grok-oss --resume sess-abc\n",
+            )
+        );
+    }
+    #[test]
+    fn print_exit_resume_hint_truncates_summary_to_width() {
+        let info = ExitInfo {
+            session_id: "sess-abc".to_string(),
+            minimal: false,
+            summary: Some(ExitSummary {
+                title: "t".repeat(50),
+                last_prompt: Some("p".repeat(50)),
+                last_response: Some("r".repeat(50)),
+            }),
+        };
+        let mut buf = Vec::new();
+        print_exit_resume_hint(&info, 20, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains(&format!("\n{}…\n", "t".repeat(19))));
+        assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));
+        assert!(out.contains(&format!("\n  {}…\n", "r".repeat(17))));
+        assert!(out.contains("  grok-oss --resume sess-abc\n"));
     }
     #[test]
     fn print_exit_resume_hint_includes_session_summary() {

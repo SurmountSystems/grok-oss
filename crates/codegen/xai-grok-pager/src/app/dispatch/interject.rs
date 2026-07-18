@@ -139,6 +139,13 @@ pub(super) fn dispatch_send_prompt_now(
         agent.arm_send_now_expectation(prompt_id.clone());
         // The arm hides the queue echo pushed below — paint the block now.
         super::queue::push_send_now_user_block(agent, &prompt_id, "prompt", &text, false);
+        // Soft interject toasts; send-now used to clear the composer with no
+        // chrome — say what happened so the draft vanishing doesn't feel like
+        // a black hole.
+        agent.show_toast("Send now — interrupting current turn");
+    } else {
+        // Goal turn (or other no-cancel promote): still confirm the chord fired.
+        agent.show_toast("Send now");
     }
     agent.suppress_parked_marker_on_interject();
 
@@ -309,6 +316,29 @@ mod tests {
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
             Some("No active session"),
             "no-session interject takes the 'No active session' path"
+        );
+    }
+
+    /// Send-now must toast on dispatch (composer already cleared at the key
+    /// handler) so cancel-and-send never feels like a silent black hole.
+    #[test]
+    fn send_prompt_now_toasts_on_dispatch() {
+        use crate::app::agent::AgentState;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+        let _ = dispatch(
+            Action::SendPromptNow {
+                text: "steer left".into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+        assert_eq!(
+            app.agents[&id].toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Send now — interrupting current turn")
         );
     }
 

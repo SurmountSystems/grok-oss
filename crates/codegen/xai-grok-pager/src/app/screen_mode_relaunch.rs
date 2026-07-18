@@ -867,8 +867,7 @@ mod tests {
     fn failed_relaunch_hint_includes_screen_mode_env() {
         // Recovery command must carry GROK_SCREEN_MODE so following the
         // hint after a failed `/fullscreen` does not reopen minimal/inline. The
-        // explicit flag makes the manual resume persist the sticky preference
-        // like a successful exec would.
+        // explicit flag keeps the resume in the right mode if the env is dropped.
         let cli = cli_hint_name();
         let full = screen_mode_relaunch_resume_hint("abc-sid", false);
         assert_eq!(

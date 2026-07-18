@@ -6,11 +6,10 @@ edition.workspace = true
 description = "Foundation modules for the grok shell crate family: environment presets, CPU profiling, and process/filesystem utilities."
 
 [features]
-# CI default set: builds a single shared rlib per crate, so downstream test
-# targets need the test-only helper surface compiled in.
-default-bazel = ["test-support"]
-# Expose EnvVarGuard (and similar) to dependents' cargo tests.
+# Exposes `#[cfg(test)]`-only helpers (`env::EnvVarGuard`,
+# `cpu_profile` test seams) to downstream crates' test targets. Enabled by
 test-support = ["xai-grok-env/test-support"]
+default-bazel = ["test-support"]
 
 [dependencies]
 anyhow = { workspace = true }

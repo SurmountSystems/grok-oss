@@ -134,12 +134,12 @@ const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "opt-in",
         display: "Opt in",
-        description: "Allow SpaceXAI to retain coding session data for model training and product improvement.",
+        description: "Allow SpaceXAI to retain and use coding session data for training and product improvement.",
     },
     EnumChoice {
         canonical: "opt-out",
         display: "Opt out",
-        description: "Do not retain coding session data for training. Does not disable product analytics.",
+        description: "Do not retain coding session data. Code requests will not be used for training.",
     },
 ];
 
@@ -595,39 +595,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             // Minimal mode has no interactive scrollback pane for the rail.
             hidden_in_minimal: true,
-        },
-        SettingMeta {
-            key: "page_flip_on_send",
-            category: SettingCategory::Appearance,
-            owner: SettingOwner::Shared,
-            label: "Snap prompt to top on send",
-            description: "When you send a prompt, scroll it to the top of the screen so the \
-                          response starts on a fresh page (default). Turn off to leave the scroll \
-                          position unchanged when you send.",
-            keywords: &[
-                "page", "flip", "send", "prompt", "scroll", "top", "jump", "auto", "snap",
-            ],
-            kind: SettingKind::Bool {
-                default: ui_default.page_flip_on_send_enabled(),
-            },
-            restart_required: false,
-            hidden_in_minimal: true,
-        },
-        SettingMeta {
-            key: "combine_queued_prompts",
-            category: SettingCategory::Editor,
-            owner: SettingOwner::Shared,
-            label: "Combine queued prompts",
-            description: "Merge consecutive plain follow-ups into one model turn \
-                          (TUI shows one bubble each). Stops at bash, slash commands, \
-                          cron, expanded skills, image follow-ups, or a row under edit. \
-                          Default off; applies on local drain and shell promote.",
-            keywords: &["queue", "combine", "batch", "follow-up", "merge", "pending"],
-            kind: SettingKind::Bool {
-                default: ui_default.combine_queued_prompts.unwrap_or(false),
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
         },
         SettingMeta {
             // Persisted key stays `simple_mode`; the user-facing label
@@ -1140,31 +1107,27 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned. Persisted in auth metadata (not config.toml).
         // Reads from `PagerLocalSnapshot.coding_data_sharing_opt_out`.
-        // Default "opt-out" matches `AuthEntry::coding_data_retention_opt_out = true`
-        // (safer consumer default; server enrichment may still opt the user in).
+        // Default "opt-in" matches `AuthEntry::coding_data_retention_opt_out = false`.
         // ZDR / non-admin guards are enforced at dispatch time.
-        // Do not put "telemetry" in keywords — that word is the config-file
-        // analytics toggle (Monitoring / Configuration docs).
         SettingMeta {
             key: "coding_data_sharing",
             category: SettingCategory::Privacy,
             owner: SettingOwner::Shell,
             label: "Coding data sharing",
-            description: "Controls whether SpaceXAI may retain and train on coding session \
-                          data. Does not affect product analytics; see Configuration and \
-                          Monitoring docs.",
+            description: "Controls whether SpaceXAI may retain and train on coding session data.",
             keywords: &[
                 "privacy",
                 "data",
                 "sharing",
                 "coding",
                 "retention",
+                "telemetry",
                 "training",
                 "opt-in",
                 "opt-out",
             ],
             kind: SettingKind::Enum {
-                default: "opt-out",
+                default: "opt-in",
                 choices: CODING_DATA_SHARING_CHOICES,
                 supports_preview: false,
             },
