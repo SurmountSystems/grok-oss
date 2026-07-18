@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 # Put Surmount commits ON TOP OF the current xAI export tip — for real.
 #
-# Does a real `git cherry-pick` chain onto xai-org/main (or given tip).
-# Conflicts stop the script for you to resolve, then:
-#   git add … && git cherry-pick --continue
-#   # re-run this script with CONTINUE=1  OR finish remaining picks manually
+# Real `git cherry-pick` onto xai-org/main. Conflicts stop for you to resolve:
+#   git add -u && git cherry-pick --continue
+#   CONTINUE=1 ./scripts/put-history-on-xai.sh
 #
-# This is NOT commit-tree theater (same trees, fake parents). Parents are the
-# xAI tip. Trees are 3-way merges of each Surmount commit onto that base.
+# SAFETY (until the stack is merged / ready):
+#   - If onto-xai/<tip> already exists and is a descendant of the xAI tip,
+#     the script EXITS 0 and does nothing. It will NOT delete your work.
+#   - To rebuild from scratch: FORCE=1 ./scripts/put-history-on-xai.sh
+#   - Never run this while mid cherry-pick without finishing or aborting first.
 #
 # Does NOT push. Does NOT rewrite Surmount main/merge-2. Does NOT touch xai-org.
 #
 # Usage:
-#   ./scripts/put-history-on-xai.sh              # stack current branch on xAI tip
-#   ./scripts/put-history-on-xai.sh <xai-tip>
+#   ./scripts/put-history-on-xai.sh                 # create stack if missing
 #   SURMOUNT_REF=merge-2 ./scripts/put-history-on-xai.sh
-#   CONTINUE=1 ./scripts/put-history-on-xai.sh   # after resolving a conflict
+#   FORCE=1 SURMOUNT_REF=merge-2 ./scripts/put-history-on-xai.sh
+#   CONTINUE=1 ./scripts/put-history-on-xai.sh
 #
 # Env:
-#   SURMOUNT_REF   tip to take commits from (default: current branch / HEAD)
-#   SEED_REF       exclusive lower bound (default: seed from import log / b189869)
-#   KEEP_EXISTING=1  refuse if onto-xai/* already exists
+#   SURMOUNT_REF     tip to take commits from (default: merge-2, else origin/main)
+#   SEED_REF         exclusive lower bound (default: import-log seed / b189869)
+#   FORCE=1          delete and rebuild onto-xai/* even if it already looks good
+#   CONTINUE=1       resume after conflict resolution
 #   ALLOW_DIRTY=1    allow dirty worktree
-#   FIRST_PARENT=1   only first-parent commits (default 0 = no-merges linear list)
+#   FIRST_PARENT=1   only first-parent commits (default 0 = no-merges)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,18 +46,29 @@ SEED_REF="${SEED_REF:-}"
 IMPORT_LOG="${IMPORT_LOG:-docs/upstream-import-log.md}"
 FIRST_PARENT="${FIRST_PARENT:-0}"
 CONTINUE="${CONTINUE:-0}"
+FORCE="${FORCE:-0}"
 
 ORIGINAL_BRANCH="$(git branch --show-current || true)"
 ORIGINAL_HEAD="$(git rev-parse HEAD)"
 
-if [[ -n "$(git status --porcelain)" ]] && [[ "$CONTINUE" != "1" ]]; then
-  # Mid cherry-pick is expected when CONTINUE=1
-  if [[ -d .git/sequencer ]] || [[ -f .git/CHERRY_PICK_HEAD ]]; then
-    echo "error: cherry-pick in progress. Resolve conflicts, then:" >&2
+# Mid cherry-pick: never start a fresh rebuild.
+if [[ -f .git/CHERRY_PICK_HEAD ]] || [[ -d .git/sequencer ]]; then
+  if [[ "$CONTINUE" == "1" ]]; then
+    echo "error: cherry-pick still in progress. Finish it first:" >&2
     echo "  git add -u && git cherry-pick --continue" >&2
-    echo "  CONTINUE=1 $0" >&2
+    echo "  then: CONTINUE=1 $0" >&2
     exit 1
   fi
+  echo "error: cherry-pick in progress. Do one of:" >&2
+  echo "  # finish current pick" >&2
+  echo "  git add -u && git cherry-pick --continue && CONTINUE=1 $0" >&2
+  echo "  # or abort and restore a known tip" >&2
+  echo "  git cherry-pick --abort" >&2
+  echo "  git checkout -B onto-xai/\$(git rev-parse --short=12 xai-org/main) backup/onto-xai-resolved-a335358" >&2
+  exit 1
+fi
+
+if [[ -n "$(git status --porcelain)" ]] && [[ "$CONTINUE" != "1" ]]; then
   if [[ "${ALLOW_DIRTY:-}" == "1" ]]; then
     echo "WARN: dirty worktree allowed via ALLOW_DIRTY=1" >&2
   else
@@ -75,11 +89,18 @@ fi
 XAI_SHORT=$(git rev-parse --short=12 "$XAI_TIP")
 BRANCH="onto-xai/$XAI_SHORT"
 
-# Resolve Surmount tip
+# Surmount tip: never default to "current onto-xai branch" (that would re-stack
+# the onto branch onto itself / fall back to origin/main incorrectly).
 if [[ -z "$SURMOUNT_REF" ]]; then
-  if [[ -n "$ORIGINAL_BRANCH" && "$ORIGINAL_BRANCH" != onto-xai/* && "$ORIGINAL_BRANCH" != import/* ]]; then
+  if [[ -n "$ORIGINAL_BRANCH" \
+    && "$ORIGINAL_BRANCH" != onto-xai/* \
+    && "$ORIGINAL_BRANCH" != import/* \
+    && "$ORIGINAL_BRANCH" != backup/* ]]; then
     SURMOUNT_REF="$ORIGINAL_HEAD"
     SURMOUNT_LABEL="$ORIGINAL_BRANCH"
+  elif git show-ref --verify --quiet refs/heads/merge-2; then
+    SURMOUNT_REF=merge-2
+    SURMOUNT_LABEL=merge-2
   elif git show-ref --verify --quiet refs/remotes/origin/main; then
     SURMOUNT_REF=origin/main
     SURMOUNT_LABEL=origin/main
@@ -111,7 +132,34 @@ if ! git merge-base --is-ancestor "$SEED_REF" "$SURMOUNT_REF" 2>/dev/null; then
   exit 1
 fi
 
-# Commit list: non-merge chronological (real patches). FIRST_PARENT=1 for merge-only spine.
+# --- if stack already exists and looks good, leave it alone ---
+if [[ "$CONTINUE" != "1" && "$FORCE" != "1" ]] \
+  && git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  existing=$(git rev-parse "$BRANCH")
+  if git merge-base --is-ancestor "$XAI_TIP" "$existing" 2>/dev/null; then
+    ahead=$(git rev-list --count "$XAI_TIP..$existing")
+    if [[ "$ahead" -gt 0 ]]; then
+      echo "=== Stack already present — not rebuilding (safe default) ==="
+      echo "Branch:  $BRANCH"
+      echo "Tip:     $existing ($(git rev-parse --short "$existing"))"
+      echo "xAI tip: $XAI_TIP (ancestor: yes)"
+      echo "Ahead:   $ahead commit(s)"
+      echo
+      git log --oneline "$XAI_TIP..$BRANCH" | head -20
+      echo
+      echo "This is intentional until the stack is merged/ready."
+      echo "To rebuild from scratch (DESTRUCTIVE): FORCE=1 SURMOUNT_REF=$SURMOUNT_LABEL $0"
+      echo "Backup of last good tip (if present): backup/onto-xai-resolved-a335358"
+      # Ensure we're on the good branch, not left detached.
+      if [[ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)" != "$BRANCH" ]]; then
+        git checkout "$BRANCH"
+      fi
+      exit 0
+    fi
+  fi
+fi
+
+# Commit list
 if [[ "$FIRST_PARENT" == "1" ]]; then
   mapfile -t COMMITS < <(git rev-list --reverse --first-parent "$SEED_REF..$SURMOUNT_REF")
 else
@@ -130,28 +178,36 @@ echo "Stacking:     $SURMOUNT_LABEL @ $SURMOUNT_SHORT"
 echo "Seed:         $SEED_REF"
 echo "Commits:      ${#COMMITS[@]}"
 echo "Branch:       $BRANCH"
+echo "FORCE:        $FORCE"
 echo
 
-if [[ "$CONTINUE" == "1" ]]; then
-  if [[ -f .git/CHERRY_PICK_HEAD ]]; then
-    echo "error: still mid cherry-pick. Finish with: git cherry-pick --continue" >&2
-    exit 1
+backup_existing_branch() {
+  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    local bak="backup/${BRANCH//\//-}-$(git rev-parse --short "$BRANCH")-$(date -u +%Y%m%dT%H%M%SZ)"
+    git branch "$bak" "$BRANCH"
+    echo "Backed up previous $BRANCH → $bak"
   fi
+}
+
+if [[ "$CONTINUE" == "1" ]]; then
   if ! git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     echo "error: $BRANCH missing; cannot CONTINUE" >&2
     exit 1
   fi
   git checkout "$BRANCH"
-  # Find first commit not yet an ancestor of HEAD by matching Surmount-Commit trailer or subject+patch-id is hard;
-  # instead: pick any commit from list whose tree change isn't already applied — simpler: skip commits already in log by original sha trailer.
-  done_list=$(git log --format=%B "$XAI_TIP..HEAD" | grep -E '^Surmount-Commit: ' | awk '{print $2}' || true)
+  # Skip commits already present via cherry-pick -x trailer or identical subject+tree is hard;
+  # use cherry-pick source trailer "cherry picked from commit <sha>"
+  done_list=$(
+    git log --format=%B "$XAI_TIP..HEAD" \
+      | grep -E 'cherry picked from commit [0-9a-f]{40}' \
+      | sed -E 's/.*cherry picked from commit ([0-9a-f]{40}).*/\1/' || true
+  )
   remaining=()
   for c in "${COMMITS[@]}"; do
     if echo "$done_list" | grep -qx "$c"; then
       echo "  skip already applied: $(git rev-parse --short "$c") $(git log -1 --format=%s "$c")"
       continue
     fi
-    # also skip if commit subject already appears and we're continuing after partial
     remaining+=("$c")
   done
   COMMITS=("${remaining[@]}")
@@ -163,11 +219,12 @@ if [[ "$CONTINUE" == "1" ]]; then
   echo "Continuing with ${#COMMITS[@]} remaining commit(s)"
 else
   if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    if [[ "${KEEP_EXISTING:-}" == "1" ]]; then
-      echo "error: $BRANCH exists (KEEP_EXISTING=1)" >&2
+    if [[ "$FORCE" != "1" ]]; then
+      echo "error: $BRANCH exists. Refusing to delete (set FORCE=1 to rebuild)." >&2
       exit 1
     fi
-    echo "Replacing disposable $BRANCH ($(git rev-parse --short "$BRANCH"))"
+    backup_existing_branch
+    echo "FORCE=1: replacing $BRANCH ($(git rev-parse --short "$BRANCH"))"
     if [[ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)" == "$BRANCH" ]]; then
       git checkout --detach HEAD
     fi
@@ -176,23 +233,22 @@ else
   git checkout -B "$BRANCH" "$XAI_TIP"
 fi
 
-pick_failed=0
 for c in "${COMMITS[@]}"; do
   subj=$(git log -1 --format=%s "$c")
   short=$(git rev-parse --short "$c")
   echo ">>> cherry-pick $short $subj"
   if git cherry-pick -x "$c"; then
-    # annotate with clear trailer if -x didn't (it adds cherry picked from)
     echo "    ok → $(git rev-parse --short HEAD)"
   else
-    pick_failed=1
     echo
     echo "CONFLICT while cherry-picking $short ($subj)"
     echo "Resolve every conflict, then:"
     echo "  git add -u"
     echo "  git cherry-pick --continue"
     echo "  CONTINUE=1 $0"
-    echo "Or abort: git cherry-pick --abort && git checkout ${ORIGINAL_BRANCH:-main}"
+    echo "Or abort and restore backup:"
+    echo "  git cherry-pick --abort"
+    echo "  git checkout -B $BRANCH backup/onto-xai-resolved-a335358  # if that backup exists"
     echo
     echo "Unmerged:"
     git diff --name-only --diff-filter=U || true
@@ -208,13 +264,10 @@ echo "xAI is ancestor: $(git merge-base --is-ancestor "$XAI_TIP" HEAD && echo ye
 echo "Commits on top of xAI:"
 git log --oneline "$XAI_TIP..HEAD"
 echo
-echo "Diff vs xAI tip:"
+echo "Diff vs xAI tip (summary):"
 git diff --stat "$XAI_TIP" HEAD | tail -20
 echo
-echo "Your previous branch $ORIGINAL_BRANCH was NOT modified."
-echo "Inspect: git checkout $BRANCH"
-echo "Return:  git checkout $ORIGINAL_BRANCH"
-echo
+echo "Surmount product branches were NOT modified."
 echo "XAI_TIP=$XAI_TIP"
 echo "ONTO_BRANCH=$BRANCH"
 echo "ONTO_TIP=$(git rev-parse HEAD)"
