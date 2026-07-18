@@ -1,11 +1,16 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shell"
+<<<<<<< HEAD
 version = "1.0.45"
+=======
+version = "0.2.102"
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 edition.workspace = true
 
 [features]
 default = []
+<<<<<<< HEAD
 dhat-heap = ["dep:dhat"]
 # Session synthesis + in-process e2e harness (`session::testkit`) for soak,
 # load, and bench tests. Off by default; the tests/benches that use it declare
@@ -30,6 +35,10 @@ default-bazel = [
     "test-support",
     "config-docs",
 ]
+=======
+unstable = []
+default-bazel = []
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 [dependencies]
 dunce = { workspace = true }
@@ -225,11 +234,17 @@ tempfile = { workspace = true }
 # is `#[cfg(test)]`-only inside xai-grok-bundle without this feature.
 xai-grok-bundle = { workspace = true, features = ["test-support"] }
 xai-grok-memory = { workspace = true, features = ["test-support"] }
+<<<<<<< HEAD
 # sandbox-enforce: keep tests running against the enforcing sandbox build.
 xai-grok-workspace = { workspace = true, features = ["test-support", "sandbox-enforce"] }
 xai-grok-config = { workspace = true, features = [] }
 # Shell tests call the test-only functions in `xai_grok_cloud_config::settings_get`.
 xai-grok-cloud-config = { workspace = true, features = ["test-support"] }
+=======
+xai-grok-workspace = { workspace = true, features = ["test-support"] }
+xai-grok-config = { workspace = true, features = [] }
+ring = { workspace = true }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 tar = { workspace = true }
 flate2 = { workspace = true }
 semver = { workspace = true }

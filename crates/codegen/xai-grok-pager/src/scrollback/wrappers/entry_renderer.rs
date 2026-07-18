@@ -1405,11 +1405,25 @@ mod tests {
 
     #[test]
     fn background_block_gutter_uses_block_background_fill() {
+<<<<<<< HEAD
         // Background blocks own the gutter via the existing full-area fill, so the no-bg clear must not run for them
         // Pinned so the band color (read from the process-global theme in user.rs build_lines) is GrokNight, not the developer's config
         // Asserted relationally (gutter == content cell from the same render) so the test doesn't encode the pinned palette's exact quantized value
         let _guard = pin_theme();
         let theme = Theme::current();
+=======
+        // Background blocks own the gutter via the existing full-area fill, so
+        // the no-bg clear must not run for them. Pin GrokNight: UserPrompt
+        // line bands read `Theme::current()` (not the EntryRenderer theme
+        // handle), and under nextest a fresh process otherwise seeds from the
+        // developer's `~/.grok/config.toml` (e.g. oscura-midnight).
+        let _pin = pin_theme();
+        let theme = Theme::current();
+        assert_ne!(
+            theme.bg_light, theme.bg_base,
+            "test premise: block bg must differ from base bg"
+        );
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let entry = ScrollbackEntry::new(RenderBlock::user_prompt("hello"));
         let renderer = EntryRenderer::new(&entry, &theme);
 

@@ -294,6 +294,7 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
+<<<<<<< HEAD
     /// A mid-text `/name` token runs this command with the whole message as its args: `prose /name q` is `/name prose q`.
     /// Opt in only when the whole message is the argument; `submission_refusal` only sees a leading `/` and is bypassed.
     fn can_hoist_from_mid_text(&self) -> bool {
@@ -304,6 +305,26 @@ pub trait SlashCommand: Send + Sync {
     /// Clipboard helpers like `/copy` stay `Both`: they read scrollback state and do not need the fullscreen pane.
     fn mode_support(&self) -> ModeSupport {
         ModeSupport::Both
+=======
+    /// Whether this command functions in the scrollback-native **minimal**
+    /// mode (`grok --minimal`).
+    ///
+    /// Minimal mode deletes the interactive fullscreen scrollback pane, the
+    /// in-app mouse selection path, and the agent dashboard, handing scroll /
+    /// search / selection back to the terminal (K7). Commands that drive those
+    /// deleted surfaces — `/find`, `/dashboard` — have nothing to act on, so
+    /// the central dispatch gate refuses them with a "/<x> is not available in
+    /// minimal mode" message (committed as a system block). Clipboard helpers
+    /// like `/copy` stay available: they read scrollback state and do not need
+    /// the fullscreen pane.
+    ///
+    /// Defaults to `true` — a **denylist, not an allowlist**: the many
+    /// mode-agnostic commands keep working and new commands are available in
+    /// minimal by default (the mode is converging toward parity). Override to
+    /// `false` only for genuinely fullscreen-pane-dependent commands.
+    fn available_in_minimal(&self) -> bool {
+        true
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Placeholder text shown in the prompt when args are empty.

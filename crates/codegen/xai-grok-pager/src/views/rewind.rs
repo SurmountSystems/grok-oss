@@ -357,16 +357,26 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             );
         }
         RewindPhase::Picker { points, selected } => {
+<<<<<<< HEAD
             // Shared list-overlay frame and row geometry (also used by /jump)
             // It applies the unfocus dim itself, so return before the shared blend at the bottom of this function
+=======
+            // Shared list-overlay chrome + row geometry (also used by /jump).
+            // It applies the unfocus dim itself, so return before the shared
+            // blend at the bottom of this function.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             crate::views::overlay_list::ListOverlay {
                 len: points.len(),
                 selected: *selected,
             }
             .render(buf, area, "Rewind to which turn?", focused, |i, ctx| {
+<<<<<<< HEAD
                 let Some(point) = points.get(i) else {
                     return Line::from("");
                 };
+=======
+                let point = &points[i];
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 let dot_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
                 let preview: String = crate::render::line_utils::truncate_str(
                     point.prompt_preview.as_deref().unwrap_or("(no preview)"),
@@ -380,10 +390,25 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                     } else {
                         Modifier::empty()
                     });
+<<<<<<< HEAD
 
                 Line::from(vec![
                     Span::styled("\u{00B7} ", dot_style),
                     Span::styled(preview, text_style),
+=======
+                let meta_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
+
+                let file_info = if point.has_file_changes {
+                    format!(" \u{00B7} {} files", point.num_file_snapshots)
+                } else {
+                    String::new()
+                };
+
+                Line::from(vec![
+                    Span::styled("\u{00B7} ", dot_style),
+                    Span::styled(preview, text_style),
+                    Span::styled(file_info, meta_style),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 ])
             });
             return;

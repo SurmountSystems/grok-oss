@@ -35,8 +35,14 @@ static FACET_REGISTRY: LazyLock<FacetRegistry> = LazyLock::new(build_facet_regis
 pub(crate) fn facet_registry() -> &'static FacetRegistry {
     &FACET_REGISTRY
 }
+<<<<<<< HEAD
 /// Hard-off in release builds so they can't enable the conversations lane via env.
 pub(crate) fn conversations_lane_enabled() -> bool {
+=======
+/// Hard-off in release builds so they can't enable the
+/// conversations lane via env.
+pub fn conversations_lane_enabled() -> bool {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     false
 }
 /// Env lane (desktop `GROK_SESSION_LIST_CONVERSATIONS`) OR process-wide `--chat` (`GROK_CHAT_MODE`); hard-off in release builds.
@@ -1031,11 +1037,15 @@ mod tests {
             let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             let req = parse_list_req(&raw).expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
+<<<<<<< HEAD
             let expected_build = if cfg!(feature = "local-workspace") {
                 Some(&vec![serde_json::json!("build")])
             } else {
                 Some(&vec![serde_json::json!("build")])
             };
+=======
+            let expected = "build";
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
                 expected_build,

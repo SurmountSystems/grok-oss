@@ -8,8 +8,13 @@ use super::billing::is_credit_limit_error;
 use super::ctx::{get_active_agent_mut, visible_agent_mut, with_active_agent};
 use super::interject;
 use super::queue::{
+<<<<<<< HEAD
     apply_turn_start_shim, attach_prompt_state_to_last_queued, immediate_server_send_eligible,
     maybe_drain_queue, note_peek_page_flip, push_and_page_flip, push_server_queue_echo,
+=======
+    apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
+    maybe_drain_queue, note_peek_page_flip_after_drain, push_server_queue_echo,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     retire_optimistic_echo,
 };
 use super::router::dispatch;
@@ -473,7 +478,18 @@ pub(in crate::app) fn show_small_screen_tip(app: &mut AppView) {
     }
 }
 
+<<<<<<< HEAD
 /// Show the existing one-shot SSH discovery tip, redirected to `/doctor`.
+=======
+/// Show the one-shot "Over SSH? Run `grok wrap ssh <host>` locally…" hint at
+/// the first stable agent-view draw of an unwrapped SSH session (environment
+/// gates live in `AppView::maybe_trigger_ssh_wrap_tip`). Gated by the per-tip
+/// `contextual_hints.ssh_wrap` gate (default ON). Seen-gated in-memory via
+/// `app.tip_seen_counts`; nothing persists to disk.
+///
+/// Called directly from the draw-path trigger — not routed as an `Action`,
+/// so it returns `()` and "no effects from draw" holds structurally.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(in crate::app) fn show_ssh_wrap_tip(app: &mut AppView) {
     if !app.contextual_hints.ssh_wrap {
         return;
@@ -484,6 +500,10 @@ pub(in crate::app) fn show_ssh_wrap_tip(app: &mut AppView) {
     let Some(agent) = app.agents.get_mut(&id) else {
         return;
     };
+<<<<<<< HEAD
+=======
+    // Impression only when the tip actually takes the slot (mirrors undo/plan).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     if agent.show_ephemeral_tip(
         crate::tips::ssh_wrap::ssh_wrap_tip(),
         &mut app.tip_seen_counts,
@@ -898,6 +918,7 @@ pub(super) fn dispatch_send_prompt_submission(
                     });
                 }
                 if let Some(command) = command {
+<<<<<<< HEAD
                     // Central screen-mode gate
                     // A fully-typed invocation thus earns a hint that names the way out instead of leaking to the model
                     // A refusal added here must also extend the pre-check in `EditedCommandGate` (`dispatch::queue`)
@@ -906,6 +927,17 @@ pub(super) fn dispatch_send_prompt_submission(
                         .refusal(invocation.token, ctx.screen_mode)
                     {
                         CommandResult::Message(refusal)
+=======
+                    if ctx.screen_mode.is_minimal() && !command.available_in_minimal() {
+                        // Central minimal gate: commands that drive the deleted
+                        // fullscreen pane / dashboard (/find, /dashboard, …)
+                        // have nothing to act on in scrollback-native mode.
+                        // Surface a friendly system block instead of running them.
+                        CommandResult::Message(format!(
+                            "/{} is not available in minimal mode",
+                            invocation.token
+                        ))
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     } else {
                         agent
                             .prompt
@@ -1315,6 +1347,7 @@ pub(super) fn dispatch_send_prompt_submission(
         if consume_input && !recorded_as_command {
             agent.record_prompt_in_history(&text);
         }
+<<<<<<< HEAD
         maybe_drain_queue(agent, &mut app.pending_image_notices)
     };
     effects.extend(drain.effects);
@@ -1325,6 +1358,10 @@ pub(super) fn dispatch_send_prompt_submission(
     effects.extend(super::queue::maybe_release_queued_prompt_into_turn(
         app, None,
     ));
+=======
+    }
+    note_peek_page_flip_after_drain(app, id);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     effects
 }
 
@@ -1404,9 +1441,15 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     agent.prompt.set_text("");
     agent.note_draft_consumed();
 
+<<<<<<< HEAD
     let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
     note_peek_page_flip(app, id, drain.page_flip_entry);
     drain.effects
+=======
+    let effects = maybe_drain_queue(agent);
+    note_peek_page_flip_after_drain(app, id);
+    effects
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 /// Whether a load-result handler must stand down because a reconnect reload window is open on the agent.
@@ -1942,7 +1985,12 @@ pub(super) fn handle_prompt_response(
             silent: true,
             nonce: Default::default(),
         });
+<<<<<<< HEAD
         note_peek_page_flip(app, agent_id, page_flip_entry);
+=======
+        // Agent borrow ends here; note needs dashboard + agents together.
+        note_peek_page_flip_after_drain(app, agent_id);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         return effects;
     }
     vec![]
@@ -2060,9 +2108,15 @@ pub(super) fn handle_compact_complete(
         if app.reconnect_pending {
             return vec![];
         }
+<<<<<<< HEAD
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         return drain.effects;
+=======
+        let effects = maybe_drain_queue(agent);
+        note_peek_page_flip_after_drain(app, agent_id);
+        return effects;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     vec![]
 }

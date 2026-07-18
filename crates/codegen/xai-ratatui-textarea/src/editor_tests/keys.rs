@@ -168,7 +168,10 @@ fn lifecycle_and_host_owned_keys_remain_unclassified() {
         key(KeyCode::Esc, KeyModifiers::NONE),
         key(KeyCode::Enter, KeyModifiers::NONE),
         key(KeyCode::Tab, KeyModifiers::NONE),
+<<<<<<< HEAD
         key(KeyCode::Char('\t'), KeyModifiers::NONE),
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         key(KeyCode::BackTab, KeyModifiers::SHIFT),
         key(KeyCode::Up, KeyModifiers::NONE),
         key(KeyCode::Down, KeyModifiers::NONE),
@@ -210,37 +213,65 @@ fn backspace_delete_and_raw_encodings_have_modifier_parity() {
         (
             KeyModifiers::SUPER,
             EditCommand::DeleteToLineStart,
+<<<<<<< HEAD
             EditCommand::DeleteWordForward(WordStyle::Small),
+=======
+            EditCommand::DeleteGraphemeForward,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
         (
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             EditCommand::DeleteGraphemeBackward,
+<<<<<<< HEAD
             EditCommand::DeleteWordForward(WordStyle::Small),
+=======
+            EditCommand::DeleteGraphemeForward,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
         (
             KeyModifiers::ALT | KeyModifiers::SHIFT,
             EditCommand::DeleteGraphemeBackward,
+<<<<<<< HEAD
             EditCommand::DeleteWordForward(WordStyle::Small),
+=======
+            EditCommand::DeleteGraphemeForward,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
         (
             KeyModifiers::SUPER | KeyModifiers::SHIFT,
             EditCommand::DeleteGraphemeBackward,
+<<<<<<< HEAD
             EditCommand::DeleteWordForward(WordStyle::Small),
+=======
+            EditCommand::DeleteGraphemeForward,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
         (
             KeyModifiers::CONTROL | KeyModifiers::ALT,
             EditCommand::DeleteGraphemeBackward,
+<<<<<<< HEAD
             EditCommand::DeleteWordForward(WordStyle::Small),
+=======
+            EditCommand::DeleteGraphemeForward,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
         (
             KeyModifiers::CONTROL | KeyModifiers::SUPER,
             EditCommand::DeleteGraphemeBackward,
+<<<<<<< HEAD
             EditCommand::DeleteWordForward(WordStyle::Small),
+=======
+            EditCommand::DeleteGraphemeForward,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
         (
             KeyModifiers::ALT | KeyModifiers::SUPER,
             EditCommand::DeleteGraphemeBackward,
+<<<<<<< HEAD
             EditCommand::DeleteWordForward(WordStyle::Small),
+=======
+            EditCommand::DeleteGraphemeForward,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
         (
             KeyModifiers::META,
@@ -255,7 +286,11 @@ fn backspace_delete_and_raw_encodings_have_modifier_parity() {
         (
             KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
             EditCommand::DeleteGraphemeBackward,
+<<<<<<< HEAD
             EditCommand::DeleteWordForward(WordStyle::Small),
+=======
+            EditCommand::DeleteGraphemeForward,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
     ];
 
@@ -271,6 +306,7 @@ fn backspace_delete_and_raw_encodings_have_modifier_parity() {
             Some(expected_delete),
             "{delete:?}"
         );
+<<<<<<< HEAD
         assert_eq!(
             classify_key_event(&raw_bs),
             Some(EditCommand::DeleteGraphemeBackward),
@@ -280,6 +316,13 @@ fn backspace_delete_and_raw_encodings_have_modifier_parity() {
             classify_key_event(&raw_del),
             Some(EditCommand::DeleteGraphemeBackward),
             "{raw_del:?}",
+=======
+        assert_eq!(classify_key_event(&raw_bs), backspace_command, "{raw_bs:?}");
+        assert_eq!(
+            classify_key_event(&raw_del),
+            backspace_command,
+            "{raw_del:?}"
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         );
     }
 }

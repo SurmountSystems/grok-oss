@@ -4,7 +4,11 @@ use super::ExtResult;
 use crate::agent::MvpAgent;
 use agent_client_protocol as acp;
 #[tracing::instrument(skip_all, fields(method = %args.method))]
+<<<<<<< HEAD
 pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+=======
+pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     {
         let _ = (agent, args);
         Err(acp::Error::method_not_found())

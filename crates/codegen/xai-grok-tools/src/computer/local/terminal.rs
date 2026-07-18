@@ -244,6 +244,7 @@ enum TerminalCommand {
         reply: oneshot::Sender<Option<PathBuf>>,
     },
 
+<<<<<<< HEAD
     WarmShell {
         cwd: PathBuf,
     },
@@ -251,6 +252,10 @@ enum TerminalCommand {
     KillForegroundCommandsByOwner {
         owner_session_id: String,
     },
+=======
+    /// Kill all running foreground processes owned by a specific session.
+    KillForegroundCommandsByOwner { owner_session_id: String },
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
     KillTasksByOwner {
         owner_session_id: String,
@@ -813,6 +818,7 @@ impl LocalTerminalActor {
         })
     }
 
+<<<<<<< HEAD
     #[cfg(unix)]
     async fn ensure_persistent_shell_initialized(&mut self, cwd: &std::path::Path) {
         if self.shell_state.is_some() {
@@ -839,6 +845,8 @@ impl LocalTerminalActor {
         }
     }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Spawn a command with persistent shell state: restore the prior snapshot
     /// via fd 3, run the user command, dump the new state to fd 4.
     #[cfg(unix)]
@@ -851,7 +859,20 @@ impl LocalTerminalActor {
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
-        self.ensure_persistent_shell_initialized(cwd).await;
+        if self.shell_state.is_none() {
+            let shell = shell_state::ShellKind::detect();
+            match shell_state::ShellState::init(shell, cwd).await {
+                Ok(state) => self.shell_state = Some(state),
+                Err(e) => {
+                    tracing::warn!("persistent shell init failed, using empty state: {e}");
+                    self.shell_state = Some(shell_state::ShellState {
+                        cwd: cwd.to_path_buf(),
+                        snapshot: String::new(),
+                        shell,
+                    });
+                }
+            }
+        }
 
         let shell_state = self.shell_state.as_ref().unwrap();
         let tracked_cwd_alive = match tokio::fs::metadata(&shell_state.cwd).await {
@@ -1109,6 +1130,7 @@ impl LocalTerminalActor {
                 let cwd = None;
                 let _ = reply.send(cwd);
             }
+<<<<<<< HEAD
             TerminalCommand::WarmShell { cwd } => {
                 #[cfg(unix)]
                 if self.persistent_shell {
@@ -1122,6 +1144,8 @@ impl LocalTerminalActor {
                 #[cfg(not(unix))]
                 let _ = cwd;
             }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             TerminalCommand::KillForegroundCommands => {
                 self.kill_foreground_commands().await;
             }
@@ -2713,6 +2737,7 @@ impl TerminalBackend for LocalTerminalBackend {
         reply_rx.await.ok().flatten()
     }
 
+<<<<<<< HEAD
     async fn warm_shell(&self, cwd: &std::path::Path) {
         let _ = self
             .cmd_tx
@@ -2722,6 +2747,8 @@ impl TerminalBackend for LocalTerminalBackend {
             .await;
     }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     async fn kill_foreground_commands(&self) {
         let _ = self
             .cmd_tx

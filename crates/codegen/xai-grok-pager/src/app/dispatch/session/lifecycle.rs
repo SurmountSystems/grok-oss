@@ -17,8 +17,13 @@ use crate::app::dispatch::ctx::{
 };
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{consume_chat_kind, dispatch_initial_prompt};
+<<<<<<< HEAD
 use crate::app::dispatch::queue::{QueueDrain, maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::{confirmed_quit, dispatch};
+=======
+use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip_after_drain};
+use crate::app::dispatch::router::dispatch;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::app::dispatch::status::notify_session_ready;
 use crate::app::dispatch::task_result::unregister_session_effect;
 use crate::app::dispatch::transcript::extensions_modal_tab_fetches;
@@ -1487,8 +1492,12 @@ pub(in crate::app::dispatch) fn handle_session_created(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
+<<<<<<< HEAD
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         identity_rebind.apply(app);
+=======
+        note_peek_page_flip_after_drain(app, agent_id);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         return effects;
     }
     abandoned_husk_cleanup_effects(app, session_id)
@@ -1625,8 +1634,12 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
+<<<<<<< HEAD
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         identity_rebind.apply(app);
+=======
+        note_peek_page_flip_after_drain(app, agent_id);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         return effects;
     }
     abandoned_husk_cleanup_effects(app, session_id)
@@ -1969,9 +1982,14 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 vec![]
             }
         };
+<<<<<<< HEAD
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         effects.extend(drain.effects);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+=======
+        effects.extend(maybe_drain_queue(agent));
+        note_peek_page_flip_after_drain(app, agent_id);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         effects
     } else {
         vec![]

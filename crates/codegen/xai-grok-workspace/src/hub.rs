@@ -58,16 +58,25 @@ pub struct HubConfig {
     pub alpha_test_key: Option<String>,
     /// Permit a plaintext `ws://` server on a non-loopback host (mesh-secured).
     pub allow_insecure_ws: bool,
+<<<<<<< HEAD
     /// Diagnostics-server state handle that drives the `/ready` state from connection events.
     /// `None` means no diagnostics server (embedded/local use).
+=======
+    /// Diagnostics-server state handle driving the `/ready` state from the
+    /// connection lifecycle. `None` = no diagnostics server (embedded/local
+    /// use).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub diag: Option<DiagHandle>,
     /// Told when a reconnect's upgrade is refused `401`/`403` (with the policy code a `403` names);
     /// the connection is over, and an owner that supervises it acts at once rather than at its
     /// next liveness sweep.
     pub on_handshake_refused: Option<HandshakeRefused>,
 }
+<<<<<<< HEAD
 /// See [`HubConfig::on_handshake_refused`].
 pub type HandshakeRefused = Arc<dyn Fn(u16, Option<RefusalCode>) + Send + Sync>;
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 impl std::fmt::Debug for HubConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HubConfig")
@@ -248,6 +257,7 @@ impl HubHandle {
         if let Some(diag) = config.diag.clone() {
             let on_connect = diag.clone();
             let on_disconnect = diag.clone();
+<<<<<<< HEAD
             let on_terminal_close = diag.clone();
             server_builder = server_builder
                 .reconnect_after_terminal_close_codes([CLOSE_CODE_SANDBOX_TERMINATED])
@@ -261,6 +271,12 @@ impl HubHandle {
         if let Some(refused) = config.on_handshake_refused.clone() {
             server_builder =
                 server_builder.on_handshake_refused(move |status, code| refused(status, code));
+=======
+            server_builder = server_builder
+                .on_connect(move || on_connect.set_connected())
+                .on_disconnect(move || on_disconnect.set_disconnected())
+                .on_reconnect_settled(move || diag.set_connected());
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
         if let Some(ref id) = config.server_id {
             server_builder = server_builder.server_id(parse_server_id(id)?);

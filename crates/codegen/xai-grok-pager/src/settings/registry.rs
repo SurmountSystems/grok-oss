@@ -444,6 +444,16 @@ pub fn canonical_screen_mode(value: Option<&str>) -> &'static str {
     }
 }
 
+/// `minimal` stays; everything else (including unset / legacy `default`) → `fullscreen`.
+pub fn canonical_screen_mode(value: Option<&str>) -> &'static str {
+    let raw = value.unwrap_or_default().trim();
+    if raw.eq_ignore_ascii_case("minimal") {
+        "minimal"
+    } else {
+        "fullscreen"
+    }
+}
+
 impl PagerLocalSnapshot {
     /// Iterate over just the display names, for validator paths that don't need the ids.
     pub fn available_model_names(&self) -> impl Iterator<Item = &str> {
@@ -568,6 +578,7 @@ pub fn current_value_for(
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
+<<<<<<< HEAD
         "dashboard_preview" => Some(SettingValue::Bool(ui.dashboard_preview_enabled())),
         // The cache is the send-path source of truth (same pattern as group_tool_verbs)
         "page_flip_on_send" => Some(SettingValue::Bool(
@@ -581,6 +592,8 @@ pub fn current_value_for(
             crate::appearance::cache::load_follow_up_behavior().as_canonical(),
         )),
         "confirm_before_rewind" => Some(SettingValue::Bool(ui.confirm_before_rewind_enabled())),
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints: `None` (inherit) reads as the default ON
         "contextual_hints.undo" => {
@@ -601,9 +614,12 @@ pub fn current_value_for(
         "contextual_hints.word_select" => Some(SettingValue::Bool(
             ui.contextual_hints.word_select.unwrap_or(true),
         )),
+<<<<<<< HEAD
         "contextual_hints.export_copy" => Some(SettingValue::Bool(
             ui.contextual_hints.export_copy.unwrap_or(true),
         )),
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         "contextual_hints.ssh_wrap" => Some(SettingValue::Bool(
             ui.contextual_hints.ssh_wrap.unwrap_or(true),
         )),
@@ -661,11 +677,15 @@ pub fn current_value_for(
         "screen_mode" => Some(SettingValue::Enum(canonical_screen_mode(
             ui.screen_mode.as_deref(),
         ))),
+<<<<<<< HEAD
         // SHELL: whether the Ctrl+Space or F8 chord is active; None means true
         "voice_keybind_enabled" => {
             Some(SettingValue::Bool(ui.voice_keybind_enabled.unwrap_or(true)))
         }
         // SHELL: canonicalized from `[ui].voice_capture_mode`; None falls back to "hold"
+=======
+        // SHELL — canonicalized from `[ui].voice_capture_mode`; None → "hold".
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         "voice_capture_mode" => Some(SettingValue::Enum(canonical_voice_capture_mode(
             ui.voice_capture_mode.as_deref(),
         ))),
@@ -873,6 +893,7 @@ mod tests {
                         "contextual_hints.word_select default drifts from UiConfig::default()"
                     );
                 }
+<<<<<<< HEAD
                 ("contextual_hints.export_copy", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
@@ -880,6 +901,8 @@ mod tests {
                         "contextual_hints.export_copy default drifts from UiConfig::default()"
                     );
                 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 ("contextual_hints.ssh_wrap", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
@@ -895,13 +918,19 @@ mod tests {
                     );
                 }
                 ("show_timeline", SettingKind::Bool { default }) => {
+<<<<<<< HEAD
                     // Single-sourced via UiConfig::show_timeline_enabled(); this guards that defs.rs wired the resolver, not a stray literal
+=======
+                    // Single-sourced via UiConfig::show_timeline_enabled(); this
+                    // guards that defs.rs wired the resolver, not a stray literal.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     assert_eq!(
                         *default,
                         ui.show_timeline_enabled(),
                         "show_timeline default drifts from UiConfig::default()"
                     );
                 }
+<<<<<<< HEAD
                 ("dashboard_preview", SettingKind::Bool { default }) => {
                     assert_eq!(ui.dashboard_preview_enabled(), *default);
                 }
@@ -933,6 +962,8 @@ mod tests {
                         "follow_up_behavior default drifts from UiConfig::default()"
                     );
                 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 ("simple_mode", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
@@ -1183,7 +1214,11 @@ mod tests {
                     );
                     assert_eq!(*default, "fullscreen");
                 }
+<<<<<<< HEAD
                 // render_mermaid: Option<String>; None reads as "auto"
+=======
+                // render_mermaid: Option<String>; None → "auto".
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 ("render_mermaid", SettingKind::Enum { default, .. }) => {
                     assert_eq!(
                         ui.render_mermaid, None,
@@ -1514,7 +1549,12 @@ mod tests {
         assert_eq!(canonical_screen_mode(None), "fullscreen");
     }
 
+<<<<<<< HEAD
     /// Corrupted `auto_dark_theme = "auto"` (a circular reference) falls back to the canonical default.
+=======
+    /// Corrupted `auto_dark_theme = "auto"` (would cause circular ref)
+    /// falls back to canonical default.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn current_value_for_auto_dark_theme_filters_auto_value() {
         let ui = UiConfig {
@@ -1792,7 +1832,10 @@ mod tests {
                 "contextual_hints.send_now",
                 "contextual_hints.small_screen",
                 "contextual_hints.word_select",
+<<<<<<< HEAD
                 "contextual_hints.export_copy",
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 "contextual_hints.ssh_wrap",
             ],
         );

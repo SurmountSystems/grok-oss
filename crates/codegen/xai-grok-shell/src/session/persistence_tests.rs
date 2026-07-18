@@ -1,5 +1,8 @@
 use super::*;
+<<<<<<< HEAD
 use crate::session::storage::jsonl::AppendDurability;
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 struct ActorGuard {
     handle: PersistenceHandle,
@@ -14,6 +17,7 @@ impl ActorGuard {
 }
 
 fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
+<<<<<<< HEAD
     test_actor_with_remote_sync(info, storage, None)
 }
 
@@ -43,12 +47,18 @@ fn test_actor_inner(
     if mark_summary_done {
         summary.mark_done();
     }
+=======
+    let (tx, rx) = mpsc::unbounded_channel();
+    let summary_tx = tx.clone();
+    let sampling_client = OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let task = tokio::spawn(
         SessionPersistence {
             info,
             storage,
             pending_notification: None,
             rx,
+<<<<<<< HEAD
             remote_sync,
             // These tests run the actor as resumed; the backfill on writeback upgrade only runs for a fresh session
             created_fresh: false,
@@ -64,11 +74,28 @@ fn test_actor_inner(
             last_usage_live: None,
             last_usage_turn: None,
             last_incoming_turn: None,
+=======
+            remote_sync: None,
+            relay_sync: None,
+            summary: crate::session::summary::SummaryGenerator::new(
+                crate::session::summary::SummaryConfig {
+                    sampling_client,
+                    model: String::new(),
+                    persistence_tx: summary_tx,
+                },
+            ),
+            registry_title_sync: None,
+            gateway: None,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
         .run(),
     );
     ActorGuard {
+<<<<<<< HEAD
         handle: PersistenceHandle::from_parts_for_test(tx, disk_full_rx),
+=======
+        handle: PersistenceHandle { tx, noop: false },
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         task,
     }
 }
@@ -86,6 +113,7 @@ fn neutral_update(info: &Info, text: &str) -> SessionUpdate {
     SessionUpdate::Acp(Box::new(notification(info, text)))
 }
 
+<<<<<<< HEAD
 #[tokio::test]
 async fn writeback_backfill_is_fresh_only_and_acp_only() {
     let info = Info {
@@ -393,6 +421,52 @@ async fn committed_pending_drain_still_writes_the_durable_update() {
 
 #[tokio::test]
 async fn durable_append_drains_pending_update_in_fifo_order() {
+=======
+#[test]
+fn committed_error_does_not_restore_pending_notification() {
+    let notification = notification(
+        &Info {
+            id: acp::SessionId::new("committed-update"),
+            cwd: "/test".into(),
+        },
+        "committed",
+    );
+    let mut pending = None;
+    let result = SessionPersistence::finish_pending_append(
+        &mut pending,
+        notification,
+        Err(crate::session::storage::AppendUpdateError::Committed(
+            io::Error::other("summary patch failed"),
+        )),
+    );
+    assert_eq!(result.unwrap_err().to_string(), "summary patch failed");
+    assert!(pending.is_none());
+}
+
+#[test]
+fn uncommitted_error_restores_pending_notification() {
+    let notification = notification(
+        &Info {
+            id: acp::SessionId::new("uncommitted-update"),
+            cwd: "/test".into(),
+        },
+        "pending",
+    );
+    let mut pending = None;
+    let result = SessionPersistence::finish_pending_append(
+        &mut pending,
+        notification,
+        Err(crate::session::storage::AppendUpdateError::NotCommitted(
+            io::Error::other("append failed"),
+        )),
+    );
+    assert!(result.is_err());
+    assert!(pending.is_some());
+}
+
+#[tokio::test]
+async fn durable_ack_drains_pending_update_in_fifo_order() {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let dir = tempfile::tempdir().unwrap();
     let info = Info {
         id: acp::SessionId::new("durable-update"),
@@ -411,11 +485,24 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
         .tx
         .send(PersistenceMsg::Update(neutral_update(&info, "before")))
         .unwrap();
+<<<<<<< HEAD
     actor
         .handle
         .append_update_durably(neutral_update(&info, "durable"))
         .await
         .unwrap();
+=======
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::AppendUpdateDurablyAndAck {
+            update: neutral_update(&info, "durable"),
+            respond_to,
+        })
+        .unwrap();
+    response.await.unwrap().unwrap();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let summary = storage.load_summary(&info).await.unwrap();
     assert_eq!(summary.num_messages, 2);
 
@@ -438,6 +525,7 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
     assert_eq!(texts, ["before", "durable"]);
     actor.stop().await;
 }
+<<<<<<< HEAD
 
 async fn flush_ack(handle: &PersistenceHandle) -> io::Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2518,3 +2606,5 @@ async fn stamp_session_identity_falls_back_to_snapshot_when_disk_has_none() {
     assert_eq!(on_disk.agent_id.as_deref(), Some("ag1.c0ffee"));
     assert_eq!(on_disk.attempt_id, Some(stamped.attempt_id));
 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))

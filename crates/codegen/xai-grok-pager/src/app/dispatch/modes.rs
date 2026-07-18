@@ -1,7 +1,13 @@
 //! Plan, yolo, auto, and permission mode transitions and toasts.
 
+<<<<<<< HEAD
 use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
+=======
+use super::ctx::with_active_agent;
+use super::queue::{maybe_drain_queue, note_peek_page_flip_after_drain};
+use super::session::lifecycle::skip_picker_and_create_session;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
@@ -66,8 +72,13 @@ pub(super) fn dispatch_enter_plan_mode(
         agent
             .session
             .enqueue_prompt_with_skill_tokens(desc, skill_token_ranges);
+<<<<<<< HEAD
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         note_peek_page_flip(app, id, drain.page_flip_entry);
+=======
+        let drain = maybe_drain_queue(agent);
+        note_peek_page_flip_after_drain(app, id);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut effects = Vec::with_capacity(1);
         for eff in drain.effects {
             match eff {

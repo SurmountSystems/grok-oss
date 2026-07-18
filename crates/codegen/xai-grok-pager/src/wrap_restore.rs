@@ -1,5 +1,6 @@
 //! Terminal-mode tracking and restore emission for `grok wrap`.
 //!
+<<<<<<< HEAD
 //! `grok wrap` cannot tell a clean child exit from a connection drop: an ssh transport death reaches it as a plain PTY EOF plus an exit code.
 //! What it *can* know is which DEC private modes the child enabled on the local terminal and never disabled; the reset bytes died with the link.
 //! [`ModeTracker`] observes every complete CSI sequence the wrap output filter forwards.
@@ -13,6 +14,30 @@
 //! Known limitation: the kitty protocol keeps an independent stack per screen buffer, while this tracker keeps one net-depth counter.
 //! A child that pushes on one screen and dies while the other is active is therefore restored by count, not by screen.
 //! The pager crash handler's teardown has the same limitation; tracking a depth per screen would close the gap.
+=======
+//! `grok wrap` cannot tell a clean child exit from a connection drop: an ssh
+//! transport death reaches it as a plain PTY EOF plus an exit code. What it
+//! *can* know is which DEC private modes the child enabled on the local
+//! terminal and never disabled — reset bytes that died with the link.
+//! [`ModeTracker`] observes every complete CSI sequence the wrap output
+//! filter forwards and keeps a bitmask of latched modes plus the kitty
+//! keyboard push depth; [`restore_bytes`] emits disables for exactly that
+//! latched state. Dirty deaths get repaired, clean exits stay byte-for-byte
+//! transparent, and kitty pops are exactly as deep as the child's net pushes
+//! (a blind pop could corrupt an enclosing context's keyboard stack).
+//!
+//! The tracked set mirrors the canonical teardown table in
+//! [`xai_crash_handler::terminal`] (`RESTORE_SEQ`) — pinned mechanically by a
+//! unit test below — plus the remaining mouse encodings (`?1005`, `?1016`)
+//! and the legacy alternate screens (`?47`, `?1047`) that a wrapped TUI may
+//! use.
+//!
+//! Known limitation: the kitty protocol keeps an independent stack per screen
+//! buffer, while this tracker keeps one net-depth counter. A child that
+//! pushes on one screen and dies while the other is active is therefore
+//! restored by count, not by screen — the same limitation as the pager crash
+//! handler's teardown; tracking a depth per screen would close that gap.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -42,11 +67,21 @@ const ALT_47: u32 = 1 << 10;
 const ALT_1047: u32 = 1 << 11;
 /// Alternate screen buffer with cursor save/restore, `?1049`.
 const ALT_1049: u32 = 1 << 12;
+<<<<<<< HEAD
 /// Cursor hidden; mode `?25` is tracked INVERTED.
 /// DECTCEM's set side (`?25h`) shows the cursor, so the latched (needs-repair) state is having seen `?25l` without a later `?25h`.
 const CURSOR_HIDDEN: u32 = 1 << 13;
 
 /// Mouse/paste/focus disables in the relative order pinned by `xai_crash_handler::terminal::RESTORE_SEQ`'s ordering tests.
+=======
+/// Cursor hidden — mode `?25` tracked INVERTED: DECTCEM's set side (`?25h`)
+/// shows the cursor, so the latched (needs-repair) state is having seen
+/// `?25l` without a later `?25h`.
+const CURSOR_HIDDEN: u32 = 1 << 13;
+
+/// Mouse/paste/focus disables in the relative order pinned by
+/// `xai_crash_handler::terminal::RESTORE_SEQ`'s ordering tests.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 const DISABLE_ORDER: &[(u32, &[u8])] = &[
     (MOUSE_1000, b"\x1b[?1000l"),
     (MOUSE_1002, b"\x1b[?1002l"),
@@ -80,19 +115,44 @@ fn mode_bit(mode: u32) -> Option<u32> {
     })
 }
 
+<<<<<<< HEAD
 /// Tracks latched terminal state, shared (via `Arc`) between the wrap output filter, the exit-path drop guard, and
 /// the terminate-signal thread. So the uniform strongest ordering is chosen over reasoning about minimal per-site
 /// orderings.
+=======
+/// Latched-terminal-state tracker shared (via `Arc`) between the wrap output
+/// filter, the exit-path drop guard, and the terminate-signal thread.
+///
+/// All state is atomic: the read loop updates it while other threads snapshot
+/// it, and the two-phase `restore_claimed`/`restore_done` gate keeps the
+/// multiple exit paths from emitting restores twice while still letting a
+/// losing path wait for the winner to finish. `SeqCst` throughout: every
+/// access is on a cold path (a few RMWs per tracked mode change, none per
+/// output byte), so the uniform strongest ordering is chosen over reasoning
+/// about minimal per-site orderings.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Default)]
 pub(crate) struct ModeTracker {
     /// Bitmask of latched modes (the `MOUSE_*`/`PASTE_*`/... bits above).
     modes: AtomicU32,
+<<<<<<< HEAD
     /// Net kitty keyboard protocol pushes (`CSI > .. u`) minus pops (`CSI < .. u`), floored at zero.
     kitty_depth: AtomicU32,
     /// Claim phase of the one-shot restore gate: set by the first exit path that starts the restore.
     restore_claimed: AtomicBool,
     /// Completion phase: set by the claim winner once the restore has been fully emitted.
     /// Losing exit paths then know it is safe to let the process exit.
+=======
+    /// Net kitty keyboard protocol pushes (`CSI > .. u`) minus pops
+    /// (`CSI < .. u`), floored at zero.
+    kitty_depth: AtomicU32,
+    /// Claim phase of the one-shot restore gate: set by the first exit path
+    /// that starts the restore.
+    restore_claimed: AtomicBool,
+    /// Completion phase: set by the claim winner once the restore has been
+    /// fully emitted, so losing exit paths know it is safe to let the
+    /// process exit.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     restore_done: AtomicBool,
 }
 
@@ -108,19 +168,32 @@ impl ModeTracker {
         Self::default()
     }
 
+<<<<<<< HEAD
     /// Update state from one complete CSI sequence (`ESC [ .. final`), exactly as forwarded to the terminal.
     ///
     /// Only child-to-terminal output flows here, so mouse *reports* (which a real terminal sends the other way, on stdin) never reach this parser.
+=======
+    /// Update state from one complete CSI sequence (`ESC [ .. final`),
+    /// exactly as forwarded to the terminal.
+    ///
+    /// Only child→terminal output flows here, so mouse *reports* (which a
+    /// real terminal sends the other way, on stdin) never reach this parser.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn observe_csi(&self, seq: &[u8]) {
         if seq.len() < 3 {
             return;
         }
+<<<<<<< HEAD
         let Some((&final_byte, rest)) = seq.split_last() else {
             return;
         };
         let Some(body) = rest.get(2..) else {
             return;
         };
+=======
+        let final_byte = seq[seq.len() - 1];
+        let body = &seq[2..seq.len() - 1];
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         match final_byte {
             // DECSET/DECRST only; ANSI SM/RM (no `?`) is untracked.
             b'h' | b'l' => {
@@ -139,6 +212,7 @@ impl ModeTracker {
                 Some(b'>') => {
                     self.kitty_depth.fetch_add(1, Ordering::SeqCst);
                 }
+<<<<<<< HEAD
                 // Kitty keyboard pop: `CSI < n u`, n defaulting to 1
                 // The depth floors at zero so a child popping an entry it never pushed cannot make wrap pop one on its behalf later
                 Some(b'<') => {
@@ -149,13 +223,30 @@ impl ModeTracker {
                         .and_then(parse_decimal)
                         .filter(|&n| n > 0)
                         .unwrap_or(1);
+=======
+                // Kitty keyboard pop: `CSI < n u`, n defaulting to 1. The
+                // depth floors at zero so a child popping an entry it never
+                // pushed cannot make wrap pop one on its behalf later.
+                Some(b'<') => {
+                    // Zero also means the default (1): under the common CSI
+                    // zero-means-default convention a terminal may pop one
+                    // entry for `<0u`, and over-counting depth here risks the
+                    // destructive extra pop at exit.
+                    let n = parse_decimal(&body[1..]).filter(|&n| n > 0).unwrap_or(1);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     let _ = self.kitty_depth.fetch_update(
                         Ordering::SeqCst,
                         Ordering::SeqCst,
                         |depth| Some(depth.saturating_sub(n)),
                     );
                 }
+<<<<<<< HEAD
                 // `CSI u` restores the cursor, `CSI ? u` queries, and `CSI = .. u` sets flags without pushing; none are stack operations.
+=======
+                // `CSI u` restores the cursor, `CSI ? u` queries, and
+                // `CSI = .. u` sets flags without pushing — none are stack
+                // operations.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 _ => {}
             },
             _ => {}
@@ -182,9 +273,18 @@ impl ModeTracker {
         }
     }
 
+<<<<<<< HEAD
     /// The first caller gets `true` and must call `finish_restore` when done. Later callers get `false` and must not
     /// emit (the terminal would be reset twice, and the kitty pop is a destructive stack operation). They should
     /// instead wait for completion before letting the process exit.
+=======
+    /// Claim the one-shot restore shared by every exit path (drop guard,
+    /// signal thread): the first caller gets `true` and must call
+    /// [`finish_restore`](Self::finish_restore) when done; later callers get
+    /// `false` and must not emit (the terminal would be reset twice — the
+    /// kitty pop is a destructive stack operation) but should wait for
+    /// completion before letting the process exit.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn begin_restore(&self) -> bool {
         !self.restore_claimed.swap(true, Ordering::SeqCst)
     }
@@ -200,9 +300,21 @@ impl ModeTracker {
     }
 }
 
+<<<<<<< HEAD
 /// Disable sequences for exactly the latched state in `snapshot`. Nothing latched yields an empty vec: clean exits
 /// must stay byte-transparent. Synchronized-update end goes first: multiplexers must stop buffering before the
 /// other resets arrive.
+=======
+/// Disable sequences for exactly the latched state in `snapshot`.
+///
+/// Nothing latched yields an empty vec — clean exits must stay
+/// byte-transparent. The emission order matches
+/// `xai_crash_handler::terminal::RESTORE_SEQ` for every element the two
+/// share (pinned by a unit test below): synchronized-update end first
+/// (multiplexers must stop buffering before the other resets arrive), cursor
+/// show, mouse/paste/focus disables, kitty pops before the alt-screen exits
+/// (the kitty stack is per-screen), alt-screen exits last.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn restore_bytes(snapshot: ModeSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
     if snapshot.modes & SYNC_2026 != 0 {
@@ -216,7 +328,12 @@ pub(crate) fn restore_bytes(snapshot: ModeSnapshot) -> Vec<u8> {
             out.extend_from_slice(seq);
         }
     }
+<<<<<<< HEAD
     // One pop per net push: unwinds the child's stack entries exactly and leaves any enclosing context's entries alone
+=======
+    // One pop per net push: unwinds the child's stack entries exactly and
+    // leaves any enclosing context's entries alone.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     for _ in 0..snapshot.kitty_depth {
         out.extend_from_slice(b"\x1b[<u");
     }
@@ -338,15 +455,26 @@ mod tests {
 
     #[test]
     fn kitty_pop_floors_at_zero() {
+<<<<<<< HEAD
         // Popping an entry the child never pushed must not go negative and must not make wrap emit pops of its own later
+=======
+        // Popping an entry the child never pushed must not go negative and
+        // must not make wrap emit pops of its own later.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(restore_for(&[b"\x1b[<u"]).is_empty());
         assert!(restore_for(&[b"\x1b[<5u", b"\x1b[>1u", b"\x1b[<u"]).is_empty());
     }
 
     #[test]
     fn kitty_pop_zero_count_means_default_one() {
+<<<<<<< HEAD
         // A terminal following the CSI zero-means-default convention pops one entry for `<0u`
         // Counting it as zero would leave wrap's depth one too high: an extra pop into an enclosing stack at exit
+=======
+        // A terminal following the CSI zero-means-default convention pops one
+        // entry for `<0u`; counting it as zero would leave wrap's depth one
+        // too high — an extra pop into an enclosing stack at exit.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(restore_for(&[b"\x1b[>1u", b"\x1b[<0u"]).is_empty());
     }
 
@@ -416,8 +544,15 @@ mod tests {
         assert!(tracker.restore_done());
     }
 
+<<<<<<< HEAD
     /// `RESTORE_SEQ` is the canonical "every mode the pager enables" teardown table, so every disable it contains must
     /// be covered by this tracker. The shared elements must also be emitted in the same relative order. If a mode is
+=======
+    /// Drift guard for the cross-crate mirror claim: `RESTORE_SEQ` is the
+    /// canonical "every mode the pager enables" teardown table, so every
+    /// disable it contains must be covered by this tracker, and the shared
+    /// elements must be emitted in the same relative order. If a mode is
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     /// added to `RESTORE_SEQ` without extending the tracker, this fails.
     #[test]
     fn covers_and_orders_every_crash_handler_restore_seq_element() {
@@ -439,6 +574,7 @@ mod tests {
         let tracker = ModeTracker::new();
         for element in &elements {
             let enable: Vec<u8> = match element.as_slice() {
+<<<<<<< HEAD
                 // Tracking a single push makes restore emit the kitty pop
                 b"\x1b[<u" => b"\x1b[>1u".to_vec(),
                 // Show-cursor clears the inverted hidden-cursor latch
@@ -448,6 +584,14 @@ mod tests {
                         Some((_, prefix)) => prefix.to_vec(),
                         None => seq.to_vec(),
                     };
+=======
+                // Kitty pop is undone-by-tracking a single push.
+                b"\x1b[<u" => b"\x1b[>1u".to_vec(),
+                // Show-cursor disarms the inverted hidden-cursor latch.
+                b"\x1b[?25h" => b"\x1b[?25l".to_vec(),
+                seq if seq.starts_with(b"\x1b[?") && seq.ends_with(b"l") => {
+                    let mut enable = seq[..seq.len() - 1].to_vec();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     enable.push(b'h');
                     enable
                 }
@@ -460,13 +604,19 @@ mod tests {
             tracker.observe_csi(&enable);
         }
 
+<<<<<<< HEAD
         // Every element present, in RESTORE_SEQ's relative order (wrap-only extras like ?1005/?1016/?1047 may interleave between them)
+=======
+        // Every element present, in RESTORE_SEQ's relative order (wrap-only
+        // extras like ?1005/?1016/?1047 may interleave between them).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let out = restore_bytes(tracker.snapshot());
         let positions: Vec<usize> = elements
             .iter()
             .map(|element| position_of(&out, element))
             .collect();
         for (window, pair) in elements.windows(2).zip(positions.windows(2)) {
+<<<<<<< HEAD
             let [prev, next] = window else { continue };
             let [left, right] = pair else { continue };
             assert!(
@@ -474,6 +624,13 @@ mod tests {
                 "{:?} must precede {:?} to match RESTORE_SEQ, got {:?}",
                 String::from_utf8_lossy(prev),
                 String::from_utf8_lossy(next),
+=======
+            assert!(
+                pair[0] < pair[1],
+                "{:?} must precede {:?} to match RESTORE_SEQ, got {:?}",
+                String::from_utf8_lossy(&window[0]),
+                String::from_utf8_lossy(&window[1]),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 String::from_utf8_lossy(&out)
             );
         }

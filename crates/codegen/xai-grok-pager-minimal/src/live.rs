@@ -440,9 +440,19 @@ fn live_tail_renderer<'a>(
 ) -> EntryRenderer<'a> {
     super::commit::minimal_renderer(entry, theme, appearance.clone(), cwd, tick)
 }
+<<<<<<< HEAD
 /// Render the uncommitted tail (entries past the commit frontier), bottom-anchored so the most recent output is
 /// always visible. Starts at the shared [`super::commit::scan_frontier`] stop point so it renders exactly the
 /// entries [`tail_height`] measured.
+=======
+/// Render the uncommitted tail (entries past the commit frontier), bottom-anchored
+/// so the most recent output is always visible; the topmost visible entry is
+/// clipped via `with_skip_rows` when the run is taller than the tail area.
+///
+/// Starts at the shared [`super::commit::scan_frontier`] stop point so it renders
+/// exactly the entries [`tail_height`] measured (the viewport was sized to that —
+/// any disagreement makes the prompt jump on commit).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[allow(clippy::too_many_arguments)]
 fn draw_tail(
     buf: &mut Buffer,
@@ -596,6 +606,7 @@ fn render_minimal_status(
         },
     );
 }
+<<<<<<< HEAD
 /// A `Reserved` frame paints nothing but must still record the size a command script is told (`COLUMNS`/`LINES`): it sizes the script's first run.
 fn render_config_status_line(
     buf: &mut Buffer,
@@ -623,6 +634,9 @@ fn render_config_status_line(
     }
 }
 /// Idle status: `minimal · [/fullscreen to go back ·] /help`, plus the auto-set note.
+=======
+/// Idle status: `minimal · [/fullscreen to go back ·] /help` (+ auto-set note).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn render_idle_hint(buf: &mut Buffer, area: Rect, theme: &Theme) {
     let style = theme.dim().bg(Color::Reset);
     buf.set_style(area, style);

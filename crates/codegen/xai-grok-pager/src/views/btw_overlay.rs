@@ -467,9 +467,12 @@ pub fn render_btw_panel(
 mod tests {
     use super::*;
     use crate::render::osc8::resolve_link_target;
+<<<<<<< HEAD
 
     /// Markdown body range id (`MARKDOWN_BODY_RANGE`); `/btw` hits and copy share it.
     const BTW_OVERLAY_RANGE_ID: u16 = 0;
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
     fn render_with_model(
         state: &BtwOverlayState,

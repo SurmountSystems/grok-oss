@@ -20,12 +20,19 @@ use super::text_selection::TextSelection;
 
 const COMPACT_DEFAULT: bool = false;
 const TIMESTAMPS_DEFAULT: bool = true;
+<<<<<<< HEAD
 /// Aliased rather than hardcoded so [`UiConfig::SHOW_TIMELINE_DEFAULT`] stays the single source of truth.
 const TIMELINE_DEFAULT: bool = UiConfig::SHOW_TIMELINE_DEFAULT;
 const PAGE_FLIP_ON_SEND_DEFAULT: bool = UiConfig::PAGE_FLIP_ON_SEND_DEFAULT;
 /// Rollout flag.
 const COMBINE_QUEUED_PROMPTS_DEFAULT: bool = false;
 const FOLLOW_UP_BEHAVIOR_DEFAULT: FollowUpBehavior = FollowUpBehavior::Queue;
+=======
+/// Timeline sidebar (per-turn tick rail): single source of truth is
+/// [`UiConfig::SHOW_TIMELINE_DEFAULT`]; aliased here for the `Cell::new`
+/// const context and the effective-config fallback read.
+const TIMELINE_DEFAULT: bool = UiConfig::SHOW_TIMELINE_DEFAULT;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 const SIMPLE_MODE_DEFAULT: bool = true;
 /// This matches the previous on-disk default.
 const VIM_MODE_DEFAULT: bool = false;
@@ -101,6 +108,11 @@ pub fn set_timestamps(enabled: bool) {
     TIMESTAMPS_LOADED.with(|l| l.set(true));
 }
 
+<<<<<<< HEAD
+=======
+// -- Timeline sidebar ----------------------------------------------------------
+
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 thread_local! {
     static TIMELINE_CURRENT: Cell<bool> = const { Cell::new(TIMELINE_DEFAULT) };
     static TIMELINE_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -126,6 +138,7 @@ pub fn set_show_timeline(enabled: bool) {
     TIMELINE_LOADED.with(|l| l.set(true));
 }
 
+<<<<<<< HEAD
 thread_local! {
     static PAGE_FLIP_ON_SEND_CURRENT: Cell<bool> = const { Cell::new(PAGE_FLIP_ON_SEND_DEFAULT) };
     static PAGE_FLIP_ON_SEND_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -210,6 +223,9 @@ pub fn set_follow_up_behavior(value: FollowUpBehavior) {
     FOLLOW_UP_BEHAVIOR_CURRENT.with(|c| c.set(value));
     FOLLOW_UP_BEHAVIOR_LOADED.with(|l| l.set(true));
 }
+=======
+// -- Simple mode --------------------------------------------------------------
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 thread_local! {
     static SIMPLE_MODE_CURRENT: Cell<bool> = const { Cell::new(SIMPLE_MODE_DEFAULT) };
@@ -620,6 +636,7 @@ pub fn prime(ui: &UiConfig) {
     set(ui.compact_mode);
     set_timestamps(ui.show_timestamps.unwrap_or(TIMESTAMPS_DEFAULT));
     set_show_timeline(ui.show_timeline_enabled());
+<<<<<<< HEAD
     set_page_flip_on_send(ui.page_flip_on_send_enabled());
     set_combine_queued_prompts(
         ui.combine_queued_prompts
@@ -631,6 +648,8 @@ pub fn prime(ui: &UiConfig) {
             .and_then(FollowUpBehavior::from_canonical)
             .unwrap_or(FOLLOW_UP_BEHAVIOR_DEFAULT),
     );
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     set_simple_mode(ui.simple_mode.unwrap_or(SIMPLE_MODE_DEFAULT));
     set_keep_text_selection(text_selection_from_ui(ui));
     // These keys live in the layered config, not the `UiConfig` arg; seed them so the first frame skips disk
@@ -730,6 +749,7 @@ mod tests {
         assert_eq!(COMPACT_DEFAULT, ui.compact_mode);
         assert_eq!(TIMESTAMPS_DEFAULT, ui.show_timestamps.unwrap_or(true));
         assert_eq!(TIMELINE_DEFAULT, ui.show_timeline_enabled());
+<<<<<<< HEAD
         assert_eq!(PAGE_FLIP_ON_SEND_DEFAULT, ui.page_flip_on_send_enabled());
         assert_eq!(
             COMBINE_QUEUED_PROMPTS_DEFAULT,
@@ -740,6 +760,8 @@ mod tests {
             FOLLOW_UP_BEHAVIOR_DEFAULT.as_canonical(),
             ui.follow_up_behavior()
         );
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(SIMPLE_MODE_DEFAULT, ui.simple_mode.unwrap_or(true));
         assert_eq!(VIM_MODE_DEFAULT, ui.vim_mode.unwrap_or(false));
         assert_eq!(

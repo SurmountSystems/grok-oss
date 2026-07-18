@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 //! Dense live-tail paint for the middle of the dashboard peek box.
 //!
 //! Reads the agent's leased [`ScrollbackState`] without mutating fold state, layout cache, follow mode, or view mode.
@@ -7,13 +8,33 @@
 //! Foldable entries render Collapsed; messages keep their full expanded body.
 //!
 //! Layout, top to bottom:
+=======
+//! Dense live-tail paint for the dashboard peek middle.
+//!
+//! Reads the agent's leased [`ScrollbackState`] without mutating fold state,
+//! layout cache, follow mode, or view mode. Dashboard lease
+//! (`begin_peek_viewport`) already forced follow + AllTurns for attach restore.
+//!
+//! Density vs full [`ScrollbackPane`]: no sticky headers, no vpad, no gap rows,
+//! no horizontal accent/pad chrome. Foldable entries project Collapsed; messages
+//! keep full expanded body.
+//!
+//! Layout (top → bottom):
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 //! 1. Last user prompt pinned (1 line), when present and height allows
 //! 2. Top `…` when the current-turn body is truncated from above
 //! 3. Pure tail of content **after** the last user (current turn only)
 //!
+<<<<<<< HEAD
 //! The body is **always** the current turn when a last user exists (including when the list-first min box leaves only ~3 middle rows).
 //! The pin is dropped only when the middle has no rows left for it.
 //! After a fresh user send with no agent lines yet, the middle is the pin over empty rows; prior turns are not pulled up.
+=======
+//! Body is **always** current-turn when a last user exists (including the
+//! list-first min-box ~3-row middle). Pin is dropped only when the middle
+//! has no rows left for it. After a fresh user send with no agent lines,
+//! the middle is pin + empty — prior turns are not pulled up.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -28,8 +49,16 @@ use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::types::{BlockLine, DisplayMode};
 use crate::theme::Theme;
 
+<<<<<<< HEAD
 /// Densified body line count for shrink-to-content (v1: the current-turn body). Counts only content
 /// after the last user prompt.
+=======
+/// Densified body line count for shrink-to-content (v1: current-turn body).
+///
+/// Content **after** the last user prompt only. Pin / ellipsis are layout
+/// chrome and are budgeted separately in desired peek content.
+/// `width` is the middle content width (same as the paint area width).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn densified_body_line_count(scrollback: &ScrollbackState, width: u16) -> u16 {
     if width == 0 || scrollback.is_empty() {
         return 0;
@@ -38,14 +67,26 @@ pub fn densified_body_line_count(scrollback: &ScrollbackState, width: u16) -> u1
     densified_lines_from(scrollback, width, after).len() as u16
 }
 
+<<<<<<< HEAD
 /// Whether scrollback has a user prompt that dense paint will pin when height allows (drives the pin row in shrink desired content).
+=======
+/// Whether scrollback has a user prompt that dense paint will pin when height
+/// allows (drives the pin row in shrink desired content).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn scrollback_has_last_user(scrollback: &ScrollbackState) -> bool {
     find_last_user_idx(scrollback).is_some()
 }
 
+<<<<<<< HEAD
 /// Paint a dense live tail into `area`. Does not call `prepare_layout`, `enable_follow`, or
 /// `set_view_mode`. Those either belong to the viewport lease or would dirty state the attach path
 /// needs.
+=======
+/// Paint a dense live tail into `area`.
+///
+/// Does not call `prepare_layout` / `enable_follow` / `set_view_mode` — those
+/// either belong to the viewport lease or would dirty attach-path state.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut Buffer) {
     if area.width < 1 || area.height == 0 || scrollback.is_empty() {
         return;
@@ -58,7 +99,11 @@ pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut 
     let height = area.height as usize;
 
     let last_user = find_last_user_idx(scrollback);
+<<<<<<< HEAD
     // The body is the current turn when a last user exists; the full stream otherwise
+=======
+    // Always current-turn when a last user exists; full stream otherwise.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let body_start = last_user.map(|i| i + 1).unwrap_or(0);
     let flat = densified_lines_from(scrollback, content_w, body_start);
 
@@ -85,8 +130,12 @@ pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut 
 
     let mut y = area.y;
     if let Some(line) = pin {
+<<<<<<< HEAD
         // Mirrors the scrollback pane's content paint so the same rows read the same direction in the peek preview
         buf.set_line_safe_bidi(area.x, y, &line, content_w);
+=======
+        buf.set_line_safe(area.x, y, &line, content_w);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         y = y.saturating_add(1);
     }
     if ellipsis {
@@ -99,12 +148,21 @@ pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut 
         if y >= area.y.saturating_add(area.height) {
             break;
         }
+<<<<<<< HEAD
         buf.set_line_safe_bidi(area.x, y, line, content_w);
+=======
+        buf.set_line_safe(area.x, y, line, content_w);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         y = y.saturating_add(1);
     }
 }
 
+<<<<<<< HEAD
 /// Take a pure tail of `flat` into `budget` rows, reserving one row for a top `…` when content is omitted above.
+=======
+/// Take a pure tail of `flat` into `budget` rows, reserving one row for a top
+/// `…` when content is omitted above.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn pure_tail_with_ellipsis(flat: Vec<Line<'static>>, budget: usize) -> (bool, Vec<Line<'static>>) {
     if budget == 0 {
         return (false, Vec::new());
@@ -113,11 +171,19 @@ fn pure_tail_with_ellipsis(flat: Vec<Line<'static>>, budget: usize) -> (bool, Ve
         return (false, flat);
     }
     if budget == 1 {
+<<<<<<< HEAD
         // No room for both marker and content; keep the live tail line
         return (false, flat.last().cloned().into_iter().collect());
     }
     let take = budget - 1;
     (true, flat.get(flat.len() - take..).unwrap_or(&[]).to_vec())
+=======
+        // No room for both marker and content — keep the live tail line.
+        return (false, flat[flat.len() - 1..].to_vec());
+    }
+    let take = budget - 1;
+    (true, flat[flat.len() - take..].to_vec())
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 fn find_last_user_idx(scrollback: &ScrollbackState) -> Option<usize> {
@@ -168,7 +234,11 @@ fn dense_entry_lines(
 ) -> Vec<Line<'static>> {
     let mode = dense_mode(entry);
     let ctx = entry.context_with_mode(width, mode, appearance, cwd);
+<<<<<<< HEAD
     let output = entry.output_uncached(&ctx);
+=======
+    let output = entry.output_with_hooks(&ctx);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let keep_blanks = !entry.is_foldable();
     output
         .lines
@@ -225,6 +295,7 @@ mod tests {
         let (ell, body) = pure_tail_with_ellipsis(lines, 4);
         assert!(ell);
         assert_eq!(body.len(), 3);
+<<<<<<< HEAD
         assert_eq!(
             body.first()
                 .and_then(|l| l.spans.first())
@@ -237,6 +308,10 @@ mod tests {
                 .map(|s| s.content.as_ref()),
             Some("L9")
         );
+=======
+        assert_eq!(body[0].spans[0].content.as_ref(), "L7");
+        assert_eq!(body[2].spans[0].content.as_ref(), "L9");
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -263,11 +338,19 @@ mod tests {
         paint_peek_live_tail(&sb, area, &mut buf);
         let rows = plain_cells(&buf, area);
         assert!(
+<<<<<<< HEAD
             rows.first().is_some_and(|r| r.contains("latest prompt")),
             "pinned user on first row: {rows:?}"
         );
         assert!(
             !rows.first().is_some_and(|r| r.contains("first prompt")),
+=======
+            rows[0].contains("latest prompt"),
+            "pinned user on first row: {rows:?}"
+        );
+        assert!(
+            !rows[0].contains("first prompt"),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             "older user must not pin: {rows:?}"
         );
         let joined = rows.join("\n");
@@ -302,10 +385,17 @@ mod tests {
             paint_peek_live_tail(&sb, area, &mut buf);
             let rows = plain_cells(&buf, area);
             assert!(
+<<<<<<< HEAD
                 rows.first().is_some_and(|r| r.contains("say hi to me")),
                 "h={h}: new user pinned: {rows:?}"
             );
             let body = rows.get(1..).unwrap_or(&[]).join("\n");
+=======
+                rows[0].contains("say hi to me"),
+                "h={h}: new user pinned: {rows:?}"
+            );
+            let body = rows[1..].join("\n");
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             assert!(
                 !body.contains("prior answer")
                     && !body.contains("old ask")
@@ -335,6 +425,7 @@ mod tests {
         let mut buf = filled_buf(area);
         paint_peek_live_tail(&sb, area, &mut buf);
         let rows = plain_cells(&buf, area);
+<<<<<<< HEAD
         assert!(
             rows.first().is_some_and(|r| r.contains("ask")),
             "user pin first: {rows:?}"
@@ -342,6 +433,11 @@ mod tests {
         assert!(
             rows.get(1)
                 .is_some_and(|r| r.contains('…') || r.contains("...")),
+=======
+        assert!(rows[0].contains("ask"), "user pin first: {rows:?}");
+        assert!(
+            rows[1].contains('…') || rows[1].contains("..."),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             "top ellipsis under pin when truncated: {rows:?}"
         );
         let joined = rows.join("\n");
@@ -357,7 +453,11 @@ mod tests {
 
     #[test]
     fn dense_tail_min_box_middle_is_current_turn_with_pin() {
+<<<<<<< HEAD
         // The list-first min box leaves ~3 middle rows after the status, reply, and blank rows
+=======
+        // List-first min box leaves ~3 middle rows after status/reply/blank.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut sb = ScrollbackState::new();
         sb.push(ScrollbackEntry::new(RenderBlock::user_prompt("old")));
         sb.push(ScrollbackEntry::new(RenderBlock::agent_message(
@@ -377,10 +477,14 @@ mod tests {
         paint_peek_live_tail(&sb, area, &mut buf);
         let rows = plain_cells(&buf, area);
         let joined = rows.join("\n");
+<<<<<<< HEAD
         assert!(
             rows.first().is_some_and(|r| r.contains("ask")),
             "pin on min-box middle: {rows:?}"
         );
+=======
+        assert!(rows[0].contains("ask"), "pin on min-box middle: {rows:?}");
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(
             !joined.contains("prior turn") && !joined.contains("old"),
             "prior turn must not fill min-box middle: {joined:?}"

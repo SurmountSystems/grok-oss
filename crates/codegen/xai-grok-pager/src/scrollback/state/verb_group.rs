@@ -176,9 +176,23 @@ struct Bucket<'e> {
     running_sources: std::collections::HashSet<&'e str>,
 }
 
+<<<<<<< HEAD
 /// The label counts members only: folded thoughts contribute nothing here and appear as their own member rows only
 /// when the group is expanded. Callers with the fold's span pass its exact end so the label counts precisely the
 /// entries the fold claimed.
+=======
+/// Walk the verb-group run starting at `header_idx` (same [`run_step`] rules
+/// as the layout fold: thinking and hidden entries are skipped, anything
+/// else ends the run) and build the aggregated label. The label counts
+/// members only: folded thoughts contribute nothing here and surface as
+/// their own member rows only when the group is expanded.
+///
+/// `end` is the run's exclusive upper bound in `entries` indices. Callers
+/// with the fold's span (see `state::groups`) pass its exact end so the
+/// label counts precisely the entries the fold claimed; callers without one
+/// pass `entries.len()` and rely on the [`RunStep::Break`] arm, which is
+/// kept as the in-bound stop in either case.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn verb_group_header_label(
     entries: &[&ScrollbackEntry],
     header_idx: usize,
@@ -204,9 +218,27 @@ pub fn verb_group_header_label(
     acc.into_label(theme)
 }
 
+<<<<<<< HEAD
 /// Thoughts occupy participant slots but are never bucketed: like verb-group labels, group labels stay tools-only.
 /// Thoughts are the only participants a label may silently omit. anything else would make the label under-describe
 /// what the fold conceals.
+=======
+/// Aggregated label for a truncation ("N more") header, describing the rows
+/// the fold hid — "Ran 6 commands, Read 2 files" — through the same bucket
+/// vocabulary as verb-group headers.
+///
+/// Walks the span's participants (skipping hidden thinking exactly like the
+/// fold's projection) from `range.start`, stopping after `limit`
+/// participants when given — the collapsed header describes only its hidden
+/// prefix; the expanded collapse header passes `None` and describes the
+/// whole run. Thoughts occupy participant slots but are NEVER bucketed:
+/// like verb-group labels, group labels stay tools-only. Returns `None` —
+/// the caller keeps the plain "N more" count — when nothing was bucketed (a
+/// pure-thought prefix) or when any walked participant has no bucket
+/// (System/SessionEvent rows, lifecycle chrome): thoughts are the only
+/// participants a label may silently omit, anything else would make it
+/// under-describe what the fold conceals.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn truncation_header_label(
     entries: &[&ScrollbackEntry],
     range: std::ops::Range<usize>,

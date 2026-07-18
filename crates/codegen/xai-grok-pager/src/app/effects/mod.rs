@@ -2521,11 +2521,18 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
+<<<<<<< HEAD
                     let params = serde_json::json!({
                     "sessionId": session_id.0.to_string(),
                     "serverName": server_name,
                     "values": values,
                 });
+=======
+                    let params = serde_json::json!(
+                        { "sessionId" : session_id.0.to_string(), "serverName" :
+                        server_name, "values" : values, }
+                    );
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     let req = acp::ExtRequest::new(
                         "x.ai/mcp/setup",
                         serde_json::value::to_raw_value(&params)
@@ -5330,10 +5337,51 @@ fn session_info_fields(
     }
     push("Turn", info.data.turn_index.to_string(), true);
     let ctx = &info.data.context;
+<<<<<<< HEAD
     push(
         "Context",
         format!("{} / {} tokens ({}%)", ctx.used, ctx.total, ctx.usage_pct),
         true,
+=======
+    let used = ctx.used;
+    let total = ctx.total;
+    let pct = ctx.usage_pct;
+    let title_line = match title {
+        Some(t) => format!("  Title: {t}\n"),
+        None => String::new(),
+    };
+    let model_hash_line = if xai_grok_shell::session::should_show_model_fingerprint(
+        info.data.show_model_fingerprint,
+        model,
+    ) {
+        info.data
+            .model_fingerprint
+            .as_deref()
+            .map(|fp| format!("\n  Model Hash: {fp}"))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let backend_line = info
+        .data
+        .api_backend
+        .as_deref()
+        .map(|b| format!("\n  API Backend: {b}"))
+        .unwrap_or_default();
+    let sandbox_line = xai_grok_sandbox::profile_name()
+        .map(|profile| format!("\n  Sandbox: {profile}"))
+        .unwrap_or_default();
+    let turn_line = format!("\n  Turn: {}", info.data.turn_index);
+    let conversation_line = info
+        .data
+        .conversation_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("\n  Conversation ID: {id}"))
+        .unwrap_or_default();
+    let version_display = xai_grok_version::display_version(
+        xai_grok_update::channel_label(),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     );
     fields
 }

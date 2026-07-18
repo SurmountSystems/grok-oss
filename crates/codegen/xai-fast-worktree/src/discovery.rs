@@ -265,6 +265,7 @@ fn rebuild_worktree_db_from_grove_dirs(
     report.discovered += discovery.found.len() as u64;
     for wt in discovery.found {
         let path = dunce::canonicalize(&wt.path).unwrap_or_else(|_| wt.path.clone());
+<<<<<<< HEAD
         // Refuse symlink escape outside managed roots.
         if !path_under_worktree_roots(&path, &roots) {
             tracing::warn!(
@@ -273,6 +274,8 @@ fn rebuild_worktree_db_from_grove_dirs(
             );
             continue;
         }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let id = id_from_path(&path);
         let path_str = path.to_string_lossy();
         if db.get_by_id(&id)?.is_some() || db.get(&path_str)?.is_some() {

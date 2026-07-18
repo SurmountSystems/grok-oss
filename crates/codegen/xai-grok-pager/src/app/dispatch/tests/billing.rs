@@ -1525,6 +1525,7 @@ fn unknown_non_restricted_command_still_passes_through() {
     );
 }
 
+<<<<<<< HEAD
 /// `Action::OpenUrl` for a billing CTA must push a scrollback system message that includes the full URL when the OS browser opener cannot run.
 /// The opener failure is simulated via a broken `GROK_TEST_OPEN_URL_FILE` path.
 /// On a headless VM the opener always fails, so without this message the Upgrade and Buy-more-credits buttons do nothing visible.
@@ -1532,6 +1533,19 @@ fn unknown_non_restricted_command_still_passes_through() {
 #[test]
 fn open_url_shows_manual_url_when_browser_unavailable() {
     // Point `GROK_TEST_OPEN_URL_FILE` at a path whose parent dir does not exist so the write fails and `open_url` returns false (BrowserUnavailable)
+=======
+// ── Browser-unavailable URL fallback ────────────────────────────────
+
+/// When the OS browser opener cannot run (simulated via a broken
+/// `GROK_TEST_OPEN_URL_FILE` seam), `Action::OpenUrl` for a billing CTA
+/// must push a scrollback system message that includes the full URL —
+/// the headless-VM fix for silent Upgrade / Buy-more-credits no-ops.
+#[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
+#[test]
+fn open_url_shows_manual_url_when_browser_unavailable() {
+    // Point the test seam at a path whose parent dir does not exist so the
+    // write fails and `open_url` returns false (BrowserUnavailable).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let bad = std::env::temp_dir().join(format!(
         "grok-open-url-missing-{}/out.txt",
         std::process::id()
@@ -1551,11 +1565,23 @@ fn open_url_shows_manual_url_when_browser_unavailable() {
         "must push a system message with the URL"
     );
     let text = last_system_text(&app, AgentId(0));
+<<<<<<< HEAD
     assert_eq!(
         text,
         crate::app::link_opener::browser_unavailable_message(url)
     );
     let toast = test_agent(&app, AgentId(0))
+=======
+    assert!(
+        text.contains("Could not open a browser"),
+        "fallback copy missing: {text}"
+    );
+    assert!(
+        text.contains(url),
+        "full billing URL must be visible for copy: {text}"
+    );
+    let toast = app.agents[&AgentId(0)]
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         .toast
         .as_ref()
         .map(|(m, _)| m.as_str());
@@ -1565,7 +1591,11 @@ fn open_url_shows_manual_url_when_browser_unavailable() {
     unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
 }
 
+<<<<<<< HEAD
 /// A successful open (the `GROK_TEST_OPEN_URL_FILE` write succeeds) must not spam a fallback system message.
+=======
+/// Successful open (test seam write OK) must not spam a fallback system message.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
 #[test]
 fn open_url_does_not_show_fallback_when_opener_succeeds() {
@@ -1596,6 +1626,7 @@ fn open_url_does_not_show_fallback_when_opener_succeeds() {
     let _ = std::fs::remove_file(&url_file);
 }
 
+<<<<<<< HEAD
 /// Welcome has no scrollback: browser-unavailable OpenUrl must put up a single-line toast that includes the full URL.
 /// No `\n`; the welcome painter is one row. Privacy-banner Terms/Policy clicks hit this path.
 #[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
@@ -1653,6 +1684,10 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
 }
 
 /// Credit-limit upsell Q&A submit routes through OpenUrl; when the browser is unavailable the full option URL must land in scrollback.
+=======
+/// Credit-limit upsell Q&A submit routes through OpenUrl; when the browser
+/// is unavailable the full option URL must land in scrollback.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
 #[test]
 fn credit_limit_upsell_submit_shows_url_when_browser_unavailable() {
@@ -1676,13 +1711,21 @@ fn credit_limit_upsell_submit_shows_url_when_browser_unavailable() {
         .question_view
         .take()
         .expect("expected credit-limit upsell modal");
+<<<<<<< HEAD
     // Select option 1, "Buy more credits" (credits / usage URL)
     set_first_selection(&mut qv, QuestionSelection::Single(Some(1)));
+=======
+    // Select option 1 = "Buy more credits" (credits / usage URL).
+    qv.selections[0] = QuestionSelection::Single(Some(1));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let kind = LocalQuestionKind::CreditLimitUpsell {
         choices: vec![
             xai_grok_telemetry::events::CreditLimitChoice::UpgradeTier,
             xai_grok_telemetry::events::CreditLimitChoice::PurchaseCredits,
+<<<<<<< HEAD
             xai_grok_telemetry::events::CreditLimitChoice::RetryLastPrompt,
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ],
     };
     let InputOutcome::Action(Action::OpenUrl(url)) =
@@ -1704,6 +1747,7 @@ fn credit_limit_upsell_submit_shows_url_when_browser_unavailable() {
     // SAFETY: serialized via `serial_test`.
     unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
 }
+<<<<<<< HEAD
 
 #[test]
 fn billing_fetched_clears_usage_modal_loading() {
@@ -1774,3 +1818,5 @@ fn billing_error_surfaces_in_usage_modal_without_scrollback() {
     assert_eq!(state.billing_error.as_deref(), Some("billing boom"));
     assert_eq!(agent_scrollback_len(&app), before);
 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))

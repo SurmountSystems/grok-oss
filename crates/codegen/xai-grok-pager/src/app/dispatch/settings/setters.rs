@@ -96,8 +96,15 @@ pub(super) fn set_screen_mode_inner(app: &mut AppView, canonical: &str) {
 }
 
 /// Persist `[ui].screen_mode` (`fullscreen` | `minimal`). Restart-required.
+<<<<<<< HEAD
 /// Choosing Fullscreen when missing must still write.
 /// Otherwise legacy pager.toml / leaky-terminal paths can keep applying after the user confirmed Fullscreen.
+=======
+///
+/// Unset is *displayed* as Fullscreen but is not an explicit on-disk value —
+/// choosing Fullscreen when missing must still write, or legacy pager.toml /
+/// leaky-terminal paths can keep applying after the user confirmed Fullscreen.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(in crate::app::dispatch) fn set_screen_mode(app: &mut AppView, value: String) -> Vec<Effect> {
     let canonical = crate::settings::canonical_screen_mode(Some(&value));
     let prev_raw = app.current_ui.screen_mode.as_deref();
@@ -1033,8 +1040,14 @@ pub(super) fn set_timeline_inner(app: &mut AppView, new: bool) {
 }
 
 pub(in crate::app::dispatch) fn set_timeline(app: &mut AppView, new: bool) -> Vec<Effect> {
+<<<<<<< HEAD
     // Gate on the displayed state (`appearance.show_timeline`, what the rail renders from and what `/timeline` toggles against)
     // The separately hydrated `current_ui` could disagree and make the toggle no-op
+=======
+    // Gate on the displayed state (`appearance.show_timeline`, what the rail
+    // renders from and what `/timeline` toggles against) — not the separately
+    // hydrated `current_ui`, which could disagree and make the toggle no-op.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let prev = app.appearance.show_timeline;
     // Idempotency gate.
     if prev == new {
@@ -1051,6 +1064,7 @@ pub(in crate::app::dispatch) fn set_timeline(app: &mut AppView, new: bool) -> Ve
     }]
 }
 
+<<<<<<< HEAD
 pub(super) fn set_page_flip_on_send_inner(app: &mut AppView, new: bool) {
     app.current_ui.page_flip_on_send = Some(new);
     crate::appearance::cache::set_page_flip_on_send(new);
@@ -1161,6 +1175,8 @@ pub(in crate::app::dispatch) fn set_follow_up_behavior(
     }]
 }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 /// State-only mutation for `simple_mode`.
 ///
 /// Propagates to every agent's `input_mode` so the toggle takes effect immediately (not just on new agents).
@@ -1332,6 +1348,7 @@ pub(in crate::app::dispatch) fn set_contextual_hint_word_select(
     )
 }
 
+<<<<<<< HEAD
 pub(in crate::app::dispatch) fn set_contextual_hint_export_copy(
     app: &mut AppView,
     new: bool,
@@ -1347,6 +1364,8 @@ pub(in crate::app::dispatch) fn set_contextual_hint_export_copy(
     )
 }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(in crate::app::dispatch) fn set_contextual_hint_ssh_wrap(
     app: &mut AppView,
     new: bool,
@@ -1362,6 +1381,10 @@ pub(in crate::app::dispatch) fn set_contextual_hint_ssh_wrap(
     )
 }
 
+<<<<<<< HEAD
+=======
+// ---------------------------------------------------------------------------
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 // Theme settings: `theme`, `auto_dark_theme`, `auto_light_theme`.
 // `PreviewX` (preview): visual only, no persist/toast.
 // Auto-theme setters apply visually only when `theme="auto"` AND the system is in the matching mode; otherwise the value is just stored

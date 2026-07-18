@@ -129,7 +129,12 @@ fn parse_args(argv: Vec<String>) -> Args {
 }
 
 fn load_config(path: Option<&std::path::Path>) -> VoiceConfig {
+<<<<<<< HEAD
     // The probe has no shell config stack; env is the resolved fallback (config table still beats it, matching the pager's precedence)
+=======
+    // The probe has no shell config stack; env is the resolved fallback
+    // (config table still beats it, matching the pager's precedence).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let env_base = std::env::var("GROK_XAI_API_BASE_URL").ok();
     if let Some(path) = path
         && let Ok(raw) = std::fs::read_to_string(path)
@@ -143,6 +148,18 @@ fn load_config(path: Option<&std::path::Path>) -> VoiceConfig {
     {
         return VoiceConfig::from_config_table(&table, env_base.as_deref());
     }
+<<<<<<< HEAD
+=======
+    if let Ok(raw) = std::fs::read_to_string(
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(".grok/config.toml"),
+    ) && let Ok(table) = toml::from_str::<toml::Table>(&raw)
+    {
+        return VoiceConfig::from_config_table(&table, env_base.as_deref());
+    }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     VoiceConfig::from_config_table(&toml::Table::new(), env_base.as_deref())
 }
 

@@ -227,7 +227,111 @@ async fn handle_update(
     )
     .await;
 
+<<<<<<< HEAD
     match updated {
+=======
+    let source_identity = |s: &xai_grok_plugin_marketplace::MarketplaceSource| -> String {
+        match &s.kind {
+            xai_grok_plugin_marketplace::SourceKind::Local { path } => path.display().to_string(),
+            xai_grok_plugin_marketplace::SourceKind::Git { url, .. } => url.clone(),
+        }
+    };
+
+    let source = match sources
+        .iter()
+        .find(|s| source_identity(s) == source_url_or_path)
+    {
+        Some(s) => s,
+        None => {
+            return ActionOutcome {
+                status: OutcomeStatus::NotFound,
+                message: format!("Marketplace source not found: {source_url_or_path}"),
+                requires_reload: false,
+                requires_restart: false,
+            };
+        }
+    };
+
+    let plugin_path =
+        match xai_grok_plugin_marketplace::MarketplaceRelativePath::parse(plugin_relative_path) {
+            Ok(path) => path,
+            Err(e) => {
+                return ActionOutcome {
+                    status: OutcomeStatus::ValidationError,
+                    message: format!("Invalid plugin path: {e}"),
+                    requires_reload: false,
+                    requires_restart: false,
+                };
+            }
+        };
+    let plugin_relative_path = plugin_path.as_str();
+
+    let marketplace_lease;
+    let marketplace_root = match &source.kind {
+        xai_grok_plugin_marketplace::SourceKind::Local { path } => {
+            marketplace_lease = None;
+            path.clone()
+        }
+        xai_grok_plugin_marketplace::SourceKind::Git { url, branch } => {
+            let cache_root = xai_grok_plugin_marketplace::git::default_cache_root();
+            match xai_grok_plugin_marketplace::git::sync_source_cache_with_mode(
+                url,
+                branch.as_deref(),
+                &cache_root,
+                xai_grok_plugin_marketplace::git::SyncMode::Force,
+            ) {
+                Ok(lease) => {
+                    let path = lease.path.clone();
+                    marketplace_lease = Some(lease);
+                    path
+                }
+                Err(e) => {
+                    return ActionOutcome {
+                        status: OutcomeStatus::InternalError,
+                        message: format!("Git sync failed: {e}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    };
+                }
+            }
+        }
+    };
+
+    let scan = xai_grok_plugin_marketplace::scan_marketplace(&marketplace_root);
+    let entry = match scan
+        .entries
+        .into_iter()
+        .find(|entry| entry.relative_path == plugin_relative_path)
+    {
+        Some(entry) => entry,
+        None => {
+            return ActionOutcome {
+                status: OutcomeStatus::NotFound,
+                message: format!("Marketplace plugin not found: {plugin_relative_path}"),
+                requires_reload: false,
+                requires_restart: false,
+            };
+        }
+    };
+
+    let provenance = xai_grok_agent::plugins::install_registry::MarketplaceProvenance {
+        source_url_or_path: source_url_or_path.to_string(),
+        source_display_name: source.name.clone(),
+        plugin_subdir: plugin_relative_path.to_string(),
+    };
+    let mut registry = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
+    let require_sha = crate::plugin::marketplace_require_sha();
+    let update_result = installer::update_from_marketplace_entry_transactional(
+        &marketplace_root,
+        &entry,
+        provenance,
+        &mut registry,
+        require_sha,
+    );
+    drop(marketplace_lease);
+
+    match update_result {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         Ok(result) => {
             run_post_install(&result.repo_key).await;
             let reload_outcome = agent
@@ -397,6 +501,7 @@ fn install_error_outcome(
     }
 }
 
+<<<<<<< HEAD
 fn action_outcome(
     status: xai_hooks_plugins_types::OutcomeStatus,
     message: String,
@@ -406,6 +511,181 @@ fn action_outcome(
         message,
         requires_reload: false,
         requires_restart: false,
+=======
+    if let Some((remote_url, remote_ref, remote_sha, remote_subdir)) = remote_entry {
+        // URL-sourced plugin: clone from remote git URL.
+        let provenance = xai_grok_agent::plugins::install_registry::MarketplaceProvenance {
+            source_url_or_path: source_url_or_path.to_string(),
+            source_display_name: source.name.clone(),
+            plugin_subdir: plugin_relative_path.to_string(),
+        };
+        let mut registry = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
+        let require_sha = crate::plugin::marketplace_require_sha();
+        match installer::install_from_remote_url(
+            &remote_url,
+            remote_ref.as_deref(),
+            remote_sha.as_deref(),
+            remote_subdir.as_deref(),
+            plugin_relative_path,
+            provenance,
+            &mut registry,
+            require_sha,
+        ) {
+            Ok(installer::MarketplaceInstallResult::Installed { repo_key }) => {
+                // Auto-enable installed plugin so it's active after reload.
+                let (_, post_warnings) = crate::config::post_install_plugin(&repo_key);
+                for w in &post_warnings {
+                    tracing::warn!("{w}");
+                }
+                let _ = agent
+                    .execute_plugins_action(sid, xai_hooks_plugins_types::PluginsAction::Reload)
+                    .await;
+                ActionOutcome {
+                    status: OutcomeStatus::Success,
+                    message: format!(
+                        "Installed from {}: {plugin_relative_path} (key: {repo_key})",
+                        source.name,
+                    ),
+                    requires_reload: false,
+                    requires_restart: false,
+                }
+            }
+            Ok(installer::MarketplaceInstallResult::AlreadyInstalled { repo_key }) => {
+                ActionOutcome {
+                    status: OutcomeStatus::ValidationError,
+                    message: format!(
+                        "Already installed (key: {repo_key}). Use Update to reinstall."
+                    ),
+                    requires_reload: false,
+                    requires_restart: false,
+                }
+            }
+            Err(e) => ActionOutcome {
+                status: OutcomeStatus::InternalError,
+                message: format!("Install failed: {e}"),
+                requires_reload: false,
+                requires_restart: false,
+            },
+        }
+    } else {
+        // Local-sourced plugin: resolve from marketplace directory.
+        let marketplace_lease;
+        let marketplace_root = match &source.kind {
+            xai_grok_plugin_marketplace::SourceKind::Local { path } => {
+                marketplace_lease = None;
+                path.clone()
+            }
+            xai_grok_plugin_marketplace::SourceKind::Git { url, branch } => {
+                let cache_root = xai_grok_plugin_marketplace::git::default_cache_root();
+                match xai_grok_plugin_marketplace::git::sync_source_cache_with_mode(
+                    url,
+                    branch.as_deref(),
+                    &cache_root,
+                    xai_grok_plugin_marketplace::git::SyncMode::UseTtl,
+                ) {
+                    Ok(lease) => {
+                        let cached_path = lease.path.clone();
+                        marketplace_lease = Some(lease);
+                        cached_path
+                    }
+                    Err(e) => {
+                        return ActionOutcome {
+                            status: OutcomeStatus::InternalError,
+                            message: format!("Git sync failed: {e}"),
+                            requires_reload: false,
+                            requires_restart: false,
+                        };
+                    }
+                }
+            }
+        };
+
+        let plugin_path =
+            match xai_grok_plugin_marketplace::MarketplaceRelativePath::parse(plugin_relative_path)
+            {
+                Ok(path) => path,
+                Err(e) => {
+                    return ActionOutcome {
+                        status: OutcomeStatus::ValidationError,
+                        message: format!("Invalid plugin path: {e}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    };
+                }
+            };
+        let plugin_dir = match plugin_path.join_under(&marketplace_root) {
+            Ok(path) => path,
+            Err(e) => {
+                return ActionOutcome {
+                    status: OutcomeStatus::ValidationError,
+                    message: format!("Invalid plugin path: {e}"),
+                    requires_reload: false,
+                    requires_restart: false,
+                };
+            }
+        };
+        if !plugin_dir.is_dir() {
+            return ActionOutcome {
+                status: OutcomeStatus::NotFound,
+                message: format!("Plugin directory not found: {}", plugin_dir.display()),
+                requires_reload: false,
+                requires_restart: false,
+            };
+        };
+        let plugin_relative_path = plugin_path.as_str();
+
+        let provenance = xai_grok_agent::plugins::install_registry::MarketplaceProvenance {
+            source_url_or_path: source_url_or_path.to_string(),
+            source_display_name: source.name.clone(),
+            plugin_subdir: plugin_relative_path.to_string(),
+        };
+
+        let mut registry = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
+        let install_result = installer::install_from_marketplace(
+            &marketplace_root,
+            plugin_relative_path,
+            provenance,
+            &mut registry,
+        );
+        drop(marketplace_lease);
+        match install_result {
+            Ok(installer::MarketplaceInstallResult::Installed { repo_key }) => {
+                // Auto-enable installed plugin so it's active after reload.
+                let (_, post_warnings) = crate::config::post_install_plugin(&repo_key);
+                for w in &post_warnings {
+                    tracing::warn!("{w}");
+                }
+                let _ = agent
+                    .execute_plugins_action(sid, xai_hooks_plugins_types::PluginsAction::Reload)
+                    .await;
+                ActionOutcome {
+                    status: OutcomeStatus::Success,
+                    message: format!(
+                        "Installed from {}: {plugin_relative_path} (key: {repo_key})",
+                        source.name,
+                    ),
+                    requires_reload: false,
+                    requires_restart: false,
+                }
+            }
+            Ok(installer::MarketplaceInstallResult::AlreadyInstalled { repo_key }) => {
+                ActionOutcome {
+                    status: OutcomeStatus::ValidationError,
+                    message: format!(
+                        "Already installed (key: {repo_key}). Use Update to reinstall."
+                    ),
+                    requires_reload: false,
+                    requires_restart: false,
+                }
+            }
+            Err(e) => ActionOutcome {
+                status: OutcomeStatus::InternalError,
+                message: format!("Install failed: {e}"),
+                requires_reload: false,
+                requires_restart: false,
+            },
+        }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 }
 

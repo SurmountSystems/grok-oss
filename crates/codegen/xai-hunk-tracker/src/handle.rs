@@ -39,9 +39,18 @@ impl HunkTrackerHandle {
         self.cmd_tx.is_closed()
     }
 
+<<<<<<< HEAD
     /// Record that an agent tool wrote to a file. This is fire-and-forget - doesn't wait for processing. `previous_content`
     /// is the file content before this write (if known). It is used as a fallback baseline when the file doesn't exist in git
     /// HEAD (e.g., in worktrees created from dirty state).
+=======
+    /// Record that an agent tool wrote to a file.
+    /// This is fire-and-forget - doesn't wait for processing.
+    ///
+    /// `previous_content` is the file content before this write (if known).
+    /// It is used as a fallback baseline when the file doesn't exist in git HEAD
+    /// (e.g., in worktrees created from dirty state).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn record_agent_write(
         &self,
         path: PathBuf,

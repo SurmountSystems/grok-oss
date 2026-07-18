@@ -60,7 +60,12 @@ pub fn install_from_marketplace(
         subdir: None,
     };
 
+<<<<<<< HEAD
     // Local copy from the synced source checkout: the pin gate governs remote fetches only (see install_from_remote_url's security doc)
+=======
+    // Local copy from the synced source checkout: the pin gate governs remote
+    // fetches only (see install_from_remote_url's security doc).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     match git_install::install_from_source(&source, registry, false) {
         Ok(result) => {
             let repo_key = result.repo_key.clone();
@@ -80,7 +85,11 @@ pub fn install_from_marketplace(
             let _ = std::fs::remove_file(&old_path);
             registry.remove(&key);
             registry.save()?;
+<<<<<<< HEAD
             // Retry: registry no longer has the key
+=======
+            // Retry — registry no longer has the key.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             match git_install::install_from_source(&source, registry, false) {
                 Ok(result) => {
                     let repo_key = result.repo_key.clone();
@@ -98,7 +107,26 @@ pub fn install_from_marketplace(
 }
 
 /// Install a plugin from a remote git URL (superpowers-style marketplace).
+<<<<<<< HEAD
 /// Clones the plugin repo and installs it via the standard git install pipeline; pins to `git_sha` if set, otherwise uses `git_ref` or HEAD.
+=======
+///
+/// Clones the plugin repo and installs it via the standard git install
+/// pipeline; pins to `git_sha` if set, otherwise uses `git_ref` or HEAD.
+///
+/// # Security
+///
+/// Marketplace plugins are **not cryptographically signed**. A remote install
+/// without `git_sha` tracks a mutable ref (branch/tag/HEAD) and can be
+/// substituted by anyone who can push that ref. Prefer publishing `sha` in
+/// `plugin-index.json` and installing with that pin.
+///
+/// `require_sha` (from [`crate::config::load_require_sha`]) fails such installs
+/// closed. It covers every path that fetches plugin code from a remote git URL
+/// (marketplace `remote_url` entries, direct installs, git updates). It does
+/// NOT cover plugins vendored inside a marketplace source itself — those come
+/// from the synced source checkout, whose branch is not yet pinnable.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn install_from_remote_url(
     url: &str,
     git_ref: Option<&str>,
@@ -119,9 +147,14 @@ pub fn install_from_remote_url(
                 })
         })
         .transpose()?;
+<<<<<<< HEAD
     let (url, git_ref, git_sha) = git_install::clone_operands(url, git_ref, git_sha)?;
     // Short-circuit before the pin gate, without fetching
     // Re-install of an already-present plugin must not refuse just because the catalog entry is unpinned
+=======
+    // No-fetch short-circuit before the pin gate: re-install of an already-present
+    // plugin must not refuse just because the catalog entry is unpinned.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     if let Some((existing_key, _)) = find_installed_marketplace_plugin(
         registry,
         &provenance.source_url_or_path,
@@ -138,7 +171,12 @@ pub fn install_from_remote_url(
         subdir,
     };
 
+<<<<<<< HEAD
     // Single pin gate lives in install_from_source; pass plugin_name so refusals name the catalog entry rather than the bare URL
+=======
+    // Single pin gate lives in install_from_source; pass plugin_name so refusals
+    // name the catalog entry rather than the bare URL.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     match git_install::install_from_source_with_label(
         &source,
         registry,
@@ -263,7 +301,15 @@ pub fn update_from_marketplace_entry_transactional(
     remove_path_if_exists(&staging_path)?;
     remove_path_if_exists(&backup_path)?;
 
+<<<<<<< HEAD
     let stage_result = if let Some((url, git_ref, git_sha)) = remote_source {
+=======
+    let stage_result = if let Some(url) = entry.remote_url.as_deref() {
+        // Catalog pins published as `ref` still need hoisting for the verified clone path.
+        let (git_ref, git_sha) =
+            git_install::hoist_pin_slots(entry.remote_ref.as_deref(), entry.remote_sha.as_deref());
+        git_install::ensure_pinned(require_sha, git_sha, &entry.name, url)?;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         clone_repo_to_path(url, git_ref, git_sha, &staging_path)
     } else {
         let source_path = plugin_relative_path
@@ -708,6 +754,7 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+<<<<<<< HEAD
     fn transactional_sha_clone_rejects_before_target_creation() {
         for bad in ["deadbeef", "--upload-pack=cmd"] {
             let root = tempfile::tempdir().unwrap();
@@ -721,6 +768,8 @@ mod tests {
     }
 
     #[test]
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     fn require_sha_rejects_unpinned_remote_install() {
         with_test_registry(|registry| {
             let err = install_from_remote_url(
@@ -758,6 +807,7 @@ mod tests {
                 true,
             )
             .unwrap_err();
+<<<<<<< HEAD
             match err {
                 InstallError::InstallFailed { detail } => assert!(
                     detail.contains("40 or 64 hexadecimal"),
@@ -802,6 +852,12 @@ mod tests {
                 assert_eq!(registry.list().len(), registry_len);
                 assert!(installed_path.exists());
             }
+=======
+            assert!(
+                matches!(err, InstallError::UnpinnedRemoteRefused { .. }),
+                "a non-hex 'pin' must be refused up front, got: {err}"
+            );
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         });
     }
 
@@ -844,7 +900,11 @@ mod tests {
                 }
             }
 
+<<<<<<< HEAD
             // Re-installing an already-present plugin fetches nothing, so require_sha must not refuse the unpinned entry
+=======
+            // No-fetch re-install under require_sha must not refuse unpinned catalog entries.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             match install_from_remote_url(
                 &url,
                 Some("main"),

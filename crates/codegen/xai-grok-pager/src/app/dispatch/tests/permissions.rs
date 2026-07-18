@@ -519,6 +519,7 @@ fn permission_select_reject_does_not_steer_sticky_cursor() {
         "reject selection must not steer the sticky cursor"
     );
 }
+<<<<<<< HEAD
 
 /// Push a bash "Always allow" prompt (id `allow-always-command`) whose arrow-scope covers `gh api`, returning the response receiver.
 fn push_bash_allow_always(
@@ -735,3 +736,5 @@ fn retyped_same_text_is_still_glob() {
         "dirty editor is a glob even when text matches pre-fill"
     );
 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))

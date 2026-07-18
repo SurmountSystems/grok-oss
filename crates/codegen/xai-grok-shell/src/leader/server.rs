@@ -1152,6 +1152,7 @@ async fn handle_workspace_start(
         cwd_path.clone(),
         url,
         auth,
+<<<<<<< HEAD
         xai_grok_workspace::LocalWorkspaceConnectOptions {
             metadata: Some(metadata),
             server_id: Some(server_id),
@@ -1162,6 +1163,18 @@ async fn handle_workspace_start(
             project_lsp_trusted,
             ..Default::default()
         },
+=======
+        Some(metadata),
+        Some(server_id),
+        alpha_test_key,
+        allow_insecure_ws,
+        status_config,
+        upload_queue_enabled,
+        project_lsp_trusted,
+        None,
+        false,
+        false,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     )
     .await
     .map_err(|e| workspace_err(format!("failed to connect workspace to hub: {e}")))?;

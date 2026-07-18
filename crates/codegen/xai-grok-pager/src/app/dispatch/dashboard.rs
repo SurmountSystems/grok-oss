@@ -8,7 +8,11 @@ use super::dashboard_telemetry::{
 };
 use super::modes::{dispatch_cycle_mode_and_sync, set_yolo_mode, yolo_enable_blocked};
 use super::permissions::resolve_permission_queue_transition;
+<<<<<<< HEAD
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
+=======
+use super::queue::{maybe_drain_queue, note_peek_page_flip_after_drain};
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 use super::router::dispatch;
 use super::session::lifecycle::{
     dispatch_new_session_inner_with_id, dispatch_new_worktree_session,
@@ -720,6 +724,12 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
     }
     if let Some(d) = app.dashboard.as_mut() {
         d.restore_peek_viewport(&mut app.agents);
+<<<<<<< HEAD
+=======
+        // Clear the dispatch input even though we don't enqueue
+        // anything — a stray paste while the button is focused
+        // (no typed Enter) shouldn't survive the view switch.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         d.dispatch.set_text("");
         d.error_toast = None;
         d.filter = crate::views::dashboard::Filter::None;
@@ -1483,7 +1493,12 @@ pub(super) fn dispatch_dashboard_peek_reply(
     if text.trim().is_empty() && images.is_empty() {
         return vec![];
     }
+<<<<<<< HEAD
     let drain = {
+=======
+
+    let effects = {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             if let Some(d) = app.dashboard.as_mut() {
                 d.set_peek(None);
@@ -1491,6 +1506,12 @@ pub(super) fn dispatch_dashboard_peek_reply(
             }
             return vec![];
         };
+<<<<<<< HEAD
+=======
+
+        // Enqueue + drain: idle → sends now, running → stays queued.
+        // Untrimmed so `chip_elements` byte ranges stay aligned with the stored text.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         agent.session.enqueue_prompt(text);
         if let Some(entry) = agent.session.pending_prompts.back_mut() {
             entry.chip_elements = chip_elements;
@@ -1498,10 +1519,20 @@ pub(super) fn dispatch_dashboard_peek_reply(
                 entry.images = images;
             }
         }
+<<<<<<< HEAD
         maybe_drain_queue(agent, &mut app.pending_image_notices)
     };
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     let effects = drain.effects;
+=======
+        maybe_drain_queue(agent)
+    };
+    // Note page-flip before restore on attach.
+    note_peek_page_flip_after_drain(app, agent_id);
+
+    // Clear the reply draft now that it's been accepted, and drop any
+    // stale error toast.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     if let Some(d) = app.dashboard.as_mut() {
         d.clear_peek_reply();
         d.error_toast = None;

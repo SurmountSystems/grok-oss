@@ -38,6 +38,7 @@ pub mod keys {
     pub const F2: &[u8] = b"\x1bOQ";
 }
 
+<<<<<<< HEAD
 /// One explicit environment mutation applied after the TestSandbox baseline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EnvOp<'a> {
@@ -63,6 +64,8 @@ impl<'a> EnvOp<'a> {
     }
 }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug)]
 pub(crate) enum PtyRead {
     Chunk(Vec<u8>),
@@ -70,7 +73,12 @@ pub(crate) enum PtyRead {
     Closed,
 }
 
+<<<<<<< HEAD
 /// Low-level PTY controller: spawns a child process inside a PTY and provides methods to inject input, resize, and drain output.
+=======
+/// Low-level PTY controller: spawns a child process inside a PTY and provides
+/// methods to inject input, resize, and drain output.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub struct PtyController {
     child: Box<dyn portable_pty::Child + Send>,
     process_tree: Option<TestProcessTree>,
@@ -271,6 +279,7 @@ impl PtyController {
             .map(|state| state == PtyExitPoll::Running)
     }
 
+<<<<<<< HEAD
     /// Poll once without collapsing pending status, liveness, or query errors.
     /// Repeated calls return cached exit status without querying a reaped child.
     pub fn poll_exit_code(&mut self) -> Result<PtyExitPoll<u32>> {
@@ -284,6 +293,20 @@ impl PtyController {
     /// Returns [`PtyExitPoll::PendingStatus`] immediately because the child is already non-running.
     /// [`PtyExitPoll::Running`] is returned only when the deadline expires while the child remains live.
     pub fn wait_exit_code(&mut self, timeout: Duration) -> Result<PtyExitPoll<u32>> {
+=======
+    /// Poll child status once, preserving process-query errors.
+    pub(crate) fn try_exit_code(&mut self) -> Result<Option<u32>> {
+        self.child
+            .try_wait()
+            .map(|status| status.map(|status| status.exit_code()))
+            .context("failed to query PTY child status")
+    }
+
+    /// Wait up to `timeout` for the child to exit, returning its exit code
+    /// (`None` if it's still running at the deadline). Call once and cache the
+    /// result — `try_wait` reaps the child, so the status isn't re-readable.
+    pub fn wait_exit_code(&mut self, timeout: Duration) -> Option<u32> {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if let Some(state) =
@@ -471,6 +494,7 @@ impl Drop for PtyController {
     }
 }
 
+<<<<<<< HEAD
 #[cfg(unix)]
 #[derive(Debug, Eq, PartialEq)]
 enum ExitObservation {
@@ -495,6 +519,102 @@ fn observe_exit_before_reap(
             Ok(ExitObservation::StatusAlreadyConsumed)
         }
         Err(error) => Err(error),
+=======
+const CLIPBOARD_SINK_ENV_VARS: &[&str] = &["GROK_OSC52_SINK", "LC_GROK_OSC52_SINK"];
+
+/// Host terminal identity markers stripped from the child environment.
+///
+/// The pager's terminal detection
+/// (`xai-grok-pager-render/src/terminal/mod.rs`:
+/// `detect_terminal_brand_from_env` / `detect_byobu_from_env` /
+/// `detect_multiplexer_from_env` / `detect_tmux_meta_from_env`, plus
+/// `embedded_editor.rs`'s `embedded_editor_from_env`) reads all of these,
+/// so any one leaking from the harness's own host terminal reclassifies the
+/// child: a dev running tests inside tmux leaks `TMUX` (every cell becomes
+/// the remuxed profile), inside Cursor leaks `CURSOR_TRACE_ID` (checked
+/// *before* `TERM_PROGRAM`, so it overrides even a test-injected brand),
+/// inside nvim's `:terminal` leaks `NVIM` (clipboard OSC 52 wrapping).
+/// Keep this list in sync with the detection source above.
+const HOST_TERMINAL_ENV_VARS: &[&str] = &[
+    // Brand chain (detect_terminal_brand_from_env), in detection order.
+    "CURSOR_TRACE_ID",
+    "VSCODE_GIT_ASKPASS_MAIN",
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TERMINAL_EMULATOR",
+    "WEZTERM_VERSION",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "TERM_SESSION_ID",
+    "KITTY_WINDOW_ID",
+    "ALACRITTY_SOCKET",
+    "TERMINATOR_UUID",
+    "VTE_VERSION",
+    "WT_SESSION",
+    // Multiplexer / Byobu markers (detect_multiplexer_from_env,
+    // detect_byobu_from_env, detect_tmux_meta_from_env).
+    "TMUX",
+    "TMUX_PANE",
+    "ZELLIJ",
+    "ZELLIJ_SESSION_NAME",
+    "STY",
+    "BYOBU_BACKEND",
+    "BYOBU_CONFIG_DIR",
+    "BYOBU_DISTRO",
+    "CMUX_SOCKET_PATH",
+    "CMUX_PANEL_ID",
+    "CMUX_BUNDLE_ID",
+    // Embedded editor markers (embedded_editor_from_env).
+    "NVIM",
+    "NVIM_LISTEN_ADDRESS",
+    "VIM_TERMINAL",
+    "INSIDE_EMACS",
+];
+
+/// Prepare the child environment: fixed `TERM`, color and host-terminal
+/// hygiene strips, then the caller's `env` pairs.
+///
+/// Strips run BEFORE the caller env is applied, preserving the contract
+/// that tests may re-inject any marker (e.g. `TERM_PROGRAM=vscode`, or a
+/// fake `NVIM` socket) to simulate that host — see
+/// `tests/pty_e2e/doubled_lines_out_of_band_repro.rs` in the pager crate.
+fn apply_child_env(cmd: &mut CommandBuilder, env: &[(&str, &str)]) {
+    // Set TERM so the pager renders with full color support.
+    cmd.env("TERM", "xterm-256color");
+    // Strip inherited color opt-outs/overrides for the same reason: a
+    // leaked NO_COLOR (common in agent/CI shells) renders the pager
+    // colorless, making style-sensitive assertions (e.g. the selection
+    // highlight color swap) silently untestable on some hosts. Tests may
+    // re-set these via the `env` list (applied after this).
+    for color_var in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
+        cmd.env_remove(color_var);
+    }
+    // Strip SSH vars inherited from the parent: the harness PTY is a
+    // local terminal, but `SSH_CONNECTION`/`SSH_TTY` leaking through
+    // makes the pager's terminal detector report SSH and disable the
+    // drag-drop image classifier (see
+    // `try_handle_dropped_paths_paste` in `agent_view.rs`).
+    for ssh_var in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_AUTH_SOCK"] {
+        cmd.env_remove(ssh_var);
+    }
+    // A harness launched under `grok wrap` must not silently confirm clipboard
+    // delivery for no-sink scenarios. Explicit sink tests re-inject a marker
+    // through `env` after this hygiene pass.
+    for sink_var in CLIPBOARD_SINK_ENV_VARS {
+        cmd.env_remove(sink_var);
+    }
+    // Neutralize parent-terminal identity bleed: agent hosts often export
+    // TERM_PROGRAM=ghostty/iTerm/etc. (and mux/editor markers) which make
+    // the child pager adopt that host's key/modifier/clipboard quirks even
+    // though we only set TERM above.
+    for term_var in HOST_TERMINAL_ENV_VARS {
+        cmd.env_remove(term_var);
+    }
+    for &(key, val) in env {
+        cmd.env(key, val);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 }
 
@@ -591,7 +711,53 @@ mod tests {
     use super::*;
 
     #[test]
+<<<<<<< HEAD
     fn exit_poll_distinguishes_pending_running_and_errors() {
+=======
+    fn apply_child_env_strips_all_host_terminal_markers() {
+        let mut cmd = CommandBuilder::new("true");
+        for var in HOST_TERMINAL_ENV_VARS {
+            cmd.env(var, "polluted");
+        }
+        for ssh_var in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_AUTH_SOCK"] {
+            cmd.env(ssh_var, "polluted");
+        }
+        for color_var in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
+            cmd.env(color_var, "polluted");
+        }
+        for sink_var in CLIPBOARD_SINK_ENV_VARS {
+            cmd.env(sink_var, "polluted");
+        }
+        // Unrelated vars must survive the hygiene pass untouched.
+        cmd.env("GROK_SCROLL_LOG", "/tmp/scroll.jsonl");
+
+        apply_child_env(&mut cmd, &[]);
+
+        for var in HOST_TERMINAL_ENV_VARS {
+            assert!(
+                cmd.get_env(var).is_none(),
+                "host terminal marker {var} leaked into the child env"
+            );
+        }
+        for ssh_var in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_AUTH_SOCK"] {
+            assert!(
+                cmd.get_env(ssh_var).is_none(),
+                "SSH marker {ssh_var} leaked into the child env"
+            );
+        }
+        for color_var in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
+            assert!(
+                cmd.get_env(color_var).is_none(),
+                "color override {color_var} leaked into the child env"
+            );
+        }
+        for sink_var in CLIPBOARD_SINK_ENV_VARS {
+            assert!(
+                cmd.get_env(sink_var).is_none(),
+                "clipboard sink marker {sink_var} leaked into the child env"
+            );
+        }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(
             classify_exit_poll::<u32, &'static str>(Ok(None), true),
             Ok(PtyExitPoll::PendingStatus)
@@ -861,8 +1027,15 @@ mod tests {
                 pixel_height: 0,
             },
             &[
+<<<<<<< HEAD
                 "-c",
                 "trap 'echo graceful > \"$MARKER\"; exit 0' TERM; : > \"$READY\"; sleep 600",
+=======
+                ("TERM_PROGRAM", "vscode"),
+                ("NVIM", "/tmp/fake-nvim.sock"),
+                ("TERM", "xterm-kitty"),
+                ("GROK_OSC52_SINK", "1"),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             ],
             &sandbox,
             &[
@@ -894,6 +1067,11 @@ mod tests {
         assert!(
             marker.exists(),
             "TERM trap never ran: Drop's SIGTERM grace did not let the child clean up"
+        );
+        assert_eq!(
+            cmd.get_env("GROK_OSC52_SINK").and_then(|v| v.to_str()),
+            Some("1"),
+            "explicit sink scenarios must be able to re-inject the marker"
         );
     }
 

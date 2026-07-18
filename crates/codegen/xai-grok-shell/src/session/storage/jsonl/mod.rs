@@ -9,8 +9,14 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, Write};
+<<<<<<< HEAD
 use std::path::{Path, PathBuf};
 use xai_chat_state::StrictAppendAck;
+=======
+#[cfg(target_os = "macos")]
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 use xai_grok_workspace::session::file_state::RewindPoint;
 mod copy;
 #[derive(Clone)]
@@ -18,12 +24,21 @@ enum SessionDirMode {
     FromRoot(PathBuf),
     Explicit(PathBuf),
 }
+<<<<<<< HEAD
 #[derive(Clone, Copy)]
 pub(crate) enum AppendDurability {
     Buffered,
     Durable,
 }
 /// JSONL storage under `{root}/sessions/{url_encoded_cwd}/{session_id}/`.
+=======
+pub(super) enum AppendDurability {
+    Buffered,
+    Durable,
+}
+/// JSONL-based storage adapter (legacy format)
+/// Stores sessions in {root}/sessions/{url_encoded_cwd}/{session_id}/
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Clone)]
 pub struct JsonlStorageAdapter {
     dir_mode: SessionDirMode,
@@ -191,6 +206,7 @@ impl JsonlStorageAdapter {
             SessionDirMode::Explicit(dir) => dir.clone(),
         }
     }
+<<<<<<< HEAD
     /// Create `info`'s session dir owner-only and durable.
     /// `FromRoot` also makes the `<encoded-cwd>` dir and the sessions root owner-only; `Explicit` parents are caller-owned.
     fn create_session_dir_owner_only(&self, info: &Info) -> io::Result<PathBuf> {
@@ -210,6 +226,10 @@ impl JsonlStorageAdapter {
     }
     pub(super) fn updates_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::UPDATES_FILE)
+=======
+    pub(super) fn updates_file(&self, info: &Info) -> PathBuf {
+        self.session_dir(info).join("updates.jsonl")
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     fn chat_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::CHAT_HISTORY_FILE)
@@ -279,8 +299,46 @@ impl JsonlStorageAdapter {
             .map_err(io::Error::other)
     }
     fn list_sessions_sync(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
+<<<<<<< HEAD
         let session_dirs = self.scan_session_dirs(cwd)?;
         let mut summaries = Vec::new();
+=======
+        let session_dirs = self.scan_session_dirs(cwd);
+        let mut summaries = Vec::new();
+        for session_dir in session_dirs {
+            let summary_path = session_dir.join("summary.json");
+            match std::fs::read(&summary_path) {
+                Ok(bytes) => {
+                    if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
+                        && !summary.is_hidden()
+                    {
+                        summaries.push(summary);
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        summaries.sort_by_cached_key(|s| {
+            (
+                std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
+                s.info.id.0.to_string(),
+            )
+        });
+        Ok(summaries)
+    }
+    /// List the N most recently modified session summaries across all
+    /// workspaces.
+    ///
+    /// Instead of reading every `summary.json` (expensive at scale — ~12K
+    /// files), this stats each file to get its mtime, sorts by mtime, and
+    /// only reads the top `limit` files. On a machine with ~12K sessions
+    /// this reduces cold-boot `workspace_list` from ~3s to ~200ms.
+    /// Final order among candidates uses `last_active_at` else `updated_at`.
+    pub async fn list_sessions_recent(&self, limit: usize) -> io::Result<Vec<Summary>> {
+        let session_dirs = self.scan_session_dirs(None);
+        let mut candidates: Vec<(PathBuf, std::time::SystemTime)> =
+            Vec::with_capacity(session_dirs.len());
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         for session_dir in session_dirs {
             let summary_path = session_dir.join(super::SUMMARY_FILE);
             match std::fs::read(&summary_path) {
@@ -384,7 +442,30 @@ impl JsonlStorageAdapter {
         line.push(b'\n');
         Self::append_jsonl_line_blocking(path, line, durability).await
     }
+<<<<<<< HEAD
     async fn append_jsonl_line_blocking(
+=======
+    /// Append one newline-terminated JSONL record to `path`, healing a torn
+    /// tail first.
+    ///
+    /// Appends are not crash-atomic: a process kill / `ENOSPC` mid-`write_all`
+    /// (e.g. the auto-update leader relaunch aborting a persistence actor
+    /// mid-append) leaves the file ending in a *partial* record with no
+    /// trailing newline. Because append failures are logged-and-continued by
+    /// the persistence actor, a plain `O_APPEND` write of the next record
+    /// would concatenate it onto that partial line, producing a merged line
+    /// that fails to parse (``expected `,` or `}` at line 1 column N``) and —
+    /// before the readers became corruption-tolerant — bricked session resume.
+    ///
+    /// Before writing, check the last byte: if it isn't `\n`, prepend one so
+    /// the torn record is terminated as its own (single) corrupt line. This
+    /// bounds the damage of any torn write to exactly one record, which the
+    /// lenient readers (e.g. [`Self::read_chat_history_sync`]) then skip.
+    async fn append_jsonl_line(&self, path: PathBuf, line: Vec<u8>) -> io::Result<()> {
+        Self::append_jsonl_line_locked(path, line, AppendDurability::Buffered).await
+    }
+    async fn append_jsonl_line_locked(
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         path: PathBuf,
         line: Vec<u8>,
         durability: AppendDurability,
@@ -393,6 +474,7 @@ impl JsonlStorageAdapter {
             .await
             .map_err(io::Error::other)?
     }
+<<<<<<< HEAD
     async fn sync_file_path_durable(path: PathBuf) -> io::Result<()> {
         tokio::task::spawn_blocking(move || {
             let file = OpenOptions::new().write(true).open(&path)?;
@@ -404,30 +486,58 @@ impl JsonlStorageAdapter {
     /// Append one JSONL record, healing a torn tail before writing.
     /// Appends are not crash-atomic: a process kill / `ENOSPC` mid-`write_all` leaves the file ending in a *partial* record with no trailing newline.
     /// Before writing, check the last byte: if it isn't `\n`, prepend one so the torn record is terminated as its own (single) corrupt line.
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     fn append_jsonl_line_sync(
         path: &Path,
         line: Vec<u8>,
         durability: AppendDurability,
     ) -> io::Result<()> {
+<<<<<<< HEAD
         Self::append_jsonl_line_sync_with(path, line, durability, Self::sync_file_durable, || {
             Self::sync_parent_directory(path)
         })
         .map_err(AppendLineError::into_io_error)
+=======
+        Self::append_jsonl_line_sync_with(
+            path,
+            line,
+            durability,
+            Self::sync_file_durable,
+            Self::sync_parent_directory,
+        )
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     fn append_jsonl_line_sync_with(
         path: &Path,
         mut line: Vec<u8>,
         durability: AppendDurability,
+<<<<<<< HEAD
         mut sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
         mut sync_parent: impl FnMut() -> io::Result<()>,
     ) -> Result<(), AppendLineError> {
         debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
         let lock = Self::lock_append(path).map_err(AppendLineError::NotCommitted)?;
+=======
+        sync_file: fn(&std::fs::File) -> io::Result<()>,
+        sync_parent: fn(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
+        let lock_path = path.with_extension("jsonl.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        lock.lock_exclusive()?;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let result = (|| {
             let mut file = OpenOptions::new()
                 .read(true)
                 .create(true)
                 .append(true)
+<<<<<<< HEAD
                 .open(path)
                 .map_err(AppendLineError::NotCommitted)?;
             let len = file
@@ -444,10 +554,22 @@ impl JsonlStorageAdapter {
                     tracing::warn!(
                         path = %path.display(),
                         "jsonl file has a torn trailing line (previous append crashed mid-write?); terminating it before appending"
+=======
+                .open(path)?;
+            let len = file.metadata()?.len();
+            if len > 0 {
+                file.seek(io::SeekFrom::Start(len - 1))?;
+                let mut last = [0u8; 1];
+                file.read_exact(&mut last)?;
+                if last[0] != b'\n' {
+                    tracing::warn!(
+                        path = % path.display(), "terminating torn jsonl tail"
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     );
                     line.insert(0, b'\n');
                 }
             }
+<<<<<<< HEAD
             file.write_all(&line)
                 .map_err(AppendLineError::NotCommitted)?;
             file.flush().map_err(AppendLineError::Committed)?;
@@ -455,6 +577,14 @@ impl JsonlStorageAdapter {
                 sync_file(&file).map_err(AppendLineError::Committed)?;
                 drop(file);
                 sync_parent().map_err(AppendLineError::Committed)?;
+=======
+            file.write_all(&line)?;
+            file.flush()?;
+            if matches!(durability, AppendDurability::Durable) {
+                sync_file(&file)?;
+                drop(file);
+                sync_parent(path)?;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             } else {
                 drop(file);
             }
@@ -462,6 +592,7 @@ impl JsonlStorageAdapter {
         })();
         let _ = lock.unlock();
         result
+<<<<<<< HEAD
     }
     async fn append_cwd_switch_with_bookkeeping(
         &self,
@@ -609,6 +740,58 @@ impl JsonlStorageAdapter {
     }
     /// Write a full JSONL file (rewriting all items), crash-atomically: serialize to a temp file then rename over the target.
     /// A crash / `ENOSPC` mid-write therefore can't truncate the existing file (e.g. lose `rewind_points.jsonl` history).
+=======
+    }
+    #[cfg(target_os = "macos")]
+    fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
+        file.sync_all()?;
+        Self::fullfsync_raw(file.as_raw_fd())
+    }
+    #[cfg(target_os = "macos")]
+    fn fullfsync_raw(fd: std::os::fd::RawFd) -> io::Result<()> {
+        let result = unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) };
+        if result == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
+        file.sync_all()
+    }
+    #[cfg(windows)]
+    fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
+        file.sync_all()
+    }
+    #[cfg(not(any(unix, windows)))]
+    fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable file sync is unsupported on this platform",
+        ))
+    }
+    #[cfg(unix)]
+    fn sync_parent_directory(path: &Path) -> io::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "update has no parent"))?;
+        std::fs::File::open(parent)?.sync_all()
+    }
+    #[cfg(windows)]
+    fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable directory sync is unsupported on this platform",
+        ))
+    }
+    /// Write a full JSONL file (rewriting all items), crash-atomically: serialize
+    /// to a temp file then rename over the target, so a crash / `ENOSPC` mid-write
+    /// can't truncate the existing file (e.g. lose `rewind_points.jsonl` history).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     async fn write_jsonl<T: serde::Serialize>(&self, path: PathBuf, items: &[T]) -> io::Result<()> {
         super::write_jsonl_atomic_async(&path, items).await
     }
@@ -636,6 +819,7 @@ impl JsonlStorageAdapter {
         path: PathBuf,
         update: &super::SessionUpdate,
         durability: AppendDurability,
+<<<<<<< HEAD
     ) -> Result<(), super::AppendUpdateError> {
         #[cfg(test)]
         if let Some(append_probe) = &self.update_append_probe {
@@ -668,6 +852,31 @@ impl JsonlStorageAdapter {
         })
         .await
         .map_err(|error| super::AppendUpdateError::NotCommitted(io::Error::other(error)))?
+=======
+    ) -> io::Result<()> {
+        let envelope = SessionUpdateEnvelope::from_update(update)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut line = serde_json::to_vec(&envelope)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        line.push(b'\n');
+        Self::append_jsonl_line_locked(path, line, durability).await
+    }
+    pub(crate) async fn append_update_with_bookkeeping<F>(
+        &self,
+        info: &Info,
+        update: &super::SessionUpdate,
+        bookkeeping: F,
+    ) -> Result<(), super::AppendUpdateError>
+    where
+        F: std::future::Future<Output = io::Result<()>>,
+    {
+        self.append_update_to_file(self.updates_file(info), update, AppendDurability::Buffered)
+            .await
+            .map_err(super::AppendUpdateError::NotCommitted)?;
+        bookkeeping
+            .await
+            .map_err(super::AppendUpdateError::Committed)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     async fn append_update_with_bookkeeping(
         &self,
@@ -1256,12 +1465,47 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
     }
+<<<<<<< HEAD
     async fn regenerate_generated_title(
         &self,
         info: &Info,
         session_title: String,
     ) -> io::Result<bool> {
         self.apply_summary_patch_reporting(
+=======
+    async fn append_update(&self, info: &Info, update: &super::SessionUpdate) -> io::Result<()> {
+        self.append_update_commit_aware(info, update)
+            .await
+            .map_err(super::AppendUpdateError::into_io_error)
+    }
+    async fn append_update_commit_aware(
+        &self,
+        info: &Info,
+        update: &super::SessionUpdate,
+    ) -> Result<(), super::AppendUpdateError> {
+        self.append_update_with_bookkeeping(
+            info,
+            update,
+            self.apply_summary_patch(
+                info,
+                super::summary_write::SummaryPatch {
+                    record_activity: true,
+                    messages: Some(super::summary_write::CounterOp::Increment(1)),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+    }
+    async fn append_update_durable(
+        &self,
+        info: &Info,
+        update: &super::SessionUpdate,
+    ) -> io::Result<()> {
+        self.append_update_to_file(self.updates_file(info), update, AppendDurability::Durable)
+            .await?;
+        self.apply_summary_patch(
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             info,
             super::summary_write::SummaryPatch {
                 generated_title_regenerate: Some(session_title),

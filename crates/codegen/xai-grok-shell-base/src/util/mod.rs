@@ -90,6 +90,7 @@ pub fn matches_trusted_base_url(candidate: &str, trusted_base: &str) -> bool {
         && candidate.port_or_known_default() == trusted.port_or_known_default()
         && path_matches
 }
+<<<<<<< HEAD
 /// Production cli-chat-proxy base only (compiled-in constant). Unlike [`is_cli_chat_proxy_url`], this rejects loopback and staging/dev hosts. Used for security-sensitive remote kill-switches.
 /// Those must not become env toggles via `GROK_CLI_CHAT_PROXY_BASE_URL` (or similar) pointing at an attacker-controlled origin.
 pub fn is_prod_cli_chat_proxy_url(url: &str) -> bool {
@@ -100,17 +101,30 @@ pub fn is_prod_cli_chat_proxy_url(url: &str) -> bool {
 /// It is suitable for xAI-only request extensions.
 pub fn is_trusted_cli_chat_proxy_url(url: &str) -> bool {
     if is_prod_cli_chat_proxy_url(url) {
+=======
+/// When set (any value), treat loopback `/v1` bases as cli-chat-proxy so unit
+/// tests can bind an axum mock without talking to production. Never set in
+/// production; `just test` / `cargo-ci` sets it for hermetic e2e.
+pub const TRUST_LOOPBACK_CLI_CHAT_PROXY_ENV: &str = "GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY";
+
+/// True for cli-chat-proxy URLs (production, plus local-dev hosts when the
+/// optional non-production feature is enabled). When that feature is on,
+/// runtime env overrides can extend this trust set. Loopback is always
+/// accepted (unit tests and local mock servers on arbitrary ports).
+pub fn is_cli_chat_proxy_url(url: &str) -> bool {
+    if matches_trusted_base_url(url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL) {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         return true;
     }
-    if std::env::var_os(TRUST_LOOPBACK_CLI_CHAT_PROXY_ENV).is_some()
-        && let Ok(u) = reqwest::Url::parse(url)
-        && matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
-        && (u.path() == "/v1" || u.path().starts_with("/v1/"))
+    if let Ok(u) = reqwest::Url::parse(url)
+        && let Some(h) = u.host_str()
+        && (h == "localhost" || h == "127.0.0.1" || h == "::1")
     {
         return true;
     }
     false
 }
+<<<<<<< HEAD
 /// True for cli-chat-proxy URLs (production, plus local-dev hosts when the optional non-production feature is enabled).
 /// When that feature is on, runtime env overrides can extend this trust set.
 /// Loopback is always accepted (unit tests and local mock servers on arbitrary ports).
@@ -160,13 +174,46 @@ pub fn is_trusted_xai_https_url(url: &str) -> bool {
 fn is_xai_api_url_impl(url: &str, require_https: bool) -> bool {
     if require_https {
         return is_xai_api_bearer_url(url);
+=======
+/// True for xAI-operated endpoints (`*.x.ai`, cli-chat-proxy, and optional
+/// non-production xAI hosts when that feature is enabled).
+/// `disable_api_key_auth` refuses keys only for these; other hosts are BYOK and
+/// exempt. Safe against invalid URLs and suffix attacks (`evil-x.ai.example`).
+///
+/// Scheme-agnostic so credential *refusal* fails closed. To decide where to
+/// *attach* a credential, use [`is_xai_api_bearer_url`].
+pub fn is_xai_api_url(url: &str) -> bool {
+    is_xai_api_url_impl(url, false)
+}
+/// Like [`is_xai_api_url`], but requires `https` on every arm, so a
+/// session bearer is never attached to a cleartext endpoint, including loopback
+/// (a co-located process could otherwise read a token sent to `http://localhost`).
+pub fn is_xai_api_bearer_url(url: &str) -> bool {
+    is_xai_api_url_impl(url, true)
+}
+fn is_xai_api_url_impl(url: &str, require_https: bool) -> bool {
+    if require_https {
+        let Ok(parsed) = reqwest::Url::parse(url) else {
+            return false;
+        };
+        if parsed.scheme() != "https" {
+            return false;
+        }
+        if is_loopback_host(&parsed) {
+            return false;
+        }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
     if is_cli_chat_proxy_url(url) {
         return true;
     }
     reqwest::Url::parse(url)
         .ok()
+<<<<<<< HEAD
         .and_then(|url| url.host_str().map(str::to_owned))
+=======
+        .and_then(|u| u.host_str().map(str::to_owned))
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
 }
 fn is_loopback_host(parsed: &reqwest::Url) -> bool {

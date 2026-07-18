@@ -40,11 +40,28 @@ to guess if that directory is unavailable or unsafe. Grok preserves the file's
 line endings and mode, makes a backup when changing an existing file, and
 refuses conflicting or ambiguous direct assignments.
 
+<<<<<<< HEAD
 Grok deliberately does **not** run `tmux source-file` or change the live tmux
 server. Reload with the exact command shown after apply, or detach and reattach,
 then run `/doctor` again. Until reload, the live finding is expected to remain.
 The conservative config scan checks direct global assignments only; review
 sourced files, conditionals, plugins, and generated tmux setup yourself.
+=======
+```bash
+tmux source-file ~/.tmux.conf
+# or detach and reattach
+```
+
+### Live diagnostics inside Grok
+
+Run this slash command:
+
+```
+/terminal-setup
+```
+
+The command reports the terminal, multiplexer, **color level**, **available themes**, and a compact **Clipboard** status table, then lists any issues and fixes. When color is below truecolor, it explains how to unlock the truecolor-only themes (TokyoNight, RosePineMoon, OscuraMidnight) — or notes that Terminal.app is inherently 256-color. The aliases `/terminal-check` and `/terminal-info` run the same command.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 ---
 
@@ -97,16 +114,24 @@ step alone changes anything.
 
 Grok writes through up to three routes, shown in `/doctor` under **Clipboard**:
 
+<<<<<<< HEAD
 - **native** — the local operating-system clipboard.
 - **tmux** — the tmux paste buffer when Grok runs inside tmux.
 - **OSC 52** — an escape sequence that can cross tmux, containers, or SSH.
+=======
+Grok writes to the clipboard through up to three routes, shown in the **Clipboard** section of `/terminal-setup`:
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 #### Wayland
 
+<<<<<<< HEAD
 Modern Wayland compositors can update the clipboard without keeping the
 terminal focused. Older compositors may require Grok to remain focused until
 the copy message appears. Grok shows a startup warning when this applies; run
 `/doctor` for the detected status and steps.
+=======
+**Linux Wayland**: on compositors that support the data-control protocol (GNOME 48+, KDE, Sway, Hyprland — the **Clipboard** section shows `data-control on`; the line is omitted off Wayland) copies work even if the terminal loses focus mid-copy. On older compositors (GNOME 46/47), keep the terminal focused until the copy toast confirms, and install the `wl-clipboard` package (provides `wl-copy`) for the most reliable route — Grok shows a startup warning when this applies. If data-control misbehaves on your compositor, set `GROK_CLIPBOARD_NO_DATA_CONTROL=1` to stop Grok from speaking that protocol entirely — copies then go through the CLI tools (`wl-copy`/`xclip`).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 `GROK_CLIPBOARD_NO_DATA_CONTROL=1` is an advanced fallback that disables the
 data-control route. Copies then use command-line clipboard tools.
@@ -119,14 +144,29 @@ encoded payload as text. Set `GROK_CLIPBOARD_NO_OSC52=1` before starting Grok to
 disable that route. `/doctor` then shows `osc 52 off`; native and tmux routes are
 unchanged.
 
+<<<<<<< HEAD
 #### Linux X11 selections
+=======
+**Unknown terminals over SSH**: when Grok cannot identify the outer terminal, it sends the copy but reports delivery as unverified. If paste fails, reconnect with `grok wrap <ssh command>` or use `/minimal`.
+
+**Known limitation — Apple Terminal + SSH**:
+Apple Terminal ignores OSC 52, so copying from a Grok session over SSH can't reach your local clipboard. Use the workaround below.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 X11 **PRIMARY** and **CLIPBOARD** are separate:
 
+<<<<<<< HEAD
 - An unmodified middle click reads PRIMARY only when `DISPLAY` is set. Under
   XWayland, `xclip` or `xsel` must be on `PATH`.
 - `Ctrl+V` reads CLIPBOARD and never falls back to PRIMARY.
 - `Shift+Insert` remains the terminal's selected-text paste.
+=======
+`grok wrap` also protects your local terminal from dirty disconnects: if the wrapped command dies while a remote TUI has mouse reporting, the alternate screen, or similar modes enabled (for example the SSH connection drops mid-session), wrap resets those modes on exit instead of leaving the terminal spraying mouse escape codes.
+
+When Grok starts inside an SSH session that isn't already running under `grok wrap`, a one-time contextual tip above the prompt recommends `grok wrap ssh <host>` (it stops appearing on its own once you launch through wrap). To turn it off, set `ssh_wrap = false` under `[ui.contextual_hints]` in `~/.grok/config.toml`, or use `/settings` → **Show contextual hints** → **SSH wrap**.
+
+> **Warning**: `grok wrap` is **experimental** and may misbehave in some setups.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 #### SSH and selected text
 

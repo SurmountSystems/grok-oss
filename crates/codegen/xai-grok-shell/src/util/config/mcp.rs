@@ -7,6 +7,7 @@ use toml::map::Map as TomlMap;
 use xai_grok_agent::prompt::skills::SkillsConfig;
 use xai_grok_tools::types::compat::{CompatConfig, CompatConfigToml};
 
+<<<<<<< HEAD
 use xai_grok_config::ClaudeImport;
 pub(crate) use xai_grok_config::mcp_servers::{
     MCP_SCOPE_PROJECT, McpEnabledFilter, get_mcp_server_config, load_mcp_json_file,
@@ -23,6 +24,17 @@ pub use xai_grok_config_types::{
     McpServerTransportConfig, McpSetupConfig, McpSetupDerivedValue, McpSetupField,
     McpSetupFieldType, McpSetupOption, McpSetupResolution,
 };
+=======
+pub use xai_grok_mcp::oauth_config::{McpOAuthConfig, McpOAuthConfigMap};
+// MCP server config value types extracted to `xai-grok-config-types` (config
+// dependency inversion); re-exported so `crate::util::config::*` paths keep working.
+pub use xai_grok_config_types::{
+    McpJsonOAuthBlock, McpPreferenceSource, McpPreferencesFile, McpServerConfig,
+    McpServerPreferences, McpServerTransportConfig, McpSetupConfig, McpSetupDerivedValue,
+    McpSetupField, McpSetupFieldType, McpSetupOption, McpSetupResolution,
+};
+// Permission-policy value types likewise extracted; re-exported to keep paths stable.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub use xai_grok_config_types::{
     PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
 };
@@ -94,11 +106,69 @@ pub(crate) fn load_mcp_servers_with_oauth(
     cwd: &std::path::Path,
     compat: &CompatConfig,
 ) -> (Vec<acp::McpServer>, McpOAuthConfigMap) {
+<<<<<<< HEAD
     xai_grok_config::mcp_servers::load_mcp_servers_with_oauth(&mcp_server_sources(
         cwd,
         compat,
         "load_mcp_servers_with_oauth",
     ))
+=======
+    let global_config =
+        crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(toml::map::Map::new()));
+
+    let mut servers_map: IndexMap<String, McpServerConfig> = IndexMap::new();
+    for (name, config) in parse_mcp_servers_from_toml(&global_config) {
+        servers_map.insert(name, config);
+    }
+
+    let project_configs = crate::config::find_project_configs(cwd);
+    for config_path in &project_configs {
+        if let Ok(root) = crate::config::load_config_file(config_path) {
+            for (name, config) in parse_mcp_servers_from_toml(&root) {
+                servers_map.insert(name, config);
+            }
+        }
+    }
+    // Also load from ~/.claude.json (lower priority than TOML)
+    for (name, config) in load_claude_json_mcp_servers_as_configs(cwd, compat) {
+        servers_map.entry(name).or_insert(config);
+    }
+
+    // Also load from ~/.cursor/mcp.json (lower priority than TOML and ~/.claude.json)
+    for (name, config) in load_cursor_mcp_servers_as_configs(cwd, compat) {
+        servers_map.entry(name).or_insert(config);
+    }
+
+    // Also load from .mcp.json files (lower priority than TOML, ~/.claude.json, and ~/.cursor)
+    for (name, config) in load_mcp_json_servers_as_configs(cwd) {
+        servers_map.entry(name).or_insert(config);
+    }
+
+    let mut oauth_configs = McpOAuthConfigMap::new();
+    let mut acp_servers = Vec::new();
+
+    let preferences = load_mcp_preferences().file();
+    let sub = &crate::config::expand_env_vars_in_string;
+    for (name, config) in servers_map {
+        let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
+            McpSetupResolution::Resolved(config) => config,
+            McpSetupResolution::Required(_) => continue,
+            McpSetupResolution::Invalid(reason) => {
+                tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
+                continue;
+            }
+        };
+        config.expand_strings(sub);
+        if let Some(oauth) = config.oauth_config() {
+            oauth_configs.insert(name.clone(), oauth);
+        }
+        if let Some(acp_server) = config.to_acp_mcp_server(name) {
+            acp_servers.push(acp_server);
+        }
+    }
+
+    (acp_servers, oauth_configs)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 pub fn load_mcp_servers(cwd: &std::path::Path, compat: &CompatConfig) -> Vec<acp::McpServer> {
@@ -109,7 +179,45 @@ pub fn load_mcp_servers(cwd: &std::path::Path, compat: &CompatConfig) -> Vec<acp
     ))
 }
 
+<<<<<<< HEAD
 pub(crate) fn mcp_server_sources(
+=======
+/// Load MCP servers from config.toml only (global + project-scoped), without
+/// loading from `~/.claude.json`, `~/.cursor/mcp.json`, or
+/// `.mcp.json` sources.
+///
+/// Used by [`crate::session::managed_mcp::merge_managed_mcp_servers_sourced`]
+/// which handles those non-TOML sources separately with proper `ConfigSource`
+/// tracking. Using [`load_mcp_servers`] there would cause all entries to be
+/// tagged as `ConfigSource::ConfigToml`, hiding the true origin.
+pub(crate) fn load_mcp_servers_toml_only(cwd: &std::path::Path) -> Vec<acp::McpServer> {
+    let preferences = load_mcp_preferences().file();
+    let sub = &crate::config::expand_env_vars_in_string;
+    load_all_mcp_configs(cwd)
+        .into_iter()
+        .filter_map(|(name, config)| {
+            let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
+                McpSetupResolution::Resolved(config) => config,
+                McpSetupResolution::Required(_) => return None,
+                McpSetupResolution::Invalid(reason) => {
+                    tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
+                    return None;
+                }
+            };
+            config.expand_strings(sub);
+            config.to_acp_mcp_server(name)
+        })
+        .collect()
+}
+
+/// Merge MCP servers from a pre-parsed global config with project-scoped overrides.
+///
+/// Same merge strategy as [`load_mcp_servers_with_project`] but takes the global
+/// config as a pre-parsed `toml::Value` instead of re-reading from disk. Project
+/// configs are still read from disk because the watcher signals paths, not content.
+pub(crate) fn reload_mcp_servers_merged(
+    global_config: &TomlValue,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     cwd: &std::path::Path,
     compat: &CompatConfig,
     caller: &'static str,
@@ -121,6 +229,73 @@ pub(crate) fn mcp_server_sources(
         compat: *compat,
         claude_import: claude_import(caller),
     }
+<<<<<<< HEAD
+=======
+
+    let project_configs = crate::config::find_project_configs(cwd);
+    for config_path in &project_configs {
+        if let Ok(root) = crate::config::load_config_file(config_path) {
+            let project_servers = parse_mcp_servers_from_toml(&root);
+            if !project_servers.is_empty() {
+                tracing::info!(
+                    count = project_servers.len(),
+                    path = %config_path.display(),
+                    "Loaded project-scoped MCP servers from .grok/config.toml"
+                );
+                for (name, config) in project_servers {
+                    servers.insert(name, config);
+                }
+            }
+        }
+    }
+    // Also load from ~/.claude.json (lower priority than TOML)
+    let claude_servers = load_claude_json_mcp_servers_as_configs(cwd, compat);
+    tracing::info!(
+        count = claude_servers.len(),
+        "Loaded MCP servers from ~/.claude.json"
+    );
+    for (name, config) in claude_servers {
+        servers.entry(name).or_insert(config);
+    }
+
+    // Also load from ~/.cursor/mcp.json (lower priority than TOML and ~/.claude.json)
+    let cursor_servers = load_cursor_mcp_servers_as_configs(cwd, compat);
+    tracing::info!(
+        count = cursor_servers.len(),
+        "Loaded Cursor MCP servers from ~/.cursor/mcp.json"
+    );
+    for (name, config) in cursor_servers {
+        servers.entry(name).or_insert(config);
+    }
+
+    // Also load from .mcp.json files (lower priority than TOML)
+    let mcp_json_servers = load_mcp_json_servers_as_configs(cwd);
+    tracing::info!(
+        count = mcp_json_servers.len(),
+        "Loaded .mcp.json MCP servers"
+    );
+    for (name, config) in mcp_json_servers {
+        servers.entry(name).or_insert(config);
+    }
+
+    let preferences = load_mcp_preferences().file();
+    let sub = &crate::config::expand_env_vars_in_string;
+    servers
+        .into_iter()
+        .filter_map(|(name, config)| {
+            let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
+                McpSetupResolution::Resolved(config) => config,
+                McpSetupResolution::Required(_) => return None,
+                McpSetupResolution::Invalid(reason) => {
+                    tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
+                    return None;
+                }
+            };
+            config.expand_strings(sub);
+            config.to_acp_mcp_server(name)
+        })
+        .collect()
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 pub(crate) fn load_mcp_servers_toml_only(cwd: &std::path::Path) -> Vec<acp::McpServer> {
@@ -308,6 +483,230 @@ fn claude_import(caller: &'static str) -> ClaudeImport {
     ClaudeImport::from_marker(crate::claude_import::is_claude_import_marked_with_log(
         caller,
     ))
+}
+
+pub fn mcp_preferences_path() -> PathBuf {
+    xai_grok_config::grok_home().join("mcp_preferences.json")
+}
+
+/// Result of loading prefs. Corrupt files are readable as empty for resolution
+/// but must not be overwritten (would clobber other servers).
+#[derive(Debug, Clone)]
+pub enum McpPreferencesLoad {
+    Ok(McpPreferencesFile),
+    Missing,
+    Corrupt,
+}
+
+impl McpPreferencesLoad {
+    pub fn file(&self) -> McpPreferencesFile {
+        match self {
+            Self::Ok(f) => f.clone(),
+            Self::Missing | Self::Corrupt => McpPreferencesFile::default(),
+        }
+    }
+
+    pub fn is_writable(&self) -> bool {
+        !matches!(self, Self::Corrupt)
+    }
+}
+
+pub fn load_mcp_preferences() -> McpPreferencesLoad {
+    load_mcp_preferences_from(&mcp_preferences_path())
+}
+
+pub fn load_mcp_preferences_from(path: &std::path::Path) -> McpPreferencesLoad {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return McpPreferencesLoad::Missing,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "failed to read MCP preferences");
+            return McpPreferencesLoad::Corrupt;
+        }
+    };
+    match serde_json::from_str(&content) {
+        Ok(file) => McpPreferencesLoad::Ok(file),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "failed to parse MCP preferences");
+            McpPreferencesLoad::Corrupt
+        }
+    }
+}
+
+pub async fn save_mcp_preferences(prefs: &McpPreferencesFile) -> Result<()> {
+    save_mcp_preferences_to(&mcp_preferences_path(), prefs).await
+}
+
+pub async fn save_mcp_preferences_to(
+    path: &std::path::Path,
+    prefs: &McpPreferencesFile,
+) -> Result<()> {
+    if matches!(load_mcp_preferences_from(path), McpPreferencesLoad::Corrupt) {
+        anyhow::bail!(
+            "refusing to overwrite unreadable MCP preferences at {}",
+            path.display()
+        );
+    }
+    let json = serde_json::to_string_pretty(prefs)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = path.with_extension(format!(
+        "json.tmp.{}{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    tokio::fs::write(&tmp, &json).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to set mcp preferences permissions: {e}"))?;
+    }
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+/// Restore a single server key after a failed setup (best-effort).
+pub async fn restore_mcp_preference_server(
+    server_name: &str,
+    previous: Option<McpServerPreferences>,
+) -> Result<()> {
+    let load = load_mcp_preferences();
+    if !load.is_writable() {
+        return Ok(());
+    }
+    let mut prefs = load.file();
+    match previous {
+        Some(entry) => {
+            prefs.servers.insert(server_name.to_string(), entry);
+        }
+        None => {
+            prefs.servers.remove(server_name);
+        }
+    }
+    save_mcp_preferences(&prefs).await
+}
+
+/// Unresolved setup-bearing MCP config collected for `/mcps` list and auth.
+#[derive(Debug, Clone)]
+pub struct McpSetupServerEntry {
+    pub name: String,
+    pub config: McpServerConfig,
+    pub source: McpPreferenceSource,
+}
+
+/// Collect MCP configs that declare a `setup` schema from config and plugins.
+/// Used to surface setup-required rows and drive `x.ai/mcp/setup`.
+pub fn collect_mcp_setup_configs(
+    cwd: &std::path::Path,
+    plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
+    compat: &CompatConfig,
+) -> IndexMap<String, McpSetupServerEntry> {
+    let mut result = IndexMap::new();
+    for (name, (config, scope)) in load_mcp_server_configs_with_project(cwd) {
+        if !config.enabled || config.setup.is_none() {
+            continue;
+        }
+        result.insert(
+            name.clone(),
+            McpSetupServerEntry {
+                name,
+                config,
+                source: McpPreferenceSource {
+                    kind: "config".to_string(),
+                    plugin: None,
+                    scope: Some(scope.to_string()),
+                },
+            },
+        );
+    }
+    if !crate::claude_import::is_claude_import_marked_with_log("collect_mcp_setup_configs") {
+        for (name, config) in load_claude_json_mcp_servers_as_configs(cwd, compat) {
+            if !config.enabled || config.setup.is_none() {
+                continue;
+            }
+            result.entry(name.clone()).or_insert(McpSetupServerEntry {
+                name,
+                config,
+                source: McpPreferenceSource {
+                    kind: "config".to_string(),
+                    plugin: None,
+                    scope: Some(MCP_SCOPE_USER.to_string()),
+                },
+            });
+        }
+        for (name, config) in load_cursor_mcp_servers_as_configs(cwd, compat) {
+            if !config.enabled || config.setup.is_none() {
+                continue;
+            }
+            result.entry(name.clone()).or_insert(McpSetupServerEntry {
+                name,
+                config,
+                source: McpPreferenceSource {
+                    kind: "config".to_string(),
+                    plugin: None,
+                    scope: Some(MCP_SCOPE_USER.to_string()),
+                },
+            });
+        }
+        for (name, config) in load_mcp_json_servers_as_configs(cwd) {
+            if !config.enabled || config.setup.is_none() {
+                continue;
+            }
+            result.entry(name.clone()).or_insert(McpSetupServerEntry {
+                name,
+                config,
+                source: McpPreferenceSource {
+                    kind: "config".to_string(),
+                    plugin: None,
+                    scope: Some(MCP_SCOPE_PROJECT.to_string()),
+                },
+            });
+        }
+    }
+    if let Some(registry) = plugin_registry {
+        let toml_claimed_names = all_toml_mcp_server_names(cwd);
+        for plugin in registry.active_plugins() {
+            // File first, then inline; first-wins matches runtime plugin load.
+            let mut plugin_configs = IndexMap::new();
+            if let Some(ref mcp_path) = plugin.mcp_config_path
+                && let Some(config) = read_mcp_json(mcp_path)
+            {
+                for (name, server) in config.mcp_servers {
+                    plugin_configs.entry(name).or_insert(server);
+                }
+            }
+            if let Some(ref inline_value) = plugin.inline_mcp_servers {
+                let normalized =
+                    xai_grok_agent::plugins::manifest::normalize_inline_mcp_servers(inline_value);
+                if let Ok(config) = serde_json::from_value::<McpConfig>(normalized) {
+                    for (name, server) in config.mcp_servers {
+                        plugin_configs.entry(name).or_insert(server);
+                    }
+                }
+            }
+            for (name, config) in plugin_configs {
+                if toml_claimed_names.contains(&name) || !config.enabled || config.setup.is_none() {
+                    continue;
+                }
+                result.entry(name.clone()).or_insert(McpSetupServerEntry {
+                    name,
+                    config,
+                    source: McpPreferenceSource {
+                        kind: "plugin".to_string(),
+                        plugin: Some(plugin.name.clone()),
+                        scope: None,
+                    },
+                });
+            }
+        }
+    }
+    result
 }
 
 pub const MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY: &str = "__managed_gateway_connectors";
@@ -802,6 +1201,430 @@ pub(crate) fn get_all_mcp_disabled_tools(
     xai_grok_config::mcp_servers::get_all_mcp_disabled_tools()
 }
 
+<<<<<<< HEAD
+=======
+/// Load all configured MCP servers as `(name, config)` pairs.
+///
+/// Reads from `load_effective_config()`, which merges the system-managed,
+/// managed, and user config layers only. Use
+/// [`load_mcp_server_configs_with_project`] for a view that also includes
+/// project-scoped `.grok/config.toml` files.
+pub fn load_mcp_server_configs() -> IndexMap<String, McpServerConfig> {
+    let root =
+        crate::config::load_effective_config().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
+    parse_mcp_servers_from_toml(&root)
+}
+
+fn parse_mcp_servers_from_toml(root: &TomlValue) -> IndexMap<String, McpServerConfig> {
+    let TomlValue::Table(table) = root else {
+        return IndexMap::new();
+    };
+    let Some(TomlValue::Table(mcp_servers)) = table.get("mcp_servers") else {
+        return IndexMap::new();
+    };
+
+    let mut result = IndexMap::new();
+    for (name, value) in mcp_servers {
+        if let Ok(config) = toml::Value::try_into::<McpServerConfig>(value.clone()) {
+            result.insert(name.clone(), config);
+        }
+    }
+    result
+}
+
+// ── .mcp.json support ────────────────────────────────────────────────
+
+// `.mcp.json` discovery moved to `xai-grok-workspace` (client-side, shared with
+// the folder-trust gate); re-exported so `crate::util::config::*` paths keep working.
+pub use xai_grok_workspace::project_config::{
+    MCP_JSON_FILENAME, find_mcp_json_files, mcp_json_candidate_paths,
+};
+
+pub fn load_mcp_json_file(path: &std::path::Path) -> Vec<acp::McpServer> {
+    if !path.is_file() {
+        return vec![];
+    }
+    let Some(value) = read_mcp_json(path) else {
+        return vec![];
+    };
+    let label = path.display().to_string();
+    parse_mcp_config(&value, &label, &crate::config::expand_env_vars_in_string)
+}
+/// Load .mcp.json servers as McpServerConfig map (for merging into load_mcp_servers).
+pub(crate) fn load_mcp_json_servers_as_configs(
+    cwd: &std::path::Path,
+) -> IndexMap<String, McpServerConfig> {
+    // Phase 2 cutoff: if the user has imported, skip reading .mcp.json.
+    if crate::claude_import::is_claude_import_marked_with_log("load_mcp_json_servers_as_configs") {
+        return IndexMap::new();
+    }
+    load_mcp_json_servers_as_configs_unfiltered(cwd)
+}
+
+/// Like [`load_mcp_json_servers_as_configs`] but bypasses the import-marker
+/// gate. Used by the `/import-claude` scanner so users can re-import items
+/// they previously skipped, even after the runtime cutoff is active.
+pub fn load_mcp_json_servers_as_configs_unfiltered(
+    cwd: &std::path::Path,
+) -> IndexMap<String, McpServerConfig> {
+    let mcp_json_files = find_mcp_json_files(cwd);
+    if mcp_json_files.is_empty() {
+        return IndexMap::new();
+    }
+
+    let mut result = IndexMap::new();
+
+    // Reverse so cwd entries win on name conflict.
+    for mcp_path in mcp_json_files.iter().rev() {
+        if let Some(config) = read_mcp_json(mcp_path) {
+            for (name, cfg) in config.mcp_servers {
+                result.entry(name).or_insert(cfg);
+            }
+        }
+    }
+
+    result
+}
+
+pub(crate) fn parse_mcp_config(
+    config: &McpConfig,
+    source_label: &str,
+    sub: &dyn Fn(&str) -> String,
+) -> Vec<acp::McpServer> {
+    parse_mcp_config_with_oauth(config, source_label, sub).0
+}
+
+pub(crate) fn parse_mcp_config_with_oauth(
+    config: &McpConfig,
+    source_label: &str,
+    sub: &dyn Fn(&str) -> String,
+) -> (Vec<acp::McpServer>, McpOAuthConfigMap) {
+    let preferences = load_mcp_preferences().file();
+    let mut servers = Vec::new();
+    let mut oauth_configs = McpOAuthConfigMap::new();
+    for (name, server_config) in &config.mcp_servers {
+        let mut server_config = match server_config.resolve_setup(preferences.servers.get(name)) {
+            McpSetupResolution::Resolved(config) => config,
+            McpSetupResolution::Required(_) => continue,
+            McpSetupResolution::Invalid(reason) => {
+                tracing::warn!(
+                    source = source_label,
+                    server = %name,
+                    error = %reason,
+                    "MCP setup config is invalid"
+                );
+                continue;
+            }
+        };
+        server_config.expand_strings(sub);
+        if let Some(oauth) = server_config.oauth_config() {
+            oauth_configs.insert(name.clone(), oauth);
+        }
+        if let Some(server) = server_config.to_acp_mcp_server(name.clone()) {
+            servers.push(server);
+        } else {
+            tracing::warn!(
+                source = source_label,
+                server = name,
+                "MCP server has no 'command' (stdio) or 'url' (http/sse); skipping"
+            );
+        }
+    }
+
+    if !servers.is_empty() {
+        tracing::info!(
+            source = source_label,
+            count = servers.len(),
+            "loaded MCP servers"
+        );
+    }
+
+    (servers, oauth_configs)
+}
+
+/// Load MCP servers from `~/.claude.json`.
+///
+/// User-level MCP servers live at the top-level `mcpServers` key,
+/// and per-project (local-scope) MCP servers under `projects.<cwd>.mcpServers`.
+///
+/// Returns servers from both locations (project-specific first, then user-level).
+pub fn load_claude_json_mcp_servers(
+    cwd: &std::path::Path,
+    compat: &CompatConfig,
+) -> Vec<acp::McpServer> {
+    // Compat gate: skip ~/.claude.json MCP loading when disabled.
+    if !compat.claude.mcps {
+        return vec![];
+    }
+    // Phase 2 cutoff: if the user has imported, skip reading ~/.claude.json.
+    if crate::claude_import::is_claude_import_marked_with_log("load_claude_json_mcp_servers") {
+        return vec![];
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return vec![];
+    };
+    let claude_json_path = home.join(".claude.json");
+    load_claude_json_mcp_servers_from(&claude_json_path, cwd)
+}
+/// Load ~/.claude.json MCP servers as McpServerConfig map (for merging into load_mcp_servers).
+pub(crate) fn load_claude_json_mcp_servers_as_configs(
+    cwd: &std::path::Path,
+    compat: &CompatConfig,
+) -> IndexMap<String, McpServerConfig> {
+    // Compat gate: skip ~/.claude.json MCP loading when disabled.
+    if !compat.claude.mcps {
+        return IndexMap::new();
+    }
+    // Phase 2 cutoff: if the user has imported, skip reading ~/.claude.json.
+    if crate::claude_import::is_claude_import_marked_with_log(
+        "load_claude_json_mcp_servers_as_configs",
+    ) {
+        return IndexMap::new();
+    }
+    load_claude_json_mcp_servers_as_configs_unfiltered(cwd)
+}
+
+/// Like [`load_claude_json_mcp_servers_as_configs`] but bypasses the
+/// import-marker gate. Used by the `/import-claude` scanner so users can
+/// re-import items they previously skipped, even after the runtime cutoff
+/// is active.
+pub fn load_claude_json_mcp_servers_as_configs_unfiltered(
+    cwd: &std::path::Path,
+) -> IndexMap<String, McpServerConfig> {
+    let Some(home) = dirs::home_dir() else {
+        return IndexMap::new();
+    };
+    let claude_json_path = home.join(".claude.json");
+    load_claude_json_mcp_servers_from_as_configs(&claude_json_path, cwd)
+}
+
+fn load_claude_json_mcp_servers_from_as_configs(
+    claude_json_path: &std::path::Path,
+    cwd: &std::path::Path,
+) -> IndexMap<String, McpServerConfig> {
+    let content = match std::fs::read_to_string(claude_json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(
+                path = %claude_json_path.display(),
+                error = %e,
+                "failed to read ~/.claude.json"
+            );
+            return IndexMap::new();
+        }
+    };
+    let config: ClaudeJsonConfig = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(
+                path = %claude_json_path.display(),
+                error = %e,
+                "failed to parse ~/.claude.json"
+            );
+            return IndexMap::new();
+        }
+    };
+
+    let mut result = IndexMap::new();
+
+    // Per-project MCP servers (local scope, higher priority)
+    let cwd_key = cwd.to_string_lossy();
+    if let Some(project) = config.projects.get(cwd_key.as_ref()) {
+        for (name, cfg) in &project.mcp_servers {
+            result.insert(name.clone(), cfg.clone());
+        }
+    }
+
+    // User-level MCP servers (lower priority)
+    for (name, cfg) in &config.user_mcp.mcp_servers {
+        result.entry(name.clone()).or_insert(cfg.clone());
+    }
+    tracing::info!(
+        project_count = config
+            .projects
+            .get(cwd_key.as_ref())
+            .map(|p| p.mcp_servers.len())
+            .unwrap_or(0),
+        user_level_count = config.user_mcp.mcp_servers.len(),
+        total_count = result.len(),
+        "MCP servers loaded from ~/.claude.json"
+    );
+
+    result
+}
+
+/// Load MCP servers from editor MCP config files.
+///
+/// Scans project-level `<cwd>/.cursor/mcp.json` first (higher priority),
+/// then global `~/.cursor/mcp.json`. Both use the `{"mcpServers": {...}}`
+/// format identical to `.mcp.json`. Gated by `compat.cursor.mcps`.
+pub fn load_cursor_mcp_servers(
+    cwd: &std::path::Path,
+    compat: &CompatConfig,
+) -> Vec<acp::McpServer> {
+    // Compat gate: skip Cursor MCP loading when disabled.
+    if !compat.cursor.mcps {
+        return vec![];
+    }
+    let mut result = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    // Project-level (higher priority)
+    let project_path = cwd.join(".cursor").join("mcp.json");
+    for server in load_mcp_json_file(&project_path) {
+        let name = match &server {
+            acp::McpServer::Http(acp::McpServerHttp { name, .. })
+            | acp::McpServer::Sse(acp::McpServerSse { name, .. })
+            | acp::McpServer::Stdio(acp::McpServerStdio { name, .. }) => name.clone(),
+            // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
+            _ => continue,
+        };
+        if seen_names.insert(name) {
+            result.push(server);
+        }
+    }
+
+    // Global (lower priority)
+    if let Some(home) = dirs::home_dir() {
+        let global_path = home.join(".cursor").join("mcp.json");
+        for server in load_mcp_json_file(&global_path) {
+            let name = match &server {
+                acp::McpServer::Http(acp::McpServerHttp { name, .. })
+                | acp::McpServer::Sse(acp::McpServerSse { name, .. })
+                | acp::McpServer::Stdio(acp::McpServerStdio { name, .. }) => name.clone(),
+                // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
+                _ => continue,
+            };
+            if seen_names.insert(name) {
+                result.push(server);
+            }
+        }
+    }
+
+    result
+}
+
+/// Load Cursor MCP servers as McpServerConfig map (for merging into load_mcp_servers).
+///
+/// Scans project-level `<cwd>/.cursor/mcp.json` first, then global.
+pub(crate) fn load_cursor_mcp_servers_as_configs(
+    cwd: &std::path::Path,
+    compat: &CompatConfig,
+) -> IndexMap<String, McpServerConfig> {
+    // Compat gate: skip Cursor MCP loading when disabled.
+    if !compat.cursor.mcps {
+        return IndexMap::new();
+    }
+    let mut result = IndexMap::new();
+
+    // Project-level (higher priority)
+    let project_path = cwd.join(".cursor").join("mcp.json");
+    if project_path.is_file()
+        && let Some(config) = read_mcp_json(&project_path)
+    {
+        for (name, cfg) in config.mcp_servers {
+            result.insert(name, cfg);
+        }
+    }
+
+    // Global (lower priority — or_insert so project wins)
+    if let Some(home) = dirs::home_dir() {
+        let global_path = home.join(".cursor").join("mcp.json");
+        if global_path.is_file()
+            && let Some(config) = read_mcp_json(&global_path)
+        {
+            for (name, cfg) in config.mcp_servers {
+                result.entry(name).or_insert(cfg);
+            }
+        }
+    }
+
+    result
+}
+
+/// Subset of `~/.claude.json` we care about for MCP server discovery.
+///
+/// Reuses `McpConfig` for both the top-level user MCP servers and per-project
+/// entries — the JSON shape (`{ "mcpServers": { ... } }`) is identical at both levels.
+#[derive(Default, Deserialize)]
+struct ClaudeJsonConfig {
+    /// User-level MCP servers (top-level `mcpServers` key).
+    #[serde(flatten)]
+    user_mcp: McpConfig,
+    /// Per-project entries, keyed by absolute project path.
+    #[serde(default)]
+    projects: HashMap<String, McpConfig>,
+}
+
+/// Inner implementation that accepts the file path, making it testable.
+fn load_claude_json_mcp_servers_from(
+    claude_json_path: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Vec<acp::McpServer> {
+    let content = match std::fs::read_to_string(claude_json_path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let config: ClaudeJsonConfig = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(
+                path = %claude_json_path.display(),
+                error = %e,
+                "failed to parse claude.json"
+            );
+            return vec![];
+        }
+    };
+
+    let sub = &crate::config::expand_env_vars_in_string;
+    let mut servers = Vec::new();
+
+    // Per-project MCP servers (local scope, higher priority)
+    let cwd_key = cwd.to_string_lossy();
+    if let Some(project) = config.projects.get(cwd_key.as_ref()) {
+        let label = format!("~/.claude.json projects[{}]", cwd_key);
+        servers.extend(parse_mcp_config(project, &label, sub));
+    }
+
+    // User-level MCP servers (lower priority)
+    if !config.user_mcp.mcp_servers.is_empty() {
+        servers.extend(parse_mcp_config(&config.user_mcp, "~/.claude.json", sub));
+    }
+
+    servers
+}
+
+/// Read and parse a JSON file. Returns `None` on I/O or parse errors (logged).
+pub(crate) fn read_mcp_json(path: &std::path::Path) -> Option<McpConfig> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to read MCP JSON");
+        })
+        .ok()?;
+    serde_json::from_str(&content)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to parse MCP JSON");
+        })
+        .ok()
+}
+
+/// Like `load_mcp_servers_with_project` but returns raw configs without filtering by `enabled`.
+fn load_all_mcp_configs(cwd: &std::path::Path) -> IndexMap<String, McpServerConfig> {
+    load_mcp_server_configs_with_project(cwd)
+        .into_iter()
+        .map(|(name, (config, _))| (name, config))
+        .collect()
+}
+
+/// Load all configured MCP servers with the scope each definition came from
+/// (`"user"` or `"project"`).
+///
+/// Overlays project-scoped `.grok/config.toml` files from `cwd` up to the
+/// repo root onto the user-tier config, nearest definition winning — the same
+/// override semantics as [`get_mcp_server_config_with_project`].
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn load_mcp_server_configs_with_project(
     cwd: &std::path::Path,
 ) -> IndexMap<String, (McpServerConfig, &'static str)> {
@@ -1227,10 +2050,27 @@ ignore = ["~/.grok/skills/noisy/SKILL.md"]
     }
 
     #[tokio::test]
+<<<<<<< HEAD
     async fn mcp_preferences_save_refuses_corrupt_file_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mcp_preferences.json");
         std::fs::write(&path, "not json").unwrap();
+=======
+    async fn mcp_preferences_missing_malformed_and_save_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_preferences.json");
+        assert!(matches!(
+            load_mcp_preferences_from(&path),
+            McpPreferencesLoad::Missing
+        ));
+        assert!(load_mcp_preferences_from(&path).file().servers.is_empty());
+
+        std::fs::write(&path, "not json").unwrap();
+        assert!(matches!(
+            load_mcp_preferences_from(&path),
+            McpPreferencesLoad::Corrupt
+        ));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let prefs = McpPreferencesFile {
             version: 1,
             servers: HashMap::from([(
@@ -1246,22 +2086,37 @@ ignore = ["~/.grok/skills/noisy/SKILL.md"]
                 },
             )]),
         };
+<<<<<<< HEAD
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(save_mcp_preferences_to(&path, &prefs).await.is_err());
 
         std::fs::remove_file(&path).unwrap();
         save_mcp_preferences_to(&path, &prefs).await.unwrap();
         let loaded = load_mcp_preferences_from(&path).file();
+<<<<<<< HEAD
         let Some(acme) = loaded.servers.get("acme") else {
             panic!("expected acme server: {:?}", loaded.servers);
         };
         assert_eq!(acme.values.get("site").map(String::as_str), Some("us5"));
         assert_eq!(
             acme.source.as_ref().and_then(|s| s.plugin.as_deref()),
+=======
+        assert_eq!(loaded.servers["acme"].values["site"], "us5");
+        assert_eq!(
+            loaded.servers["acme"]
+                .source
+                .as_ref()
+                .unwrap()
+                .plugin
+                .as_deref(),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             Some("acme")
         );
     }
 
+<<<<<<< HEAD
     #[tokio::test]
     async fn save_mcp_server_config_at_refuses_an_unparseable_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1724,4 +2579,7 @@ enabled = false
             "file must be left intact"
         );
     }
+=======
+    // === merge_section tests ===
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }

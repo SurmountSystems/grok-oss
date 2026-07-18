@@ -55,6 +55,7 @@ macro_rules! wire_enum {
 pub(crate) use wire_enum;
 
 pub use auto_mode::{
+<<<<<<< HEAD
     AUTO_MODE_CLASSIFIER_SYSTEM_PROMPT, AutoFastPath, BashSecurityAssessment,
     CLASSIFIER_TURN_MAX_LEN, ClassifierContext, ClassifierFailure, ClassifierMessage,
     ClassifierMessageRole, ClassifierOutcome, ClassifierPromptType, ClassifierSecurityFinding,
@@ -64,6 +65,15 @@ pub use auto_mode::{
     build_classifier_messages, classifier_output_json_schema, default_auto_mode_classifier,
     is_auto_mode_allowlisted_access, is_auto_mode_allowlisted_tool_name,
     parse_classifier_model_output, parse_classifier_model_text, permission_decision_args,
+=======
+    AUTO_MODE_CLASSIFIER_SYSTEM_PROMPT, AutoFastPath, CLASSIFIER_TURN_MAX_LEN, ClassifierContext,
+    ClassifierMessage, ClassifierMessageRole, ClassifierPromptType, ClassifierTurn,
+    ClassifierVerdict, ClassifyTextChannel, ClassifyTextFn, FixedClassifier,
+    HeuristicPermissionClassifier, LlmPermissionClassifier, PermissionClassifier, SharedClassifier,
+    access_requires_user_interaction, auto_mode_fast_path, build_classifier_messages,
+    classifier_output_json_schema, default_auto_mode_classifier, is_auto_mode_allowlisted_access,
+    is_auto_mode_allowlisted_tool_name, parse_classifier_model_text, permission_decision_args,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 };
 pub use gate_preflight::GatePreflight;
 

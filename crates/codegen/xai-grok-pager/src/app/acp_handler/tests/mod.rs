@@ -2197,6 +2197,7 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
     let owner = app.agents.get_mut(&AgentId(0)).expect("owner present");
     owner.extensions_modal = Some(
         make_mcps_modal_with_servers(
+<<<<<<< HEAD
             vec![McpServerInfo {
             name: "alpha".into(),
             display_name: None,
@@ -2214,6 +2215,16 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
             plugin_name: None,
             is_managed_gateway: false,
         }],
+=======
+            vec![
+                McpServerInfo { name : "alpha".into(), display_name : None, status :
+                McpServerDisplayStatus::Initializing, tool_count : 0, auth_required :
+                false, setup_required : false, setup : None, setup_values :
+                std::collections::HashMap::new(), tools : Vec::new(), enabled : true,
+                source : "local".into(), wire_source : McpWireSource::Local, plugin_name
+                : None, is_managed_gateway : false, }
+            ],
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ),
     );
 }

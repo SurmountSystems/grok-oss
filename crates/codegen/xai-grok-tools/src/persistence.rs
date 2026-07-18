@@ -19,6 +19,7 @@ pub struct ResourcesPersistence {
     state_path: Option<PathBuf>,
     /// Channel to send serialized state to the background writer
     tx: tokio::sync::mpsc::UnboundedSender<ResourcesPersistenceCommand>,
+    noop: bool,
 }
 
 #[cfg(test)]
@@ -46,6 +47,7 @@ impl ResourcesPersistence {
         Self {
             state_path: None,
             tx,
+            noop: true,
         }
     }
 
@@ -89,8 +91,14 @@ impl ResourcesPersistence {
         });
 
         Self {
+<<<<<<< HEAD
             state_path: Some(state_path),
             tx,
+=======
+            state_path,
+            tx,
+            noop: false,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 
@@ -130,7 +138,11 @@ impl ResourcesPersistence {
     /// Save the current Resources state (non-blocking).
     /// Sends a serialized snapshot to the background writer.
     pub fn save(&self, resources: &Resources) {
+<<<<<<< HEAD
         if self.state_path.is_none() {
+=======
+        if self.noop {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             return;
         }
         let snapshot = resources.serialize();
@@ -142,7 +154,11 @@ impl ResourcesPersistence {
         &self,
         snapshot: serde_json::Value,
     ) -> io::Result<tokio::sync::oneshot::Receiver<io::Result<()>>> {
+<<<<<<< HEAD
         if self.state_path.is_none() {
+=======
+        if self.noop {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             let (respond_to, response) = tokio::sync::oneshot::channel();
             let _ = respond_to.send(Ok(()));
             return Ok(response);
@@ -179,14 +195,24 @@ impl ResourcesPersistence {
         Self::await_save_and_flush(self.enqueue_save_and_flush(snapshot)?).await
     }
 
+<<<<<<< HEAD
     /// `None` when this handle writes nothing.
     pub fn state_path(&self) -> Option<&std::path::Path> {
         self.state_path.as_deref()
+=======
+    /// Path to the persisted state file.
+    pub fn state_path(&self) -> &std::path::Path {
+        &self.state_path
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Flush pending writes. Call on graceful shutdown.
     pub async fn flush(&self) {
+<<<<<<< HEAD
         if self.state_path.is_none() {
+=======
+        if self.noop {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             return;
         }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -323,6 +349,7 @@ impl ResourcesPersistence {
 
     #[cfg(not(windows))]
     async fn publish_durable(path: &Path, tmp_path: &Path) -> io::Result<()> {
+<<<<<<< HEAD
         // A bare filename has an empty parent, so the write would land in the server's own directory, shared by every session.
         let parent = path
             .parent()
@@ -335,6 +362,12 @@ impl ResourcesPersistence {
             })?;
 
         Self::replace_state_path(path, tmp_path).await?;
+=======
+        Self::replace_state_path(path, tmp_path).await?;
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "resources state has no parent")
+        })?;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         tokio::fs::File::open(parent).await?.sync_all().await
     }
 
@@ -688,5 +721,140 @@ mod tests {
 
         assert!(noop.state_path().is_none());
         assert!(!noop.load(&mut Resources::new()));
+    }
+
+    #[tokio::test]
+    async fn save_and_flush_supersedes_older_pending_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("resources_state.json");
+        let persistence = ResourcesPersistence::new(state_path.clone());
+        persistence.flush().await;
+
+        let mut resources = Resources::new();
+        resources.register_state::<WebCitationCounter>();
+        resources
+            .get_or_default::<State<WebCitationCounter>>()
+            .counter = 1;
+        persistence.save(&resources);
+
+        resources
+            .get_or_default::<State<WebCitationCounter>>()
+            .counter = 2;
+        persistence
+            .save_and_flush(resources.serialize())
+            .await
+            .unwrap();
+        persistence.flush().await;
+
+        let content = std::fs::read_to_string(state_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["state"]["grok_build.WebCitation"]["counter"], 2);
+    }
+
+    #[tokio::test]
+    async fn save_and_flush_error_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("missing");
+        let state_path = parent.join("resources_state.json");
+        let persistence = ResourcesPersistence::new(state_path.clone());
+
+        let mut resources = Resources::new();
+        resources.register_state::<WebCitationCounter>();
+        resources
+            .get_or_default::<State<WebCitationCounter>>()
+            .counter = 7;
+        let snapshot = resources.serialize();
+
+        assert!(persistence.save_and_flush(snapshot.clone()).await.is_err());
+
+        std::fs::create_dir(parent).unwrap();
+        persistence.save_and_flush(snapshot).await.unwrap();
+
+        let content = std::fs::read_to_string(state_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["state"]["grok_build.WebCitation"]["counter"], 7);
+    }
+
+    #[tokio::test]
+    async fn enqueued_acknowledged_save_precedes_a_newer_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("resources_state.json");
+        let persistence = ResourcesPersistence::new(state_path.clone());
+        persistence.flush().await;
+
+        let mut resources = Resources::new();
+        resources.register_state::<WebCitationCounter>();
+        resources
+            .get_or_default::<State<WebCitationCounter>>()
+            .counter = 1;
+        let acknowledgement = persistence
+            .enqueue_save_and_flush(resources.serialize())
+            .unwrap();
+
+        resources
+            .get_or_default::<State<WebCitationCounter>>()
+            .counter = 2;
+        persistence.save(&resources);
+
+        ResourcesPersistence::await_save_and_flush(acknowledgement)
+            .await
+            .unwrap();
+        persistence.flush().await;
+
+        let content = std::fs::read_to_string(state_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["state"]["grok_build.WebCitation"]["counter"], 2);
+    }
+
+    #[tokio::test]
+    async fn post_create_failure_cleans_temp_and_allows_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp_path = dir.path().join("resources_state.json.tmp");
+        std::fs::write(&tmp_path, "partial").unwrap();
+        let error = io::Error::other("publish failed");
+        let returned = ResourcesPersistence::cleanup_temp_on_error(&tmp_path, Err(error))
+            .await
+            .unwrap_err();
+        assert_eq!(returned.to_string(), "publish failed");
+        assert!(!tmp_path.exists());
+        std::fs::write(&tmp_path, "retry").unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_publish_supports_long_paths_and_legacy_directory() {
+        use windows::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        assert_eq!(
+            ResourcesPersistence::WINDOWS_MOVE_FLAGS.0,
+            MOVEFILE_REPLACE_EXISTING.0 | MOVEFILE_WRITE_THROUGH.0
+        );
+        let long = PathBuf::from(format!(r"C:\{}", "long\\".repeat(60)));
+        let wide = ResourcesPersistence::windows_extended_path(&long).unwrap();
+        assert!(wide.len() > 260 && String::from_utf16_lossy(&wide).starts_with(r"\\?\"));
+        let unc =
+            ResourcesPersistence::windows_extended_path(Path::new(r"\\server\share\state.json"))
+                .unwrap();
+        assert!(String::from_utf16_lossy(&unc).starts_with(r"\\?\UNC\"));
+        assert!(ResourcesPersistence::windows_extended_path(Path::new("bad\0path")).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("state.json");
+        std::fs::create_dir(&target).unwrap();
+        let temp = dir.path().join("state.json.tmp");
+        std::fs::write(&temp, "new").unwrap();
+        ResourcesPersistence::publish_durable(&target, &temp)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "new");
+    }
+
+    #[tokio::test]
+    async fn noop_save_and_flush_acknowledges_without_writing() {
+        ResourcesPersistence::noop()
+            .save_and_flush(serde_json::json!({"state": {}}))
+            .await
+            .unwrap();
     }
 }

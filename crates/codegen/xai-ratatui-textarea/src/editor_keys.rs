@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+<<<<<<< HEAD
 use super::{EditCommand, Movement, WordStyle};
 
 /// Resolve a key event into a cursor [`Movement`]; `None` for non-movement keys.
@@ -33,6 +34,12 @@ pub(crate) fn resolve_movement(event: &KeyEvent) -> Option<Movement> {
 pub fn classify_key_event(event: &KeyEvent) -> Option<EditCommand> {
     match event {
         // Some terminals encode Ctrl-B/Ctrl-F as bare C0 characters.
+=======
+use super::{EditCommand, WordStyle};
+
+pub fn classify_key_event(event: &KeyEvent) -> Option<EditCommand> {
+    match event {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         KeyEvent {
             code: KeyCode::Char('\u{0002}'),
             modifiers: KeyModifiers::NONE,
@@ -50,6 +57,7 @@ pub fn classify_key_event(event: &KeyEvent) -> Option<EditCommand> {
         } if *modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             Some(EditCommand::DeleteWordBackward(WordStyle::Small))
         }
+<<<<<<< HEAD
         // Kitty protocol loss can surface Backspace as raw BS or DEL; modifiers are unreliable.
         KeyEvent {
             code: KeyCode::Char('\u{0008}' | '\u{007f}'),
@@ -57,14 +65,28 @@ pub fn classify_key_event(event: &KeyEvent) -> Option<EditCommand> {
         } => Some(EditCommand::DeleteGraphemeBackward),
         KeyEvent {
             code: KeyCode::Backspace,
+=======
+        KeyEvent {
+            code: KeyCode::Backspace | KeyCode::Char('\u{0008}' | '\u{007f}'),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             modifiers,
             ..
         } => Some(backspace_command(*modifiers)),
         KeyEvent {
             code: KeyCode::Delete,
+<<<<<<< HEAD
             modifiers,
             ..
         } => Some(delete_command(*modifiers)),
+=======
+            modifiers: KeyModifiers::ALT | KeyModifiers::CONTROL,
+            ..
+        } => Some(EditCommand::DeleteWordForward(WordStyle::Small)),
+        KeyEvent {
+            code: KeyCode::Delete,
+            ..
+        } => Some(EditCommand::DeleteGraphemeForward),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         KeyEvent {
             code: KeyCode::Char('w'),
             modifiers: KeyModifiers::CONTROL,
@@ -74,6 +96,7 @@ pub fn classify_key_event(event: &KeyEvent) -> Option<EditCommand> {
         )),
         KeyEvent {
             code: KeyCode::Left,
+<<<<<<< HEAD
             modifiers,
             ..
         } if modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
@@ -86,6 +109,16 @@ pub fn classify_key_event(event: &KeyEvent) -> Option<EditCommand> {
         } if modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
             Some(EditCommand::MoveWordRight(WordStyle::Small))
         }
+=======
+            modifiers: KeyModifiers::ALT | KeyModifiers::CONTROL,
+            ..
+        } => Some(EditCommand::MoveWordLeft(WordStyle::Small)),
+        KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::ALT | KeyModifiers::CONTROL,
+            ..
+        } => Some(EditCommand::MoveWordRight(WordStyle::Small)),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::CONTROL,
@@ -148,11 +181,17 @@ pub fn classify_key_event(event: &KeyEvent) -> Option<EditCommand> {
         } => Some(EditCommand::DeleteGraphemeForward),
         KeyEvent {
             code: KeyCode::Char('d'),
+<<<<<<< HEAD
             modifiers,
             ..
         } if modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER) => {
             Some(EditCommand::DeleteWordForward(WordStyle::Small))
         }
+=======
+            modifiers: KeyModifiers::ALT | KeyModifiers::SUPER,
+            ..
+        } => Some(EditCommand::DeleteWordForward(WordStyle::Small)),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         KeyEvent {
             code: KeyCode::Char(character),
             modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
@@ -185,7 +224,10 @@ fn shifted_char(character: char) -> char {
 }
 
 fn backspace_command(modifiers: KeyModifiers) -> EditCommand {
+<<<<<<< HEAD
     // Backspace preserves exact historical chords; extra modifiers fall back to grapheme delete.
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     match modifiers {
         KeyModifiers::ALT | KeyModifiers::CONTROL => {
             EditCommand::DeleteWordBackward(WordStyle::Small)
@@ -194,6 +236,7 @@ fn backspace_command(modifiers: KeyModifiers) -> EditCommand {
         _ => EditCommand::DeleteGraphemeBackward,
     }
 }
+<<<<<<< HEAD
 
 fn delete_command(modifiers: KeyModifiers) -> EditCommand {
     // Delete accepts Shift in addition to a word modifier because enhanced protocols retain it.
@@ -203,3 +246,5 @@ fn delete_command(modifiers: KeyModifiers) -> EditCommand {
         EditCommand::DeleteGraphemeForward
     }
 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))

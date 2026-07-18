@@ -400,6 +400,11 @@ impl AgentView {
             cancel_trigger_hint: None,
             rewind_state: None,
             rewind_points: None,
+<<<<<<< HEAD
+=======
+            inline_edit: None,
+            pending_inline_resubmit: None,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             jump_state: None,
             timeline_rail: None,
             timeline_hover: None,
@@ -775,7 +780,11 @@ impl AgentView {
         if let Some(reload) = self.session_reload.take()
             && self.apply_reload_outcome(reload, false)
         {
+<<<<<<< HEAD
             crate::memory_release::release_retained_memory("reload-abort");
+=======
+            crate::memory_release::release_retained_memory_with("reload-abort");
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
     /// Finalize the reload window opened for `generation`.

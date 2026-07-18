@@ -134,6 +134,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
         Arc::new(timestamps::TimestampsCommand),
+        Arc::new(timeline::TimelineCommand),
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         // Screen-mode switchers: visible only in the opposite mode.
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::minimal()),
@@ -149,8 +150,13 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(announcements::AnnouncementsCommand),
         Arc::new(feedback::FeedbackCommand),
         Arc::new(privacy::PrivacyCommand),
+<<<<<<< HEAD
         Arc::new(doctor::DoctorCommand),
         Arc::new(import_claude::ImportClaudeCommand),
+=======
+        Arc::new(rewind::RewindCommand),
+        Arc::new(jump::JumpCommand),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         Arc::new(login::LoginCommand),
         Arc::new(logout::LogoutCommand),
         Arc::new(home::HomeCommand),

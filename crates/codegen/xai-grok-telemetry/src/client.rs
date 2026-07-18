@@ -363,6 +363,7 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
         }
     }
 }
+<<<<<<< HEAD
 /// Resolved mode of the initialized client, `None` when off.
 /// Lets a parent pass its mode to a spawned child that cannot re-resolve remote settings.
 pub fn current_mode() -> Option<TelemetryMode> {
@@ -372,6 +373,14 @@ pub fn current_mode() -> Option<TelemetryMode> {
 }
 /// Sync the user's Mixpanel profile once per init. Fire-and-forget. Only runs in [`TelemetryMode::Enabled`].
 /// SessionMetrics mode may emit lifecycle events via [`track`], but must not write Mixpanel people profiles (`engage`).
+=======
+
+/// Sync the user's Mixpanel profile once per init. Fire-and-forget.
+///
+/// Only runs in [`TelemetryMode::Enabled`]. SessionMetrics mode may emit
+/// lifecycle events via [`track`], but must not write Mixpanel people
+/// profiles (`engage`).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn sync_profile() {
     let lock = TELEMETRY_CLIENT.get_or_init(|| Mutex::new(None));
     let client = {
@@ -381,9 +390,19 @@ pub fn sync_profile() {
             None => return,
         }
     };
+<<<<<<< HEAD
     if !client.mode.is_enabled() {
         return;
     }
+=======
+
+    // The single profile-sync gate: reads the installed client's mode, so every
+    // caller (and any init race) resolves against what was actually installed.
+    if !client.mode.is_enabled() {
+        return;
+    }
+
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let Some(mixpanel) = client.mixpanel.clone() else {
         return;
     };
@@ -498,13 +517,28 @@ mod tests {
     fn event_value_strips_workspace_prefix() {
         assert_eq!(event_value("grok-workspace-turn"), "turn");
     }
+<<<<<<< HEAD
     /// SessionMetrics must not attempt Mixpanel profile engage; sync_profile is a no-op unless mode is fully Enabled.
     #[test]
     fn sync_profile_is_noop_in_session_metrics_mode() {
+=======
+
+    /// SessionMetrics must not attempt Mixpanel profile engage — sync_profile
+    /// is a no-op unless mode is fully Enabled.
+    #[test]
+    fn sync_profile_is_noop_in_session_metrics_mode() {
+        // No tokio runtime here BY DESIGN: if the gate wrongly falls through,
+        // sync_profile's tokio::spawn panics and fails this test. Converting
+        // this to #[tokio::test] would silently turn it into theater.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert!(
             tokio::runtime::Handle::try_current().is_err(),
             "this test must run without a tokio runtime"
         );
+<<<<<<< HEAD
+=======
+        // Clear the global client even if an assert below panics.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         struct ClearClient;
         impl Drop for ClearClient {
             fn drop(&mut self) {
@@ -513,6 +547,12 @@ mod tests {
             }
         }
         let _clear = ClearClient;
+<<<<<<< HEAD
+=======
+
+        // Mixpanel configured, but no events endpoint: the global must never
+        // carry a live funnel out of this test.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let cfg = TelemetryConfig {
             mixpanel_enabled: true,
             mixpanel_token: Some("test-token".into()),
@@ -531,6 +571,10 @@ mod tests {
             None,
             reqwest::Client::new(),
         );
+<<<<<<< HEAD
+=======
+        // Explicit call must no-op too (init already invoked it once).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         sync_profile();
         assert!(
             is_session_metrics_enabled(),
@@ -538,7 +582,13 @@ mod tests {
         );
         assert!(!is_enabled(), "product analytics must stay off");
     }
+<<<<<<< HEAD
     /// Names without a known emitter prefix pass through unchanged.
+=======
+
+    /// Names without a known emitter prefix pass through unchanged (preserves
+    /// the old `unwrap_or(event_name)` fallback).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn event_value_passes_through_unprefixed() {
         assert_eq!(event_value("turn"), "turn");

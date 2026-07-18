@@ -22,7 +22,11 @@ use crate::app::dispatch::ctx::{
 };
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{defer_to_open_reload_window, supersede_open_reload_window};
+<<<<<<< HEAD
 use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
+=======
+use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip_after_drain};
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::app::dispatch::router::dispatch;
 use crate::app::dispatch::status::notify_session_ready;
 use crate::app::dispatch::transcript::extensions_modal_tab_fetches;
@@ -1361,9 +1365,14 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
+<<<<<<< HEAD
         crate::memory_release::release_retained_memory("session-load-replay");
         note_peek_page_flip(app, agent_id, page_flip_entry);
         identity_rebind.apply(app);
+=======
+        crate::memory_release::release_retained_memory_with("session-load-replay");
+        note_peek_page_flip_after_drain(app, agent_id);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         return effects;
     }
     vec![]

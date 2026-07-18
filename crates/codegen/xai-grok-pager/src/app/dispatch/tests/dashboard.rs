@@ -7843,7 +7843,11 @@ fn dashboard_peek_auto_opens_for_selected_row() {
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
     open_dashboard(&mut app);
+<<<<<<< HEAD
     let area = Rect::new(0, 0, 80, 40);
+=======
+    let area = Rect::new(0, 0, 80, 40); // list-first: list floor 12 + peek min 8 + chrome
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let reg = crate::actions::ActionRegistry::defaults();
     app.dashboard
         .as_mut()
@@ -7901,6 +7905,10 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
     use ratatui::layout::Rect;
     let reg = crate::actions::ActionRegistry::defaults();
     let area = Rect::new(0, 0, 80, 40);
+<<<<<<< HEAD
+=======
+
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let box_height_for = |reply_text: &str| -> u16 {
         let mut app = test_app_with_agent();
         mark_agent_nonempty(&mut app, AgentId(0));

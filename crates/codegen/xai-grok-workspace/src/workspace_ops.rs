@@ -996,6 +996,7 @@ fn hook_registry_to_wire(
         serde_json::to_value(registry).map_err(|e| WorkspaceError::HubError(e.to_string()))?;
     serde_json::from_value(value).map_err(|e| WorkspaceError::HubError(e.to_string()))
 }
+<<<<<<< HEAD
 /// Inverse of [`hook_registry_to_wire`].
 /// Unknown event keys (a newer peer) are dropped so one can't fail the whole decode, and matchers are recompiled fail-closed after decoding.
 fn wire_to_hook_registry(
@@ -1026,6 +1027,15 @@ fn wire_to_hook_registry(
     };
     let value =
         serde_json::to_value(&known).map_err(|e| WorkspaceError::HubError(e.to_string()))?;
+=======
+/// Inverse of [`hook_registry_to_wire`]. Rebuilds compiled matchers via
+/// [`HookRegistry::recompile_matchers`] so invalid patterns fail closed
+/// (match nothing) rather than widening to match-all after the wire hop.
+fn wire_to_hook_registry(
+    wire: &HookRegistryWire,
+) -> WorkspaceResult<xai_grok_hooks::discovery::HookRegistry> {
+    let value = serde_json::to_value(wire).map_err(|e| WorkspaceError::HubError(e.to_string()))?;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let mut registry: xai_grok_hooks::discovery::HookRegistry =
         serde_json::from_value(value).map_err(|e| WorkspaceError::HubError(e.to_string()))?;
     registry.recompile_matchers();

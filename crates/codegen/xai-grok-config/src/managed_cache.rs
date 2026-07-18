@@ -8,8 +8,13 @@ use std::path::Path;
 
 use crate::paths::user_grok_home;
 
+<<<<<<< HEAD
 /// Sync marker; staleness keys on this, not mtimes.
 /// Public so removal code can name it apart from the policy artifacts (removed last).
+=======
+/// Sync marker; staleness keys on this, not mtimes. Public so removal code can name it
+/// apart from the policy artifacts (removed last).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub const MANAGED_CONFIG_CACHE_FILE: &str = "managed_config_cache.json";
 
 /// The on-disk marker: unsigned, detects only deletion or identity change, not in-place edits (see the module doc).
@@ -30,6 +35,7 @@ struct ManagedConfigCache {
     /// Served opt-in (`fail_closed = true`); `default` false so a pre-upgrade or un-opted marker never fails closed.
     #[serde(default)]
     fail_closed: bool,
+<<<<<<< HEAD
     /// Local-clock high-water mark.
     /// At-rest signed checks use `max(now, floor)` so a rolled-back clock cannot un-expire a policy.
     /// As forgeable as the rest of the marker: defeats a passive clock change, not a file edit.
@@ -37,6 +43,17 @@ struct ManagedConfigCache {
     rollback_floor: u64,
     /// Fields written by newer binaries, preserved when this binary rewrites only the floor.
     /// A full sync rewrites the marker from scratch.
+=======
+    /// Local-clock high-water mark. At-rest signed checks use `max(now, floor)` so a
+    /// rolled-back clock cannot un-expire a policy. Session starts and the background
+    /// tick raise it; a successful fetch resets it to `now` (reconnect heals a
+    /// forward-clock-inflated floor). As forgeable as the rest of the marker — defeats
+    /// a passive clock change, not a file edit.
+    #[serde(default)]
+    rollback_floor: u64,
+    /// Fields written by newer binaries, preserved when this binary rewrites only the
+    /// floor. A full sync rewrites the marker from scratch.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -107,16 +124,30 @@ pub fn mark_managed_config_synced_at(home: &Path, marker: SyncMarker<'_>) {
         .ok();
     let cache = ManagedConfigCache {
         synced_at,
+<<<<<<< HEAD
         // Blank becomes None: the marker must never record "unknown" as a tenant
         principal: normalize_identity(principal),
         // What THIS sync served (not what is on disk); an identity switch already evicted the prior artifacts
+=======
+        // Blank → None: marker must never record "unknown" as a tenant.
+        principal: normalize_identity(principal),
+        // What THIS sync served (not on-disk); switch already evicted priors.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         had_managed_config,
         had_requirements,
         key_fingerprint: normalize_identity(key_fingerprint),
         fail_closed,
+<<<<<<< HEAD
         // Reset (not max): reconnect must clear an inflated floor
         // Residual risk: fetch verify is unclamped and managed_config_url is user-writable
         // A rolled-back clock plus a still-valid replayed envelope can reinstate a superseded policy and reset the floor
+=======
+        // Reset (not max): reconnect must clear an inflated floor. Residual: fetch
+        // verify is unclamped and managed_config_url is user-writable, so a rolled-back
+        // clock plus a still-valid replayed envelope can reinstate a superseded policy
+        // and reset the floor; that path does not self-heal online. A server-side
+        // policy-version counter is the eventual close.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         rollback_floor: synced_at.unwrap_or(0),
         extra: Default::default(),
     };
@@ -126,13 +157,22 @@ pub fn mark_managed_config_synced_at(home: &Path, marker: SyncMarker<'_>) {
     }
 }
 
+<<<<<<< HEAD
 /// Raise an existing marker's floor to the wall clock; in a dark build this is a no-op.
 /// Caller holds the managed-config lock so this serializes with the fetch-path floor reset.
+=======
+/// Raise an existing marker's floor to the wall clock. Dark build → no-op. Caller holds
+/// the managed-config lock so this serializes with the fetch-path floor reset.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn bump_rollback_floor(home: &Path) {
     bump_rollback_floor_with_now(home, crate::signed_policy::now_unix());
 }
 
+<<<<<<< HEAD
 /// [`bump_rollback_floor`] with an injected timestamp, for tests.
+=======
+/// Test seam for [`bump_rollback_floor`] with an injected timestamp.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[doc(hidden)]
 pub fn bump_rollback_floor_with_now(home: &Path, now: u64) {
     if !crate::signed_policy::verification_active() {
@@ -141,7 +181,11 @@ pub fn bump_rollback_floor_with_now(home: &Path, now: u64) {
     raise_rollback_floor(home, now);
 }
 
+<<<<<<< HEAD
 /// `max(prior, now)`: never lowers, never creates a marker (purge must stay purged).
+=======
+/// `max(prior, now)` — never lowers, never creates a marker (purge must stay purged).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn raise_rollback_floor(home: &Path, now: u64) {
     let Some(mut cache) = read_managed_config_cache(home) else {
         return;
@@ -157,12 +201,16 @@ fn raise_rollback_floor(home: &Path, now: u64) {
     }
 }
 
+<<<<<<< HEAD
 /// The marker's last successful apply time (unix seconds), if any.
 pub fn managed_config_synced_at(home: &Path) -> Option<u64> {
     read_managed_config_cache(home)?.synced_at
 }
 
 /// Atomic write of the marker; best-effort (failure is logged, never returned).
+=======
+/// Atomic write of the marker; best-effort (failure is logged, never surfaced).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn write_marker_atomically(home: &Path, json: &str) {
     if let Err(e) =
         crate::fs_atomic::write_atomically(&home.join(MANAGED_CONFIG_CACHE_FILE), json, None)
@@ -214,7 +262,12 @@ fn read_managed_config_cache(home: &Path) -> Option<ManagedConfigCache> {
 }
 
 /// Confirmed identity switch vs the marker (both sides of a dimension known and differing).
+<<<<<<< HEAD
 /// A missing marker, a blank value, or a pre-upgrade marker never counts.
+=======
+/// Missing marker / blank / pre-upgrade never counts. Callers evict prior artifacts on true.
+/// Takes the apply-lock holder's `home` (same dir as the lock).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn managed_config_identity_changed_at(
     home: &Path,
     new_principal: Option<&str>,
@@ -225,6 +278,43 @@ pub fn managed_config_identity_changed_at(
     };
     confirmed_switch(cache.principal.as_deref(), new_principal).is_some()
         || confirmed_switch(cache.key_fingerprint.as_deref(), new_key_fingerprint).is_some()
+<<<<<<< HEAD
+=======
+}
+
+/// Present non-blank value, else `None` (blank/whitespace is "unknown", not a tenant). Untrimmed.
+fn known(value: Option<&str>) -> Option<&str> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
+/// [`known`] then trim — the one normalization for storing or deriving an identity
+/// (whitespace is not identity). Shared with the shell's identity derivation.
+pub fn normalize_identity(value: Option<&str>) -> Option<String> {
+    known(value).map(|v| v.trim().to_owned())
+}
+
+/// Both sides known and differing after trim (older markers may be untrimmed). Returns recorded value.
+fn confirmed_switch<'a>(recorded: Option<&'a str>, current: Option<&str>) -> Option<&'a str> {
+    match (known(recorded), known(current)) {
+        (Some(old), Some(new)) if old.trim() != new.trim() => Some(old),
+        _ => None,
+    }
+}
+
+/// Offline tenant-purge detector: confirmed team switch vs marker → evicted principal.
+/// Key-scoped markers never confirm (key owns the machine's policy, not the team).
+pub fn confirmed_team_switch(new_team_id: &str) -> Option<String> {
+    user_grok_home().and_then(|home| confirmed_team_switch_at(&home, new_team_id))
+}
+
+/// [`confirmed_team_switch`] for an explicit `home` (purge-lock holder: same dir as delete).
+pub fn confirmed_team_switch_at(home: &Path, new_team_id: &str) -> Option<String> {
+    let cache = read_managed_config_cache(home)?;
+    if known(cache.key_fingerprint.as_deref()).is_some() {
+        return None;
+    }
+    confirmed_switch(cache.principal.as_deref(), Some(new_team_id)).map(str::to_owned)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 /// Present non-blank value, else `None` (blank/whitespace is "unknown", not a tenant); the value is returned untrimmed.
@@ -265,10 +355,15 @@ pub fn confirmed_team_switch_at(home: &Path, new_team_id: &str) -> Option<String
 /// Only served artifacts count, so a config-less principal (or legacy marker) isn't misread as stale.
 /// Detects deletion, not edits.
 fn cache_missing_required_artifact(cache: &ManagedConfigCache, home: &Path) -> bool {
+<<<<<<< HEAD
     use crate::signed_policy::policy_file_has_content;
     (cache.had_requirements && !policy_file_has_content(home, crate::loader::REQUIREMENTS_FILENAME))
         || (cache.had_managed_config
             && !policy_file_has_content(home, crate::loader::MANAGED_CONFIG_FILENAME))
+=======
+    (cache.had_requirements && !home.join(crate::loader::REQUIREMENTS_FILENAME).exists())
+        || (cache.had_managed_config && !home.join(crate::loader::MANAGED_CONFIG_FILENAME).exists())
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 /// Whether the cached principal differs from the team serving now, checking the team dimension only.
@@ -280,18 +375,31 @@ fn cache_identity_mismatch(cache: &ManagedConfigCache, identity: &ServingIdentit
             known(cache.principal.as_deref()),
             known(Some(team_id.as_str())),
         ) {
+<<<<<<< HEAD
             // Both blank: no team to compare
             (None, None) => false,
             (Some(a), Some(b)) => a.trim() != b.trim(),
             // One-sided: treat as mismatch (first install or a cleared principal field)
+=======
+            // Both blank → no team to compare.
+            (None, None) => false,
+            // Both known → trim-compare.
+            (Some(a), Some(b)) => a.trim() != b.trim(),
+            // One-sided: treat as mismatch (first install / cleared principal field).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             _ => true,
         },
         ServingIdentity::DeploymentKey { .. } | ServingIdentity::None => false,
     }
 }
 
+<<<<<<< HEAD
 /// Whether the configured deployment key differs from the cache's, by one-way fingerprint (never the raw key), the only identity verifiable offline.
 /// A pre-upgrade marker (no fingerprint) never fires; only a *changed* key does.
+=======
+/// Whether the configured deployment key differs from the cache's, by one-way fingerprint (never the raw key) —
+/// the only identity verifiable offline. A pre-upgrade marker (no fingerprint) never fires; only a *changed* key.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 /// Trim-aware; both sides must be known (unlike the team principal path).
 fn cache_key_fingerprint_mismatch(cache: &ManagedConfigCache, identity: &ServingIdentity) -> bool {
     match identity {
@@ -384,14 +492,26 @@ fn expected_signed_principal<'a>(
     serving_team_id(identity).or_else(|| cache.and_then(|c| c.principal.as_deref()))
 }
 
+<<<<<<< HEAD
 /// At-rest signed checks: `max(wall clock, floor)`.
 /// Fetch-time verify stays unclamped so a fresh envelope can reset an inflated floor (see shell `verify_signed_envelope`).
+=======
+/// At-rest signed checks: `max(wall clock, floor)`. Fetch-time verify stays unclamped
+/// so a fresh envelope can reset an inflated floor (see shell `verify_signed_envelope`).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn effective_now(cache: Option<&ManagedConfigCache>) -> u64 {
     crate::signed_policy::now_unix().max(cache.map_or(0, |c| c.rollback_floor))
 }
 
+<<<<<<< HEAD
 /// A signing-enabled build refetches a signed copy over a legacy unsigned, edited, forged, or foreign-bound cache.
 /// These are the states the gate refuses on, so refusal always comes with a pending self-heal.
+=======
+/// A signing-enabled build over a legacy unsigned / edited / forged or foreign-bound
+/// cache refetches a signed copy; likewise when an imposing claim has no policy
+/// sidecar satisfying it — the states the gate refuses on, so refusal always comes
+/// with a pending self-heal. Dark build or no policy on disk → false.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn signed_cache_needs_refetch(
     home: &Path,
     cache: Option<&ManagedConfigCache>,
@@ -399,7 +519,11 @@ fn signed_cache_needs_refetch(
 ) -> bool {
     let expected_principal = expected_signed_principal(cache, identity);
     let now = effective_now(cache);
+<<<<<<< HEAD
     // Verdict match first: Trusted short-circuits the claim's read and verify
+=======
+    // Verdict match first: Trusted short-circuits the claim's read + verify.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     crate::signed_policy::cloud_cache_signature_invalid(home, expected_principal, now)
         || (matches!(
             crate::signed_policy::signed_cache_compromised(home, expected_principal, now),
@@ -438,8 +562,14 @@ pub(crate) fn managed_policy_compromised_for_at(
     let now = effective_now(cache.as_ref());
     let signed_verdict =
         crate::signed_policy::signed_cache_compromised(home, expected_principal, now);
+<<<<<<< HEAD
     // The signature binds a deployment_id, not the local deploy key, so a Trusted verdict can't attest the configured key
     // Pass the fingerprint mismatch through so it gates on every path
+=======
+    // The signature binds a deployment_id, not the local deploy key, so a Trusted verdict
+    // can't attest the configured key — pass the fingerprint mismatch through so it gates
+    // on every path.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let key_fingerprint_mismatch = cache
         .as_ref()
         .is_some_and(|c| cache_key_fingerprint_mismatch(c, identity));
@@ -453,9 +583,19 @@ pub(crate) fn managed_policy_compromised_for_at(
     )
 }
 
+<<<<<<< HEAD
 /// Combine the signed verdict with the best-effort marker fallback, one row per verdict.
 /// `claim_imposes` ([`crate::signed_policy::managed_identity_claim_imposes`]) is consulted lazily, only on `NoAuthenticSidecar`.
 /// Stripping the policy sidecar (even with a forged marker) cannot downgrade a claimed fail-closed principal.
+=======
+/// Combine the signed verdict with the best-effort marker fallback — one row per
+/// verdict; each row's reasoning lives on its [`SignedVerdict`] variant doc. Split
+/// out so the signed↔marker integration is unit-testable without a compiled-in key.
+/// `claim_imposes` ([`crate::signed_policy::managed_identity_claim_imposes`]) is
+/// consulted lazily, only on `NoAuthenticSidecar`, and outranks the forgeable-marker
+/// fallbacks there — stripping the policy sidecar (even with a forged marker) cannot
+/// downgrade a claimed fail-closed principal. A read blip stays lenient.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn managed_policy_compromised_decision(
     signed_verdict: crate::signed_policy::SignedVerdict,
     claim_imposes: impl FnOnce() -> bool,
@@ -477,6 +617,7 @@ fn managed_policy_compromised_decision(
         required
     };
     match signed_verdict {
+<<<<<<< HEAD
         SignedVerdict::Compromised => Some(ManagedPolicyCompromise::SignatureInvalid),
         SignedVerdict::Trusted if key_fingerprint_mismatch => {
             marker_compromise(cache, home, identity)
@@ -484,10 +625,19 @@ fn managed_policy_compromised_decision(
         SignedVerdict::Trusted => None,
         SignedVerdict::NoAuthenticSidecar => {
             if claim_imposes() {
+=======
+        SignedVerdict::Compromised => true,
+        // Trusted clears the gate — except the deploy-key fingerprint, which the signature can't attest.
+        SignedVerdict::Trusted => key_fingerprint_mismatch && marker_compromised(),
+        SignedVerdict::NoAuthenticSidecar => {
+            let refused = claim_imposes();
+            if refused {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 tracing::warn!(
                     "managed policy fail-closed gate: refusing session — the signed is-managed \
                      claim requires an authentic policy sidecar and none is present"
                 );
+<<<<<<< HEAD
                 return Some(ManagedPolicyCompromise::SignatureMissing);
             }
             if sidecar_required_but_missing() {
@@ -530,6 +680,22 @@ const MAX_FUTURE_SYNCED_AT_SKEW: std::time::Duration = std::time::Duration::from
 /// Stale when never synced, past the threshold, identity differs, or a served artifact is now missing.
 /// In keyed builds, also stale when the signed cache no longer verifies.
 /// No home means nothing to refresh into, so not stale.
+=======
+            }
+            refused || sidecar_required_but_missing() || marker_compromised()
+        }
+        SignedVerdict::SidecarUnreadable => marker_compromised(),
+        SignedVerdict::Inactive => marker_compromised(),
+    }
+}
+
+/// Same-machine marker: more than a few minutes of future skew is not genuine.
+const MAX_FUTURE_SYNCED_AT_SKEW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Stale when never synced, past the threshold, identity differs, a served artifact is now missing,
+/// or (keyed builds) the signed cache no longer verifies. No home → nothing to refresh into → not
+/// stale. Reads the marker once.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn managed_config_stale_at(home: Option<&Path>, identity: &ServingIdentity) -> bool {
     let Some(home) = home else {
         return false;
@@ -547,8 +713,13 @@ fn managed_config_stale_at(home: Option<&Path>, identity: &ServingIdentity) -> b
     }
     match cache.synced_at {
         Some(secs) => {
+<<<<<<< HEAD
             // Age is measured against `effective_now` (max of wall clock and floor)
             // Repeated small rollbacks or a halted clock cannot keep age under the threshold forever
+=======
+            // Against `effective_now` (max of wall clock and floor) so repeated small
+            // rollbacks / a halted clock cannot keep age under the threshold forever.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             // u64 seconds avoid SystemTime overflow panics for out-of-range timestamps.
             let now = effective_now(Some(&cache));
             let age = now.saturating_sub(secs);

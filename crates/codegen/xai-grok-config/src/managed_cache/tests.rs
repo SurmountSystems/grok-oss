@@ -23,6 +23,7 @@ fn signed_verdict_overrides_marker_both_ways() {
         fail_closed: true,
         ..Default::default()
     };
+<<<<<<< HEAD
 
     // Signed says NOT compromised, so it proceeds, overriding the marker's tamper signal
     assert_eq!(
@@ -38,11 +39,24 @@ fn signed_verdict_overrides_marker_both_ways() {
     );
 
     // Signed says compromised, so it refuses, though this intact marker alone would pass
+=======
+    // Signed says NOT compromised → proceed, overriding the marker's tamper signal.
+    assert!(!managed_policy_compromised_decision(
+        SignedVerdict::Trusted,
+        || false,
+        false,
+        Some(&cache),
+        home,
+        &team("team-007")
+    ));
+    // Signed says compromised → refuse, though this intact marker alone would pass.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let intact = ManagedConfigCache {
         principal: Some("team-007".into()),
         fail_closed: true,
         ..Default::default()
     };
+<<<<<<< HEAD
     assert_eq!(
         Some(ManagedPolicyCompromise::SignatureInvalid),
         managed_policy_compromised_decision(
@@ -54,6 +68,16 @@ fn signed_verdict_overrides_marker_both_ways() {
             &team("team-007")
         )
     );
+=======
+    assert!(managed_policy_compromised_decision(
+        SignedVerdict::Compromised,
+        || false,
+        false,
+        Some(&intact),
+        home,
+        &team("team-007")
+    ));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 /// `Trusted` must NOT short-circuit past the deploy-key fingerprint check (the signature can't attest the local key).
@@ -70,6 +94,7 @@ fn signed_verdict_does_not_skip_deploy_key_fingerprint() {
         fail_closed: true,
         ..Default::default()
     };
+<<<<<<< HEAD
 
     // Trusted with a fingerprint mismatch forces the marker path, which refuses an opted-in cache
     assert_eq!(
@@ -129,12 +154,35 @@ fn signed_verdict_does_not_skip_deploy_key_fingerprint() {
     );
 
     // An opted-OUT deploy host with a key change is not refused; it never opted into fail-closed
+=======
+    // Trusted + fingerprint mismatch forces the marker path, which refuses an
+    // opted-in cache.
+    assert!(managed_policy_compromised_decision(
+        SignedVerdict::Trusted,
+        || false,
+        true, // deploy-key fingerprint mismatch
+        Some(&opted_in),
+        home,
+        &dkey("fp-local")
+    ));
+    // A matching fingerprint trusts the signed verdict as before.
+    assert!(!managed_policy_compromised_decision(
+        SignedVerdict::Trusted,
+        || false,
+        false,
+        Some(&opted_in),
+        home,
+        &dkey("fp-cache")
+    ));
+    // Opted-OUT deploy host with a key change → not refused (preserves non-fail-closed behavior).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let opted_out = ManagedConfigCache {
         principal: Some("dep-1".into()),
         key_fingerprint: Some("fp-cache".into()),
         fail_closed: false,
         ..Default::default()
     };
+<<<<<<< HEAD
     assert_eq!(
         None,
         managed_policy_compromised_decision(
@@ -159,6 +207,26 @@ fn signed_verdict_does_not_skip_deploy_key_fingerprint() {
             &dkey("fp-local")
         )
     );
+=======
+    assert!(!managed_policy_compromised_decision(
+        SignedVerdict::Trusted,
+        || false,
+        true,
+        Some(&opted_out),
+        home,
+        &dkey("fp-local")
+    ));
+    // Compromised refuses EVEN with a fingerprint mismatch — never falls through to
+    // this opted-OUT marker.
+    assert!(managed_policy_compromised_decision(
+        SignedVerdict::Compromised,
+        || false,
+        true,
+        Some(&opted_out),
+        home,
+        &dkey("fp-local")
+    ));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 /// A sidecar read BLIP is not absence: unlike NoAuthenticSidecar it never refuses on its own; the marker decision stands.
@@ -190,6 +258,7 @@ fn unreadable_sidecar_falls_back_to_marker() {
 
     // Marker-grade tamper (served artifact missing on disk) still refuses.
     std::fs::remove_file(home.join("requirements.toml")).unwrap();
+<<<<<<< HEAD
     assert_eq!(
         Some(ManagedPolicyCompromise::PolicyFileMissing),
         managed_policy_compromised_decision(
@@ -201,6 +270,16 @@ fn unreadable_sidecar_falls_back_to_marker() {
             &team("team-007")
         )
     );
+=======
+    assert!(managed_policy_compromised_decision(
+        SignedVerdict::SidecarUnreadable,
+        || false,
+        false,
+        Some(&served_fail_closed),
+        home,
+        &team("team-007")
+    ));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 /// NoAuthenticSidecar under a fail-closed marker that recorded served policy refuses.
@@ -238,6 +317,7 @@ fn missing_sidecar_under_fail_closed_marker_refuses() {
         fail_closed: true,
         ..Default::default()
     };
+<<<<<<< HEAD
     assert_eq!(
         None,
         managed_policy_compromised_decision(
@@ -251,13 +331,40 @@ fn missing_sidecar_under_fail_closed_marker_refuses() {
     );
 
     // Never opted in, so the marker decision stands
+=======
+    assert!(!managed_policy_compromised_decision(
+        SignedVerdict::NoAuthenticSidecar,
+        || false,
+        false,
+        Some(&served_nothing),
+        home,
+        &team("team-007")
+    ));
+    // Never opted in → marker decision (allows).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let opted_out = ManagedConfigCache {
         principal: Some("team-007".into()),
         had_requirements: true,
         fail_closed: false,
         ..Default::default()
     };
+<<<<<<< HEAD
     assert_eq!(
+=======
+    assert!(!managed_policy_compromised_decision(
+        SignedVerdict::NoAuthenticSidecar,
+        || false,
+        false,
+        Some(&opted_out),
+        home,
+        &team("team-007")
+    ));
+    // No marker at all → nothing to enforce.
+    assert!(!managed_policy_compromised_decision(
+        SignedVerdict::NoAuthenticSidecar,
+        || false,
+        false,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         None,
         managed_policy_compromised_decision(
             SignedVerdict::NoAuthenticSidecar,
@@ -297,6 +404,7 @@ fn inactive_verdict_falls_through_to_marker() {
         fail_closed: true,
         ..Default::default()
     };
+<<<<<<< HEAD
     assert_eq!(
         Some(ManagedPolicyCompromise::PolicyFileMissing),
         managed_policy_compromised_decision(
@@ -310,13 +418,40 @@ fn inactive_verdict_falls_through_to_marker() {
     );
 
     // An opted-OUT marker never refuses, even with a missing artifact
+=======
+    assert!(managed_policy_compromised_decision(
+        SignedVerdict::Inactive,
+        || false,
+        false,
+        Some(&missing),
+        home,
+        &team("team-007")
+    ));
+    // Opted-OUT marker → never refuses, even with a missing artifact.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let optout = ManagedConfigCache {
         principal: Some("team-007".into()),
         had_requirements: true,
         fail_closed: false,
         ..Default::default()
     };
+<<<<<<< HEAD
     assert_eq!(
+=======
+    assert!(!managed_policy_compromised_decision(
+        SignedVerdict::Inactive,
+        || false,
+        false,
+        Some(&optout),
+        home,
+        &team("team-007")
+    ));
+    // No marker at all → nothing to enforce.
+    assert!(!managed_policy_compromised_decision(
+        SignedVerdict::Inactive,
+        || false,
+        false,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         None,
         managed_policy_compromised_decision(
             SignedVerdict::Inactive,
@@ -1259,8 +1394,57 @@ fn confirmed_team_switch_scopes_to_marker() {
     assert_eq!(confirmed_team_switch_at(home, "team-b"), None);
 }
 
+<<<<<<< HEAD
 /// Blank identity values normalize to `None` at the marker WRITE, so no reader can treat "unknown" as a distinct tenant.
 /// The detectors' blank guards stay as defense in depth.
+=======
+/// The offline purge detector: fires only on a marker-recorded TEAM switch, returning the
+/// evicted principal; a key-scoped marker means the key owns the machine's policy, so a
+/// team mismatch (even with live config unreadable/blipping) must never confirm.
+#[test]
+fn confirmed_team_switch_scopes_to_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+
+    // No marker → no switch (first run / signed-out).
+    assert_eq!(confirmed_team_switch_at(home, "team-b"), None);
+
+    // Team marker A → B confirms and reports the evicted principal; same team doesn't.
+    mark_managed_config_synced_at(
+        home,
+        SyncMarker {
+            principal: Some("team-a"),
+            had_managed_config: true,
+            had_requirements: true,
+            key_fingerprint: None,
+            fail_closed: true,
+        },
+    );
+    assert_eq!(
+        confirmed_team_switch_at(home, "team-b").as_deref(),
+        Some("team-a")
+    );
+    assert_eq!(confirmed_team_switch_at(home, "team-a"), None);
+
+    // Key-scoped marker (dk-synced): a differing team NEVER confirms — the regression
+    // shape is a dk machine with a team user signed in and config resolution blipping.
+    mark_managed_config_synced_at(
+        home,
+        SyncMarker {
+            principal: Some("dk-deployment-1"),
+            had_managed_config: true,
+            had_requirements: true,
+            key_fingerprint: Some("fp-1"),
+            fail_closed: true,
+        },
+    );
+    assert_eq!(confirmed_team_switch_at(home, "team-b"), None);
+}
+
+/// Blank identity values normalize to `None` at the marker WRITE, so no reader can
+/// treat "unknown" as a distinct tenant (the detectors' blank guards stay as
+/// defense in depth).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn marker_write_normalizes_blank_identities() {
     let dir = tempfile::tempdir().unwrap();
@@ -1288,7 +1472,12 @@ fn marker_write_normalizes_blank_identities() {
     assert_eq!(confirmed_team_switch_at(home, "team-b"), None);
 }
 
+<<<<<<< HEAD
 /// Identity values are stored TRIMMED at the marker write, so a marker can never differ from a live value by surrounding whitespace alone.
+=======
+/// Identity values are stored TRIMMED at the marker write, so a marker can never
+/// differ from a live value by surrounding whitespace alone.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn marker_write_trims_identity_values() {
     let dir = tempfile::tempdir().unwrap();
@@ -1308,8 +1497,13 @@ fn marker_write_trims_identity_values() {
     assert_eq!(cache.key_fingerprint.as_deref(), Some("fp-1"));
 }
 
+<<<<<<< HEAD
 /// The blank and trim rules live only here ([`known`] and `confirmed_switch`).
 /// A switch needs both sides known and differing on their trimmed forms, else `None`.
+=======
+/// The one home of the blank + trim rules ([`known`] + `confirmed_switch`): both sides
+/// known and differing on their trimmed forms, else `None`.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn confirmed_switch_requires_two_known_differing_sides() {
     assert_eq!(confirmed_switch(Some("a"), Some("b")), Some("a"));
@@ -1319,17 +1513,30 @@ fn confirmed_switch_requires_two_known_differing_sides() {
     assert_eq!(confirmed_switch(None, Some("b")), None);
     assert_eq!(confirmed_switch(Some("a"), None), None);
     assert_eq!(confirmed_switch(None, None), None);
+<<<<<<< HEAD
     // Whitespace is not identity: a marker written untrimmed by an older build must not read as a tenant switch against the same (trimmed) value...
     assert_eq!(confirmed_switch(Some("team-a "), Some("team-a")), None);
     assert_eq!(confirmed_switch(Some("team-a"), Some("team-a ")), None);
     // ...while genuinely different trimmed values still switch (the recorded value is returned verbatim for logging)
+=======
+    // Whitespace is not identity: a marker written untrimmed by an older build must
+    // not read as a tenant switch against the same (trimmed) value...
+    assert_eq!(confirmed_switch(Some("team-a "), Some("team-a")), None);
+    assert_eq!(confirmed_switch(Some("team-a"), Some("team-a ")), None);
+    // ...while genuinely different trimmed values still switch (the recorded value
+    // is returned verbatim for logging).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     assert_eq!(
         confirmed_switch(Some(" team-a "), Some("team-b")),
         Some(" team-a ")
     );
 }
 
+<<<<<<< HEAD
 /// The staleness identity compare is trim-aware (a sibling of the trim at the marker write).
+=======
+/// Staleness identity compare is trim-aware (sibling of marker write normalize).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn cache_identity_mismatch_ignores_whitespace_only_diffs() {
     let cache = ManagedConfigCache {
@@ -1397,6 +1604,7 @@ fn floor_bump_preserves_unknown_marker_fields() {
     raise_rollback_floor(home, 1_700_000_100);
     let marker = std::fs::read_to_string(home.join(MANAGED_CONFIG_CACHE_FILE)).unwrap();
     let v: serde_json::Value = serde_json::from_str(&marker).unwrap();
+<<<<<<< HEAD
     assert_eq!(
         v.get("rollback_floor").and_then(serde_json::Value::as_u64),
         Some(1_700_000_100)
@@ -1404,6 +1612,12 @@ fn floor_bump_preserves_unknown_marker_fields() {
     assert_eq!(
         v.get("from_the_future"),
         Some(&serde_json::Value::Bool(true)),
+=======
+    assert_eq!(v["rollback_floor"].as_u64(), Some(1_700_000_100));
+    assert_eq!(
+        v["from_the_future"],
+        serde_json::Value::Bool(true),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         "the RMW must not strip fields a newer binary wrote: {marker}"
     );
 }
@@ -1436,6 +1650,7 @@ fn fetch_resets_an_inflated_rollback_floor() {
     );
 }
 
+<<<<<<< HEAD
 #[test]
 fn bump_rollback_floor_is_inert_when_dark() {
     crate::signed_policy::test_seam::with_dark(|| {
@@ -1465,6 +1680,11 @@ fn bump_rollback_floor_is_inert_when_dark() {
 
 #[test]
 fn bump_rollback_floor_raises_when_verification_active() {
+=======
+/// Dark build: public tick is a no-op over an existing marker.
+#[test]
+fn bump_rollback_floor_is_inert_when_dark() {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     mark_managed_config_synced_at(
@@ -1479,6 +1699,7 @@ fn bump_rollback_floor_raises_when_verification_active() {
     );
     let floor = |home: &Path| read_managed_config_cache(home).map_or(0, |c| c.rollback_floor);
     let base = floor(home);
+<<<<<<< HEAD
     assert!(crate::signed_policy::verification_active());
     let raised = base + 10_000;
     bump_rollback_floor_with_now(home, raised);
@@ -1486,6 +1707,14 @@ fn bump_rollback_floor_raises_when_verification_active() {
         floor(home),
         raised,
         "armed build: the tick must raise the floor"
+=======
+    assert!(!crate::signed_policy::verification_active());
+    bump_rollback_floor_with_now(home, base + 10_000);
+    assert_eq!(
+        floor(home),
+        base,
+        "dark build: the tick must not move the floor"
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     );
 }
 
@@ -1532,6 +1761,7 @@ fn managed_config_stale_for_far_future_sync() {
     );
 }
 
+<<<<<<< HEAD
 /// Unreadable requirements (PermissionDenied) with no fail_closed marker must still arm the gate.
 /// Otherwise clear_orphan could wipe policy that may still be fail_closed on disk.
 #[test]
@@ -1577,5 +1807,9 @@ fn missing_requirements_and_marker_not_armed() {
 
 // The is-managed claim gate tests live in a sibling child module (this file is past the 1k-line mark)
 // The #[path] include below keeps the same private access
+=======
+// The is-managed claim gate tests live in a sibling child module (this file is
+// past the 1k-line mark); same private access via the #[path] include below.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[path = "claim_tests.rs"]
 mod claim_tests;

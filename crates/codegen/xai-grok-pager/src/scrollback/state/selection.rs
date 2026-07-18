@@ -19,6 +19,7 @@ impl ScrollbackState {
     }
 
     pub(crate) fn set_view_mode(&mut self, mode: ViewMode) {
+<<<<<<< HEAD
         if self.view_mode == mode {
             return;
         }
@@ -36,6 +37,9 @@ impl ScrollbackState {
                 self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
             }
         }
+=======
+        self.view_mode = mode;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Get the range of entry indices visible in the current view mode.

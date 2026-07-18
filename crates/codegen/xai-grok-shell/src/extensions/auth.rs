@@ -27,6 +27,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
+<<<<<<< HEAD
 /// `pub` with both serde directions so the pager builds the request from the type the agent parses.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +60,13 @@ async fn handle_hydrate_team_capability(agent: &MvpAgent, args: &acp::ExtRequest
 /// Stop an in-flight interactive login (device poll or loopback wait).
 /// Calling it when nothing is waiting does nothing.
 /// When `request_seq` is present, only that attempt is cancelled, so a delayed cancel cannot cancel a newer login that already replaced it.
+=======
+/// Stop an in-flight interactive login (device poll / loopback wait).
+/// Idempotent: no-op when nothing is waiting.
+///
+/// When `request_seq` is present, only that attempt is cancelled — a delayed
+/// cancel cannot tear down a successor login that already replaced it.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn handle_cancel(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(Deserialize)]
     struct CancelParams {
@@ -130,10 +138,17 @@ fn handle_submit_code(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     match agent.interactive_auth.submit_code(params.code) {
         Ok(()) => to_raw_response(&serde_json::json!({ "submitted": true })),
+<<<<<<< HEAD
         Err(xai_grok_login::single_flight::SubmitCodeError::SendFailed(e)) => {
             Err(acp::Error::internal_error().data(format!("failed to submit auth code: {e}")))
         }
         Err(xai_grok_login::single_flight::SubmitCodeError::NoPendingAttempt) => {
+=======
+        Err(crate::auth::single_flight::SubmitCodeError::SendFailed(e)) => {
+            Err(acp::Error::internal_error().data(format!("failed to submit auth code: {e}")))
+        }
+        Err(crate::auth::single_flight::SubmitCodeError::NoPendingAttempt) => {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             Err(acp::Error::invalid_params().data("no pending auth session"))
         }
     }
@@ -142,7 +157,12 @@ fn handle_submit_code(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 /// Awaits the auth URL from the oneshot channel (blocks until ready).
 async fn handle_get_url(agent: &MvpAgent) -> ExtResult {
     let rx = agent.interactive_auth.take_url_rx();
+<<<<<<< HEAD
     // `None` when no URL was sent (cached credentials, early error, second poll): report mode as `null` rather than mislabeling it `loopback`
+=======
+    // `None` when no URL was sent (cached creds, early error, second poll):
+    // report mode as `null` rather than mislabeling it `loopback`.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let (auth_url, mode) = match rx {
         Some(rx) => match rx.await {
             Ok(info) => (Some(info.url), Some(info.mode)),
@@ -170,6 +190,7 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Stop any in-flight login so it cannot write credentials back after logout.
     agent.interactive_auth.cancel();
 
+<<<<<<< HEAD
     let result = xai_grok_login::perform_logout(
         &agent.auth_manager,
         params.scope.as_deref(),
@@ -178,6 +199,13 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     .map_err(|e| acp::Error::internal_error().data(format!("failed to logout: {e}")))?;
     // `auth.lifecycle` (not `auth`) avoids colliding with the pre-existing per-request `AuthManager::auth()` `#[instrument]` span
     xai_grok_telemetry::event_span!("auth.lifecycle", action = "logout", success = true);
+=======
+    let result = crate::auth::perform_logout(&agent.auth_manager, params.scope.as_deref())
+        .map_err(|e| acp::Error::internal_error().data(format!("failed to logout: {e}")))?;
+    // `auth.lifecycle` (not `auth`) avoids colliding with the pre-existing
+    // per-request `AuthManager::auth()` `#[instrument]` span.
+    tracing::info_span!("auth.lifecycle", action = "logout", success = true).in_scope(|| {});
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
     agent.models_manager.on_auth_changed().await;
 

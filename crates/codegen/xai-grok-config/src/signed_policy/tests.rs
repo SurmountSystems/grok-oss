@@ -1122,6 +1122,7 @@ fn rotation_selects_the_trusted_key_by_signed_key_id() {
     );
 }
 
+<<<<<<< HEAD
 // The is-managed claim tests live in a sibling child module because this file is at the 1k-line mark
 // The #[path] include below keeps the same private access
 #[path = "claim_tests.rs"]
@@ -1204,3 +1205,9 @@ fn signed_requirements_attest_ignores_remote_kill_switch() {
         });
     });
 }
+=======
+// The is-managed claim tests live in a sibling child module (this file is at the
+// 1k-line mark); same private access via the #[path] include below.
+#[path = "claim_tests.rs"]
+mod claim_tests;
+>>>>>>> e3fdf3ed (Merge 2 (#4))

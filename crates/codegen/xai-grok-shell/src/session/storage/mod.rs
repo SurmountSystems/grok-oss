@@ -1162,6 +1162,32 @@ impl SessionFileSet {
     }
 }
 
+<<<<<<< HEAD
+=======
+#[derive(Debug)]
+pub enum AppendUpdateError {
+    NotCommitted(io::Error),
+    Committed(io::Error),
+}
+
+impl AppendUpdateError {
+    pub fn into_io_error(self) -> io::Error {
+        match self {
+            Self::NotCommitted(error) | Self::Committed(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for AppendUpdateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotCommitted(error) | Self::Committed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+/// Storage adapter trait for session persistence
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 /// Abstracts over different storage backends (JSONL, SQLite, etc.)
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
@@ -1231,6 +1257,7 @@ pub trait StorageAdapter: Send + Sync {
             .map_err(AppendUpdateError::NotCommitted)
     }
 
+<<<<<<< HEAD
     /// Append one update durably, preserving whether the replay record committed before failure.
     async fn append_update_durable_commit_aware(
         &self,
@@ -1244,6 +1271,20 @@ pub trait StorageAdapter: Send + Sync {
     }
 
     /// Append a chat message and increment counter.
+=======
+    /// Append one update with the ordinary bookkeeping and a durable log barrier.
+    ///
+    /// Adapters without this capability return `Unsupported`; callers must tolerate a duplicate
+    /// record when retrying an error that occurred after the append reached storage.
+    async fn append_update_durable(&self, _info: &Info, _update: &SessionUpdate) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable session update append is unsupported",
+        ))
+    }
+
+    /// Append a chat message and increment counter
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     async fn append_chat_message(&self, info: &Info, message: &ConversationItem) -> io::Result<()>;
 
     /// Append one chat message and report whether the JSONL record was committed before an error.

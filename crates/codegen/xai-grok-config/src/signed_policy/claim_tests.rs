@@ -1,4 +1,9 @@
+<<<<<<< HEAD
 //! The server-signed is-managed claim: verifiers, domain separation, and the impose/defer signal that closes the sidecar-removal downgrade.
+=======
+//! The server-signed is-managed claim: verifiers, domain separation, and the
+//! impose/defer signal (sidecar-removal downgrade closure).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use super::super::*;
 use super::{keyset, payload, sign, test_keypair};
@@ -30,7 +35,12 @@ fn write_claim(home: &std::path::Path, sidecar: &SignatureEnvelope) {
     write_managed_identity_sidecar(home, sidecar).unwrap();
 }
 
+<<<<<<< HEAD
 /// The required `typ` closes signature confusion: neither message type substitutes for the other, even genuinely signed by the same key.
+=======
+/// The required `typ` closes signature confusion: neither message type substitutes
+/// for the other, even genuinely signed by the same key.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn domain_separation_rejects_cross_type_substitution() {
     let dir = tempfile::tempdir().unwrap();
@@ -50,8 +60,14 @@ fn domain_separation_rejects_cross_type_substitution() {
         "an identity claim must be rejected by the policy verifier"
     );
 
+<<<<<<< HEAD
     // End-to-end: the authentic claim copied over the policy sidecar (policy files deleted) must read NoAuthenticSidecar, never Trusted
     // Substituting the claim used to start such a fail_closed principal unmanaged
+=======
+    // End-to-end: the authentic claim copied over the policy sidecar (policy files
+    // deleted) must read NoAuthenticSidecar, never Trusted — the pre-fix exploit
+    // started such a fail_closed principal unmanaged.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     std::fs::write(
         sidecar_path(home),
         serde_json::to_string(&claim_sidecar).unwrap(),
@@ -63,7 +79,12 @@ fn domain_separation_rejects_cross_type_substitution() {
         "a substituted claim is not an authentic policy verdict"
     );
 
+<<<<<<< HEAD
     // Reverse: a policy envelope must not verify as a claim (its shape has no `principal`, so it fails at parse)
+=======
+    // Reverse: a policy envelope must not verify as a claim (its shape has no
+    // `principal`, so it fails at parse).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let policy_sidecar = sign(&kp, &payload());
     assert_eq!(
         verify_managed_identity_claim(
@@ -85,7 +106,12 @@ fn domain_separation_rejects_cross_type_substitution() {
     );
 }
 
+<<<<<<< HEAD
 /// The claim imposes ONLY when authentic, bound, and fail_closed; permissive, foreign, unknown-principal, forged, and absent claims are all silent.
+=======
+/// The claim imposes ONLY when authentic + bound + fail_closed; permissive,
+/// foreign, unknown-principal, forged, and absent claims are all silent.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn claim_imposes_only_for_bound_fail_closed_claim() {
     let dir = tempfile::tempdir().unwrap();
@@ -93,7 +119,11 @@ fn claim_imposes_only_for_bound_fail_closed_claim() {
     let (kp, pubkey) = test_keypair();
     let keys = keyset("v1", &pubkey);
 
+<<<<<<< HEAD
     // An absent claim is silent
+=======
+    // Absent → silent.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     assert!(!managed_identity_claim_imposes_with_keys(
         home,
         &keys,
@@ -136,7 +166,12 @@ fn claim_imposes_only_for_bound_fail_closed_claim() {
     );
 }
 
+<<<<<<< HEAD
 /// An expired claim is silent (callers pass the floor-clamped now, so a rolled-back clock cannot un-expire it).
+=======
+/// An expired claim is silent (callers pass the floor-clamped now, so a rolled-back
+/// clock cannot un-expire it).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn expired_claim_is_silent() {
     let dir = tempfile::tempdir().unwrap();
@@ -170,7 +205,12 @@ fn verify_fetched_claim_rejects_expired() {
     );
 }
 
+<<<<<<< HEAD
 /// Corrupt claim bytes read as Absent (not Present): impose is silent, never refuses on garbage; same read_envelope_at path as the policy sidecar.
+=======
+/// Corrupt claim bytes read as Absent (not Present): impose is silent, never
+/// refuses on garbage — same read_envelope_at path as the policy sidecar.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn corrupt_claim_file_is_silent() {
     let dir = tempfile::tempdir().unwrap();
@@ -203,8 +243,14 @@ fn corrupt_claim_file_is_silent() {
     ));
 }
 
+<<<<<<< HEAD
 /// A directory squatting the claim slot is Absent (non-regular), never an imposing claim.
 /// It is also never the lenient Unreadable blip (that is EACCES on a regular file only).
+=======
+/// A directory squatting the claim slot is Absent (non-regular), never an
+/// imposing claim — and never the lenient Unreadable blip (that is EACCES on a
+/// regular file only).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn directory_squatting_claim_slot_is_silent() {
     let dir = tempfile::tempdir().unwrap();

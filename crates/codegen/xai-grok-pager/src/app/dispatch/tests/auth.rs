@@ -626,9 +626,16 @@ fn login_with_empty_auth_methods_fails_closed() {
     assert!(app.login_method_id.is_none());
 }
 
+<<<<<<< HEAD
 /// Puts the app in `Authenticating` with a live task's abort handle installed, as the event loop would.
 /// Returns the task's JoinHandle and the seq.
 /// Callers assert the task actually gets aborted (`unwrap_err().is_cancelled()`), not merely that the handle slot was cleared.
+=======
+/// Puts the app in `Authenticating` with a live task's abort handle installed
+/// (as the event loop would), returning the task's JoinHandle and the seq.
+/// Callers assert the task actually gets aborted (`unwrap_err().is_cancelled()`),
+/// not merely that the handle slot was cleared.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn install_live_auth_task(
     app: &mut AppView,
     rt: &tokio::runtime::Runtime,
@@ -655,8 +662,13 @@ fn test_runtime() -> tokio::runtime::Runtime {
         .expect("test runtime")
 }
 
+<<<<<<< HEAD
 /// A second `/login` while already authenticating must abort the prior auth task and bump the seq.
 /// Single-flight: never two device-code requests running at once.
+=======
+/// A second `/login` while already authenticating must abort the prior auth
+/// task and bump the seq (single-flight: no stacked device-code mints).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn login_while_authenticating_aborts_prior_task() {
     let rt = test_runtime();
@@ -688,8 +700,14 @@ fn login_while_authenticating_aborts_prior_task() {
     );
 }
 
+<<<<<<< HEAD
 /// A stale `AuthComplete` (its abort lost the race because the task had already finished) must not complete the new attempt.
 /// The request-seq guard is the only protection here.
+=======
+/// A stale `AuthComplete` (from an attempt whose abort lost the race because
+/// the task had already finished) must not complete the new attempt: the
+/// request-seq guard is the only protection here.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn stale_auth_complete_after_relogin_is_ignored() {
     let mut app = test_app_with_agent();
@@ -719,7 +737,12 @@ fn stale_auth_complete_after_relogin_is_ignored() {
     }
 }
 
+<<<<<<< HEAD
 /// Switch-account while authenticating goes through the same single-flight abort as `/login` (sibling entry point).
+=======
+/// Switch-account while authenticating goes through the same single-flight
+/// abort as `/login` (sibling entry point).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn switch_account_while_authenticating_aborts_prior_task() {
     let rt = test_runtime();
@@ -742,7 +765,12 @@ fn switch_account_while_authenticating_aborts_prior_task() {
     }
 }
 
+<<<<<<< HEAD
 /// Cancelling a mid-session login aborts the in-flight auth task (not just restores the view) so a retry cannot race a still-polling prior attempt.
+=======
+/// Cancelling a mid-session login aborts the in-flight auth task (not just
+/// restores the view) so a retry cannot race a still-polling prior mint.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn cancel_login_aborts_prior_task() {
     let rt = test_runtime();
@@ -760,7 +788,12 @@ fn cancel_login_aborts_prior_task() {
     });
 }
 
+<<<<<<< HEAD
 /// Cancelling a mid-session login returns to the session rather than quitting the app, and clears the stashed view and auth state.
+=======
+/// Cancelling a mid-session login returns to the session rather than
+/// quitting the app, and clears the stashed view + auth state.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[test]
 fn cancel_login_restores_view() {
     let mut app = test_app_with_agent();

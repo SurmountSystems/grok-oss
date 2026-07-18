@@ -243,8 +243,12 @@ pub enum PersistenceMsg {
     Update(SessionUpdate),
     AppendUpdateDurablyAndAck {
         update: SessionUpdate,
+<<<<<<< HEAD
         respond_to:
             tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
+=======
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     },
     ContentChunk(PersistenceContentChunk),
     Chat(ConversationItem),
@@ -1713,6 +1717,7 @@ impl SessionPersistence {
     }
 
     async fn write_update(
+<<<<<<< HEAD
         &mut self,
         update: &SessionUpdate,
     ) -> Result<(), crate::session::storage::AppendUpdateError> {
@@ -1845,11 +1850,26 @@ impl SessionPersistence {
         if let Some(sync) = &self.remote_sync {
             sync.queue(notification.clone());
         }
+=======
+        &self,
+        update: &SessionUpdate,
+    ) -> Result<(), crate::session::storage::AppendUpdateError> {
+        self.storage
+            .append_update_commit_aware(&self.info, update)
+            .await
+    }
+
+    fn queue_acp_sync(&self, notification: acp::SessionNotification) {
+        if let Some(sync) = &self.remote_sync {
+            sync.queue(notification.clone());
+        }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         if let Some(relay) = &self.relay_sync {
             relay.queue(notification);
         }
     }
 
+<<<<<<< HEAD
     /// Enable writeback for a session created `Local` before settings resolved.
     /// Build the sync and (for a fresh session) backfill its local-only history.
     /// No-op once syncing, so a repeat upgrade is harmless.
@@ -1938,10 +1958,44 @@ impl SessionPersistence {
                     return Err(crate::session::storage::AppendUpdateError::NotCommitted(
                         error,
                     ));
+=======
+    fn finish_pending_append(
+        pending: &mut Option<acp::SessionNotification>,
+        notification: acp::SessionNotification,
+        result: Result<(), crate::session::storage::AppendUpdateError>,
+    ) -> Result<acp::SessionNotification, io::Error> {
+        match result {
+            Ok(()) => Ok(notification),
+            Err(crate::session::storage::AppendUpdateError::NotCommitted(error)) => {
+                *pending = Some(notification);
+                Err(error)
+            }
+            Err(crate::session::storage::AppendUpdateError::Committed(error)) => Err(error),
+        }
+    }
+
+    async fn drain_pending(&mut self) -> io::Result<()> {
+        if let Some(notification) = self.pending_notification.take() {
+            let result = self
+                .write_update(&SessionUpdate::Acp(Box::new(notification.clone())))
+                .await;
+            match Self::finish_pending_append(
+                &mut self.pending_notification,
+                notification.clone(),
+                result,
+            ) {
+                Ok(notification) => self.queue_acp_sync(notification),
+                Err(error) => {
+                    if self.pending_notification.is_none() {
+                        self.queue_acp_sync(notification);
+                    }
+                    return Err(error);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 }
             }
         }
         Ok(())
+<<<<<<< HEAD
     }
 
     async fn handle_durable_append(
@@ -1999,6 +2053,14 @@ impl SessionPersistence {
         };
         if let Err(error) = &result {
             tracing::warn!(%error, "failed to write pending update");
+=======
+    }
+
+    /// Flush any pending merged ACP notification to disk and remote sync.
+    async fn flush_pending(&mut self) {
+        if let Err(error) = self.drain_pending().await {
+            tracing::warn!(?error, "failed to write pending update");
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
         if let Some(sync) = &self.remote_sync {
             sync.flush();
@@ -2134,11 +2196,34 @@ impl SessionPersistence {
                     }
                 }
                 PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to } => {
+<<<<<<< HEAD
                     let result = self.handle_durable_append(update).await;
                     // A dropped receiver is a fire-and-forget durable append (e.g. the TurnCompleted terminal).
                     // Its errors would otherwise vanish with the unread ack
                     if let Err(Err(error)) = respond_to.send(result) {
                         tracing::warn!(%error, "failed to write durable update");
+=======
+                    let result = async {
+                        self.drain_pending().await?;
+                        self.storage
+                            .append_update_durable(&self.info, &update)
+                            .await?;
+                        if let SessionUpdate::Acp(notification) = update {
+                            self.queue_acp_sync(*notification);
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::Chat(chat_msg) => {
+                    if let Err(e) = self
+                        .storage
+                        .append_chat_message(&self.info, &chat_msg)
+                        .await
+                    {
+                        tracing::warn!(?e, "failed to write chat message");
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     }
                 }
                 PersistenceMsg::Chat(chat_msg) => {
@@ -3352,6 +3437,14 @@ fn classify_remote_delete(
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod durable_update_tests;
+<<<<<<< HEAD
+=======
+
+#[cfg(test)]
+mod delete_session_history_tests {
+    use super::{DeleteSessionError, SessionDeletion, classify_remote_delete};
+    use crate::remote::client::BackendError;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 #[cfg(test)]
 #[path = "persistence_delete_session_history_tests.rs"]

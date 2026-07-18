@@ -25,8 +25,12 @@ fn initial_injection_backend_params_use_override_min_score() {
         },
         watcher: None,
         stale_claim_secs: 60,
+<<<<<<< HEAD
         search_source: MemorySearchSource::Tool,
         observation_sink: crate::session::memory::noop_memory_observation_sink(),
+=======
+        search_source: "tool",
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
     };
     let initial_injection = crate::config::MemoryInitialInjectionConfig {
@@ -54,8 +58,12 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
         },
         watcher: None,
         stale_claim_secs: 60,
+<<<<<<< HEAD
         search_source: MemorySearchSource::Tool,
         observation_sink: crate::session::memory::noop_memory_observation_sink(),
+=======
+        search_source: "tool",
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
     };
     let initial_injection = crate::config::MemoryInitialInjectionConfig {
@@ -1114,8 +1122,12 @@ async fn create_injection_ready_actor(
         search_config: crate::config::MemorySearchConfig::default(),
         watcher: None,
         stale_claim_secs: 60,
+<<<<<<< HEAD
         search_source: MemorySearchSource::Tool,
         observation_sink: crate::session::memory::noop_memory_observation_sink(),
+=======
+        search_source: "tool",
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
     });
     actor

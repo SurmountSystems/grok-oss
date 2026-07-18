@@ -1,6 +1,10 @@
 [package]
 name = "xai-grok-pager"
+<<<<<<< HEAD
 version = "1.0.45"
+=======
+version = "0.2.102"
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -226,9 +230,52 @@ harness = false
 name = "edit_highlight"
 harness = false
 
+<<<<<<< HEAD
 [[bench]]
 name = "resize"
 harness = false
+=======
+# PTY integration tests are split into coherent scheduling families. The test
+# modules remain under tests/pty_e2e/; these roots only define which cases share
+# one Cargo/Bazel process. All cases stay #[ignore]d for ordinary Cargo runs.
+[[test]]
+name = "pty_e2e_smoke"
+path = "tests/pty_e2e_smoke.rs"
+
+[[test]]
+name = "pty_e2e_queue"
+path = "tests/pty_e2e_queue.rs"
+
+[[test]]
+name = "pty_e2e_scroll_selection"
+path = "tests/pty_e2e_scroll_selection.rs"
+
+[[test]]
+name = "pty_e2e_minimal"
+path = "tests/pty_e2e_minimal.rs"
+
+[[test]]
+name = "pty_e2e_config_ui"
+path = "tests/pty_e2e_config_ui.rs"
+
+[[test]]
+name = "pty_e2e_shell_tools"
+path = "tests/pty_e2e_shell_tools.rs"
+
+[[test]]
+name = "pty_e2e_persistence"
+path = "tests/pty_e2e_persistence.rs"
+
+[[test]]
+name = "pty_e2e_clipboard"
+path = "tests/pty_e2e_clipboard.rs"
+
+# Leader-mode PTY e2e — split from ordinary PTY families so multi-process
+# cluster bring-up never contends with their bounded pools.
+[[test]]
+name = "leader_pty_e2e"
+path = "tests/leader_pty_e2e/mod.rs"
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 # Settings modal regression tests — keyboard/mouse dispatch + registry
 # contracts. Not gated by `--ignored`; runs on every `cargo test`.
@@ -265,7 +312,11 @@ local-workspace = ["xai-grok-shell/local-workspace"]
 jemalloc = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 release-dist = []
+<<<<<<< HEAD
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
 test-support = ["xai-grok-pager-render/test-support", "xai-grok-gboom/test-support"]
+=======
+
+>>>>>>> e3fdf3ed (Merge 2 (#4))

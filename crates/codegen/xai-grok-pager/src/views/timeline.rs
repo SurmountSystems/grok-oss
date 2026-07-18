@@ -1,7 +1,16 @@
+<<<<<<< HEAD
 //! Timeline sidebar: a tick rail (one tick per turn) that replaces the scrollbar in its gutter while enabled.
 //! Tick position encodes conversation order, not scroll proportion.
 //!
 //! Geometry is computed once per frame into a [`TimelineRail`] consumed by both the renderer and mouse hit-testing, so they cannot drift.
+=======
+//! Timeline sidebar: a tick rail (one tick per turn) that replaces the
+//! scrollbar in its gutter while enabled. Tick position encodes conversation
+//! order, not scroll proportion.
+//!
+//! Geometry is computed once per frame into a [`TimelineRail`] consumed by
+//! both the renderer and mouse hit-testing, so they cannot drift.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use std::ops::Range;
 
@@ -10,13 +19,21 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+<<<<<<< HEAD
 use crate::app::agent_view::ViewSurface;
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 use crate::theme::Theme;
 
 /// Columns reserved for the rail (widest tick).
 pub const RAIL_WIDTH: u16 = 2;
 
+<<<<<<< HEAD
 /// Terminals narrower than this hide the rail (the transcript needs the columns more than the navigator).
+=======
+/// Terminals narrower than this hide the rail (the transcript needs the
+/// columns more than the navigator).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub const MIN_TERMINAL_WIDTH: u16 = 60;
 
 /// Minimum turns before the rail appears (a 1-turn timeline is noise).
@@ -27,18 +44,42 @@ pub const MIN_TURNS: usize = 2;
 pub struct TimelineRail {
     /// Full rail rect (hit target), spanning the scrollback rows.
     pub rect: Rect,
+<<<<<<< HEAD
     /// Turn indices currently shown as ticks (windowed around the active turn when the conversation has more turns than rows).
+=======
+    /// Turn indices currently shown as ticks (windowed around the active
+    /// turn when the conversation has more turns than rows).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub window: Range<usize>,
     /// First tick row.
     pub ticks_y: u16,
     /// Active turn (viewport top), if any.
     pub active: Option<usize>,
+<<<<<<< HEAD
     /// The ▲ target: the nearest turn strictly above the viewport top
     /// ([`ScrollbackState::turn_above_viewport_top`]), NOT `active - 1`.
     pub up_target: Option<usize>,
     /// The ▼ target: the nearest turn below the viewport top
     /// ([`ScrollbackState::turn_below_viewport_top`]). Both go through `jump_to_turn`, which
     /// over-scrolls trailing turns rather than dimming.
+=======
+    /// The ▲ target: nearest turn strictly above the viewport top
+    /// ([`ScrollbackState::turn_above_viewport_top`]), NOT `active - 1` —
+    /// stepping from `active` could target trailing turns that no scroll
+    /// can bring to the top (stuck ▲).
+    ///
+    /// [`ScrollbackState::turn_above_viewport_top`]:
+    /// crate::scrollback::ScrollbackState::turn_above_viewport_top
+    pub up_target: Option<usize>,
+    /// The ▼ target: nearest turn below the viewport top
+    /// ([`ScrollbackState::turn_below_viewport_top`]), so ▼ anchors it to the
+    /// top exactly like clicking its tick (both go through `jump_to_turn`,
+    /// which over-scrolls trailing turns rather than dimming). `None` only
+    /// when the last turn already owns the top.
+    ///
+    /// [`ScrollbackState::turn_below_viewport_top`]:
+    /// crate::scrollback::ScrollbackState::turn_below_viewport_top
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub down_target: Option<usize>,
     /// Chevron rows.
     pub up_y: u16,
@@ -56,16 +97,29 @@ pub enum TimelineHit {
     Down,
 }
 
+<<<<<<< HEAD
 /// Columns to reserve for the rail this frame: the single eligibility policy (setting, view kind, terminal width, turn count).
 /// Geometry feasibility (enough rows) stays in [`compute_rail`].
 pub(crate) fn rail_width(
     show_timeline: bool,
     surface: ViewSurface,
+=======
+/// Columns to reserve for the rail this frame — the single eligibility
+/// policy (setting, view kind, terminal width, turn count). Geometry
+/// feasibility (enough rows) stays in [`compute_rail`].
+pub fn rail_width(
+    show_timeline: bool,
+    is_subagent_view: bool,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     area_width: u16,
     turn_count: usize,
 ) -> u16 {
     if show_timeline
+<<<<<<< HEAD
         && surface == ViewSurface::Root
+=======
+        && !is_subagent_view
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         && area_width >= MIN_TERMINAL_WIDTH
         && turn_count >= MIN_TURNS
     {
@@ -75,8 +129,14 @@ pub(crate) fn rail_width(
     }
 }
 
+<<<<<<< HEAD
 /// The viewport-derived turn state the rail is built from, gathered once per frame from `ScrollbackState`.
 /// Bundled so [`compute_rail`] takes one argument instead of four adjacent `Option<usize>` / `bool` positionals.
+=======
+/// The viewport-derived turn state the rail is built from, gathered once
+/// per frame from `ScrollbackState`. Bundled so [`compute_rail`] takes one
+/// argument instead of four adjacent `Option<usize>` / `bool` positionals.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RailViewport {
     /// Turn at the viewport top (the highlighted tick), if any.
@@ -85,11 +145,20 @@ pub struct RailViewport {
     pub up_target: Option<usize>,
     /// ▼ target: nearest turn below the viewport top.
     pub down_target: Option<usize>,
+<<<<<<< HEAD
     /// Viewport is scrolled to the bottom; pins the tick window to the tail.
     pub at_bottom: bool,
 }
 
 /// Compute rail geometry for this frame, or `None` when the rail should not render (too few turns, or no room for chevrons and at least one tick).
+=======
+    /// Viewport is scrolled to the bottom — pins the tick window to the tail.
+    pub at_bottom: bool,
+}
+
+/// Compute rail geometry for this frame, or `None` when the rail should
+/// not render (too few turns / no room for chevrons + at least one tick).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn compute_rail(
     scrollback_area: Rect,
     rail_x: u16,
@@ -109,9 +178,16 @@ pub fn compute_rail(
     let window = if turn_count <= max_ticks {
         0..turn_count
     } else {
+<<<<<<< HEAD
         // More turns than rows: slide a window that keeps the active tick visible
         // At the bottom, prefer the tail so the newest ticks stay on screen
         // Never exclude the viewport-top (active) turn, though, or no tick would highlight
+=======
+        // More turns than rows: slide a window that keeps the active tick
+        // visible. At the bottom, prefer the tail so the newest ticks stay
+        // on screen — but never exclude the viewport-top (active) turn,
+        // or no tick would highlight.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let tail_start = turn_count - max_ticks;
         let start = if vp.at_bottom {
             match vp.active {
@@ -127,7 +203,11 @@ pub fn compute_rail(
         start..start + max_ticks
     };
 
+<<<<<<< HEAD
     // Center the chevron and tick stack vertically, like the web rail
+=======
+    // Center the chevron + tick stack vertically, like the web rail.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let total_rows = window.len() + 2;
     let top = scrollback_area.y + ((height - total_rows) / 2) as u16;
     let ticks_y = top + 1;
@@ -150,8 +230,18 @@ pub fn compute_rail(
     })
 }
 
+<<<<<<< HEAD
 /// Display and action therefore cannot disagree; `None` means an end stop (dim chevron, click is a
 /// no-op). The chevron therefore matches the click instead of doing nothing.
+=======
+/// The turn a rail interaction jumps to, derived from the rail's own
+/// fields — the same state that dims the chevrons, so display and action
+/// cannot disagree. `None` = end stop (dim chevron, click is a no-op).
+///
+/// ▼ steps to `down_target` even at the bottom: `jump_to_turn` over-scrolls
+/// a trailing turn to the top (identical to clicking its tick), so the
+/// chevron matches the click instead of sitting dead.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn chevron_target(rail: &TimelineRail, hit: TimelineHit) -> Option<usize> {
     match hit {
         TimelineHit::Tick(turn_idx) => Some(turn_idx),
@@ -182,8 +272,14 @@ impl TimelineRail {
     }
 }
 
+<<<<<<< HEAD
 /// Render the rail: chevrons and one tick row per windowed turn.
 /// The rail draws directly on the scrollback background; a dark track strip read as an awkward empty band, especially with few ticks.
+=======
+/// Render the rail: chevrons + one tick row per windowed turn. The rail
+/// draws directly on the scrollback background (no dark track strip — it
+/// read as an awkward empty band, especially with few ticks).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn render_rail(
     buf: &mut Buffer,
     rail: &TimelineRail,
@@ -194,7 +290,12 @@ pub fn render_rail(
     let normal = Style::default().fg(theme.gray);
     let bright = Style::default().fg(theme.text_primary);
 
+<<<<<<< HEAD
     // Chevron dim state derives from the same function the click handler uses; a dim chevron is guaranteed to be a no-op
+=======
+    // Chevron dim state derives from the same function the click handler
+    // uses — a dim chevron is guaranteed to be a no-op.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let up_enabled = chevron_target(rail, TimelineHit::Up).is_some();
     let down_enabled = chevron_target(rail, TimelineHit::Down).is_some();
     let up_style = if hovered == Some(TimelineHit::Up) && up_enabled {
@@ -235,16 +336,29 @@ pub fn render_rail(
         } else if is_hovered {
             (crate::glyphs::timeline_tick_hover(), bright)
         } else {
+<<<<<<< HEAD
             // Short dim tick in the rightmost cell: a pad space precomposed with the light horizontal glyph
+=======
+            // Short dim tick in the rightmost cell (precomposed pad + light).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             (" \u{2500}", dim)
         };
         buf.set_span(rail.rect.x, y, &Span::styled(text, style), RAIL_WIDTH);
     }
 }
 
+<<<<<<< HEAD
 /// Floating preview card for a hovered tick, anchored left of the rail. The interior must stay
 /// `bg_base`: border glyphs draw mid-cell, so any lighter fill bleeds a half-cell past the border
 /// line.
+=======
+/// Floating preview card for a hovered tick, anchored left of the rail.
+///
+/// Shrink-to-fit, in the house popup chrome (clear + dark base fill +
+/// rounded `Block`, like the pickers and /btw panel). The interior must
+/// stay `bg_base`: border glyphs draw mid-cell, so any lighter fill
+/// bleeds a half-cell past the border line.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn render_tick_hover_popup(
     buf: &mut Buffer,
     rail: &TimelineRail,
@@ -268,10 +382,15 @@ pub fn render_tick_hover_popup(
             rest = "";
         } else {
             let end = crate::render::line_utils::byte_offset_at_width(rest, max_text);
+<<<<<<< HEAD
             let Some(head) = rest.get(..end) else { break };
             let Some(tail) = rest.get(end..) else { break };
             lines.push(head.to_string());
             rest = tail.trim_start();
+=======
+            lines.push(rest[..end].to_string());
+            rest = rest[end..].trim_start();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
     if lines.is_empty() {
@@ -285,7 +404,12 @@ pub fn render_tick_hover_popup(
         .unwrap_or(0) as u16;
     let card_w = text_w + 4;
     let card_h = lines.len() as u16 + 2;
+<<<<<<< HEAD
     // Too short a terminal to place the card without painting over the panes above/below; skip it
+=======
+    // Too short a terminal to place the card without painting over the
+    // panes above/below — skip it.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     if card_h > scrollback_area.height {
         return;
     }
@@ -344,7 +468,11 @@ mod tests {
         }
     }
 
+<<<<<<< HEAD
     /// `compute_rail` with `active - 1` / `active + 1` targets and `at_bottom: false`.
+=======
+    /// `compute_rail` with adjacent targets for an off-bottom prompt row.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     fn rail(turn_count: usize, active: Option<usize>) -> Option<TimelineRail> {
         let vp = RailViewport {
             active,
@@ -386,7 +514,12 @@ mod tests {
         let rail = rail(50, Some(25)).unwrap();
         assert_eq!(rail.window.len(), 18);
         assert!(rail.window.contains(&25));
+<<<<<<< HEAD
         // Window is roughly centered on the active turn, and tick rows map to window-relative turn indices
+=======
+        // Window is roughly centered on the active turn, and tick rows map
+        // to window-relative turn indices.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(rail.window.start, 25 - 9);
         assert_eq!(
             rail.hit(76, rail.ticks_y),
@@ -401,7 +534,12 @@ mod tests {
         let rail = self::rail(50, None).unwrap();
         assert_eq!(rail.window, 32..50);
 
+<<<<<<< HEAD
         // At the bottom the window prefers the tail, but still includes the viewport-top (active) turn so a tick stays highlighted
+=======
+        // At the bottom the window prefers the tail, but still includes the
+        // viewport-top (active) turn so a tick stays highlighted.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let rail = compute_rail(
             area(),
             76,
@@ -417,7 +555,11 @@ mod tests {
         assert_eq!(rail.window, 25..43);
         assert!(rail.window.contains(&25));
 
+<<<<<<< HEAD
         // Active already in the tail pins to the newest ticks
+=======
+        // Active already in the tail → pin to the newest ticks.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let rail = compute_rail(
             area(),
             76,
@@ -462,7 +604,12 @@ mod tests {
         // End stops are no-ops (the dim chevrons).
         assert_eq!(chevron_target(&rail(10, Some(0)).unwrap(), Up), None);
         assert_eq!(chevron_target(&rail(10, Some(9)).unwrap(), Down), None);
+<<<<<<< HEAD
         // Pre-turn content focuses the first tick, but Down still enters that first turn rather than skipping to the second
+=======
+        // Pre-turn content focuses the first tick, but Down still enters
+        // that first turn rather than skipping to the second.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let pre = compute_rail(
             area(),
             76,
@@ -476,7 +623,12 @@ mod tests {
         .unwrap();
         assert_eq!(chevron_target(&pre, Down), Some(0));
         assert_eq!(chevron_target(&pre, Up), None);
+<<<<<<< HEAD
         // At the bottom ▼ still steps to the next turn (jump_to_turn over-scrolls it to the top, matching a tick click); ▲ steps up
+=======
+        // At the bottom ▼ still steps to the next turn (jump_to_turn
+        // over-scrolls it to the top, matching a tick click); ▲ steps up.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let bottom = compute_rail(
             area(),
             76,
@@ -509,6 +661,7 @@ mod tests {
 
     #[test]
     fn rail_width_gates_eligibility() {
+<<<<<<< HEAD
         // All conditions met reserves the rail columns
         assert_eq!(RAIL_WIDTH, rail_width(true, ViewSurface::Root, 80, 5));
         // Setting off / child surface / narrow terminal / too few turns.
@@ -519,5 +672,14 @@ mod tests {
             rail_width(true, ViewSurface::Root, MIN_TERMINAL_WIDTH - 1, 5)
         );
         assert_eq!(0, rail_width(true, ViewSurface::Root, 80, 1));
+=======
+        // All conditions met → rail columns reserved.
+        assert_eq!(rail_width(true, false, 80, 5), RAIL_WIDTH);
+        // Setting off / subagent view / narrow terminal / too few turns.
+        assert_eq!(rail_width(false, false, 80, 5), 0);
+        assert_eq!(rail_width(true, true, 80, 5), 0);
+        assert_eq!(rail_width(true, false, MIN_TERMINAL_WIDTH - 1, 5), 0);
+        assert_eq!(rail_width(true, false, 80, 1), 0);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 }

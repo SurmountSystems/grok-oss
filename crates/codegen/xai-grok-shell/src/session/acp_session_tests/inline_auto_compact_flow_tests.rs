@@ -422,6 +422,7 @@ async fn test_response_header_context_window_downgrade_rejected() {
         })
         .await;
 }
+<<<<<<< HEAD
 /// A kept selection the catalog did not list at resume applies at the next turn once it does.
 #[tokio::test(flavor = "current_thread")]
 async fn a_kept_context_window_selection_applies_once_the_catalog_lists_it() {
@@ -457,6 +458,59 @@ async fn a_kept_context_window_selection_applies_once_the_catalog_lists_it() {
             assert_eq!(500_000, cfg.context_window.get());
         })
         .await;
+=======
+#[test]
+fn initial_injection_backend_params_use_override_min_score() {
+    let params = crate::session::memory::MemoryBackendParams {
+        session_id: "test-session".to_owned(),
+        embed_config: None,
+        embed_base_url: "http://localhost".to_owned(),
+        embed_api_key: None,
+        search_config: crate::config::MemorySearchConfig {
+            min_score: 0.35,
+            ..Default::default()
+        },
+        watcher: None,
+        stale_claim_secs: 60,
+        search_source: "tool",
+        embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+    };
+    let initial_injection = crate::config::MemoryInitialInjectionConfig {
+        enabled: true,
+        min_score: Some(0.72),
+    };
+    let (adjusted, effective_min_score) =
+        build_initial_injection_backend_params(&params, &initial_injection);
+    assert_eq!("injection", adjusted.search_source);
+    assert!((0.72 - adjusted.search_config.min_score).abs() < f32::EPSILON);
+    assert!((0.72 - effective_min_score as f32).abs() < f32::EPSILON);
+    assert!((0.35 - params.search_config.min_score).abs() < f32::EPSILON);
+    assert_eq!("tool", params.search_source);
+}
+#[test]
+fn initial_injection_backend_params_preserve_default_zero_min_score() {
+    let params = crate::session::memory::MemoryBackendParams {
+        session_id: "test-session".to_owned(),
+        embed_config: None,
+        embed_base_url: "http://localhost".to_owned(),
+        embed_api_key: None,
+        search_config: crate::config::MemorySearchConfig {
+            min_score: 0.41,
+            ..Default::default()
+        },
+        watcher: None,
+        stale_claim_secs: 60,
+        search_source: "tool",
+        embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
+    };
+    let (adjusted, effective_min_score) = build_initial_injection_backend_params(
+        &params,
+        &crate::config::MemoryInitialInjectionConfig::default(),
+    );
+    assert_eq!("injection", adjusted.search_source);
+    assert!((0.41 - adjusted.search_config.min_score).abs() < f32::EPSILON);
+    assert!((0.0 - effective_min_score as f32).abs() < f32::EPSILON);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 #[allow(clippy::field_reassign_with_default)]
 async fn create_test_actor_with_memory(

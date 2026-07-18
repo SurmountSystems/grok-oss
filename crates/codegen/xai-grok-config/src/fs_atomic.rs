@@ -1,5 +1,10 @@
+<<<<<<< HEAD
 //! Atomic file writes, shared by the managed-cache marker, the signature sidecar, and downstream identifier caches (e.g. the telemetry agent id).
 //! The temp file is fsynced before it is published, so a crash cannot leave the final path holding a truncated file.
+=======
+//! Atomic file writes, shared by the managed-cache marker, the signature
+//! sidecar, and downstream identifier caches (e.g. the telemetry agent id).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -7,6 +12,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+<<<<<<< HEAD
 static WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Follow no more hops than the kernel: Linux 40, Darwin/BSD 32, Windows 63 relative / 31 fully-qualified.
@@ -1264,6 +1270,12 @@ fn refuse_changed_destination_inode(dest: &Path, bound: Option<FileId>) -> io::R
 ///
 /// Parent-directory symlinks are followed. A leaf file-symlink is replaced (managed slots).
 /// User `config.toml` and `pager.toml` follow via [`resolve_atomic_destination`].
+=======
+/// Atomic temp + rename so a torn write can't leave a half-written file. The temp
+/// name is unique per writer (pid + counter) and `create_new`, so concurrent
+/// writers don't collide. `mode` (unix only) is applied at temp-file creation, so
+/// the final file never exists with looser permissions.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn write_atomically(
     final_path: &Path,
     contents: &str,

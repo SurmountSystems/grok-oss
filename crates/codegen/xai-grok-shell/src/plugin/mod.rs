@@ -126,7 +126,18 @@ pub fn install_plugin(source: &str, cwd: &Path) -> Result<InstallOutcome, Plugin
         repo_key
     };
 
+<<<<<<< HEAD:crates/codegen/xai-grok-shell/src/plugin/mod.rs
     let (plugin_names, post_warnings) = crate::config::post_install_plugin(&repo_key);
+=======
+    let result =
+        git_install::install_from_source(&install_source, &registry, marketplace_require_sha())?;
+
+    let repo = git_install::build_installed_repo(&result, &install_source);
+    registry.insert(result.repo_key.clone(), repo);
+    save_registry_or_warn(&registry);
+
+    let (plugin_names, post_warnings) = crate::config::post_install_plugin(&result.repo_key);
+>>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/plugin.rs
 
     Ok(InstallOutcome {
         repo_key,
@@ -341,8 +352,112 @@ fn apply_update_to_registry(
     entry.plugins = git_install::repo_plugin_map(&result.plugins);
 }
 
+<<<<<<< HEAD:crates/codegen/xai-grok-shell/src/plugin/mod.rs
 /// Update one installed plugin by name, or all when `name` is `None`. Saves
 /// the registry once at the end.
+=======
+struct MarketplaceSourceRoot {
+    path: PathBuf,
+    _lease: Option<SourceCacheLease>,
+}
+
+fn update_marketplace_repo(
+    registry: &mut InstallRegistry,
+    repo: &InstalledRepo,
+    source_cache: &mut std::collections::HashMap<String, MarketplaceSourceRoot>,
+) -> Result<installer::MarketplaceUpdateResult, InstallError> {
+    let provenance = repo
+        .marketplace
+        .clone()
+        .ok_or_else(|| InstallError::InstallFailed {
+            detail: "installed repo is missing marketplace provenance".into(),
+        })?;
+    let entry_path = MarketplaceRelativePath::parse(&provenance.plugin_subdir).map_err(|e| {
+        InstallError::InstallFailed {
+            detail: format!("invalid marketplace plugin path: {e}"),
+        }
+    })?;
+
+    let cache_key = provenance.source_url_or_path.clone();
+    if !source_cache.contains_key(&cache_key) {
+        source_cache.insert(
+            cache_key.clone(),
+            marketplace_root_for_provenance(&provenance)?,
+        );
+    }
+    let marketplace_root = source_cache
+        .get(&cache_key)
+        .unwrap_or_else(|| unreachable!());
+    let scan = scan_marketplace(&marketplace_root.path);
+    let entry = scan
+        .entries
+        .into_iter()
+        .find(|entry| entry.relative_path == entry_path.as_str())
+        .ok_or_else(|| InstallError::PluginNotFound {
+            name: provenance.plugin_subdir.clone(),
+        })?;
+
+    let require_sha = crate::plugin::marketplace_require_sha();
+    installer::update_from_marketplace_entry_transactional(
+        &marketplace_root.path,
+        &entry,
+        provenance,
+        registry,
+        require_sha,
+    )
+}
+
+fn marketplace_root_for_provenance(
+    provenance: &xai_grok_agent::plugins::install_registry::MarketplaceProvenance,
+) -> Result<MarketplaceSourceRoot, InstallError> {
+    let source = &provenance.source_url_or_path;
+    if let Some((url, branch)) = configured_marketplace_git_source(source) {
+        let cache_root = git::default_cache_root();
+        let lease = git::sync_source_cache_with_mode(
+            &url,
+            branch.as_deref(),
+            &cache_root,
+            git::SyncMode::Force,
+        )
+        .map_err(|e| InstallError::InstallFailed {
+            detail: format!("Git sync failed: {e}"),
+        })?;
+        return Ok(MarketplaceSourceRoot {
+            path: lease.path.clone(),
+            _lease: Some(lease),
+        });
+    }
+
+    if source.contains("://") || source.contains("git@") {
+        let cache_root = git::default_cache_root();
+        let lease =
+            git::sync_source_cache_with_mode(source, None, &cache_root, git::SyncMode::Force)
+                .map_err(|e| InstallError::InstallFailed {
+                    detail: format!("Git sync failed: {e}"),
+                })?;
+        Ok(MarketplaceSourceRoot {
+            path: lease.path.clone(),
+            _lease: Some(lease),
+        })
+    } else {
+        Ok(MarketplaceSourceRoot {
+            path: PathBuf::from(source),
+            _lease: None,
+        })
+    }
+}
+
+fn configured_marketplace_git_source(source_url_or_path: &str) -> Option<(String, Option<String>)> {
+    load_marketplace_sources()
+        .into_iter()
+        .find_map(|source| match source.kind {
+            SourceKind::Git { url, branch } if url == source_url_or_path => Some((url, branch)),
+            _ => None,
+        })
+}
+
+/// Update one or all installed plugins. Saves the registry once at the end.
+>>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/plugin.rs
 pub fn update_plugins(name: Option<&str>) -> Result<Vec<RepoUpdateOutcome>, UpdateError> {
     // Registry lock across load→update loop→save.
     let _registry_lock =
@@ -742,6 +857,62 @@ fn bullet_list(items: &[String]) -> String {
         .join("\n")
 }
 
+<<<<<<< HEAD:crates/codegen/xai-grok-shell/src/plugin/mod.rs
+=======
+/// The require-sha pin policy for remote plugin code. Disk-only config + env,
+/// both tighten-only: a remote campaign overlay must not be able to relax a
+/// local security policy, and an unreadable config falls back to the env knob.
+pub fn marketplace_require_sha() -> bool {
+    xai_grok_config::load_effective_config_disk_only()
+        .map(|c| xai_grok_plugin_marketplace::load_require_sha(&c))
+        .unwrap_or_else(|_| xai_grok_plugin_marketplace::env_require_sha())
+}
+
+/// Marketplace sources from config.toml + settings JSON, unfiltered.
+pub fn load_marketplace_sources() -> Vec<MarketplaceSource> {
+    let config = crate::config::load_effective_config()
+        .ok()
+        .unwrap_or(toml::Value::Table(toml::map::Map::new()));
+    let mut sources = load_sources(&config);
+    sources.extend(load_extra_sources_from_settings(&sources));
+    sources
+}
+
+/// Like [`load_marketplace_sources`] but drops git sources blocked by the
+/// managed `marketplace_allowlist`. Install paths must use this so policy
+/// cannot be bypassed.
+pub fn load_filtered_marketplace_sources() -> Vec<MarketplaceSource> {
+    let allowlist =
+        &xai_grok_workspace::permission::resolution::managed_settings().marketplace_allowlist;
+    filter_sources_by_allowlist(load_marketplace_sources(), allowlist)
+}
+
+fn filter_sources_by_allowlist(
+    mut sources: Vec<MarketplaceSource>,
+    allowlist: &xai_grok_workspace::permission::resolution::MarketplaceAllowlist,
+) -> Vec<MarketplaceSource> {
+    if allowlist.is_restricted() {
+        sources.retain(|source| match &source.kind {
+            SourceKind::Git { url, .. } => {
+                if allowlist.is_url_allowed(url) {
+                    true
+                } else {
+                    tracing::warn!(
+                        name = %source.name,
+                        url,
+                        reason = %allowlist.block_reason(),
+                        "Marketplace source blocked by allowlist"
+                    );
+                    false
+                }
+            }
+            SourceKind::Local { .. } => true,
+        });
+    }
+    sources
+}
+
+>>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/plugin.rs
 fn registered_source_label(source: &MarketplaceSource) -> String {
     let qualifier = install_resolve::addressable_qualifier(source);
     format!("{} ({qualifier})", source.name)
@@ -1088,6 +1259,7 @@ fn install_marketplace_entry(
         });
     }
 
+<<<<<<< HEAD:crates/codegen/xai-grok-shell/src/plugin/mod.rs
     let result = acquire::install_marketplace_entry(
         source,
         marketplace_root,
@@ -1108,6 +1280,30 @@ fn install_marketplace_entry(
             })
         }
     })?;
+=======
+    let provenance = MarketplaceProvenance {
+        source_url_or_path: source_identity,
+        source_display_name: source.name.clone(),
+        plugin_subdir: plugin_subdir.clone(),
+    };
+
+    let result = if let Some(remote_url) = entry.remote_url.as_deref() {
+        let require_sha = crate::plugin::marketplace_require_sha();
+        installer::install_from_remote_url(
+            remote_url,
+            entry.remote_ref.as_deref(),
+            entry.remote_sha.as_deref(),
+            entry.remote_subdir.as_deref(),
+            &plugin_subdir,
+            provenance,
+            registry,
+            require_sha,
+        )
+    } else {
+        installer::install_from_marketplace(marketplace_root, &plugin_subdir, provenance, registry)
+    };
+
+>>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-shell/src/plugin.rs
     let repo_key = match result {
         installer::MarketplaceInstallResult::Installed { repo_key }
         | installer::MarketplaceInstallResult::AlreadyInstalled { repo_key } => repo_key,

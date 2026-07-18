@@ -79,6 +79,7 @@ group_tool_verbs = true                # fold runs of read/search/list tool call
                                        # — and finished thoughts among them — into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
                                        # back-to-back same-file edits into one row, expand for the
+<<<<<<< HEAD
                                        # diffs (default: false)
 page_flip_on_send = true               # pin a just-sent prompt at the top of the viewport so the
                                        # response starts on a fresh page (default: true); set false
@@ -86,6 +87,10 @@ page_flip_on_send = true               # pin a just-sent prompt at the top of th
 follow_up_behavior = "queue"           # mid-turn follow-ups: "queue" (wait for turn end; default) or
                                        # "steer" (plain Enter still queues visibly, then injects at the
                                        # next tool/model safe gap). See Keyboard Shortcuts → Mid-turn.
+=======
+                                       # diffs (default: false; pager.toml [scrollback.blocks.edit]
+                                       # expanded_by_default/line_summary override its fold shape)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
 
@@ -182,19 +187,38 @@ Toggle it at runtime with `/vim-mode`, or from `/settings` → **Vim scrollback 
 
 #### Screen mode
 
+<<<<<<< HEAD
 `[ui] screen_mode` is the **default render mode** for plain `grok` launches. Set it from `/settings` → **Default screen mode** (restart required) or edit `config.toml` by hand — both write the file. CLI flags (`--minimal` / `--fullscreen`) and slash commands (`/minimal` / `/fullscreen`) are session-scoped and do **not** write this key; after a slash switch, the reverse command returns you for that session only.
 
 | Value | Behavior |
 |-------|----------|
 | unset | Settings shows **Fullscreen**. There's no sticky preference at startup: legacy `pager.toml` `[terminal] minimal` can still force minimal, and terminals that leak mouse reports (JediTerm/Windows) may auto-open minimal until you set an explicit value. Otherwise the alt-screen policy picks fullscreen vs inline. |
+=======
+#### Screen Mode
+
+The `screen_mode` setting under `[ui]` is the **default render mode** for plain
+`grok` launches. Configure it from `/settings` → **Default screen mode**
+(restart required), or edit `config.toml` by hand. Both choices write
+`config.toml`. CLI flags (`--minimal` / `--fullscreen`) and slash commands
+(`/minimal` / `/fullscreen`) are session-scoped and do **not** write this key —
+after a slash switch, the reverse command (`/fullscreen` ⇄ `/minimal`) returns
+you for that session only.
+
+| Value | Behavior |
+|-------|----------|
+| unset | Settings shows **Fullscreen**. At startup there is no sticky preference: legacy `pager.toml` `[terminal] minimal` can still force minimal, and terminals that leak mouse reports (JediTerm/Windows) may auto-open minimal until you set an explicit value. Otherwise the alt-screen policy picks fullscreen vs inline. |
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 | `"fullscreen"` | Sticky non-minimal. Fullscreen-vs-inline still follows the alt-screen policy (`--no-alt-screen`, `[terminal] alt_screen`, terminal auto-detection). |
 | `"minimal"` | Sticky minimal (scrollback-native) mode. |
 
 A CLI flag always wins over the config value for that invocation.
+<<<<<<< HEAD
 
 #### Snap prompt to top on send
 
 By default, sending a prompt scrolls it to the top of the viewport so the response starts on a fresh page. Set `[ui] page_flip_on_send = false` (or toggle **Snap prompt to top on send** in `/settings` → Appearance) to leave the scroll position alone when you send. It takes effect on the next send — no restart.
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 #### Scrolling
 

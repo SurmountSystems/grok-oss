@@ -16,6 +16,28 @@ use crate::theme::Theme;
 pub struct PeekLiveTailArgs<'a> {
     pub scrollback: &'a crate::scrollback::state::ScrollbackState,
 }
+<<<<<<< HEAD
+=======
+
+/// Exclusive bottom y of the live-tail middle band (above the reply).
+///
+/// Reserves a 1-row breathing blank above the reply only when middle still
+/// has ≥2 rows after that blank so pin + body can share. When only one row
+/// would remain (`middle_h_with_blank == 1`), expand into the blank so the
+/// current-turn body is not starved — matches measure when
+/// `blank_row=false` (e.g. max_content = fixed+1 with pin).
+fn live_tail_middle_bottom(middle_top: u16, reply_top_y: u16) -> u16 {
+    let with_blank = reply_top_y.saturating_sub(1);
+    let h_with_blank = with_blank.saturating_sub(middle_top);
+    if h_with_blank > 1 {
+        with_blank
+    } else if reply_top_y > middle_top {
+        reply_top_y
+    } else {
+        with_blank
+    }
+}
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 /// Exclusive bottom y of the live-tail middle band (above the reply). Reserves a 1-row breathing
 /// blank above the reply only when the middle still has at least 2 rows after that blank, so pin
@@ -57,9 +79,25 @@ pub struct PeekFields {
     pub reject_option: Option<usize>,
 }
 
+<<<<<<< HEAD
 /// Status (`response_type` and `time_ago`) on the header row. The reply draft is preserved across
 /// refreshes and only cleared when the peeked row changes or the panel closes
 /// (`DashboardState::set_peek`).
+=======
+/// Per-row peek panel state.
+///
+/// Peek panel display state for a selected dashboard row.
+///
+/// - Status (`response_type` + `time_ago`) on the header row.
+/// - Middle body: live-tail scrollback (see `PeekLiveTailArgs`) or a
+///   pending permission / ask-question UI.
+/// - `❯ reply` input backed by the dashboard-owned `peek_reply`
+///   [`PromptWidget`](crate::views::prompt_widget::PromptWidget).
+///
+/// Display fields refresh every frame from the selected agent; the reply
+/// draft is preserved across refreshes and only cleared when the peeked
+/// row changes or the panel closes (`DashboardState::set_peek`).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone)]
 pub struct PeekPanelState {
     /// Which row is being peeked. Tracks the selection cursor; the row may disappear between frames.
@@ -289,8 +327,45 @@ pub fn compute_peek_fields(
                 reject_option,
             })
         }
+<<<<<<< HEAD
         // Roster-only rows are not locally hosted; there is no local `AgentView` to peek into
         DashboardRowId::Roster { .. } | DashboardRowId::Workspace { .. } => None,
+=======
+        DashboardRowId::Subagent {
+            parent,
+            child_session_id,
+        } => {
+            let parent_agent = agents.get(parent)?;
+            let info = parent_agent.subagent_sessions.get(child_session_id)?;
+            let label = {
+                let (l, _) = crate::app::subagent::format_subagent_label(info);
+                sanitize_display_text(&l).into_owned()
+            };
+            // `subagent_views` holds `Box<AgentView>`; the closures let
+            // deref coercion turn `&Box<AgentView>` into `&AgentView`.
+            let child = parent_agent.subagent_views.get(child_session_id);
+            let response_type = child
+                .map(|c| extract_last_response_type(c))
+                .unwrap_or_else(|| "Subagent".to_string());
+            let last_user_message = child.and_then(|c| extract_last_user_message(c));
+            let time_ago = crate::util::format_time_ago(info.last_progress_at.elapsed());
+            Some(PeekFields {
+                label,
+                time_ago,
+                response_type,
+                last_user_message,
+                // Subagents are driven by their parent — no direct
+                // permission prompts surface here.
+                question: None,
+                options: Vec::new(),
+                request_id: None,
+                reject_option: None,
+            })
+        }
+        // Roster-only rows are not locally hosted — there is no local
+        // `AgentView` to peek into.
+        DashboardRowId::Roster { .. } => None,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 }
 
@@ -385,8 +460,46 @@ fn paint_peek_config_badge(
     reply.render_info_line(buf, info_rect, &info, theme.bg_base, theme, panel.focused);
 }
 
+<<<<<<< HEAD
 /// On a too-narrow / too-short area, paints nothing and returns an empty result; the caller can
 /// fall back to the regular dispatch rendering.
+=======
+/// Render the peek panel inline in place of the dispatch input.
+///
+/// The panel is a single rounded box that REPLACES the dispatch input
+/// (same screen position): one box containing the recent activity
+/// summary above and a `❯ reply` input at the bottom. Bottom footer
+/// hints flip accordingly (handled in `render_footer`).
+///
+/// Layout (rounded box, 5 rows when full-height):
+///
+/// ```text
+/// ╭───────────────────────────────────────────────────────────╮
+/// │ 2m Running: cargo test · ❯ hello? · working on the fix     │
+/// │                                                            │
+/// │ ❯ reply                                                    │
+/// ╰────────────────────────────────────────────────────────────╯
+/// ```
+///
+/// When a permission is pending, the top line switches to the
+/// question text + numbered options.
+///
+/// On a too-narrow / too-short area, paints nothing and returns an
+/// empty result — the caller can fall back to the regular dispatch
+/// rendering.
+///
+/// `reply` is the dashboard-owned `peek_reply` [`PromptWidget`] backing
+/// the `❯ reply` line (and the reject-feedback slot in question mode);
+/// rendering through the shared widget is what gives the reply paste
+/// chips, selection highlighting, and caret-following scroll for free.
+///
+/// `overlay_area` is the rect above the box for paste-chip text
+/// previews (`None` suppresses them).
+///
+/// Returns the reply caret position (so the caller can park the
+/// terminal cursor) plus the reply input's screen rect (recorded for
+/// mouse routing — click-to-focus and drag selection).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[allow(clippy::too_many_arguments)]
 pub fn render_peek_panel(
     buf: &mut Buffer,
@@ -558,8 +671,13 @@ pub fn render_peek_panel(
         } else {
             inner.width as usize
         };
+<<<<<<< HEAD
         // While Working, the status label is secondary (a touch brighter than dim chrome)
         // Live-tail keeps painting the middle regardless
+=======
+        // While Working, the status label is secondary (a touch brighter than
+        // dim chrome). Live-tail keeps painting the middle regardless.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let working = panel.response_type == "Working";
         let label_style = if working {
             Style::default().fg(theme.text_secondary)
@@ -575,8 +693,13 @@ pub fn render_peek_panel(
         }
 
         let middle_top = inner.y + 1;
+<<<<<<< HEAD
         // Match `peek_live_tail_desired_content`: blank only when the middle still has at least 2 rows after it (pin and body)
         // When only 1 row remains, keep it
+=======
+        // Match `peek_live_tail_desired_content`: blank only when middle still
+        // has ≥2 rows after it (pin + body). When only 1 row remains, keep it.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let middle_bottom = live_tail_middle_bottom(middle_top, reply_top_y);
         let middle_h = middle_bottom.saturating_sub(middle_top);
         let middle_area = Rect {
@@ -590,7 +713,16 @@ pub fn render_peek_panel(
                 if scrollback.is_empty() {
                     if let Some(hint) = empty_hint.or(Some("No activity yet")) {
                         let trunc = truncate_str(hint, inner.width as usize);
+<<<<<<< HEAD
                         buf.set_string(inner.x, middle_top, trunc, theme.dim().bg(theme.bg_base));
+=======
+                        buf.set_string(
+                            inner.x,
+                            middle_top,
+                            trunc,
+                            Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                        );
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     }
                 } else {
                     super::peek_tail::paint_peek_live_tail(scrollback, middle_area, buf);
@@ -600,7 +732,16 @@ pub fn render_peek_panel(
             && middle_h > 0
         {
             let trunc = truncate_str(hint, inner.width as usize);
+<<<<<<< HEAD
             buf.set_string(inner.x, middle_top, trunc, theme.dim().bg(theme.bg_base));
+=======
+            buf.set_string(
+                inner.x,
+                middle_top,
+                trunc,
+                Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+            );
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 
@@ -664,7 +805,19 @@ pub fn render_peek_panel(
     PeekRenderResult { caret, reply_rect }
 }
 
+<<<<<<< HEAD
 /// Returns at least 1.
+=======
+/// Number of rows the `❯ reply` input wants at the given reply TEXT
+/// width (the inner box width minus the `❯ ` prefix), capped at `cap`.
+/// Used both by the dashboard layout to size the peek box and by
+/// [`render_peek_panel`] to place the reply, so a multi-line draft
+/// (Shift+Enter) is fully visible. Routes through
+/// [`PromptWidget::desired_height`](crate::views::prompt_widget::PromptWidget::desired_height)
+/// (chromeless, no prefix — the prefix is painted separately) so paste
+/// chips and wrapped lines are counted exactly as they render. Returns
+/// ≥1.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn reply_row_count(
     reply: &crate::views::prompt_widget::PromptWidget,
     reply_text_width: u16,
@@ -683,8 +836,23 @@ pub fn reply_row_count(
         .max(1)
 }
 
+<<<<<<< HEAD
 /// It mirrors the agent view's turn-status line so the peek never dwells on a stale completed
 /// response while the agent has actually moved on.
+=======
+/// The header label for the peek panel, e.g. `"Thinking"` / `"Thought"`,
+/// `"Response"`, `"Edit"`, `"Read"`, `"Bash"`, `"Working"`, …
+///
+/// While the turn is RUNNING the label follows the live turn activity
+/// (`Thinking` / `Responding` / a running tool / `Working` when waiting),
+/// mirroring the agent view's turn-status line so the peek never dwells on a
+/// stale completed response while the agent has actually moved on.
+///
+/// When IDLE it scans the scrollback newest-first and returns a label for the
+/// first agent-produced block (a `Thinking` block reads `"Thought"` once
+/// done). Scanning stops at the user's latest prompt / interjection (anything
+/// before it belongs to a previous turn), falling back to `"Idle"`.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn extract_last_response_type(agent: &AgentView) -> String {
     use crate::scrollback::block::RenderBlock;
     use crate::scrollback::blocks::ToolCallBlock;
@@ -799,9 +967,36 @@ pub fn extract_first_user_message(agent: &AgentView) -> Option<String> {
     None
 }
 
+<<<<<<< HEAD
 /// Extract the last `count` short text descriptions from the given agent view's scrollback. Blocks
 /// are never Debug-formatted. Every projected string is run through `strip_ansi_escapes::strip_str`
 /// so embedded `\x1b[...]` sequences from agent output cannot reach the buffer.
+=======
+/// Extract the last `count` short text descriptions from the given
+/// agent view's scrollback.
+///
+/// No more `format!("{:?}", entry.block)`, which leaked
+/// Rust Debug output (variant tags, struct field names, escaped
+/// strings — and worst of all the head of bash commands containing
+/// credentials).
+///
+/// Every projected string is run through
+/// `strip_ansi_escapes::strip_str` so embedded `\x1b[...]` sequences
+/// from agent output cannot reach the buffer.
+///
+/// Every projected string is also run
+/// through `sanitize_display_text` so a maliciously crafted block
+/// can't smuggle terminal escapes via this path.
+///
+/// The pipeline is project → first line → ANSI-strip
+/// → sanitise. Splitting BEFORE sanitisation matters because
+/// `sanitize_display_text` rewrites `\n` to U+FFFD (it's a control
+/// character), so a `.lines().next()` AFTER sanitisation returns the
+/// whole concatenated body. Doing the split first also avoids
+/// allocating the entire body when only the first line is needed.
+///
+/// Returns newest-last (top to bottom = chronological).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn extract_recent_lines(agent: &AgentView, count: usize) -> Vec<String> {
     let mut out = Vec::new();
     if count == 0 {
@@ -920,8 +1115,13 @@ mod tests {
 
     #[test]
     fn live_tail_middle_bottom_skips_blank_when_only_one_content_row() {
+<<<<<<< HEAD
         // status@0, middle from 1, 3-line reply starts at 3, so span 2
         // A blank would leave middle_h=1 (pin-only); expand so pin and body fit
+=======
+        // status@0, middle from 1, 3-line reply starts at 3 → span 2.
+        // blank would leave middle_h=1 (pin-only); expand so pin+body fit.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(live_tail_middle_bottom(1, 3), 3);
         // Generous middle (span 4) keeps blank above reply.
         assert_eq!(live_tail_middle_bottom(1, 5), 4);
@@ -929,13 +1129,66 @@ mod tests {
         assert_eq!(live_tail_middle_bottom(3, 3), 2);
     }
 
+<<<<<<< HEAD
     /// Tight box: status, pin, body, and a 3-line reply, with no blank budget.
+=======
+    /// Tight box: status + pin + body + 3-line reply, no blank budget.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Paint must not steal the body row for a breathing blank.
     #[test]
     fn render_peek_tight_pin_shows_current_turn_body() {
         use crate::scrollback::block::RenderBlock;
         use crate::scrollback::entry::ScrollbackEntry;
         use crate::scrollback::state::ScrollbackState;
+<<<<<<< HEAD
+=======
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        // borders(2) + inner content_rows(6) = 8.
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+        let panel = PeekPanelState::new(DashboardRowId::TopLevel(AgentId(0)), fields("Response"));
+        let mut reply = test_reply();
+        reply.set_text("r1\nr2\nr3");
+        let mut sb = ScrollbackState::new();
+        sb.push(ScrollbackEntry::new(RenderBlock::user_prompt("user pin")));
+        sb.push(ScrollbackEntry::new(RenderBlock::agent_message(
+            "current turn line",
+        )));
+        let _ = render_peek_panel(
+            &mut buf,
+            area,
+            &panel,
+            &mut reply,
+            &theme,
+            false,
+            None,
+            false,
+            None,
+            Some(PeekLiveTailArgs { scrollback: &sb }),
+            None,
+        );
+        let mut content = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                content.push_str(buf[(x, y)].symbol());
+            }
+            content.push('\n');
+        }
+        assert!(content.contains("user pin"), "pin must paint: {content:?}");
+        assert!(
+            content.contains("current turn line"),
+            "body must not be eaten by blank: {content:?}"
+        );
+    }
+
+    /// While the agent is working the "Working" status label renders in the
+    /// secondary colour; other status labels stay dim chrome.
+    #[test]
+    fn render_peek_working_status_uses_secondary_colour() {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -1008,7 +1261,11 @@ mod tests {
             );
             buf
         };
+<<<<<<< HEAD
         // Inner content sits two cells in (1 border, 1 pad inset): status at (2,1)
+=======
+        // Inner content sits two cells in (1 border + 1 pad inset): status at (2,1).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let working = render("Working");
         assert_eq!(
             working.cell((2, 1)).map(|c| c.symbol()),
@@ -1022,6 +1279,7 @@ mod tests {
         );
 
         let idle = render("Response");
+<<<<<<< HEAD
         assert_eq!(
             idle.cell((2, 1)).map(|c| c.symbol()),
             Some("R"),
@@ -1030,6 +1288,12 @@ mod tests {
         assert_eq!(
             idle.cell((2, 1)).map(|c| c.fg),
             Some(theme.gray_dim),
+=======
+        assert_eq!(idle[(2, 1)].symbol(), "R", "status label is `Response`");
+        assert_eq!(
+            idle[(2, 1)].fg,
+            theme.gray_dim,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             "a non-working status stays dim chrome",
         );
     }
@@ -1063,7 +1327,11 @@ mod tests {
                 .collect()
         };
 
+<<<<<<< HEAD
         // Summary mode: model and always-approve on the bottom border
+=======
+        // Summary mode → model + always-approve on the bottom border.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut panel =
             PeekPanelState::new(DashboardRowId::TopLevel(AgentId(0)), fields("Response"));
         panel.model_name = Some("Grok 4 Fast".to_string());
@@ -1078,7 +1346,11 @@ mod tests {
             "always-approve flag: {bottom:?}"
         );
 
+<<<<<<< HEAD
         // Pending-question (approval) mode: badge still painted
+=======
+        // Pending-question (approval) mode → badge still painted.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut q = fields("Response");
         q.question = Some("Allow write?".to_string());
         q.options = vec![
@@ -1105,7 +1377,12 @@ mod tests {
             "no flag without yolo: {plain_bottom:?}",
         );
 
+<<<<<<< HEAD
         // Plan mode shows a `plan` flag (so all three Shift+Tab cycle states are visible on the badge)
+=======
+        // Plan mode → a `plan` flag (so all three Shift+Tab cycle states
+        // are visible on the badge).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut planp =
             PeekPanelState::new(DashboardRowId::TopLevel(AgentId(0)), fields("Response"));
         planp.model_name = Some("Grok 4 Fast".to_string());
@@ -1194,14 +1471,22 @@ mod tests {
     #[test]
     fn apply_fields_reports_row_change() {
         let mut state = PeekPanelState::new(DashboardRowId::TopLevel(AgentId(0)), fields("Idle"));
+<<<<<<< HEAD
         // Same row: no change reported (caller preserves the draft)
+=======
+        // Same row → no change reported (caller preserves the draft).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let changed = state.apply_fields(
             DashboardRowId::TopLevel(AgentId(0)),
             fields("Running\u{2026}"),
         );
         assert!(!changed, "same row must not report a change");
         assert_eq!(state.response_type, "Running\u{2026}");
+<<<<<<< HEAD
         // Different row: change reported (caller clears the draft)
+=======
+        // Different row → change reported (caller clears the draft).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let changed = state.apply_fields(DashboardRowId::TopLevel(AgentId(1)), fields("Idle"));
         assert!(changed, "row change must be reported");
         assert_eq!(state.row, DashboardRowId::TopLevel(AgentId(1)));
@@ -1275,7 +1560,12 @@ mod tests {
         );
     }
 
+<<<<<<< HEAD
     /// The reply input renders the typed draft (not the dim placeholder) and reports a caret position.
+=======
+    /// The reply input renders the typed draft (not the dim
+    /// placeholder) and reports a caret position.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn render_peek_shows_typed_reply_and_caret() {
         use ratatui::buffer::Buffer;
@@ -1451,8 +1741,15 @@ mod tests {
         }
     }
 
+<<<<<<< HEAD
     /// When a permission is pending, the peek paints the question and numbered options at the top and shows the reply slot on the last inner row.
     /// The 1-9 keys still answer the permission via `peek_number_key`.
+=======
+    /// When a permission is pending, the peek paints
+    /// the question + numbered options at the top and still
+    /// shows the reply slot on the last inner row. The 1-9
+    /// keys still answer the permission via `peek_number_key`.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn render_peek_paints_permission_question_with_options() {
         use ratatui::buffer::Buffer;

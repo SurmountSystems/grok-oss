@@ -29,9 +29,15 @@ pub enum LinkPresentation {
 /// Output and activation policy for a semantic link target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedLinkTarget {
+<<<<<<< HEAD
     /// OSC 8 destination for the terminal, or `None` to leave link detection to the terminal's own plain-text scanning.
     pub osc8_url: Option<Arc<str>>,
     /// Target the app opens on activation, or `None` to leave opening to the terminal.
+=======
+    /// Terminal-owned OSC 8 destination, or `None` when plain text owns discovery.
+    pub osc8_url: Option<Arc<str>>,
+    /// App-owned activation target, or `None` when activation is delegated.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub open_target: Option<LinkTarget>,
 }
 
@@ -249,7 +255,11 @@ fn quoted_file_path_regex() -> &'static regex::Regex {
 }
 
 /// Turn a display path (`/abs/…` or `~/…`) into a semantic filesystem target.
+<<<<<<< HEAD
 /// Relative paths fail; use [`tool_path_file_target`] to join cwd first.
+=======
+/// Relative paths fail — use [`tool_path_file_target`] to join cwd first.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn path_to_file_target(path: &str) -> Option<LinkTarget> {
     tool_path_file_target(path, None)
 }
@@ -329,6 +339,7 @@ fn file_link_presentation_with_home(
     file_link_presentation_for_resolved(painted, target, cwd, resolved.as_deref())
 }
 
+<<<<<<< HEAD
 /// Web, mailto, tel, and anchors are `None`. Relative paths prefer a unique `media_paths` suffix (stable across forks); ambiguous matches stay unlinked.
 /// Else join to `cwd` and stay inside it. `cwd = None` disables that fallback.
 pub fn local_link_to_file_target(
@@ -336,6 +347,21 @@ pub fn local_link_to_file_target(
     media_paths: &[PathBuf],
     cwd: Option<&Path>,
 ) -> Option<LinkTarget> {
+=======
+/// Resolve a markdown link destination that names a local file into a semantic
+/// filesystem target, so model paths (`[videos/1.mp4](videos/1.mp4)`) open on click.
+///
+/// Web/scheme URLs, `mailto:`/`tel:`, and anchors return `None`.
+///
+/// - **Absolute / `~`** paths resolve directly (must be an existing file).
+/// - **Relative** paths (`images/1.jpg`) resolve against `media_paths` — the
+///   absolute paths of media actually generated in this transcript — by
+///   matching a unique entry whose path ends with those components. This ties
+///   each short path to the exact file its message produced (correct across
+///   forks/resumes) and never opens an arbitrary or out-of-session file; an
+///   ambiguous or absent match is left unlinked.
+pub fn local_link_to_file_target(dest: &str, media_paths: &[PathBuf]) -> Option<LinkTarget> {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let dest = dest.trim();
     if dest.is_empty() || dest.starts_with('#') || dest.contains("://") {
         return None;
@@ -355,6 +381,7 @@ pub fn local_link_to_file_target(
         return None;
     }
     Some(LinkTarget::File(Arc::from(resolved)))
+<<<<<<< HEAD
 }
 
 /// Unique generated-media match, else a `cwd` path that stays inside `cwd`. Ambiguous media matches resolve to neither.
@@ -376,6 +403,8 @@ fn relative_link_target(
     joined
         .starts_with(xai_grok_paths::normalize_lexically(cwd))
         .then_some(joined)
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 /// Convert a display-cell column to a `u16` suitable for overlay coordinates.
@@ -479,7 +508,11 @@ fn push_link_segments(
             col_end,
             target: target.clone(),
             presentation,
+<<<<<<< HEAD
             id: Some(id),
+=======
+            id: None,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         });
     }
     true
@@ -518,7 +551,11 @@ fn scan_logical_line(
             .get_or_insert_with(Vec::new)
             .push(link.start()..link.end());
 
+<<<<<<< HEAD
         let target = LinkTarget::Url(Arc::from(url.as_str()));
+=======
+        let target = LinkTarget::Url(Arc::from(url));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         push_link_segments(
             text,
             rows,
@@ -647,8 +684,12 @@ fn scan_logical_line(
             let path = m
                 .as_str()
                 .trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
+<<<<<<< HEAD
             // Bare relative paths in prose stay media-only (no cwd fallback), so ordinary `a/b.ext`-shaped prose is not over-linkified
             let Some(file_target) = local_link_to_file_target(path, media_paths, None) else {
+=======
+            let Some(file_target) = local_link_to_file_target(path, media_paths) else {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 continue;
             };
             let path_end = m.start() + path.len();
@@ -703,11 +744,16 @@ mod tests {
         let media = vec![dir.path().join("images/1.jpg")];
 
         // Short session-relative path matches the generated media by suffix.
+<<<<<<< HEAD
         let target = local_link_to_file_target("images/1.jpg", &media, None).unwrap();
         let Some(media_path) = media.first() else {
             panic!("expected media path");
         };
         assert_eq!(target, LinkTarget::File(Arc::from(media_path.as_path())));
+=======
+        let target = local_link_to_file_target("images/1.jpg", &media).unwrap();
+        assert_eq!(target, LinkTarget::File(Arc::from(media[0].as_path())));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let resolved = resolve_link_target(&target).expect("resolved target");
         let url = resolved.osc8_url.expect("OSC 8 URL");
         assert!(
@@ -723,6 +769,7 @@ mod tests {
         std::fs::write(dir.path().join("images/1.jpg"), b"x").unwrap();
         let media = vec![dir.path().join("images/1.jpg")];
 
+<<<<<<< HEAD
         assert!(local_link_to_file_target("https://x.ai", &media, None).is_none());
         assert!(local_link_to_file_target("mailto:a@b.c", &media, None).is_none());
         assert!(local_link_to_file_target("#section", &media, None).is_none());
@@ -730,6 +777,15 @@ mod tests {
         assert!(local_link_to_file_target("images/2.jpg", &media, None).is_none());
         // No known media at all.
         assert!(local_link_to_file_target("images/1.jpg", &[], None).is_none());
+=======
+        assert!(local_link_to_file_target("https://x.ai", &media).is_none());
+        assert!(local_link_to_file_target("mailto:a@b.c", &media).is_none());
+        assert!(local_link_to_file_target("#section", &media).is_none());
+        // Relative path that isn't a known generated media file.
+        assert!(local_link_to_file_target("images/2.jpg", &media).is_none());
+        // No known media at all.
+        assert!(local_link_to_file_target("images/1.jpg", &[]).is_none());
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -744,6 +800,7 @@ mod tests {
             dir.path().join("a/images/1.jpg"),
             dir.path().join("b/images/1.jpg"),
         ];
+<<<<<<< HEAD
         assert!(local_link_to_file_target("images/1.jpg", &media, None).is_none());
         // A `..` never matches a clean absolute media path, so it can't escape.
         assert!(local_link_to_file_target("../images/1.jpg", &media, None).is_none());
@@ -801,6 +858,16 @@ mod tests {
     // ── tool_path_file_target ──
 
     #[test]
+=======
+        assert!(local_link_to_file_target("images/1.jpg", &media).is_none());
+        // A `..` never matches a clean absolute media path, so it can't escape.
+        assert!(local_link_to_file_target("../images/1.jpg", &media).is_none());
+    }
+
+    // ── tool_path_file_target ──
+
+    #[test]
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     fn tool_path_file_target_resolves_relative_against_cwd() {
         let cwd = Path::new("/Users/me/project");
         let target = tool_path_file_target("src/main.rs", Some(cwd)).expect("target");
@@ -1124,7 +1191,11 @@ mod tests {
         scan_unjoined(std::iter::once((5, &line)), 2, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
+<<<<<<< HEAD
         let link = &nth_link(&overlay, 0);
+=======
+        let link = &overlay.links()[0];
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(
             &*resolve_link_target(&link.target)
                 .and_then(|resolved| resolved.osc8_url)
@@ -1146,19 +1217,31 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 2);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "https://a.example"
         );
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 1).target)
+=======
+            &*resolve_link_target(&overlay.links()[1].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "https://b.example"
         );
+<<<<<<< HEAD
         assert!(nth_link(&overlay, 0).col_end <= nth_link(&overlay, 1).col_start);
         assert_ne!(nth_link(&overlay, 0).id, nth_link(&overlay, 1).id);
+=======
+        assert!(overlay.links()[0].col_end <= overlay.links()[1].col_start);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -1173,7 +1256,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "https://example.com"
@@ -1276,7 +1363,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "https://example.com",
@@ -1292,7 +1383,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "https://example.com/path?key=val#sec"
@@ -1320,7 +1415,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "file:///Users/foo/src/main.rs"
@@ -1348,7 +1447,11 @@ mod tests {
             let mut overlay = LinkOverlay::new();
             scan_unjoined(std::iter::once((0, &line)), 0, &media, &mut overlay);
             assert_eq!(overlay.links().len(), 1, "{line_text}");
+<<<<<<< HEAD
             let url = resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            let url = resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url");
             assert!(
@@ -1386,7 +1489,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             // `%` is itself percent-encoded (`%25`) when building the file URL.
@@ -1614,12 +1721,20 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "file:///Users/alice"
         );
+<<<<<<< HEAD
         assert_eq!(nth_link(&overlay, 0).screen_row, 0);
+=======
+        assert_eq!(overlay.links()[0].screen_row, 0);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -1634,6 +1749,15 @@ mod tests {
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
+<<<<<<< HEAD
+=======
+        assert_eq!(
+            &*resolve_link_target(&overlay.links()[0].target)
+                .and_then(|resolved| resolved.osc8_url)
+                .expect("url"),
+            "file:///Users/foo/images/1.jpg"
+        );
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(
             &*resolve_link_target(&nth_link(&overlay, 0).target)
                 .and_then(|resolved| resolved.osc8_url)
@@ -1654,7 +1778,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "file:///Users/foo/bar.rs",
@@ -1683,7 +1811,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "https://example.com/foo/bar",
@@ -1722,7 +1854,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "file:///tmp/grok-impl-summary.md"
@@ -1737,7 +1873,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "file:///node_modules/@scope/package/index.js"
@@ -1784,7 +1924,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "file:///tmp/release/Demo%20App.app"
@@ -1805,7 +1949,11 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             "file:///tmp/foo/bar"
@@ -1857,12 +2005,20 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
+<<<<<<< HEAD
             &*resolve_link_target(&nth_link(&overlay, 0).target)
+=======
+            &*resolve_link_target(&overlay.links()[0].target)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 .and_then(|resolved| resolved.osc8_url)
                 .expect("url"),
             expected.as_str()
         );
+<<<<<<< HEAD
         assert_eq!(nth_link(&overlay, 0).col_start, 0);
+=======
+        assert_eq!(overlay.links()[0].col_start, 0);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]

@@ -14,8 +14,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+<<<<<<< HEAD
     /// Check terminal, clipboard, color, and input support without starting Grok
     Doctor(crate::doctor_cmd::DoctorArgs),
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
@@ -748,6 +751,7 @@ pub struct PagerArgs {
     /// Run inline instead of using the terminal alternate screen.
     #[arg(long = "no-alt-screen")]
     pub no_alt_screen: bool,
+<<<<<<< HEAD
     /// Experimental: scrollback-native rendering.
     /// Finalized blocks are printed into the terminal's native scrollback (use the terminal's own scroll / selection).
     /// Session-scoped only, does not write config.
@@ -756,6 +760,19 @@ pub struct PagerArgs {
     /// Open in the standard fullscreen TUI for this session, overriding a config `[ui] screen_mode = "minimal"` preference.
     /// Session-scoped only, does not write config.
     /// Fullscreen-vs-inline still follows the alt-screen policy (--no-alt-screen, [terminal] alt_screen, terminal auto-detection).
+=======
+    /// Experimental: scrollback-native rendering. Finalized blocks are printed
+    /// into the terminal's native scrollback (use the terminal's own scroll /
+    /// selection); a small pinned region holds the prompt + running turn.
+    /// Session-scoped only — does not write config. To default plain `grok` to
+    /// minimal, set `[ui] screen_mode = "minimal"` in ~/.grok/config.toml.
+    #[arg(long = "minimal")]
+    pub minimal: bool,
+    /// Open in the standard fullscreen TUI for this session, overriding a
+    /// config `[ui] screen_mode = "minimal"` preference. Session-scoped only —
+    /// does not write config. Fullscreen-vs-inline still follows the alt-screen
+    /// policy (--no-alt-screen, [terminal] alt_screen, terminal auto-detection).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     #[arg(long = "fullscreen", conflicts_with = "minimal")]
     pub fullscreen: bool,
     /// Write sampling events to ~/.grok/logs/sampling.jsonl.

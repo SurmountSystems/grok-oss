@@ -1731,8 +1731,15 @@ fn render_welcome_done(
         if in_vscode_family { "ctrl+d" } else { "ctrl+q" },
     );
 
+<<<<<<< HEAD
     // Heights that don't depend on the menu, computed first so the menu builder can probe the layout to decide whether to add a Changelog row
     // Startup-warning hint height (multi-line aware). It must pick the same entry `render_startup_warnings` draws; see `startup::banner_warning`.
+=======
+    // Heights that don't depend on the menu — computed first so the menu
+    // builder can probe the layout to decide whether to add a Changelog row.
+    // Startup-warning hint height (multi-line aware). Must pick the same
+    // entry `render_startup_warnings` draws — see `startup::banner_warning`.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let hint_height = crate::startup::banner_warning(p.startup_warnings).map_or(0u16, |w| {
         let msg_lines = w.message.lines().count() as u16;
         let action_line = if w.action.is_some() { 1 } else { 0 };
@@ -2622,8 +2629,21 @@ fn render_auth_input_box(
     }
 }
 
+<<<<<<< HEAD
 /// Only one is rendered: the severity-aware pick from `startup::banner_warning`, so a
 /// runtime-pushed Warning displaces an earlier Info entry.
+=======
+/// Render one startup warning centered in the given area.
+///
+/// `startup_warnings` can hold more than one entry (the WezTerm
+/// kitty-keyboard banner is prepended ahead of `summarize_warnings()`
+/// output — see `diagnostics::assemble_startup_warnings`), but only one is
+/// rendered — the severity-aware pick from `startup::banner_warning`, so a
+/// runtime-pushed Warning displaces an earlier Info entry; all of them point
+/// at `/terminal-setup`, which lists every issue. One message line, one
+/// optional action line, plus a buffer row for spacing. Severity controls
+/// color (yellow for `Warning`, dim for `Info`).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn render_startup_warnings(
     area: Rect,
     buf: &mut Buffer,

@@ -1,7 +1,17 @@
+<<<<<<< HEAD
 //! Shared prompt-area list overlay: accent bar, bold title, and a scrollable single-line row list with a cursor.
 //!
 //! `/rewind`'s picker phase and `/jump` each used to keep this row geometry in sync by hand across their render, hit-test, and height functions.
 //! Row content stays with the caller (a closure); this module owns the accent bar, title, cursor styling, and the scroll window.
+=======
+//! Shared prompt-area list overlay: accent bar, bold title, and a
+//! scrollable single-line row list with a cursor.
+//!
+//! One source of truth for the row geometry that `/rewind`'s picker phase
+//! and `/jump` previously each kept in sync by hand across their render,
+//! hit-test, and height functions. Row *content* stays with the caller
+//! (a closure); this owns chrome, cursor styling, and the scroll window.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -13,8 +23,14 @@ use crate::theme::Theme;
 /// Rows shown before the list scrolls (matches the historical picker cap).
 const MAX_ROWS: usize = 15;
 
+<<<<<<< HEAD
 /// List geometry: row count and cursor position.
 /// Construct per call; every method derives the same scroll window from these two fields, so the render, hit-test, and height paths cannot drift.
+=======
+/// List geometry: row count + cursor position. Construct per call; all
+/// methods derive the same scroll window from these two fields, so the
+/// render, hit-test, and height paths cannot drift.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub struct ListOverlay {
     pub len: usize,
     pub selected: usize,
@@ -30,7 +46,12 @@ pub struct RowCtx {
 }
 
 impl ListOverlay {
+<<<<<<< HEAD
     /// Overlay height: title plus rows (at most [`MAX_ROWS`]), capped at 60% of the screen, plus one padding row.
+=======
+    /// Overlay height: title + rows (≤ [`MAX_ROWS`]), capped at 60% of the
+    /// screen, plus one padding row.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn height(&self, screen_h: u16) -> u16 {
         let rows = self.len.min(MAX_ROWS) as u16;
         let h = 2 + rows;
@@ -38,7 +59,11 @@ impl ListOverlay {
         h.min(cap) + 1
     }
 
+<<<<<<< HEAD
     /// Rows that fit in `area` (title and padding excluded).
+=======
+    /// Rows that fit in `area` (title + padding excluded).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     fn visible_rows(area: Rect) -> usize {
         area.height.saturating_sub(3) as usize
     }
@@ -52,7 +77,11 @@ impl ListOverlay {
         }
     }
 
+<<<<<<< HEAD
     /// Row index under a screen position, or `None` when the position misses the rows.
+=======
+    /// Row index under a screen position, or `None` off the rows.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn row_at(&self, area: Rect, col: u16, row: u16) -> Option<usize> {
         if area.height == 0 || area.width < 10 {
             return None;
@@ -76,9 +105,16 @@ impl ListOverlay {
         (idx < self.len).then_some(idx)
     }
 
+<<<<<<< HEAD
     /// Render the overlay: bg fill, accent bar, title, then the visible window of rows.
     /// `row_line(idx, ctx)` produces each row's content; cursor and row backgrounds are painted here.
     /// Applies the standard unfocus dim, so callers must not blend again.
+=======
+    /// Render the overlay: bg fill, accent bar, title, then the visible
+    /// window of rows. `row_line(idx, ctx)` produces each row's content;
+    /// cursor/row backgrounds are painted here. Applies the standard
+    /// unfocus dim, so callers must not blend again.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub fn render(
         &self,
         buf: &mut Buffer,
@@ -126,21 +162,38 @@ impl ListOverlay {
                 break;
             }
             let is_cursor = i == self.selected;
+<<<<<<< HEAD
+=======
+            let row_bg = if is_cursor && focused {
+                theme.bg_visual
+            } else {
+                bg
+            };
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             let row_rect = Rect {
                 x: content_x.saturating_sub(1),
                 y,
                 width: content_w + 2,
                 height: 1,
             };
+<<<<<<< HEAD
             buf.set_style(row_rect, Style::default().bg(bg));
 
             let ctx = RowCtx {
                 is_cursor,
                 row_bg: bg,
+=======
+            buf.set_style(row_rect, Style::default().bg(row_bg));
+
+            let ctx = RowCtx {
+                is_cursor,
+                row_bg,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 content_width: content_w,
             };
             let line = row_line(i, &ctx);
             buf.set_line(content_x, y, &line, content_w);
+<<<<<<< HEAD
             // Selection band on RGB themes; reverse video on the terminal
             // theme (patched over the rendered row).
             if is_cursor && focused {
@@ -152,6 +205,15 @@ impl ListOverlay {
         // Unfocus dim: blend foregrounds toward the panel bg so the overlay recedes when the prompt area is unfocused (prompt_widget pattern)
         if !focused {
             crate::render::color::recede_area(buf, area, bg, 0.66);
+=======
+            y += 1;
+        }
+
+        // Unfocus dim: blend foregrounds toward the panel bg so the overlay
+        // recedes when the prompt area is unfocused (prompt_widget pattern).
+        if !focused {
+            crate::render::color::blend_area(buf, area, Some((bg, 0.66)), None);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 }
@@ -187,7 +249,12 @@ mod tests {
 
     #[test]
     fn row_at_respects_scroll_window() {
+<<<<<<< HEAD
         // 20 rows, 7 visible (height 10 - 3), cursor at the end: the window starts at 13 so the cursor stays visible
+=======
+        // 20 rows, 7 visible (height 10 - 3), cursor at the end: the window
+        // starts at 13 so the cursor stays visible.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let list = ListOverlay {
             len: 20,
             selected: 19,
@@ -196,6 +263,7 @@ mod tests {
         assert_eq!(list.row_at(area(), 5, 8), Some(19));
     }
 
+<<<<<<< HEAD
     /// Terminal theme (zero opaque cells): the cursor row carries reverse
     /// video instead of a painted band. RGB themes keep the `bg_visual`
     /// band and the row's own fgs.
@@ -245,6 +313,8 @@ mod tests {
         assert_eq!(normal.bg, Some(theme.bg_light));
     }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn height_caps_at_max_rows_and_screen_fraction() {
         let two = ListOverlay {

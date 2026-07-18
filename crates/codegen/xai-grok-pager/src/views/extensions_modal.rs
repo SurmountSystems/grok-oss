@@ -927,6 +927,105 @@ pub enum ModalInputOutcome {
     },
 }
 
+<<<<<<< HEAD
+=======
+#[derive(Debug, Clone)]
+pub struct McpSetupFormState {
+    pub server_name: String,
+    pub field: crate::views::mcps_modal::McpSetupField,
+    pub selected: usize,
+    pub error: Option<String>,
+}
+
+impl McpSetupFormState {
+    pub fn new(server: &crate::views::mcps_modal::McpServerInfo) -> Option<Self> {
+        let setup = server.setup.as_ref()?.clone();
+        Self::from_setup(server.name.clone(), setup, server.setup_values.clone())
+    }
+
+    pub fn from_setup(
+        server_name: String,
+        setup: crate::views::mcps_modal::McpSetupConfig,
+        values: std::collections::HashMap<String, String>,
+    ) -> Option<Self> {
+        if setup.fields.len() != 1 {
+            return None;
+        }
+        let field = setup.fields.into_iter().next()?;
+        if field.options.is_empty() {
+            return None;
+        }
+        let selected = values
+            .get(&field.id)
+            .or(field.default.as_ref())
+            .and_then(|value| {
+                field
+                    .options
+                    .iter()
+                    .position(|option| option.value == *value)
+            })
+            .unwrap_or(0);
+        Some(Self {
+            server_name,
+            field,
+            selected,
+            error: None,
+        })
+    }
+
+    pub fn selected_value(&self) -> Option<String> {
+        self.field
+            .options
+            .get(self.selected)
+            .map(|option| option.value.clone())
+    }
+
+    pub fn values(&self) -> Option<std::collections::HashMap<String, String>> {
+        let mut values = std::collections::HashMap::new();
+        values.insert(self.field.id.clone(), self.selected_value()?);
+        Some(values)
+    }
+
+    pub fn handle_key(&mut self, key: &KeyEvent) -> McpSetupOutcome {
+        match key.code {
+            KeyCode::Esc => McpSetupOutcome::Cancel,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.error = None;
+                if self.selected > 0 {
+                    self.selected -= 1;
+                }
+                McpSetupOutcome::Changed
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.error = None;
+                if self.selected + 1 < self.field.options.len() {
+                    self.selected += 1;
+                }
+                McpSetupOutcome::Changed
+            }
+            KeyCode::Enter => {
+                if self.selected_value().is_none() {
+                    self.error = Some("Select an option".to_string());
+                    McpSetupOutcome::Changed
+                } else {
+                    McpSetupOutcome::Submit
+                }
+            }
+            _ => McpSetupOutcome::Unchanged,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSetupOutcome {
+    Changed,
+    Unchanged,
+    Cancel,
+    Submit,
+}
+
+/// Modal message overlay (errors, confirmations).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone)]
 pub struct McpSetupFormState {
     pub server_name: String,
@@ -3595,6 +3694,7 @@ pub fn render_extensions_modal(
         None => None,
     };
     let mut shortcuts: Vec<Shortcut<'_>> = Vec::new();
+<<<<<<< HEAD
     if matches!(modal_msg_kind, Some(ModalMsgKind::ConnectorsWait)) {
         // Same label and id as the list footer's refresh entry, so the binding cannot drift.
         if let Some(&(i, ref label)) = action_labels.iter().find(|&&(i, _)| {
@@ -3626,6 +3726,18 @@ pub fn render_extensions_modal(
     {
         // Search bar has focus: hide the shortcuts footer entirely so it doesn't compete visually with the typing cursor
         // Hiding also stops typed letters appearing to map to advertised actions (they go into the query, not shortcuts)
+=======
+    if modal_msg_kind.is_some() {
+        // Modal message overlay (error/confirmation) is rendered with
+        // its own dismissal hint in the footer below — leave the
+        // standard shortcuts list empty.
+    } else if state.picker_state.search_active && state.input.is_none() && state.mcp_setup.is_none()
+    {
+        // Search bar has focus — hide the shortcuts footer entirely so
+        // it doesn't compete visually with the typing cursor and so
+        // typed letters don't appear to map to advertised actions
+        // (they're going into the query, not triggering shortcuts).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         // Input-mode is handled below; it owns its own footer.
     } else if state.mcp_setup.is_some() {
         shortcuts.push(Shortcut {
@@ -4053,7 +4165,11 @@ fn render_mcp_setup_form(buf: &mut Buffer, area: Rect, setup: &McpSetupFormState
     let w = area.width.saturating_sub(h_inset * 2);
     let rows = (setup.field.options.len() as u16).saturating_add(4);
     let top = area.y + area.height.saturating_sub(rows) / 2;
+<<<<<<< HEAD
     let title = format!("{} · {}", setup.server_name, setup.field.label);
+=======
+    let title = format!("{} — {}", setup.server_name, setup.field.label);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     buf.set_string(
         x,
         top,
@@ -4099,8 +4215,12 @@ fn render_mcp_setup_form(buf: &mut Buffer, area: Rect, setup: &McpSetupFormState
     }
 }
 
+<<<<<<< HEAD
 /// Which full-window overlay owns the footer: a message (error/info/confirm) with its dismissal
 /// hint, or the connectors wait with its own shortcuts. Either one also suppresses the result notice.
+=======
+/// Kind of modal message overlay currently showing.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, Copy)]
 enum ModalMsgKind {
     Error,
@@ -4515,7 +4635,10 @@ mod tests {
             tools: vec![],
             enabled: true,
             source: "plugin: acme".into(),
+<<<<<<< HEAD
             blocked_reason: None,
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             wire_source: McpWireSource::Local,
             plugin_name: Some("acme".into()),
             is_managed_gateway: false,
@@ -4525,10 +4648,14 @@ mod tests {
         server.setup_values.insert("site".into(), "us5".into());
         let form = McpSetupFormState::new(&server).unwrap();
         assert_eq!(form.selected_value().as_deref(), Some("us5"));
+<<<<<<< HEAD
         assert_eq!(
             form.values().unwrap().get("site").map(String::as_str),
             Some("us5")
         );
+=======
+        assert_eq!(form.values().unwrap()["site"], "us5");
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]

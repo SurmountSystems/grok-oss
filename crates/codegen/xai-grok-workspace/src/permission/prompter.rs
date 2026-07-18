@@ -749,7 +749,11 @@ impl AcpPrompter {
         let prompt_start = Instant::now();
         let mut resolved_guard = ResolvedOnDrop {
             event_writer: &self.event_writer,
+<<<<<<< HEAD
             tool_name: Some(tool_name.clone()),
+=======
+            tool_name: Some(tool_name),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             prompt_start,
         };
 
@@ -798,7 +802,12 @@ impl AcpPrompter {
             }
         };
 
+<<<<<<< HEAD
         // events.jsonl: `PermissionResolved` at decision-time, with the user-facing wait derived from the prompt-start `Instant` above
+=======
+        // events.jsonl: `PermissionResolved` at decision-time, with the truthful
+        // user-facing wait derived from the prompt-start `Instant` above.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let tool_name = resolved_guard
             .tool_name
             .take()
@@ -831,6 +840,7 @@ impl Drop for ResolvedOnDrop<'_> {
     }
 }
 
+<<<<<<< HEAD
 fn protected_edit_meta(reason: crate::permission::ProtectedEditReason) -> Option<acp::Meta> {
     let payload = crate::permission::ProtectedEditPermission::from_reason(reason);
     serde_json::to_value(payload)
@@ -863,6 +873,14 @@ fn with_hook_ask_header(
 /// Tool name used for `events.jsonl` Permission* events AND for the `PermissionEvent.tool_name` telemetry field.
 /// Single source of truth: the permission manager also calls this when deriving `(tool_name, access_kind, access_detail)`, so the two cannot drift.
 pub fn tool_name_for_access(access: &AccessKind) -> String {
+=======
+/// Tool name used for `events.jsonl` Permission* events AND for the
+/// `PermissionEvent.tool_name` telemetry field. Single source of truth: the
+/// permission manager calls this for the `tool_name` component of its
+/// `(tool_name, access_kind, access_detail)` derivation, so the two cannot
+/// drift.
+pub(crate) fn tool_name_for_access(access: &AccessKind) -> String {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     match access {
         AccessKind::Read(_) => "read_file".to_owned(),
         AccessKind::Grep { .. } => "grep".to_owned(),

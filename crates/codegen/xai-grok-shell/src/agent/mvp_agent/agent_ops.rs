@@ -3,6 +3,7 @@
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
+<<<<<<< HEAD
 use crate::agent::config::TraceUploadEndpoints;
 use crate::sampling::EffortTarget;
 use xai_grok_login::PreferredAuthMethod;
@@ -14,6 +15,8 @@ struct SessionConfigInputs {
     effort_options: Vec<ReasoningEffortOption>,
     current_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 /// `preferred` model, else catalog `current`, else first with own credentials.
 fn byok_from_models(
     models: &indexmap::IndexMap<String, ModelEntry>,
@@ -26,6 +29,7 @@ fn byok_from_models(
         .or_else(|| models.get(current).and_then(|m| m.own_credential()))
         .or_else(|| models.values().find_map(|m| m.own_credential()))
 }
+<<<<<<< HEAD
 struct MissingSessionCtx {
     has_session_key: bool,
     has_own_credentials: bool,
@@ -51,6 +55,8 @@ type PolledFields = (
 fn polled_fields(settings: &crate::util::config::RemoteSettings) -> PolledFields {
     (settings.announcements.clone(), settings.accept_request_encodings.clone())
 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 impl MvpAgent {
     pub fn reload_skills_all_sessions(&self) -> usize {
         let session_ids = self.resident_ids();
@@ -150,7 +156,11 @@ impl MvpAgent {
         self.auth_method_id.store(Some(std::sync::Arc::new(id)));
     }
     /// Publish model-owned credentials for voice/tools static fallthrough.
+<<<<<<< HEAD
     /// Only [`ModelEntry::own_credential`], not `sampling_config.api_key` (which may be a session JWT).
+=======
+    /// Only [`ModelEntry::own_credential`] — not `sampling_config.api_key` (may be a session JWT).
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn sync_process_static_api_key(&self, preferred_model_id: Option<&str>) {
         if self.cfg.borrow().grok_com_config.api_key_auth_disabled() {
             self.auth_manager.set_process_static_api_key(None);
@@ -722,6 +732,7 @@ impl MvpAgent {
     pub(crate) fn is_data_collection_disabled(&self) -> bool {
         self.auth_manager.is_data_collection_disabled()
     }
+<<<<<<< HEAD
     /// Privacy half of the trace-upload gate; see [`TraceUploadEndpoints::is_trace_upload_blocked_for`].
     /// Like [`Self::is_data_collection_disabled`], a missing credential does not block.
     fn is_trace_upload_blocked(&self) -> bool {
@@ -741,6 +752,17 @@ impl MvpAgent {
     /// Re-sync the `Send` mirror of `cfg.is_trace_upload_enabled()` that the per-session collection gates read.
     /// `cfg` is `!Send`; the gates run on the tokio pool.
     /// Must be called after any mid-session config change that can flip the switch, i.e. every `remote_settings` rewrite.
+=======
+    /// Telemetry enabled and not ZDR. Same gate as session `telemetry_enabled`.
+    pub(crate) fn product_analytics_enabled(&self) -> bool {
+        self.cfg.borrow().is_telemetry_enabled()
+            && !self.auth_manager.current_or_expired().is_some_and(|a| a.is_zdr_team())
+    }
+    /// Re-sync the `Send` mirror of `cfg.is_trace_upload_enabled()` that the
+    /// per-session collection gates read (`cfg` is `!Send`; the gates run on
+    /// the tokio pool). Must be called after any mid-session config change
+    /// that can flip the switch — i.e. every `remote_settings` rewrite.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(super) fn sync_collection_config_gate(&self) {
         self.trace_upload_live
             .store(
@@ -2390,7 +2412,13 @@ impl MvpAgent {
         let activity = crate::agent::activity::AgentActivity::default();
         let instance = Self {
             activity,
+<<<<<<< HEAD
             session_registry: SessionRegistry::default(),
+=======
+            loading_sessions: RefCell::new(HashMap::new()),
+            dispatch_locks: RefCell::new(HashMap::new()),
+            session_threads: RefCell::new(HashMap::new()),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             resident_roster_titles: RefCell::new(HashMap::new()),
             initialize_request: OnceLock::new(),
             gateway,

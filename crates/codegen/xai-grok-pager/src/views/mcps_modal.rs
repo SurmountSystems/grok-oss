@@ -168,10 +168,13 @@ pub struct McpsServerSession {
     pub auth_required: bool,
     #[serde(default)]
     pub setup_required: bool,
+<<<<<<< HEAD
     /// Managed-policy verdict for a server the merge dropped (absent on
     /// older shells and on live servers).
     #[serde(default)]
     pub blocked_reason: Option<String>,
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
@@ -278,6 +281,7 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
             let (status, tool_count, tools, auth_required, enabled) =
                 if let Some(session) = &entry.session {
                     let enabled = session.enabled;
+<<<<<<< HEAD
                     // The shell sets blockedReason only on servers its merge dropped: a terminal
                     // verdict, so it outranks the live setup/auth statuses.
                     if session.blocked_reason.is_some() {
@@ -290,6 +294,10 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                         )
                     } else if session.setup_required {
                         // Prefer setupRequired bool; status is a fallback for older shells.
+=======
+                    // Prefer setupRequired bool; status is a fallback for older shells.
+                    if session.setup_required {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                         (
                             McpServerDisplayStatus::SetupRequired,
                             0,
@@ -342,8 +350,16 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                 .source_label
                 .or(entry.source)
                 .unwrap_or_else(|| "local".to_string());
+<<<<<<< HEAD
             // Derived from the status so a policy-blocked row cannot also open the setup form.
             let setup_required = status == McpServerDisplayStatus::SetupRequired;
+=======
+            let setup_required = entry
+                .session
+                .as_ref()
+                .is_some_and(|session| session.setup_required)
+                || matches!(status, McpServerDisplayStatus::SetupRequired);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             McpServerInfo {
                 name: entry.name,
                 display_name: entry.display_name,
@@ -457,7 +473,10 @@ mod tests {
                     tools: vec![],
                     auth_required: false,
                     setup_required: false,
+<<<<<<< HEAD
                     blocked_reason: None,
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 }),
             }],
             session_mcp_resolved: None,
@@ -664,7 +683,10 @@ mod tests {
                     tools: vec![],
                     auth_required: false,
                     setup_required: false,
+<<<<<<< HEAD
                     blocked_reason: None,
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 }),
             }
         }
@@ -724,6 +746,45 @@ mod tests {
         assert!(!server.auth_required);
         assert_eq!(server.status, McpServerDisplayStatus::SetupRequired);
         assert!(server.setup.is_some());
+    }
+
+    #[test]
+    fn convert_list_response_setup_required_takes_priority() {
+        let servers = convert_list_response(McpsListResponse {
+            servers: vec![McpsServerEntry {
+                name: "acme".into(),
+                display_name: None,
+                source: Some("local".into()),
+                source_label: Some("plugin: acme".into()),
+                config_type: Some("http".into()),
+                setup: Some(McpSetupConfig {
+                    fields: vec![McpSetupField {
+                        id: "site".into(),
+                        label: "Site".into(),
+                        field_type: "select".into(),
+                        required: true,
+                        default: Some("us1".into()),
+                        options: vec![McpSetupOption {
+                            label: "US1".into(),
+                            value: "us1".into(),
+                        }],
+                    }],
+                }),
+                setup_values: None,
+                session: Some(McpsServerSession {
+                    enabled: true,
+                    status: Some("setuprequired".into()),
+                    tools: vec![],
+                    auth_required: true,
+                    setup_required: true,
+                }),
+            }],
+        });
+        assert_eq!(servers.len(), 1);
+        assert!(servers[0].setup_required);
+        assert!(!servers[0].auth_required);
+        assert_eq!(servers[0].status, McpServerDisplayStatus::SetupRequired);
+        assert!(servers[0].setup.is_some());
     }
 
     #[test]

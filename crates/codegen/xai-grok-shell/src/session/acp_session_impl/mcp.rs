@@ -162,6 +162,7 @@ impl SessionActor {
     ///
     /// Runs force_reauth (browser flow), then re-initializes the server and registers its tools.
     pub(super) async fn handle_mcp_auth_trigger(&self, server_name: &str) -> Result<(), String> {
+<<<<<<< HEAD
         self.wait_for_server_settled(server_name).await;
         let existing_client = {
             let state = self.mcp_state.lock().await;
@@ -177,6 +178,14 @@ impl SessionActor {
                 )
                 .await?
             }
+=======
+        if server_name.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX) {
+            return Err("To authenticate, visit grok.com".to_string());
+        }
+        let client = match self.mcp_state.lock().await.get_client(server_name).cloned() {
+            Some(c) if c.has_auth() => c,
+            _ => self.recreate_http_client_with_oauth(server_name).await?,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         };
         if !client.force_reauth(true).await {
             return Err(format!(
@@ -188,6 +197,12 @@ impl SessionActor {
             .get_tool_registrations(self.mcp_state.clone())
             .await
             .map_err(|e| format!("Failed to get tools after auth: {}", e))?;
+<<<<<<< HEAD
+=======
+        let mut mcp_state = self.mcp_state.lock().await;
+        mcp_state.auth_required.remove(server_name);
+        mcp_state.init_failed.remove(server_name);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let mut ui_tools: std::collections::HashMap<
             String,
             Vec<crate::extensions::mcp::McpToolEntry>,
@@ -213,6 +228,7 @@ impl SessionActor {
         );
         Ok(())
     }
+<<<<<<< HEAD
     /// `replacing` is the slot as the caller saw it; the install lands only if the slot still holds exactly that.
     async fn rebuild_http_client_with_oauth(
         &self,
@@ -221,6 +237,16 @@ impl SessionActor {
         replacing: Option<&std::sync::Arc<crate::session::mcp_servers::McpClient>>,
     ) -> Result<std::sync::Arc<crate::session::mcp_servers::McpClient>, String> {
         let (server_config, meta_config, event_tx, generation) = {
+=======
+    /// Rebuild an HTTP MCP client with Interactive OAuth discovery and swap it
+    /// into session state. Used when auth is requested for a client that was
+    /// previously started without an `AuthorizationManager`.
+    async fn recreate_http_client_with_oauth(
+        &self,
+        server_name: &str,
+    ) -> Result<std::sync::Arc<crate::session::mcp_servers::McpClient>, String> {
+        let (server_config, meta_config, event_tx) = {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             let mcp_state = self.mcp_state.lock().await;
             let server_config = mcp_state
                 .configs
@@ -236,6 +262,7 @@ impl SessionActor {
             }
             let meta_config = mcp_state.meta_config_map.get(server_name).cloned();
             let event_tx = mcp_state.client_event_tx();
+<<<<<<< HEAD
             let generation = mcp_state.current_generation();
             (server_config, meta_config, event_tx, generation)
         };
@@ -257,10 +284,30 @@ impl SessionActor {
             meta_config.as_ref(),
             byo_config.as_ref(),
             &ctx,
+=======
+            (server_config, meta_config, event_tx)
+        };
+        let cwd = std::path::Path::new(&self.session_info.cwd);
+        let session_id = self.session_info.id.0.as_ref();
+        let (_, oauth_config_map) =
+            crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
+        let byo_config = oauth_config_map.get(server_name).cloned();
+        let event_writer = self.events.writer();
+        let mode = crate::session::mcp_servers::OauthInteractivity::Interactive;
+        let new_client = crate::session::mcp_servers::start_mcp_server(
+            server_config,
+            Some(session_id),
+            Some(cwd),
+            meta_config.as_ref(),
+            byo_config.as_ref(),
+            &event_writer,
+            mode,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         )
         .await
         .map_err(|e| format!("Failed to prepare OAuth for '{}': {}", server_name, e))?;
         if !new_client.has_auth() {
+<<<<<<< HEAD
             return Err(match discovery {
                 McpOauthDiscovery::Network => {
                     format!(
@@ -275,17 +322,30 @@ impl SessionActor {
                     )
                 }
             });
+=======
+            return Err(format!(
+                "MCP server '{}' does not support OAuth (discovery found no authorization support)",
+                server_name
+            ));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
         if let Some(tx) = event_tx {
             new_client.set_event_tx(Some(tx));
         }
+<<<<<<< HEAD
         attach_elicitation_tx(&*self.mcp_state.lock().await, &new_client);
         let arc = std::sync::Arc::new(new_client);
         let install = |mcp_state: &mut McpState| {
+=======
+        let arc = std::sync::Arc::new(new_client);
+        {
+            let mut mcp_state = self.mcp_state.lock().await;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             mcp_state
                 .owned_clients
                 .insert(server_name.to_string(), arc.clone());
             mcp_state.auth_required.insert(server_name.to_string());
+<<<<<<< HEAD
             mcp_state.clear_init_failed(server_name);
         };
         let installed = self
@@ -305,6 +365,22 @@ impl SessionActor {
         );
         Ok(arc)
     }
+=======
+            mcp_state.init_failed.remove(server_name);
+        }
+        tracing::info!(
+            server = server_name,
+            "Rebuilt MCP HTTP client with OAuth manager for auth_trigger"
+        );
+        Ok(arc)
+    }
+    /// Attempt to re-initialize MCP servers stuck in `auth_required`.
+    ///
+    /// For each server, tries `try_reauth_from_disk` which checks the credential
+    /// store on disk (picks up tokens written by another session or process)
+    /// and attempts a token refresh. No browser is opened. On success, performs
+    /// the MCP handshake and registers tools, mirroring `handle_mcp_auth_trigger`.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(super) async fn retry_auth_required_servers(&self) {
         let servers_to_retry: Vec<String> = {
             let state = self.mcp_state.lock().await;

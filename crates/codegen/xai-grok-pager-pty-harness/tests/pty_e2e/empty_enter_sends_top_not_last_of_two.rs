@@ -9,6 +9,7 @@ use super::common::*;
 #[ignore]
 async fn empty_enter_sends_top_not_last_of_two() {
     let content = ContentController::start().await.expect("start content");
+<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/empty_enter_sends_top_not_last_of_two.rs
     let mut turn_one = content.expect_agent_turn_blocked(
         "running turn before top-row send-now",
         slow_turn_text("TURNONE"),
@@ -18,6 +19,26 @@ async fn empty_enter_sends_top_not_last_of_two() {
     let mut turn_three = content.expect_agent_turn(
         "remaining queued row",
         "TURNTHREE remaining queue promoted.",
+=======
+    let mut turn_one = content.expect_response_blocked(
+        "running turn before top-row send-now",
+        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
+        ScriptedResponse::sse(chat_completions_message_events(&slow_turn_text("TURNONE"))),
+    );
+    let mut turn_two = content.expect_response(
+        "top queued row",
+        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
+        ScriptedResponse::sse(chat_completions_message_events(
+            "TURNTWO top-row send-now acknowledged.",
+        )),
+    );
+    let mut turn_three = content.expect_response(
+        "remaining queued row",
+        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
+        ScriptedResponse::sse(chat_completions_message_events(
+            "TURNTHREE remaining queue promoted.",
+        )),
+>>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/empty_enter_sends_top_not_last_of_two.rs
     );
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -55,6 +76,7 @@ async fn empty_enter_sends_top_not_last_of_two() {
         .inject_keys(b"\r")
         .expect("empty Enter send-now top");
     turn_one.release();
+<<<<<<< HEAD:crates/codegen/xai-grok-pager-pty-harness/tests/pty_e2e/empty_enter_sends_top_not_last_of_two.rs
     // Alpha (the promoted TOP row) then bravo drain back-to-back after the completion release. Waiting
     // on any on-screen marker is thus racy: a flaky observation, not a real failure, same rationale as
     // `removed_queued_prompt_never_sent`.
@@ -70,6 +92,18 @@ async fn empty_enter_sends_top_not_last_of_two() {
         );
         harness.update(Duration::from_millis(100));
     }
+=======
+    // Alpha (the promoted TOP row) then bravo drain back-to-back. Each
+    // promoted "❯ …" block and the intermediate TURNTWO reply is scrolled
+    // above the viewport by the next turn's start-adoption before a 100ms poll
+    // can observe it, so gating on those transient markers is inherently racy.
+    // Gate only on the FINAL reply (stable at the viewport head) and prove the
+    // top-row order + send-now silence via the recorded wire below, which is
+    // not subject to scrolling.
+    harness
+        .wait_for_text("TURNTHREE", Duration::from_secs(90))
+        .expect("all queued turns drained through to the final reply");
+>>>>>>> e3fdf3ed (Merge 2 (#4)):crates/codegen/xai-grok-pager/tests/pty_e2e/empty_enter_sends_top_not_last_of_two.rs
     tokio::time::timeout(Duration::from_secs(10), turn_two.wait_satisfied())
         .await
         .expect("top queued row expectation satisfied");

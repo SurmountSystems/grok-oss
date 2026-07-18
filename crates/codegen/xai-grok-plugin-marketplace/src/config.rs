@@ -29,8 +29,16 @@ struct RawSource {
 }
 
 /// Whether remote plugin installs/updates must pin a full commit sha.
+<<<<<<< HEAD
 /// Tighten-only: either `[marketplace] require_sha = true` in config.toml or `GROK_MARKETPLACE_REQUIRE_SHA=1` enables it; neither can turn it off.
 /// Defaults off so existing unpinned catalogs keep installing.
+=======
+///
+/// `[marketplace] require_sha = true` in config.toml, or
+/// `GROK_MARKETPLACE_REQUIRE_SHA=1`. Tighten-only: either source can enable,
+/// neither can override the other off. Defaults off so existing unpinned
+/// catalogs keep installing.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub fn load_require_sha(config: &toml::Value) -> bool {
     env_require_sha()
         || config
@@ -338,12 +346,22 @@ mod tests {
         assert!(load_sources(&config).is_empty());
     }
 
+<<<<<<< HEAD
     /// Exercises config alone, env alone, and the tighten-only rule (a falsy env cannot relax config-set true).
     #[test]
     fn require_sha_policy_composition() {
         let _guard = REQUIRE_SHA_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+=======
+    /// Drives the shipped composition: config alone, env alone, and the
+    /// tighten-only rule (falsy env cannot relax config-set true).
+    #[test]
+    fn require_sha_policy_composition() {
+        // Process-global env: serialize against any other env-touching test.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
         let empty: toml::Value = toml::from_str("").unwrap();
         let enabled: toml::Value = toml::from_str("[marketplace]\nrequire_sha = true\n").unwrap();
@@ -365,6 +383,7 @@ mod tests {
         unsafe { std::env::remove_var("GROK_MARKETPLACE_REQUIRE_SHA") };
     }
 
+<<<<<<< HEAD
     #[test]
     fn overlay_cannot_loosen_require_sha() {
         let _guard = REQUIRE_SHA_ENV_LOCK
@@ -383,6 +402,8 @@ mod tests {
         assert!(!load_require_sha(&layers.effective_config_base()));
     }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     #[test]
     fn missing_sources_key_returns_empty() {
         let config: toml::Value = toml::from_str("[marketplace]\n").unwrap();

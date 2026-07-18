@@ -160,12 +160,17 @@ pub struct BlockLine {
     /// Soft-wrap joiner: how this line connects to the previous when copying. The first line of a block should always
     /// have `None`.
     pub joiner: Option<String>,
+<<<<<<< HEAD
     /// Link target for rows whose painted text cannot recover it (tool headers).
     pub link_target: Option<crate::render::osc8::LinkTarget>,
     /// Display width of the `subsequent_indent` prefix on wrapped continuation lines. This width is NOT part of the
     /// logical pre-wrap content, so hyperlink column mapping must exclude it when rebuilding pre-wrap coordinates from
     /// post-wrap segments.
     pub indent_width: usize,
+=======
+    /// Semantic link target when paint text cannot recover it (tool headers).
+    pub link_target: Option<crate::render::osc8::LinkTarget>,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 
 impl Default for BlockLine {
@@ -181,7 +186,10 @@ impl Default for BlockLine {
             selection_text: None,
             joiner: None,
             link_target: None,
+<<<<<<< HEAD
             indent_width: 0,
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 }
@@ -718,7 +726,10 @@ mod tests {
             selection_text: None,
             joiner: None,
             link_target: None,
+<<<<<<< HEAD
             indent_width: 0,
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         };
     }
 

@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 use std::ops::{Deref, Range};
+=======
+use std::ops::Range;
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 use std::sync::Arc;
 
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation as _};
@@ -8,7 +12,10 @@ use unicode_width::UnicodeWidthStr as _;
 mod keys;
 
 pub use keys::classify_key_event;
+<<<<<<< HEAD
 pub(crate) use keys::resolve_movement;
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WordStyle {
@@ -33,6 +40,7 @@ pub enum EditCommand {
     DeleteToLineEnd,
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EditCommandCategory {
     Insert,
@@ -123,6 +131,8 @@ impl EditCommand {
     }
 }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditDelta {
     pub replaced_byte_range: Range<usize>,
@@ -246,6 +256,7 @@ impl PartialEq for EditBuffer {
 
 impl Eq for EditBuffer {}
 
+<<<<<<< HEAD
 impl Deref for EditBuffer {
     type Target = str;
 
@@ -254,6 +265,8 @@ impl Deref for EditBuffer {
     }
 }
 
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 impl EditBuffer {
     pub fn new() -> Self {
         Self::default()
@@ -309,14 +322,22 @@ impl EditBuffer {
     #[must_use]
     pub fn insert_str(&mut self, text: &str) -> EditOutcome {
         let plan = self.plan_replace_byte_range(self.cursor_byte..self.cursor_byte, text, &[]);
+<<<<<<< HEAD
         self.apply_validated_plan(&plan)
+=======
+        self.apply_valid_plan(&plan)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     /// Edit-result cursors keep right affinity when adjacent text merges into one grapheme.
     #[must_use]
     pub fn replace_byte_range(&mut self, range: Range<usize>, replacement: &str) -> EditOutcome {
         let plan = self.plan_replace_byte_range(range, replacement, &[]);
+<<<<<<< HEAD
         self.apply_validated_plan(&plan)
+=======
+        self.apply_valid_plan(&plan)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     pub fn plan_replace_byte_range(
@@ -479,13 +500,21 @@ impl EditBuffer {
 
     pub fn apply_plan(&mut self, plan: &EditPlan) -> Result<EditOutcome, ApplyEditPlanError> {
         self.validate_plan(plan)?;
+<<<<<<< HEAD
         Ok(self.apply_validated_plan(plan))
+=======
+        Ok(self.apply_valid_plan(plan))
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[must_use]
     pub fn apply(&mut self, command: EditCommand) -> EditOutcome {
         let plan = self.plan_command(command, &[]);
+<<<<<<< HEAD
         self.apply_validated_plan(&plan)
+=======
+        self.apply_valid_plan(&plan)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     fn make_plan(
@@ -495,11 +524,15 @@ impl EditBuffer {
         cursor_byte: usize,
         cursor_affinity: PostEditCursorAffinity,
     ) -> EditPlan {
+<<<<<<< HEAD
         let removed_text = self
             .text
             .get(replaced_byte_range.clone())
             .unwrap_or("")
             .to_owned();
+=======
+        let removed_text = self.text[replaced_byte_range.clone()].to_owned();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         EditPlan {
             replaced_byte_range,
             replacement,
@@ -511,7 +544,11 @@ impl EditBuffer {
         }
     }
 
+<<<<<<< HEAD
     pub(crate) fn validate_plan(&self, plan: &EditPlan) -> Result<(), ApplyEditPlanError> {
+=======
+    fn validate_plan(&self, plan: &EditPlan) -> Result<(), ApplyEditPlanError> {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         if !Arc::ptr_eq(&plan.source_identity, &self.identity)
             || plan.source_generation != self.generation
         {
@@ -550,7 +587,11 @@ impl EditBuffer {
         Ok(())
     }
 
+<<<<<<< HEAD
     pub(crate) fn apply_validated_plan(&mut self, plan: &EditPlan) -> EditOutcome {
+=======
+    fn apply_valid_plan(&mut self, plan: &EditPlan) -> EditOutcome {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let old_cursor = self.cursor_byte;
         let text_changed = plan.removed_text != plan.replacement;
         let inserted_len = plan.replacement.len();
@@ -608,7 +649,11 @@ impl EditBuffer {
         let mut left_width = 0usize;
         while start > line_start {
             let previous = previous_atomic_boundary(&self.text, start, &atomic_byte_ranges);
+<<<<<<< HEAD
             let grapheme_width = self.text.get(previous..start).unwrap_or("").width();
+=======
+            let grapheme_width = self.text[previous..start].width();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             let next_width = left_width.saturating_add(grapheme_width);
             if next_width > left_budget {
                 break;
@@ -621,7 +666,11 @@ impl EditBuffer {
         let mut visible_width = 0usize;
         while end < line_end {
             let next = next_atomic_boundary(&self.text, end, &atomic_byte_ranges);
+<<<<<<< HEAD
             let grapheme_width = self.text.get(end..next).unwrap_or("").width();
+=======
+            let grapheme_width = self.text[end..next].width();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
             let next_width = visible_width.saturating_add(grapheme_width);
             if next_width > display_width {
                 if end < cursor_byte {
@@ -635,7 +684,11 @@ impl EditBuffer {
 
         SingleLineViewport {
             visible_byte_range: start..end,
+<<<<<<< HEAD
             cursor_display_column: self.text.get(start..cursor_byte).unwrap_or("").width(),
+=======
+            cursor_display_column: self.text[start..cursor_byte].width(),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         }
     }
 
@@ -747,7 +800,11 @@ impl EditBuffer {
         (0..cursor_byte)
             .rev()
             .find(|position| {
+<<<<<<< HEAD
                 self.text.as_bytes().get(*position).copied() == Some(b'\n')
+=======
+                self.text.as_bytes()[*position] == b'\n'
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     && !byte_is_inside_atomic_range(*position, atomic_byte_ranges)
             })
             .map_or(0, |position| position + 1)
@@ -757,6 +814,7 @@ impl EditBuffer {
         let cursor_byte = cursor_byte.min(self.text.len());
         (cursor_byte..self.text.len())
             .find(|position| {
+<<<<<<< HEAD
                 self.text.as_bytes().get(*position).copied() == Some(b'\n')
                     && !byte_is_inside_atomic_range(*position, atomic_byte_ranges)
             })
@@ -766,6 +824,13 @@ impl EditBuffer {
                     .and_then(|i| self.text.as_bytes().get(i).copied())
                     == Some(b'\r')
                 {
+=======
+                self.text.as_bytes()[*position] == b'\n'
+                    && !byte_is_inside_atomic_range(*position, atomic_byte_ranges)
+            })
+            .map_or(self.text.len(), |line_feed| {
+                if line_feed > 0 && self.text.as_bytes()[line_feed - 1] == b'\r' {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                     line_feed - 1
                 } else {
                     line_feed
@@ -823,7 +888,11 @@ fn atomic_word_class(
             WordStyle::WhitespaceDelimited => Some(WordClass::Word),
         }
     } else {
+<<<<<<< HEAD
         word_class(text.get(start..end).unwrap_or(""), style)
+=======
+        word_class(&text[start..end], style)
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 }
 

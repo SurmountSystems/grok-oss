@@ -676,12 +676,86 @@ fn resume_worktree_action_covers_three_outcomes() {
             ResumeWorktreeAction::Rehydrate
         );
     assert_eq!(
+<<<<<<< HEAD
             resume_worktree_action(true, None),
             ResumeWorktreeAction::Reuse
         );
     assert_eq!(
             resume_worktree_action(false, None),
             ResumeWorktreeAction::Shared
+=======
+        Arc::as_ptr(& parent), Arc::as_ptr(ctx.lsp.as_ref().unwrap()),
+        "child should inherit parent LSP via context"
+    );
+}
+#[test]
+fn subagent_inherits_managed_mcp_state_via_context() {
+    let handle = crate::session::managed_mcp::ManagedMcpStateHandle::default();
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.managed_mcp_state = handle.clone();
+    assert!(
+        Arc::ptr_eq(& handle, & ctx.managed_mcp_state),
+        "child should share parent's managed MCP state (Arc identity)"
+    );
+}
+#[test]
+fn no_parent_lsp_means_child_gets_none() {
+    let ctx = ctx_with_toggle(HashMap::new());
+    assert!(ctx.lsp.is_none());
+}
+#[test]
+fn is_subagent_enabled_returns_true_for_absent_names() {
+    let ctx = ctx_with_toggle(HashMap::from([("plan".to_string(), false)]));
+    assert!(ctx.is_subagent_enabled("explore"), "absent key should default to enabled");
+    assert!(
+        ctx.is_subagent_enabled("general-purpose"),
+        "absent key should default to enabled"
+    );
+    assert!(
+        ctx.is_subagent_enabled("custom-agent"), "absent key should default to enabled"
+    );
+}
+#[test]
+fn is_subagent_enabled_returns_false_for_disabled_names() {
+    let ctx = ctx_with_toggle(
+        HashMap::from([
+            ("plan".to_string(), false),
+            ("code-reviewer".to_string(), false),
+            ("explore".to_string(), true),
+        ]),
+    );
+    assert!(! ctx.is_subagent_enabled("plan"), "plan = false should be disabled");
+    assert!(
+        ! ctx.is_subagent_enabled("code-reviewer"),
+        "code-reviewer = false should be disabled"
+    );
+    assert!(ctx.is_subagent_enabled("explore"), "explore = true should be enabled");
+}
+#[test]
+fn lookup_returns_none_for_unknown_id() {
+    let coordinator = SubagentCoordinator::new();
+    assert!(coordinator.lookup("nonexistent").is_none());
+}
+#[test]
+fn lookup_returns_ready_for_completed_subagent() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .move_to_completed(
+            "sub-1",
+            "test task".to_string(),
+            "explore".to_string(),
+            SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("found 3 files"),
+                subagent_id: "sub-1".to_string(),
+                child_session_id: "sub-1".to_string(),
+                tool_calls: 5,
+                turns: 2,
+                duration_ms: 1234,
+                ..Default::default()
+            },
+            None,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         );
 }
 #[test]
@@ -730,6 +804,290 @@ fn should_auto_wake_subagent_truth_table() {
         assert!(!should_auto_wake_subagent(inputs), "suppressed case {i}");
     }
 }
+<<<<<<< HEAD
+=======
+#[test]
+fn is_running_returns_true_for_running_variant() {
+    let snap = SubagentSnapshot {
+        subagent_id: "s".to_string(),
+        description: "d".to_string(),
+        subagent_type: "t".to_string(),
+        status: SubagentSnapshotStatus::Running {
+            turn_count: 0,
+            tool_call_count: 0,
+            tokens_used: 0,
+            context_window_tokens: 0,
+            context_usage_pct: 0,
+            tools_used: vec![],
+            error_count: 0,
+        },
+        started_at_epoch_ms: 0,
+        duration_ms: 0,
+        persona: None,
+    };
+    assert!(is_running(& snap));
+}
+#[test]
+fn is_running_returns_false_for_completed_variant() {
+    let snap = SubagentSnapshot {
+        subagent_id: "s".to_string(),
+        description: "d".to_string(),
+        subagent_type: "t".to_string(),
+        status: SubagentSnapshotStatus::Completed {
+            output: "done".to_string(),
+            tool_calls: 0,
+            turns: 0,
+            worktree_path: None,
+        },
+        started_at_epoch_ms: 0,
+        duration_ms: 0,
+        persona: None,
+    };
+    assert!(! is_running(& snap));
+}
+#[test]
+fn lookup_returns_initializing_for_pending_subagent() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-pending".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            description: "pending task".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: false,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    let lookup = coordinator.lookup("sub-pending");
+    assert!(
+        matches!(lookup, Some(SnapshotLookup::Ready(ref snap)) if snap.subagent_id ==
+        "sub-pending" && matches!(snap.status, SubagentSnapshotStatus::Initializing)),
+        "pending subagent should return Ready(Initializing)"
+    );
+}
+/// The running gauge must track `pending.len() + active.len()` through the
+/// full lifecycle: it feeds `AgentActivity::is_busy`, which gates the
+/// leader auto-update shutdown.
+#[tokio::test]
+async fn running_gauge_tracks_pending_and_active() {
+    use std::sync::atomic::Ordering;
+    let mut coordinator = SubagentCoordinator::new();
+    let gauge = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    coordinator.set_running_gauge(gauge.clone());
+    assert_eq!(gauge.load(Ordering::Relaxed), 0);
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-gauge".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            description: "gauge task".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: true,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    assert_eq!(gauge.load(Ordering::Relaxed), 1, "pending counts as running");
+    coordinator
+        .insert(
+            dummy_tracker("sub-gauge", "parent-session", "general-purpose", "gauge task"),
+        );
+    assert_eq!(gauge.load(Ordering::Relaxed), 1, "active counts as running");
+    coordinator
+        .move_to_completed(
+            "sub-gauge",
+            "gauge task".into(),
+            "general-purpose".into(),
+            SubagentResult::default(),
+            None,
+        );
+    assert_eq!(gauge.load(Ordering::Relaxed), 0, "completed does not count");
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-gauge-2".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            description: "gauge task 2".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: true,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    assert_eq!(gauge.load(Ordering::Relaxed), 1);
+    coordinator.move_pending_to_failed("sub-gauge-2", "worktree setup failed");
+    assert_eq!(gauge.load(Ordering::Relaxed), 0);
+    let late_gauge = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-gauge-3".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            description: "gauge task 3".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: true,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    coordinator.set_running_gauge(late_gauge.clone());
+    assert_eq!(late_gauge.load(Ordering::Relaxed), 1);
+}
+#[test]
+fn mark_block_waited_sets_flag_on_completed() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .move_to_completed(
+            "sub-bw",
+            "test".into(),
+            "explore".into(),
+            SubagentResult {
+                success: true,
+                subagent_id: "sub-bw".into(),
+                child_session_id: "sub-bw".into(),
+                ..Default::default()
+            },
+            None,
+        );
+    assert!(! coordinator.is_block_waited("sub-bw"));
+    coordinator.mark_block_waited("sub-bw");
+    assert!(coordinator.is_block_waited("sub-bw"));
+}
+#[test]
+fn is_block_waited_returns_false_for_unknown_id() {
+    let coordinator = SubagentCoordinator::new();
+    assert!(! coordinator.is_block_waited("nonexistent"));
+}
+/// Race condition: caller cancels the blocking wait
+/// (receiver dropped) and the subagent completes before the query poll
+/// loop's next 200ms tick clears the flag. The completion handler's
+/// decision-time check must see the dead slot, clear `block_waited`,
+/// and let the auto-wake fire.
+#[tokio::test]
+async fn block_wait_decision_wakes_when_waiter_cancelled_before_poll_tick() {
+    let mut coordinator = SubagentCoordinator::new();
+    let tracker = dummy_tracker("sub-race", "session-A", "explore", "bg task");
+    coordinator.insert(tracker);
+    let (tx, rx) = oneshot::channel::<Option<SubagentSnapshot>>();
+    let slot: BlockWaitSlot = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
+    coordinator.register_block_wait("sub-race", slot.clone());
+    assert!(coordinator.is_block_waited("sub-race"));
+    drop(rx);
+    assert!(coordinator.is_block_waited("sub-race"));
+    assert!(
+        ! coordinator.block_wait_delivered_or_live("sub-race"),
+        "cancelled waiter must not suppress the completion auto-wake"
+    );
+    assert!(
+        ! coordinator.is_block_waited("sub-race"),
+        "decision must clear the stale block_waited flag"
+    );
+}
+/// A live waiter (receiver still open) keeps the wake suppressed — the
+/// poll loop will deliver the result within one tick.
+#[tokio::test]
+async fn block_wait_decision_suppresses_for_live_waiter() {
+    let mut coordinator = SubagentCoordinator::new();
+    let tracker = dummy_tracker("sub-live", "session-A", "explore", "bg task");
+    coordinator.insert(tracker);
+    let (tx, _rx) = oneshot::channel::<Option<SubagentSnapshot>>();
+    let slot: BlockWaitSlot = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
+    coordinator.register_block_wait("sub-live", slot.clone());
+    assert!(
+        coordinator.block_wait_delivered_or_live("sub-live"),
+        "live waiter will receive the result — wake would be redundant"
+    );
+    assert!(coordinator.is_block_waited("sub-live"), "flag stays set for a live waiter");
+}
+/// A consumed sender (result already delivered) keeps the wake
+/// suppressed even though the registration is gone.
+#[tokio::test]
+async fn block_wait_decision_suppresses_after_delivery() {
+    let mut coordinator = SubagentCoordinator::new();
+    let tracker = dummy_tracker("sub-dlv", "session-A", "explore", "bg task");
+    coordinator.insert(tracker);
+    let (tx, mut rx) = oneshot::channel::<Option<SubagentSnapshot>>();
+    let slot: BlockWaitSlot = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
+    coordinator.register_block_wait("sub-dlv", slot.clone());
+    let tx = slot.borrow_mut().take().expect("sender parked");
+    let _ = tx.send(None);
+    assert!(rx.try_recv().is_ok(), "receiver got the result");
+    coordinator.unregister_block_wait("sub-dlv", &slot);
+    assert!(
+        coordinator.block_wait_delivered_or_live("sub-dlv"),
+        "already-delivered result must keep the wake suppressed"
+    );
+}
+#[tokio::test]
+async fn mark_explicitly_killed_active_then_propagates_to_completed() {
+    let mut coordinator = SubagentCoordinator::new();
+    let tracker = dummy_tracker("sub-ek", "session-A", "explore", "bg task");
+    coordinator.insert(tracker);
+    assert!(! coordinator.is_explicitly_killed("sub-ek"));
+    coordinator.mark_explicitly_killed("sub-ek");
+    assert!(coordinator.is_explicitly_killed("sub-ek"));
+    coordinator
+        .move_to_completed(
+            "sub-ek",
+            "bg task".into(),
+            "explore".into(),
+            SubagentResult {
+                success: false,
+                cancelled: true,
+                subagent_id: "sub-ek".into(),
+                child_session_id: "sub-ek".into(),
+                ..Default::default()
+            },
+            None,
+        );
+    assert!(
+        coordinator.is_explicitly_killed("sub-ek"),
+        "flag must propagate from active tracker to completed entry"
+    );
+}
+#[test]
+fn should_auto_wake_subagent_requires_background_and_enabled() {
+    assert!(! should_auto_wake_subagent(false, false, true, false, false, false, true));
+    assert!(! should_auto_wake_subagent(true, false, false, false, false, false, true));
+    assert!(should_auto_wake_subagent(true, false, true, false, false, false, true));
+}
+/// A cancelled child never wakes the parent — most acutely the Ctrl+C
+/// race where `ParentGone` backgrounds a foreground child moments before
+/// the teardown cancel lands its token.
+#[test]
+fn should_auto_wake_subagent_refuses_cancelled_results() {
+    assert!(! should_auto_wake_subagent(true, true, true, false, false, false, true));
+}
+#[test]
+fn should_auto_wake_subagent_suppressed_by_block_waited_or_killed() {
+    assert!(! should_auto_wake_subagent(true, false, true, true, false, false, true));
+    assert!(! should_auto_wake_subagent(true, false, true, false, true, false, true));
+    assert!(! should_auto_wake_subagent(true, false, true, true, true, false, true));
+}
+/// A goal loop active in the parent suppresses the subagent
+/// auto-wake synthetic prompt — the structural sibling of the bash gate.
+/// Skipping the inject here also skips `auto_wake_delivered.insert`, so the
+/// per-tool-call / between-turn surfaces stay free to drain the completion.
+#[test]
+fn should_auto_wake_subagent_suppressed_by_goal_loop() {
+    assert!(! should_auto_wake_subagent(true, false, true, false, false, true, true));
+    assert!(should_auto_wake_subagent(true, false, true, false, false, false, true));
+}
+#[test]
+fn should_auto_wake_subagent_requires_open_parent_channel() {
+    assert!(! should_auto_wake_subagent(true, false, true, false, false, false, false));
+}
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn auto_wake_test_request(id: &str) -> SubagentRequest {
     SubagentRequest {
         id: id.into(),
@@ -876,6 +1234,7 @@ fn inject_subagent_completed_prompt_sends_prompt() {
     }
 }
 #[test]
+<<<<<<< HEAD
 fn inject_subagent_completed_prompt_copies_capped_task_output() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let output = "x".repeat(20_000);
@@ -885,6 +1244,736 @@ fn inject_subagent_completed_prompt_copies_capped_task_output() {
         output: std::sync::Arc::from(output.as_str()),
         subagent_id: "sa-1".into(),
         child_session_id: "sa-1".into(),
+=======
+fn mark_explicitly_killed_sets_flag_on_completed() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .move_to_completed(
+            "sub-ek-c",
+            "test".into(),
+            "explore".into(),
+            SubagentResult {
+                success: true,
+                subagent_id: "sub-ek-c".into(),
+                child_session_id: "sub-ek-c".into(),
+                ..Default::default()
+            },
+            None,
+        );
+    assert!(! coordinator.is_explicitly_killed("sub-ek-c"));
+    coordinator.mark_explicitly_killed("sub-ek-c");
+    assert!(coordinator.is_explicitly_killed("sub-ek-c"));
+}
+#[test]
+fn is_explicitly_killed_returns_false_for_unknown_id() {
+    let coordinator = SubagentCoordinator::new();
+    assert!(! coordinator.is_explicitly_killed("nonexistent"));
+}
+#[tokio::test]
+async fn block_waited_propagates_through_move_to_completed() {
+    let mut coordinator = SubagentCoordinator::new();
+    let mut tracker = dummy_tracker("sub-prop", "session-A", "explore", "bg task");
+    tracker.block_waited = true;
+    coordinator.insert(tracker);
+    coordinator
+        .move_to_completed(
+            "sub-prop",
+            "bg task".into(),
+            "explore".into(),
+            SubagentResult {
+                success: true,
+                subagent_id: "sub-prop".into(),
+                child_session_id: "sub-prop".into(),
+                ..Default::default()
+            },
+            None,
+        );
+    assert!(coordinator.is_block_waited("sub-prop"));
+}
+fn complete_dummy(coordinator: &mut SubagentCoordinator, id: &str, surface: bool) {
+    let mut tracker = dummy_tracker(id, "session-A", "explore", "task");
+    tracker.surface_completion = surface;
+    coordinator.insert(tracker);
+    coordinator
+        .move_to_completed(
+            id,
+            "task".into(),
+            "explore".into(),
+            SubagentResult {
+                success: true,
+                subagent_id: id.into(),
+                child_session_id: id.into(),
+                ..Default::default()
+            },
+            None,
+        );
+}
+#[tokio::test]
+async fn move_to_completed_surfaces_when_flag_true() {
+    let mut coordinator = SubagentCoordinator::new();
+    complete_dummy(&mut coordinator, "sub-surface", true);
+    let drained = coordinator.drain_pending_completions();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].subagent_id, "sub-surface");
+}
+#[tokio::test]
+async fn move_to_completed_skips_buffer_when_flag_false() {
+    let mut coordinator = SubagentCoordinator::new();
+    complete_dummy(&mut coordinator, "sub-hidden", false);
+    assert!(coordinator.drain_pending_completions().is_empty());
+    assert!(coordinator.lookup("sub-hidden").is_some());
+}
+fn fail_pending(coordinator: &mut SubagentCoordinator, id: &str, surface: bool) {
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: id.to_string(),
+            subagent_type: "explore".to_string(),
+            description: "task".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: false,
+            surface_completion: surface,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    coordinator.move_pending_to_failed(id, "boom");
+}
+#[test]
+fn failure_completion_surfaces_when_flag_true() {
+    let mut coordinator = SubagentCoordinator::new();
+    fail_pending(&mut coordinator, "fail-surface", true);
+    let drained = coordinator.drain_pending_completions();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].subagent_id, "fail-surface");
+    assert!(! drained[0].success);
+}
+#[test]
+fn failure_completion_skips_buffer_when_flag_false() {
+    let mut coordinator = SubagentCoordinator::new();
+    fail_pending(&mut coordinator, "fail-hidden", false);
+    assert!(coordinator.drain_pending_completions().is_empty());
+    assert!(coordinator.lookup("fail-hidden").is_some());
+}
+#[test]
+fn is_running_returns_true_for_initializing_variant() {
+    let snap = SubagentSnapshot {
+        subagent_id: "s".to_string(),
+        description: "d".to_string(),
+        subagent_type: "t".to_string(),
+        status: SubagentSnapshotStatus::Initializing,
+        started_at_epoch_ms: 0,
+        duration_ms: 0,
+        persona: None,
+    };
+    assert!(is_running(& snap));
+}
+#[test]
+fn remove_pending_clears_entry() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-1".to_string(),
+            subagent_type: "explore".to_string(),
+            description: "test".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: false,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    assert!(coordinator.lookup("sub-1").is_some());
+    coordinator.remove_pending("sub-1");
+    assert!(
+        coordinator.lookup("sub-1").is_none(),
+        "pending entry should be gone after remove_pending"
+    );
+}
+#[test]
+fn move_pending_to_failed_creates_completed_entry() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-fail".to_string(),
+            subagent_type: "explore".to_string(),
+            description: "will fail during init".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: true,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    coordinator.move_pending_to_failed("sub-fail", "Sampling client error: bad config");
+    assert!(! coordinator.pending.contains_key("sub-fail"));
+    let lookup = coordinator.lookup("sub-fail");
+    assert!(lookup.is_some(), "failed subagent should be queryable");
+    match lookup.unwrap() {
+        SnapshotLookup::Ready(snap) => {
+            assert_eq!(snap.subagent_id, "sub-fail");
+            assert!(
+                matches!(snap.status, SubagentSnapshotStatus::Failed { .. }),
+                "status should be Failed"
+            );
+            if let SubagentSnapshotStatus::Failed { error } = &snap.status {
+                assert!(
+                    error.contains("Sampling client error"),
+                    "error should contain specific message, got: {error}"
+                );
+            }
+        }
+        _ => panic!("expected Ready snapshot for completed-as-failed subagent"),
+    }
+}
+#[test]
+fn move_pending_to_failed_fires_completion_notify() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-notify".to_string(),
+            subagent_type: "explore".to_string(),
+            description: "notify test".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: true,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    coordinator.move_pending_to_failed("sub-notify", "test error");
+    let summaries = coordinator.drain_pending_completions();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].subagent_id, "sub-notify");
+    assert!(! summaries[0].success);
+}
+#[test]
+fn move_pending_to_failed_noop_for_unknown_id() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator.move_pending_to_failed("nonexistent", "error");
+    assert!(coordinator.completed.is_empty());
+}
+#[test]
+fn move_pending_to_cancelled_creates_cancelled_entry() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-killed".to_string(),
+            subagent_type: "explore".to_string(),
+            description: "killed while initializing".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: true,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    coordinator.move_pending_to_cancelled("sub-killed", "Subagent was cancelled");
+    assert!(! coordinator.pending.contains_key("sub-killed"));
+    match coordinator.lookup("sub-killed") {
+        Some(SnapshotLookup::Ready(snap)) => {
+            assert!(
+                matches!(snap.status, SubagentSnapshotStatus::Cancelled { .. }),
+                "killed-while-pending should be Cancelled, got {:?}", snap.status
+            )
+        }
+        _ => {
+            panic!("expected Ready cancelled snapshot for killed-while-pending subagent")
+        }
+    }
+}
+fn completed_with_output(
+    id: &str,
+    text: &str,
+    persisted_output_dir: Option<PathBuf>,
+) -> CompletedSubagent {
+    CompletedSubagent {
+        subagent_id: id.into(),
+        parent_session_id: String::new(),
+        parent_prompt_id: None,
+        child_session_id: String::new(),
+        description: "task".into(),
+        subagent_type: "explore".into(),
+        persona: None,
+        started_at: std::time::Instant::now(),
+        completed_at: std::time::Instant::now(),
+        result: SubagentResult {
+            success: true,
+            output: std::sync::Arc::from(text),
+            ..Default::default()
+        },
+        resumed_from: None,
+        child_cwd: String::new(),
+        worktree_path: None,
+        snapshot_ref: None,
+        effective_model_id: String::new(),
+        block_waited: false,
+        explicitly_killed: false,
+        persisted_output_dir,
+    }
+}
+fn lookup_output(coordinator: &SubagentCoordinator, id: &str) -> String {
+    match coordinator.lookup(id) {
+        Some(SnapshotLookup::Ready(snap)) => {
+            match snap.status {
+                SubagentSnapshotStatus::Completed { output, .. } => output,
+                other => panic!("expected Completed status, got {other:?}"),
+            }
+        }
+        other => {
+            panic!(
+                "expected Ready lookup, got {:?}", other.map(| _ | "NeedsSignals/other")
+            )
+        }
+    }
+}
+#[test]
+fn lookup_degrades_to_placeholder_when_output_file_is_missing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .completed
+        .insert(
+            "sub-gone".to_string(),
+            completed_with_output("sub-gone", "", Some(dir.path().to_path_buf())),
+        );
+    assert_eq!(
+        lookup_output(& coordinator, "sub-gone"), OUTPUT_UNAVAILABLE_PLACEHOLDER,
+        "an entry whose output.json is gone must degrade, not fail the query"
+    );
+}
+#[test]
+fn lookup_serves_unpersisted_output_from_memory() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .completed
+        .insert("sub-mem".to_string(), completed_with_output("sub-mem", "output", None));
+    assert_eq!(
+        lookup_output(& coordinator, "sub-mem"), "output",
+        "an entry with nothing on disk must serve its in-memory output"
+    );
+}
+#[test]
+fn completed_entries_are_capped_oldest_first() {
+    let mut coordinator = SubagentCoordinator::new();
+    let base = std::time::Instant::now();
+    for i in 0..(MAX_COMPLETED_ENTRIES + 2) {
+        let mut entry = completed_with_output(
+            &format!("sub-{i}"),
+            "",
+            Some(std::path::PathBuf::from("/nonexistent")),
+        );
+        entry.completed_at = base + std::time::Duration::from_millis(i as u64);
+        coordinator.completed.insert(format!("sub-{i}"), entry);
+    }
+    coordinator.enforce_completed_cap();
+    assert_eq!(
+        coordinator.completed.len(), MAX_COMPLETED_ENTRIES,
+        "the completed map must be capped at MAX_COMPLETED_ENTRIES"
+    );
+    assert!(
+        ! coordinator.completed.contains_key("sub-0") && ! coordinator.completed
+        .contains_key("sub-1"), "the oldest completions must be evicted first"
+    );
+    assert!(
+        coordinator.completed.contains_key("sub-2"),
+        "entries within the cap must survive"
+    );
+}
+#[test]
+fn move_to_completed_clears_persisted_output_after_the_summary_clone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let full_output = "final report".repeat(100);
+    assert!(write_subagent_output(dir.path(), & full_output));
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .move_to_completed(
+            "sub-e2e",
+            "task".into(),
+            "explore".into(),
+            SubagentResult {
+                success: true,
+                output: std::sync::Arc::from(full_output.as_str()),
+                subagent_id: "sub-e2e".into(),
+                child_session_id: "sub-e2e".into(),
+                ..Default::default()
+            },
+            Some(dir.path().to_path_buf()),
+        );
+    let entry = coordinator.completed.get("sub-e2e").expect("entry inserted");
+    assert!(
+        entry.result.output.is_empty(),
+        "a persisted entry must not keep the output in memory"
+    );
+    assert_eq!(
+        lookup_output(& coordinator, "sub-e2e"), full_output,
+        "lookup must serve the persisted output from disk"
+    );
+    let summaries = coordinator.drain_pending_completions();
+    assert_eq!(
+        &* summaries[0].output, full_output,
+        "the completion summary must carry the full output"
+    );
+}
+#[test]
+fn persist_gate_only_persists_successful_nonempty_outputs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ok = SubagentResult {
+        success: true,
+        output: std::sync::Arc::from("text"),
+        ..Default::default()
+    };
+    assert_eq!(
+        persist_subagent_output(dir.path(), & ok), Some(dir.path().to_path_buf())
+    );
+    let empty = SubagentResult {
+        success: true,
+        ..Default::default()
+    };
+    assert_eq!(persist_subagent_output(dir.path(), & empty), None);
+    let failed = SubagentResult {
+        success: false,
+        output: std::sync::Arc::from("partial"),
+        ..Default::default()
+    };
+    assert_eq!(persist_subagent_output(dir.path(), & failed), None);
+}
+#[test]
+fn subagent_output_roundtrips_through_output_json() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = "line one\nline two with unicode ✓";
+    assert!(write_subagent_output(dir.path(), output));
+    assert_eq!(read_subagent_output(dir.path()).as_deref(), Some(output));
+    assert_eq!(read_subagent_output(& dir.path().join("missing")), None);
+    std::fs::write(dir.path().join("output.json"), "not json").expect("corrupt file");
+    assert_eq!(read_subagent_output(dir.path()), None);
+}
+#[test]
+fn cancel_with_outcome_fires_pending_token() {
+    let mut coordinator = SubagentCoordinator::new();
+    let token = CancellationToken::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-cancel".to_string(),
+            subagent_type: "explore".to_string(),
+            description: "will be cancelled".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: false,
+            surface_completion: true,
+            color: None,
+            cancel_token: token.clone(),
+        });
+    let outcome = coordinator.cancel_with_outcome("sub-cancel");
+    assert!(
+        matches!(outcome, SubagentCancelOutcome::Cancelled),
+        "cancelling pending should return Cancelled"
+    );
+    assert!(token.is_cancelled(), "pending cancel must fire the spawn token");
+    assert!(
+        coordinator.lookup("sub-cancel").is_some(),
+        "pending entry stays queryable until the spawn future tears it down"
+    );
+}
+#[tokio::test]
+async fn cancel_with_outcome_returns_variant_for_active_finished_unknown() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator.insert(dummy_tracker("sub-active", "session-A", "explore", "task"));
+    assert!(
+        matches!(coordinator.cancel_with_outcome("sub-active"),
+        SubagentCancelOutcome::Cancelled)
+    );
+    coordinator
+        .move_to_completed(
+            "sub-done",
+            "done".to_string(),
+            "explore".to_string(),
+            SubagentResult {
+                success: true,
+                subagent_id: "sub-done".to_string(),
+                ..Default::default()
+            },
+            None,
+        );
+    assert!(
+        matches!(coordinator.cancel_with_outcome("sub-done"),
+        SubagentCancelOutcome::AlreadyFinished { status } if status == "completed")
+    );
+    assert!(
+        matches!(coordinator.cancel_with_outcome("nonexistent"),
+        SubagentCancelOutcome::NotFound)
+    );
+}
+#[test]
+fn cancel_by_parent_prompt_id_fires_matching_pending_token() {
+    let mut coordinator = SubagentCoordinator::new();
+    let token_a = CancellationToken::new();
+    let token_b = CancellationToken::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-p1".to_string(),
+            subagent_type: "explore".to_string(),
+            description: "child of prompt-A".to_string(),
+            persona: None,
+            parent_prompt_id: Some("prompt-A".to_string()),
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: false,
+            surface_completion: true,
+            color: None,
+            cancel_token: token_a.clone(),
+        });
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-p2".to_string(),
+            subagent_type: "explore".to_string(),
+            description: "child of prompt-B".to_string(),
+            persona: None,
+            parent_prompt_id: Some("prompt-B".to_string()),
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: false,
+            surface_completion: true,
+            color: None,
+            cancel_token: token_b.clone(),
+        });
+    coordinator.cancel_by_parent_prompt_id("prompt-A");
+    assert!(token_a.is_cancelled(), "prompt-A token must fire");
+    assert!(
+        coordinator.lookup("sub-p1").is_some(),
+        "prompt-A entry stays queryable until spawn teardown"
+    );
+    assert!(! token_b.is_cancelled(), "prompt-B token must not fire");
+    assert!(coordinator.lookup("sub-p2").is_some());
+}
+#[test]
+fn completed_takes_precedence_over_pending_in_lookup() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-dup".to_string(),
+            subagent_type: "explore".to_string(),
+            description: "duplicate".to_string(),
+            persona: None,
+            parent_prompt_id: None,
+            parent_session_id: String::new(),
+            started_at: std::time::Instant::now(),
+            run_in_background: false,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    coordinator
+        .move_to_completed(
+            "sub-dup",
+            "duplicate".to_string(),
+            "explore".to_string(),
+            SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("done"),
+                subagent_id: "sub-dup".to_string(),
+                child_session_id: "child-dup".to_string(),
+                ..Default::default()
+            },
+            None,
+        );
+    let lookup = coordinator.lookup("sub-dup");
+    assert!(
+        matches!(lookup, Some(SnapshotLookup::Ready(ref snap)) if matches!(snap.status,
+        SubagentSnapshotStatus::Completed { .. })),
+        "completed should take precedence over pending"
+    );
+}
+#[test]
+fn list_running_for_parent_returns_empty_when_no_active() {
+    let coordinator = SubagentCoordinator::new();
+    let seeds = coordinator.list_running_for_parent("parent-1");
+    assert!(seeds.is_empty());
+}
+fn dummy_tracker(
+    subagent_id: &str,
+    parent_session_id: &str,
+    subagent_type: &str,
+    description: &str,
+) -> SubagentTracker {
+    use crate::session::feedback_manager::{FeedbackManager, FeedbackManagerConfig};
+    use crate::session::handle::SessionHandle;
+    use crate::session::info::Info;
+    use crate::session::plan_mode::PlanModeTracker;
+    use crate::session::signals::SessionSignalsHandle;
+    use std::sync::atomic::AtomicBool;
+    let gateway = test_gateway();
+    let cwd = xai_grok_paths::AbsPathBuf::new(PathBuf::from("/tmp")).unwrap();
+    let fs: Arc<dyn xai_grok_workspace::file_system::AsyncFileSystem> = Arc::new(
+        xai_grok_workspace::file_system::LocalFs::new(PathBuf::from("/tmp")),
+    );
+    let terminal: Arc<dyn crate::terminal::AsyncTerminalRunner> = Arc::new(
+        crate::terminal::TerminalRunner::new(
+            Arc::new(test_gateway()),
+            acp::SessionId::new("test"),
+        ),
+    );
+    let tool_context = crate::tools::ToolContext::new(
+        cwd,
+        Some(gateway),
+        Some(acp::SessionId::new("test")),
+        fs,
+        terminal,
+        xai_hunk_tracker::HunkTrackerHandle::noop(),
+    );
+    let signals_handle = SessionSignalsHandle::new();
+    let feedback_manager = FeedbackManager::new(
+        "test",
+        None,
+        FeedbackManagerConfig::default(),
+    );
+    let handle = SessionHandle {
+        cmd_tx: tokio::sync::mpsc::unbounded_channel().0,
+        persistence_tx: tokio::sync::mpsc::unbounded_channel().0,
+        current_prompt_id: Arc::new(std::sync::Mutex::new(None)),
+        pending_interactions: Arc::new(
+            std::sync::Mutex::new(std::collections::HashMap::new()),
+        ),
+        info: Info {
+            id: acp::SessionId::new(subagent_id),
+            cwd: "/tmp".into(),
+        },
+        max_turns: None,
+        hunk_tracker_handle: xai_hunk_tracker::HunkTrackerHandle::noop(),
+        chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
+        signals_handle,
+        gateway_enabled: Arc::new(AtomicBool::new(false)),
+        mcp_servers: vec![],
+        initial_client_mcp_servers: vec![],
+        display_cwd: None,
+        feedback_manager: Arc::new(feedback_manager),
+        upload_queue: Arc::new(OnceLock::new()),
+        upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        tool_context,
+        model_id: acp::ModelId::new("test"),
+        reasoning_effort: None,
+        yolo_mode: false,
+        origin_client: None,
+        code_nav_enabled: false,
+        ask_user_question_enabled: true,
+        plan_mode: Arc::new(
+            parking_lot::Mutex::new(PlanModeTracker::new(PathBuf::from("/tmp"))),
+        ),
+        force_compact: Arc::new(AtomicBool::new(false)),
+        permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
+        attribution_callback: None,
+        agent_name: "grok-build".to_string(),
+        managed_mcp_proxy_base_url: String::new(),
+        session_default_agent_profile: None,
+        allowed_subagent_types: None,
+        hook_registry: None,
+        workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
+        terminal_backend: None,
+        tools_notification_handle: None,
+        scheduler_handle: None,
+    };
+    SubagentTracker {
+        subagent_id: subagent_id.into(),
+        parent_session_id: parent_session_id.into(),
+        parent_prompt_id: None,
+        child_session_id: acp::SessionId::new(subagent_id),
+        subagent_type: subagent_type.into(),
+        persona: None,
+        description: description.into(),
+        started_at: std::time::Instant::now(),
+        child_handle: handle,
+        child_thread: crate::session::SessionThread::from_handle(
+            std::thread::spawn(|| {}),
+        ),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
+        resumed_from: None,
+        child_cwd: String::new(),
+        worktree_path: None,
+        effective_model_id: String::new(),
+        run_in_background: false,
+        surface_completion: true,
+        color: None,
+        block_waited: false,
+        explicitly_killed: false,
+    }
+}
+#[tokio::test]
+async fn active_summaries_for_filters_by_parent_session_id() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator.insert(dummy_tracker("sub-1", "session-A", "explore", "task 1"));
+    coordinator.insert(dummy_tracker("sub-2", "session-B", "plan", "task 2"));
+    coordinator.insert(dummy_tracker("sub-3", "session-A", "general-purpose", "task 3"));
+    let summaries_a = coordinator.active_summaries_for("session-A");
+    assert_eq!(summaries_a.len(), 2);
+    let ids_a: Vec<&str> = summaries_a.iter().map(|s| s.subagent_id.as_str()).collect();
+    assert!(ids_a.contains(& "sub-1"));
+    assert!(ids_a.contains(& "sub-3"));
+    let summaries_b = coordinator.active_summaries_for("session-B");
+    assert_eq!(summaries_b.len(), 1);
+    assert_eq!(summaries_b[0].subagent_id, "sub-2");
+    assert_eq!(summaries_b[0].subagent_type, "plan");
+    assert_eq!(summaries_b[0].description, "task 2");
+    let summaries_none = coordinator.active_summaries_for("session-C");
+    assert!(summaries_none.is_empty());
+}
+#[tokio::test]
+async fn active_summaries_returns_all_regardless_of_parent() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator.insert(dummy_tracker("sub-1", "session-A", "explore", "task 1"));
+    coordinator.insert(dummy_tracker("sub-2", "session-B", "plan", "task 2"));
+    let all = coordinator.active_summaries();
+    assert_eq!(all.len(), 2);
+}
+#[tokio::test]
+async fn resolve_running_list_returns_empty_for_empty_seeds() {
+    let resolved = resolve_running_list(vec![]).await;
+    assert!(resolved.is_empty());
+}
+#[tokio::test]
+async fn resolve_running_list_populates_fields_from_signals() {
+    use crate::session::signals::SessionSignalsHandle;
+    let signals = SessionSignalsHandle::new();
+    signals.increment_turn();
+    signals.record_tool_call("grep");
+    tokio::task::yield_now().await;
+    let seed = RunningSubagentListSeed {
+        subagent_id: "sub-1".to_string(),
+        parent_session_id: "parent-1".to_string(),
+        child_session_id: "child-1".to_string(),
+        subagent_type: "explore".to_string(),
+        description: "find endpoints".to_string(),
+        started_at_epoch_ms: 1000,
+        duration_ms: 2000,
+        signals_handle: signals,
+    };
+    let resolved = resolve_running_list(vec![seed]).await;
+    assert_eq!(resolved.len(), 1);
+    let r = &resolved[0];
+    assert_eq!(r.subagent_id, "sub-1");
+    assert_eq!(r.parent_session_id, "parent-1");
+    assert_eq!(r.child_session_id, "child-1");
+    assert_eq!(r.subagent_type, "explore");
+    assert_eq!(r.turn_count, 1);
+    assert_eq!(r.tool_call_count, 1);
+    assert!(r.tools_used.contains(& "grep".to_string()));
+}
+#[test]
+fn explicit_override_takes_precedence_over_role() {
+    let overrides = SubagentRuntimeOverrides {
+        model: Some("explicit-model".into()),
+        capability_mode: Some(xai_tool_types::SubagentCapabilityMode::All),
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         ..Default::default()
     };
     inject_subagent_completed_prompt(InjectParams {

@@ -97,7 +97,13 @@ pub use cli::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use crossterm::cursor::{self, SetCursorStyle};
 use crossterm::event;
 use crossterm::execute;
+<<<<<<< HEAD
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, SetTitle};
+=======
+use crossterm::terminal::{
+    self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+};
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub use foreign_sessions::ForeignScanCoordinator;
 pub(crate) use foreign_sessions::{
     badge_for_picker_source, foreign_tool_display_label, is_foreign_picker_source,
@@ -157,9 +163,15 @@ pub fn minimal_show_switch_back_to_fullscreen() -> bool {
 pub fn set_minimal_show_switch_back_to_fullscreen_for_test(on: bool) {
     MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN.store(on, Ordering::Release);
 }
+<<<<<<< HEAD
 /// Whether startup actually applied a forced cursor style.
 /// Teardown (and the panic hook, which can't thread parameters) resets the style only when this is true.
 /// Under inherit, `0 q` would clobber a shell-chosen style.
+=======
+/// Whether startup actually applied a forced cursor style. Teardown (and the
+/// panic hook, which can't thread parameters) resets the style only when
+/// true: under inherit, `0 q` would clobber a shell-chosen style.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) static CURSOR_STYLE_FORCED: AtomicBool = AtomicBool::new(false);
 /// The screen the terminal is ACTUALLY on, for teardown paths that cannot thread parameters (panic hook, signal handler, post-loop restore).
 /// It is updated eagerly at every screen flip so mid-switch failures tear down correctly.
@@ -198,6 +210,7 @@ pub(crate) fn mouse_reporting_toggle_enabled() -> bool {
 /// Process-global voice gate for view code without an `AppView`.
 /// Written only by [`crate::app::app_view::AppView::apply_voice_mode_enabled`].
 pub(crate) static VOICE_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
+<<<<<<< HEAD
 fn dock_flag_in(layer: &toml::Value) -> Option<bool> {
     layer
         .get("features")?
@@ -247,6 +260,8 @@ pub(crate) fn resolve_terminal_theme_enabled(remote: Option<bool>) -> bool {
     sources.remote = remote;
     Feature::TerminalTheme.resolve(sources).value
 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn voice_mode_enabled() -> bool {
     VOICE_MODE_ENABLED.load(Ordering::Acquire)
 }
@@ -254,6 +269,7 @@ pub(crate) fn voice_mode_enabled() -> bool {
 pub fn set_voice_mode_enabled_for_test(on: bool) {
     VOICE_MODE_ENABLED.store(on, Ordering::Release);
 }
+<<<<<<< HEAD
 /// Process-global gate for the Ctrl+Space / F8 voice chord, for key-routing and view code without an `AppView` (`resolve_action`, the cheatsheet).
 /// Defaults ON; seeded at startup from `[ui].voice_keybind_enabled` and updated live by the settings setter.
 /// Unlike [`VOICE_MODE_ENABLED`] it only silences the keybinding; `/voice` and the other voice entry points stay up.
@@ -282,12 +298,40 @@ pub(crate) fn voice_mode_config_value() -> Option<bool> {
 /// The registry owns the precedence and the default.
 /// One rule has no row there: with `is_api_key`, a remote-only off is forced back on.
 /// A requirement, env, or config `false` still wins, and so does a distribution without voice.
+=======
+/// `[features] voice_mode` from merged `requirements.toml`.
+pub(crate) fn voice_mode_requirement_pin() -> Option<bool> {
+    xai_grok_config::load_merged_requirements().and_then(|req| {
+        req.get("features")
+            .and_then(|f| f.get("voice_mode"))
+            .and_then(|v| v.as_bool())
+    })
+}
+/// `[features] voice_mode` from effective config (user + managed).
+pub(crate) fn voice_mode_config_value() -> Option<bool> {
+    xai_grok_shell::config::load_effective_config()
+        .ok()
+        .and_then(|cfg| {
+            cfg.get("features")
+                .and_then(|f| f.get("voice_mode"))
+                .and_then(|v| v.as_bool())
+        })
+}
+/// Resolve voice availability.
+///
+/// Precedence: requirements > `GROK_VOICE_MODE` > config/managed
+/// `[features] voice_mode` > remote `voice_mode_enabled` > default on.
+///
+/// When `is_api_key` and the only off-source is remote, force on. Requirement /
+/// env / config `false` still wins.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn resolve_voice_mode_enabled(
     requirement: Option<bool>,
     config: Option<bool>,
     remote: Option<bool>,
     is_api_key: bool,
 ) -> bool {
+<<<<<<< HEAD
     resolve_voice_mode_enabled_as(
         xai_grok_config::Distribution::current(),
         requirement,
@@ -313,12 +357,25 @@ fn resolve_voice_mode_enabled_as(
         remote,
         ..FeatureSources::from_process_env(Feature::VoiceMode)
     });
+=======
+    use xai_grok_shell::agent::config::{BoolFlag, ConfigSource};
+    let resolved = BoolFlag::env("GROK_VOICE_MODE")
+        .requirement(requirement)
+        .config(config)
+        .feature_flag(remote)
+        .default(true)
+        .resolve();
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     if resolved.value {
         return true;
     }
     is_api_key && resolved.source == ConfigSource::Remote
 }
+<<<<<<< HEAD
 /// Resolve from live policy, env, remote, and API-key state.
+=======
+/// Resolve from live policy + env + remote + API-key state.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 pub(crate) fn resolve_voice_mode_live(remote: Option<bool>, is_api_key: bool) -> bool {
     resolve_voice_mode_enabled(
         voice_mode_requirement_pin(),
@@ -332,6 +389,7 @@ mod voice_gate_tests {
     use super::{resolve_voice_mode_enabled, resolve_voice_mode_enabled_as};
     use xai_grok_config::Distribution;
     #[test]
+<<<<<<< HEAD
     fn a_distribution_without_voice_outranks_every_tier_and_the_api_key_force_on() {
         for remote in [None, Some(false), Some(true)] {
             assert!(!resolve_voice_mode_enabled_as(
@@ -356,6 +414,13 @@ mod voice_gate_tests {
         assert!(!resolve_voice_mode_enabled(None, None, Some(false), false));
     }
     #[test]
+=======
+    fn api_key_force_on_over_remote_kill_only() {
+        assert!(resolve_voice_mode_enabled(None, None, Some(false), true));
+        assert!(!resolve_voice_mode_enabled(None, None, Some(false), false));
+    }
+    #[test]
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     fn policy_false_outranks_api_key_force_on() {
         assert!(!resolve_voice_mode_enabled(
             Some(false),
@@ -468,9 +533,26 @@ fn finish_theme_after_probe(requested_minimal: bool, effective_mode: ScreenMode)
 pub(crate) struct ExitInfo {
     pub session_id: String,
     pub minimal: bool,
+<<<<<<< HEAD
     /// Session tail the user can take in at a glance; `Some` exactly when it should print.
     /// The decision whether to print lives at the sole construction site, `finish_run`.
     pub summary: Option<ExitSummary>,
+=======
+    /// Glanceable session tail; `Some` exactly when it should print. The
+    /// presence policy lives at the sole construction site, `make_run_result`.
+    pub summary: Option<ExitSummary>,
+}
+/// Session tail printed above the resume command on fullscreen quits.
+///
+/// Invariant: every field is a pre-sanitized single line (built from the
+/// `views::session_title` helpers), so the printer only width-truncates.
+pub(crate) struct ExitSummary {
+    /// Display title (rename > generated > first prompt).
+    pub title: String,
+    pub last_prompt: Option<String>,
+    /// `None` when the newest prompt is still unanswered.
+    pub last_response: Option<String>,
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 /// Session tail printed above the resume command on fullscreen quits.
 ///
@@ -1268,9 +1350,13 @@ pub async fn run(
                 }
                 return Ok(false);
             }
+<<<<<<< HEAD
             if let Some(info) = run_result.exit_info
                 && terminal_reading
             {
+=======
+            if let Some(info) = run_result.exit_info {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
                 print_exit_resume_hint(&info, width, &mut io::stderr());
             }
@@ -1280,11 +1366,20 @@ pub async fn run(
     }
 }
 /// Plain-quit "Resume this session with…" lines (after terminal restore).
+///
+/// A summary, when present — title, last prompt, last response, one line
+/// each, width-truncated — precedes the command so a glance at the pane
+/// shows which session lives there and where it left off.
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
+<<<<<<< HEAD
 /// TODO: extend beyond --minimal by rebuilding resume argv from launch flags (see screen_mode_relaunch)
 fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
     use crate::render::line_utils::truncate_str;
+=======
+fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     let cli = screen_mode_relaunch::cli_hint_name();
+    use crate::render::line_utils::truncate_str;
     let _ = writeln!(w);
     if let Some(summary) = &info.summary {
         let _ = writeln!(w, "{}", truncate_str(&summary.title, max_width));
@@ -1718,10 +1813,10 @@ pub(crate) fn set_terminal_title(title: &str) {
 fn terminal_title_string(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
-        "grok-oss".into()
+        "grok".into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 10).collect();
-        format!("{truncated} - grok-oss")
+        let truncated: String = sanitized.chars().take(80 - 6).collect();
+        format!("{} - grok", truncated)
     }
 }
 #[cfg(test)]
@@ -1771,11 +1866,11 @@ mod tests {
     fn terminal_title_strips_control_characters() {
         assert_eq!(
             terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
-            "evil]52;c;payloadtitle - grok-oss"
+            "evil]52;c;payloadtitle - grok"
         );
-        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok-oss");
-        assert_eq!(terminal_title_string(""), "grok-oss");
-        assert_eq!(terminal_title_string("My chat"), "My chat - grok-oss");
+        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok");
+        assert_eq!(terminal_title_string(""), "grok");
+        assert_eq!(terminal_title_string("My chat"), "My chat - grok");
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {
@@ -2350,31 +2445,74 @@ mod tests {
     fn print_exit_resume_hint_writes_expected_lines() {
         let mut buf = Vec::new();
         print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, &mut buf);
+<<<<<<< HEAD
         let cli = screen_mode_relaunch::cli_hint_name();
         let out = String::from_utf8(buf).unwrap();
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(
-            out,
-            format!("\nResume this session with:\n  {cli} --resume sess-abc\n")
-        );
-        // Cargo-test binaries are not product-named → Surmount default.
-        assert_eq!(cli, screen_mode_relaunch::DEFAULT_CLI_HINT_NAME);
-        assert_eq!(cli, "grok-oss");
-        assert!(
-            !out.contains("  grok --resume"),
-            "must not recommend upstream `grok` binary:\n{out}"
+            String::from_utf8(buf).unwrap(),
+            "\nResume this session with:\n  grok-oss --resume sess-abc\n"
         );
     }
     #[test]
     fn print_exit_resume_hint_includes_minimal_flag() {
         let mut buf = Vec::new();
         print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, &mut buf);
+<<<<<<< HEAD
         let cli = screen_mode_relaunch::cli_hint_name();
         let out = String::from_utf8(buf).unwrap();
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         assert_eq!(
-            out,
-            format!("\nResume this session with:\n  {cli} --minimal --resume sess-abc\n")
+            String::from_utf8(buf).unwrap(),
+            "\nResume this session with:\n  grok-oss --minimal --resume sess-abc\n"
         );
-        assert!(!out.contains("  grok --minimal"), "{out}");
+    }
+    #[test]
+    fn print_exit_resume_hint_includes_session_summary() {
+        let info = ExitInfo {
+            session_id: "sess-abc".to_string(),
+            minimal: false,
+            summary: Some(ExitSummary {
+                title: "Fix flaky CI test".to_string(),
+                last_prompt: Some("make the suite deterministic".to_string()),
+                last_response: Some("Pinned the seed; 200 consecutive green runs.".to_string()),
+            }),
+        };
+        let mut buf = Vec::new();
+        print_exit_resume_hint(&info, 80, &mut buf);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            concat!(
+                "\n",
+                "Fix flaky CI test\n",
+                "> make the suite deterministic\n",
+                "  Pinned the seed; 200 consecutive green runs.\n",
+                "\n",
+                "Resume this session with:\n",
+                "  grok-oss --resume sess-abc\n",
+            )
+        );
+    }
+    #[test]
+    fn print_exit_resume_hint_truncates_summary_to_width() {
+        let info = ExitInfo {
+            session_id: "sess-abc".to_string(),
+            minimal: false,
+            summary: Some(ExitSummary {
+                title: "t".repeat(50),
+                last_prompt: Some("p".repeat(50)),
+                last_response: Some("r".repeat(50)),
+            }),
+        };
+        let mut buf = Vec::new();
+        print_exit_resume_hint(&info, 20, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains(&format!("\n{}…\n", "t".repeat(19))));
+        assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));
+        assert!(out.contains(&format!("\n  {}…\n", "r".repeat(17))));
+        assert!(out.contains("  grok-oss --resume sess-abc\n"));
     }
     #[test]
     fn print_exit_resume_hint_includes_session_summary() {

@@ -403,6 +403,11 @@ impl AgentView {
                     if is_link_modifier_held(mouse.modifiers)
                         && self.try_arm_link_click(mouse.column, mouse.row)
                     {
+<<<<<<< HEAD
+=======
+                        self.pending_link_click = app_should_open_link_on_click(link)
+                            .then(|| (mouse.column, mouse.row, link.target.clone()));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                         self.pending_scrollback_click = None;
                         return InputOutcome::Changed;
                     }
@@ -709,6 +714,11 @@ impl AgentView {
                         if is_link_modifier_held(mouse.modifiers)
                             && self.try_arm_link_click(mouse.column, mouse.row)
                         {
+<<<<<<< HEAD
+=======
+                            self.pending_link_click = app_should_open_link_on_click(link)
+                                .then(|| (mouse.column, mouse.row, link.target.clone()));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                             self.pending_scrollback_click = None;
                             return InputOutcome::Changed;
                         }
@@ -857,6 +867,49 @@ impl AgentView {
                             .scrollback
                             .entry_index_at_screen_row(click_row, self.pane_areas.scrollback);
                         if let Some(idx) = hit_idx {
+<<<<<<< HEAD
+=======
+                            let credit_click = self
+                                .scrollback
+                                .entry(idx)
+                                .and_then(|entry| {
+                                    if let crate::scrollback::block::RenderBlock::CreditLimit(
+                                        ref blk,
+                                    ) = entry.block
+                                    {
+                                        use crate::scrollback::blocks::CreditLimitCardAction;
+                                        let choice = match blk.action {
+                                            CreditLimitCardAction::PurchaseCredits => {
+                                                xai_grok_telemetry::events::CreditLimitChoice::PurchaseCredits
+                                            }
+                                            CreditLimitCardAction::EnablePayg
+                                            | CreditLimitCardAction::IncreasePaygLimit => {
+                                                xai_grok_telemetry::events::CreditLimitChoice::PayAsYouGo
+                                            }
+                                        };
+                                        Some((blk.url.clone(), choice))
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some((url, choice)) = credit_click
+                                && let Some((area, _, _)) = self
+                                    .scrollback
+                                    .entry_screen_area(idx, self.pane_areas.scrollback)
+                            {
+                                let url_row = area.y + area.height.saturating_sub(2);
+                                if click_row >= url_row {
+                                    self.scrollback.set_selected(Some(idx));
+                                    xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::CreditLimitUpsellClicked {
+                                        surface: xai_grok_telemetry::events::CreditLimitUpsellSurface::InlineCard,
+                                        choice,
+                                    });
+                                    self.open_url_or_show(&url);
+                                    self.last_click = None;
+                                    return InputOutcome::Changed;
+                                }
+                            }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                             let selectable = self
                                 .scrollback
                                 .get(idx)
@@ -873,11 +926,14 @@ impl AgentView {
                                         .scrollback
                                         .entry_screen_area(idx, self.pane_areas.scrollback)
                                         .is_some_and(|(a, _, _)| click_row == a.y);
-                                let (last_click, show_word_select_tip) =
+                                let (last_click, show_word_select_tip, open_viewer) =
                                     self.handle_scrollback_click(now, idx, header_row_click);
                                 self.last_click = last_click;
                                 if show_word_select_tip {
                                     return InputOutcome::Action(Action::ShowWordSelectTip);
+                                }
+                                if open_viewer {
+                                    return InputOutcome::Action(Action::OpenBlockViewer);
                                 }
                                 return InputOutcome::Changed;
                             }
@@ -885,11 +941,14 @@ impl AgentView {
                             && now.duration_since(last_time).as_millis() < MULTI_CLICK_TIMEOUT_MS
                             && last_count >= 2
                         {
-                            let (last_click, show_word_select_tip) =
+                            let (last_click, show_word_select_tip, open_viewer) =
                                 self.handle_scrollback_click(now, last_idx, false);
                             self.last_click = last_click;
                             if show_word_select_tip {
                                 return InputOutcome::Action(Action::ShowWordSelectTip);
+                            }
+                            if open_viewer {
+                                return InputOutcome::Action(Action::OpenBlockViewer);
                             }
                             return InputOutcome::Changed;
                         }
@@ -997,6 +1056,7 @@ impl AgentView {
                     self.sync_timeline_hover_preview();
                     changed = true;
                 }
+<<<<<<< HEAD
                 if hit == Some(AgentPane::Dock) {
                     let new = self.dock_item_at(self.pane_areas.dock, mouse.row);
                     if new != self.dock_hovered {
@@ -1006,6 +1066,8 @@ impl AgentView {
                 } else if self.dock_hovered.take().is_some() {
                     changed = true;
                 }
+=======
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 changed |= self
                     .set_hovered_follow_up_chip(self.follow_up_chip_at(mouse.column, mouse.row));
                 changed |= self.hit_context.update_hover(mouse.column, mouse.row);

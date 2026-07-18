@@ -119,8 +119,17 @@ pub struct WorkspaceSession {
     pub(crate) depth: u32,
     pub(crate) fork_budget: u32,
     pub(crate) hunk_tracker: HunkTrackerHandle,
+<<<<<<< HEAD
     /// Cancel token for the workspace-spawned hunk tracker. [`Self::cancel_hunk_tracker`] fires it on session teardown.
     /// `None` when the tracker is externally owned, so teardown must not cancel a tracker the caller still holds.
+=======
+    /// Cancel token for the workspace-spawned [`HunkTrackerActor`] backing
+    /// [`Self::hunk_tracker`], fired on session teardown by
+    /// [`Self::cancel_hunk_tracker`]. `None` when the tracker is externally
+    /// owned (e.g. `create_session_with_tracker` / local shell mode).
+    ///
+    /// [`HunkTrackerActor`]: xai_hunk_tracker::HunkTrackerActor
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) hunk_tracker_cancel: Option<tokio_util::sync::CancellationToken>,
     pub(crate) file_state_tracker: Arc<FileStateTracker>,
     /// Per-turn hunk deltas keyed by `prompt_index`, captured at finalize and replayed on rewind (only when `workspace_rewind_hunks` is on).
@@ -488,11 +497,18 @@ impl WorkspaceSession {
     pub(crate) fn shutdown_terminal_backend(&self) {
         self.terminal_backend.shutdown();
     }
+<<<<<<< HEAD
     /// No-op when the browser tools are compiled out.
     pub(crate) fn shutdown_browser_service(&self) {}
     /// Cancel the workspace-spawned hunk-tracker actor, if this session owns one.
     /// The actor pins file contents in `file_states`.
     /// Runs at the session drop chokepoints so it stops even while leaked handle clones hold its channel open.
+=======
+    /// Cancel the workspace-spawned hunk-tracker actor, if this session owns
+    /// one. Runs at the session drop chokepoints so the actor (which pins file
+    /// contents in `file_states`) stops even while leaked handle clones hold
+    /// its channel open.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     pub(crate) fn cancel_hunk_tracker(&self) {
         if let Some(token) = &self.hunk_tracker_cancel {
             token.cancel();

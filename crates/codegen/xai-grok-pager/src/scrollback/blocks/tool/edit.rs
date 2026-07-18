@@ -161,11 +161,15 @@ fn render_diff_hunks_core(
         if i > 0 && !lines.is_empty() && !config.hunk_separator.is_empty() {
             // Add separator between hunks (no background)
             let indent = if config.indent { INDENT } else { "" };
+<<<<<<< HEAD
             let sep_text = match i
                 .checked_sub(1)
                 .and_then(|j| hunks.get(j))
                 .and_then(|prev| hunk_gap_lines(prev, hunk))
             {
+=======
+            let sep_text = match hunk_gap_lines(&hunks[i - 1], hunk) {
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 Some(1) => format!("{} 1 unchanged line", config.hunk_separator),
                 Some(n) => format!("{} {n} unchanged lines", config.hunk_separator),
                 None => config.hunk_separator.clone(),
@@ -232,8 +236,18 @@ fn render_diff_hunks_core(
     lines
 }
 
+<<<<<<< HEAD
 /// Unchanged new-file lines hidden between two hunks, when computable. Each call's hunks are numbered against its
 /// own file snapshot, so a count would be wrong there.
+=======
+/// Unchanged new-file lines hidden between two hunks, when computable.
+///
+/// Uses the `ln` of the new-file lines (Equal/Insert) bordering the gap.
+/// `None` — a hunk with no new-file lines, or a non-positive gap — keeps the
+/// bare separator. Non-monotonic `ln` happens on coalesced multi-call blocks
+/// whose later edit landed above an earlier one (each call's hunks are
+/// numbered against its own file snapshot), so a count would be wrong there.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn hunk_gap_lines(prev: &DiffHunk, next: &DiffHunk) -> Option<usize> {
     let prev_last = prev.iter().rev().find(|l| l.tag != ChangeTag::Delete)?.ln;
     let next_first = next.iter().find(|l| l.tag != ChangeTag::Delete)?.ln;
@@ -243,7 +257,11 @@ fn hunk_gap_lines(prev: &DiffHunk, next: &DiffHunk) -> Option<usize> {
         .filter(|n| *n > 0)
 }
 
+<<<<<<< HEAD
 /// Tab-expanded text for Equal/Insert hunk lines, keyed by 1-based ln.
+=======
+/// Expanded (tabs → spaces) text for Equal/Insert hunk lines, keyed by 1-based ln.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 fn hunk_new_line_texts(hunks: &[DiffHunk]) -> HashMap<usize, String> {
     let mut out = HashMap::new();
     for hunk in hunks {
@@ -1803,7 +1821,11 @@ mod tests {
                 .as_ref(),
             "foo.rs"
         );
+<<<<<<< HEAD
         assert_eq!(nth(&collapsed.lines, 0).link_target.as_ref(), Some(&target));
+=======
+        assert_eq!(collapsed.lines[0].link_target.as_ref(), Some(&target));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
         ctx.mode = DisplayMode::Expanded;
         let expanded = block.output(&ctx);
@@ -1813,7 +1835,11 @@ mod tests {
                 .as_ref(),
             "src/foo.rs"
         );
+<<<<<<< HEAD
         assert_eq!(nth(&expanded.lines, 0).link_target.as_ref(), Some(&target));
+=======
+        assert_eq!(expanded.lines[0].link_target.as_ref(), Some(&target));
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     }
 
     #[test]
@@ -2334,6 +2360,7 @@ mod tests {
 
         // Lines 2..=9 sit between the hunks: computable gap of 8.
         assert_eq!(outputs.len(), 3);
+<<<<<<< HEAD
         assert!(nth(&outputs, 1).is_separator);
         assert_eq!(
             line_to_string(&nth(&outputs, 1).line),
@@ -2400,6 +2427,69 @@ mod tests {
         let outputs =
             render_diff_hunks_highlighted(&[mk(5), pure_delete], path, &theme, 80, &config);
         assert_eq!(line_to_string(&nth(&outputs, 1).line), "  …");
+=======
+        assert!(outputs[1].is_separator);
+        assert_eq!(line_to_string(&outputs[1].line), "  … 8 unchanged lines");
+        assert_eq!(outputs[1].background, None);
+>>>>>>> e3fdf3ed (Merge 2 (#4))
+    }
+
+    #[test]
+    fn hunk_separator_singular_gap() {
+        let hunk1 = vec![DiffLine {
+            text: "line1\n".into(),
+            lo: 1,
+            ln: 1,
+            tag: ChangeTag::Equal,
+        }];
+        let hunk2 = vec![DiffLine {
+            text: "line3\n".into(),
+            lo: 3,
+            ln: 3,
+            tag: ChangeTag::Equal,
+        }];
+
+        let theme = Theme::current();
+        let config = DiffRenderConfig::default();
+        let path = Path::new("test.txt");
+        let outputs = render_diff_hunks_highlighted(&[hunk1, hunk2], path, &theme, 80, &config);
+
+        assert_eq!(line_to_string(&outputs[1].line), "  … 1 unchanged line");
+    }
+
+    #[test]
+    fn hunk_separator_bare_for_non_monotonic_or_adjacent() {
+        let mk = |ln: usize| {
+            vec![DiffLine {
+                text: format!("line{ln}\n"),
+                lo: ln,
+                ln,
+                tag: ChangeTag::Equal,
+            }]
+        };
+        let theme = Theme::current();
+        let config = DiffRenderConfig::default();
+        let path = Path::new("test.txt");
+
+        // Non-monotonic ln (a coalesced later edit above an earlier one):
+        // never render a negative/zero count, keep the bare separator.
+        let outputs = render_diff_hunks_highlighted(&[mk(20), mk(4)], path, &theme, 80, &config);
+        assert_eq!(line_to_string(&outputs[1].line), "  …");
+
+        // Adjacent hunks (no hidden lines) keep the bare separator too.
+        let outputs = render_diff_hunks_highlighted(&[mk(5), mk(6)], path, &theme, 80, &config);
+        assert_eq!(line_to_string(&outputs[1].line), "  …");
+
+        // A hunk with no new-file lines (pure deletion) is not computable.
+        let pure_delete = vec![DiffLine {
+            text: "gone\n".into(),
+            lo: 9,
+            ln: 9,
+            tag: ChangeTag::Delete,
+        }];
+        let outputs =
+            render_diff_hunks_highlighted(&[mk(5), pure_delete], path, &theme, 80, &config);
+        assert_eq!(line_to_string(&outputs[1].line), "  …");
     }
 
     #[test]
@@ -2518,8 +2608,14 @@ mod tests {
 
     #[test]
     fn snapshot_diff_merged_hunks_gap_markers() {
+<<<<<<< HEAD
         // Shape of a coalesced block: hunks from consecutive same-file edits appended in completion order, monotonically increasing
         // Every separator therefore carries a computable gap count
+=======
+        // Shape of a coalesced block: hunks from consecutive same-file edits
+        // appended in completion order, monotonically increasing, so every
+        // separator carries a computable gap count.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
         let hunk1 = vec![
             DiffLine {
                 text: "fn one() {\n".into(),
@@ -2579,6 +2675,11 @@ mod tests {
             diff_outputs_to_string(&outputs)
         );
     }
+<<<<<<< HEAD
+=======
+
+    // --- dual_line_numbers = true snapshots ---
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 
     fn dual_config() -> DiffRenderConfig {
         DiffRenderConfig {

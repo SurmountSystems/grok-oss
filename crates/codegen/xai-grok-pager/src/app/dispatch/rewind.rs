@@ -90,7 +90,12 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
 
+<<<<<<< HEAD
     // Rewind takes input priority over the `/jump` picker; close a lingering one first so it can't reappear (stale) after rewind finishes
+=======
+    // Rewind takes input priority over the `/jump` picker; close a lingering
+    // one first so it can't reappear (stale) after rewind finishes.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     agent.dismiss_jump_picker();
 
     let selected_idx = agent.scrollback.selected();
@@ -134,7 +139,12 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
 
+<<<<<<< HEAD
     // Rewind takes input priority over the `/jump` picker; close a lingering one first so it can't reappear (stale) after rewind finishes
+=======
+    // Rewind takes input priority over the `/jump` picker; close a lingering
+    // one first so it can't reappear (stale) after rewind finishes.
+>>>>>>> e3fdf3ed (Merge 2 (#4))
     agent.dismiss_jump_picker();
 
     if agent.session.state.is_busy() {

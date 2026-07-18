@@ -1,4 +1,5 @@
 use super::*;
+<<<<<<< HEAD
 use xai_grok_shell::extensions::notification::HookAnnotationKind;
 use xai_grok_shell::sampling::error::format_rate_limited_user_message;
 /// The one scrollback line a failed run gets; success gets none and a deny is already annotated by the shell.
@@ -35,6 +36,49 @@ fn is_foreign_hook_batch(agent: &AgentView, batch_prompt_id: Option<&str>) -> bo
         (batch_prompt_id, agent.session.current_prompt_id.as_deref()),
         (Some(batch), Some(current)) if batch != current
     )
+=======
+use xai_grok_shell::sampling::error::format_rate_limited_user_message;
+/// Stash a live stop/stop_failure batch under `stash_pid` for the turn marker
+/// to fold. `merge_same_name` merges a same-name repeat instead of standalone.
+pub(super) fn stash_live_stop_batch(
+    agent: &mut AgentView,
+    stash_pid: Option<String>,
+    event_name: String,
+    hook_entries: Vec<crate::scrollback::blocks::tool::HookRunEntry>,
+    merge_same_name: bool,
+) {
+    if let Some(stale) = agent
+        .pending_stop_hooks
+        .take_if(|p| p.prompt_id != stash_pid)
+    {
+        for (name, runs) in stale.groups {
+            agent.scrollback.push_lifecycle_hooks(name, runs);
+        }
+    }
+    let pending = agent.pending_stop_hooks.get_or_insert_with(|| {
+        super::super::agent_view::PendingStopHooks {
+            prompt_id: stash_pid,
+            groups: Vec::new(),
+        }
+    });
+    match pending
+        .groups
+        .iter()
+        .position(|(name, _)| *name == event_name)
+    {
+        Some(idx) if merge_same_name => {
+            pending.groups[idx].1.extend(hook_entries);
+        }
+        Some(_) => {
+            agent
+                .scrollback
+                .push_lifecycle_hooks(event_name, hook_entries);
+        }
+        None => {
+            pending.groups.push((event_name, hook_entries));
+        }
+    }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
 }
 pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
     let total = view.session.models.get_context_window().unwrap_or(0);
@@ -783,6 +827,7 @@ pub(super) fn handle_session_notification_with_origin(
             }
             sync_subagent_activity(agent, &child_session_id, None);
             if is_background {
+<<<<<<< HEAD
                 let terminal_entry_id = if let Some(eid) = existing_terminal
                     && let Some(entry) = agent.scrollback.get_by_id_mut(eid)
                 {
@@ -859,6 +904,54 @@ pub(super) fn handle_session_notification_with_origin(
                         }
                     }
                 }
+=======
+                let block = match status.as_str() {
+                    "completed" => {
+                        RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::completed(
+                            description.as_ref(),
+                            child_session_id.as_str(),
+                            elapsed_dur,
+                        ))
+                    }
+                    "cancelled" => {
+                        RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::cancelled(
+                            description.as_ref(),
+                            child_session_id.as_str(),
+                            elapsed_dur,
+                        ))
+                    }
+                    _ => RenderBlock::Subagent(crate::scrollback::blocks::SubagentBlock::failed(
+                        description.as_ref(),
+                        child_session_id.as_str(),
+                        elapsed_dur,
+                        error.clone(),
+                    )),
+                };
+                agent.scrollback.push_block(block);
+            } else if let Some(eid) = entry_id
+                && let Some(entry) = agent.scrollback.get_by_id_mut(eid)
+            {
+                if let RenderBlock::Subagent(ref mut sb) = entry.block {
+                    match status.as_str() {
+                        "completed" => {
+                            sb.kind = crate::scrollback::blocks::SubagentBlockKind::Completed {
+                                elapsed: elapsed_dur,
+                            };
+                        }
+                        "cancelled" => {
+                            sb.kind = crate::scrollback::blocks::SubagentBlockKind::Cancelled {
+                                elapsed: elapsed_dur,
+                            };
+                        }
+                        _ => {
+                            sb.kind = crate::scrollback::blocks::SubagentBlockKind::Failed {
+                                elapsed: elapsed_dur,
+                                error: error.clone(),
+                            };
+                        }
+                    }
+                }
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 entry.invalidate_cache();
             }
             if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
@@ -1892,10 +1985,19 @@ pub(super) fn apply_retry_state(
             } else if !*rate_limited && is_reauthable_failure(None, reason) {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+<<<<<<< HEAD
             } else if *rate_limited {
                 let error = crate::app::effects::sanitize_user_error(
                     &format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth),
                 );
+=======
+            } else {
+                let error = if *rate_limited {
+                    format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth)
+                } else {
+                    format!("failed after {attempts} retries: {reason}")
+                };
+>>>>>>> e3fdf3ed (Merge 2 (#4))
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::RetryFailed {
                     error,
                     error_type: None,
