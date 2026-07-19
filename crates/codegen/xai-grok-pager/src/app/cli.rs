@@ -202,7 +202,7 @@ pub enum RoutstrCommand {
         /// Submit the signed transaction to the network (default: dry-run only)
         #[arg(long)]
         broadcast: bool,
-        /// Fee rate in sat/vB (default: 5)
+        /// Fee rate in sat/vB (omit for explorer halfHour estimates when available, else default 5; must be > 0 if set)
         #[arg(long)]
         fee_rate: Option<u64>,
     },

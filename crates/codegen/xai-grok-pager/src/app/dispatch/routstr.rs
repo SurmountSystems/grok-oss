@@ -357,12 +357,15 @@ pub(super) fn dispatch_routstr_fund_reentry(
 }
 
 /// Stage `/routstr spend` then require unlock re-entry (no BIP-39 on this action).
+///
+/// `fee_rate_sat_vb`: `Some(n)` is an explicit user rate; `None` is resolved
+/// later in the spend effect (explorer halfHour or default 5) — not here.
 pub(super) fn dispatch_routstr_spend(
     app: &mut AppView,
     address: String,
     amount_sats: u64,
     broadcast: bool,
-    fee_rate_sat_vb: u64,
+    fee_rate_sat_vb: Option<u64>,
 ) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -382,11 +385,17 @@ pub(super) fn dispatch_routstr_spend(
     } else {
         "dry-run only (not broadcast)"
     };
+    let fee_line = match fee_rate_sat_vb {
+        Some(n) => format!("{n} sat/vB"),
+        None => {
+            "explorer halfHour when available, else 5 sat/vB (resolved at authorize)".to_owned()
+        }
+    };
     push_system_to_agent(
         app,
         id,
         format!(
-            "Staged on-chain spend ({mode}): {amount_sats} sats → {address} (fee rate {fee_rate_sat_vb} sat/vB).\n\
+            "Staged on-chain spend ({mode}): {amount_sats} sats → {address} (fee rate {fee_line}).\n\
              Authorize with: /routstr unlock <recovery phrase words…>\n\
              Optional AEAD password: /routstr unlock pw:<password> <phrase…>\n\
              Recovery words are never stored in chat history. Cancel by staging a different spend or running /routstr fund \
@@ -822,7 +831,7 @@ mod tests {
                 address: "bc1qdest".into(),
                 amount_sats: 1000,
                 broadcast: false,
-                fee_rate_sat_vb: 5,
+                fee_rate_sat_vb: Some(5),
             },
             &mut app,
         );
@@ -869,7 +878,7 @@ mod tests {
                 address: "bc1qstale".into(),
                 amount_sats: 99_000,
                 broadcast: true,
-                fee_rate_sat_vb: 5,
+                fee_rate_sat_vb: Some(5),
             },
             &mut app,
         );
@@ -922,7 +931,7 @@ mod tests {
                 address: "bc1qagent0".into(),
                 amount_sats: 500,
                 broadcast: true,
-                fee_rate_sat_vb: 5,
+                fee_rate_sat_vb: Some(5),
             },
             &mut app,
         );
@@ -963,7 +972,7 @@ mod tests {
                 address: "bc1qstage-a".into(),
                 amount_sats: 1000,
                 broadcast: false,
-                fee_rate_sat_vb: 5,
+                fee_rate_sat_vb: Some(5),
             },
             &mut app,
         );
@@ -992,7 +1001,7 @@ mod tests {
                 address: "bc1qstage-b".into(),
                 amount_sats: 2500,
                 broadcast: true,
-                fee_rate_sat_vb: 8,
+                fee_rate_sat_vb: Some(8),
             },
             &mut app,
         );
@@ -1027,7 +1036,7 @@ mod tests {
         assert_eq!(still.address, "bc1qstage-b");
         assert_eq!(still.amount_sats, 2500);
         assert!(still.broadcast);
-        assert_eq!(still.fee_rate_sat_vb, 8);
+        assert_eq!(still.fee_rate_sat_vb, Some(8));
 
         // Unlock still authorizes B, not a wiped/missing pending fund path.
         let effects = dispatch(

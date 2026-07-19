@@ -189,11 +189,13 @@ pub(crate) fn parse_routstr_args(args: &str) -> CommandResult {
             let rest: Vec<&str> = parts.collect();
             match grok_bitcoin_wallet::funding_cli::parse_spend_tokens(&rest) {
                 Ok(req) => {
-                    // Non-explicit fee → explorer halfHour estimates when available.
+                    // Parse only here — no blocking fee HTTP on the slash path.
+                    // Explicit fee=N → Some(n); omit → None (resolve at authorize
+                    // in the spend effect worker via halfHour estimates / default 5).
                     let fee_rate_sat_vb = if req.fee_rate_explicit {
-                        req.fee_rate_sat_vb
+                        Some(req.fee_rate_sat_vb)
                     } else {
-                        xai_grok_shell::auth::resolve_spend_fee_rate_for_product(None)
+                        None
                     };
                     CommandResult::Action(Action::RoutstrSpend {
                         address: req.payment_address,
@@ -288,19 +290,24 @@ mod tests {
                 address,
                 amount_sats: 21_000,
                 broadcast: false,
-                ..
+                fee_rate_sat_vb: None,
             }) => assert_eq!(address, "bc1qdest"),
-            other => panic!("expected spend dry-run: {other:?}"),
+            other => panic!("expected spend dry-run with deferred fee: {other:?}"),
         }
         match parse_routstr_args("spend bc1qdest 100 broadcast fee=7") {
             CommandResult::Action(Action::RoutstrSpend {
                 amount_sats: 100,
                 broadcast: true,
-                fee_rate_sat_vb: 7,
+                fee_rate_sat_vb: Some(7),
                 ..
             }) => {}
             other => panic!("expected spend broadcast: {other:?}"),
         }
+        // Explicit zero is rejected offline (no network).
+        assert!(matches!(
+            parse_routstr_args("spend bc1qdest 100 fee=0"),
+            CommandResult::Error(_)
+        ));
         assert!(matches!(
             parse_routstr_args("spend"),
             CommandResult::Error(_)

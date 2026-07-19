@@ -1,20 +1,39 @@
 # Residual work: Bitcoin-native Routstr + wallet (2026-07-19)
 
-## Done this pass (multi-sig/non-P2WPKH finalize honesty + WatchSession persistence)
+## Done this pass (RBF / CPFP fee estimation + mempool fee ladder)
 
 | Item | Status |
 |------|--------|
-| `FinalizeOutcome` Complete/Partial (honest multi-sig / non-P2WPKH residual) | **Done** |
-| Empty `final_script_witness` never counted complete; extract rejects empty | **Done** |
-| Multi-sig (`partial_sigs.len() != 1`) → Partial, no invented witness | **Done** |
-| Non-P2WPKH (P2WSH) residual → Partial, no extract success | **Done** |
-| `psbt_is_broadcast_ready` + product prepare refuses partial finalize | **Done** |
-| Partial sign → no extract / prepare / broadcast success claim | **Done** |
-| `WatchSessionState` serialize/deserialize (no BIP-39) | **Done** |
-| Durable file `{GROK_HOME}/bitcoin/watch_session.json` + atomic write | **Done** |
-| Resume after pager restart (session create/load + startup hook) | **Done** |
-| Unit tests: empty witness, multi-sig, P2WSH, partial sign, persist lifecycle | **Done** |
+| Pure `plan_rbf_fee_bump` / `RbfFeePlan` (BIP-125 same-size guidance) | **Done** |
+| Pure `plan_cpfp_child_fee` / `CpfpFeePlan` + `estimate_cpfp_child_vbytes` | **Done** |
+| `effective_fee_rate_sat_vb`, `rbf_min_fee_increase_sats`, `transaction_vbytes` | **Done** |
+| `PreparedSpend::weight_vbytes` / `effective_fee_rate_sat_vb` / `estimated_vbytes` | **Done** |
+| mempool `GET /api/v1/fees/recommended` URL + pure parse + `FeeEstimates` / `FeePriority` | **Done** |
+| `resolve_spend_fee_rate_sat_vb` (override → estimates → fallback) | **Done** |
+| `MempoolHttpClient::fetch_fee_estimates` (`explorer-http`, rate-limited) | **Done** |
+| Product copy: RBF/CPFP plan lines, fee meta on prepare, fee estimates lines | **Done** |
+| CLI/TUI: non-explicit fee uses live halfHour estimates else default 5 sat/vB | **Done** |
+| `SpendRequest.fee_rate_explicit`; spend usage notes RBF + estimates | **Done** |
+| Unit tests: RBF/CPFP edges, fee parse rejects, product formatters, override | **Done** |
 | Live CDK mint/refund / LDK BOLT11 | **Still residual** (flags remain false; no fake success) |
+| Multi-sig finalize *support* (beyond honest Partial) | **Still residual** |
+| Full PSBT RBF rebuild/broadcast path (plan helpers only this pass) | **Still residual** |
+
+## Done prior pass (multi-sig/non-P2WPKH finalize honesty + WatchSession persistence)
+
+| Item | Status |
+|------|--------|
+| `FinalizeOutcome` Complete/Partial (honest multi-sig / non-P2WPKH residual) | Done |
+| Empty `final_script_witness` never counted complete; extract rejects empty | Done |
+| Multi-sig (`partial_sigs.len() != 1`) → Partial, no invented witness | Done |
+| Non-P2WPKH (P2WSH) residual → Partial, no extract success | Done |
+| `psbt_is_broadcast_ready` + product prepare refuses partial finalize | Done |
+| Partial sign → no extract / prepare / broadcast success claim | Done |
+| `WatchSessionState` serialize/deserialize (no BIP-39) | Done |
+| Durable file `{GROK_HOME}/bitcoin/watch_session.json` + atomic write | Done |
+| Resume after pager restart (session create/load + startup hook) | Done |
+| Unit tests: empty witness, multi-sig, P2WSH, partial sign, persist lifecycle | Done |
+| Live CDK mint/refund / LDK BOLT11 | Still residual (flags remain false; no fake success) |
 
 ## Done prior pass (OR balance fetch gate + TUI dry-run full hex)
 
@@ -81,7 +100,7 @@
 - Pager: `Effect::FetchBilling { fetch_openrouter }` from active catalog id.
 - Dual-footer still requires both balances known.
 
-### Finalize honesty note (this pass)
+### Finalize honesty note
 
 - Only single-key **P2WPKH** is finalized into `final_script_witness`.
 - Multi-sig / multi-key and non-P2WPKH scripts yield `FinalizeOutcome::Partial`
@@ -90,7 +109,7 @@
 - `prepare_bip84_p2wpkh_spend` requires both complete sign and complete finalize.
 - Pubkey HASH160 mismatch vs P2WPKH UTXO remains a hard error (tamper/corrupt).
 
-### WatchSession persistence note (this pass)
+### WatchSession persistence note
 
 - File: `{GROK_HOME}/bitcoin/watch_session.json` (mode 0600, atomic rename).
 - Fields: address, network, required_confirmations, watched_txid, confirmations,
@@ -100,6 +119,17 @@
 - Resume on session create/load and event_loop startup when agent is active.
 - Unit-test builds of the pager skip durable FS (do not pollute developer home).
 - Wallet crate tests cover serialize/deserialize + full resume lifecycle.
+
+### RBF / CPFP / fee estimates note (this pass)
+
+- Built PSBT inputs still set `Sequence::ENABLE_RBF_NO_LOCKTIME`.
+- Pure planners size same-size RBF replacements and CPFP child fees offline
+  (BIP-125 absolute + incremental + higher floor rate; package target rate).
+- Product prepare appends effective fee rate + RBF signal note (no broadcast claim).
+- Fee ladder from mempool.space-shaped JSON; live fetch only with `explorer-http`.
+- CLI/TUI when user omits fee: halfHour estimate if fetch works, else 5 sat/vB.
+- **Not** shipped: automatic RBF replacement PSBT rebuild/broadcast CLI subcommand;
+  CPFP child construction; multi-sig finalize beyond Partial honesty.
 
 ## Residual (next implement)
 
@@ -112,14 +142,16 @@
 ### P1 / product surfaces
 1. Wire `topup` / `refund` to **real** CDK/LN when those stacks land: flip `mint_live` / `refund_live` / `bolt11_*_live` only with tested impls; swap `default_*_backend()` factories.
 2. Optional: dedicated QR pane widget (today: Unicode QR matrix in system block + clipboard toast).
+3. Optional: `grok routstr fees` / fee-bump CLI that prints estimate ladder + RBF plan for a stuck txid (helpers exist; product subcommand residual).
 
 ### P2 / spend path + explorers
-1. ~~Multi-sig / non-P2WPKH finalize residual~~ **Done this pass** (honest Partial; still only single-key P2WPKH finalized).
+1. ~~Multi-sig / non-P2WPKH finalize residual~~ **Done** (honest Partial; still only single-key P2WPKH finalized).
 2. Optional full `bdk_wallet` electrum/esplora sync if still needed beyond mempool UTXO ChainSource.
-3. ~~Persist WatchSession across pager process restarts~~ **Done this pass**.
-4. Optional: RBF / CPFP-aware fee estimation (today: flat sat/vB + P2WPKH vb heuristics; RBF sequence set on built inputs).
+3. ~~Persist WatchSession across pager process restarts~~ **Done**.
+4. ~~RBF / CPFP-aware fee estimation~~ **Done this pass** (pure planners + fee ladder + product meta; automatic replacement PSBT rebuild residual).
 5. Electrum push broadcaster alternative (mempool.space POST wired).
 6. Optional: multi-sig / script-path **finalize support** (today: residual Partial only).
+7. Optional: end-to-end RBF replace-by-fee rebuild from a prior `PreparedSpend` / txid.
 
 ### P3 / LDK
 1. `ldk-node` (or LDK) from BIP-39 seed; BOLT11 pay + invoice create with live capability flags.
@@ -142,7 +174,7 @@
 ```text
 Continue Bitcoin-native Routstr from RESIDUAL.md (CDK/LN live backends).
 
-Multi-sig/non-P2WPKH finalize honesty + WatchSession persistence landed.
+RBF/CPFP fee planners + mempool fee estimates + product fee meta landed.
 Do not regress:
   cargo test -p grok-bitcoin-wallet --lib
   cargo test -p xai-grok-shell --lib openrouter
@@ -152,7 +184,7 @@ Do not regress:
   ./scripts/bitcoin-routstr-validate.sh
 
 1. Wire topup/refund to real CDK/LN when stacks land; flip capability flags only when live; keep stubs honest.
-2. Optional: multi-sig/script-path finalize support (today Partial residual only); RBF/CPFP fee; bdk electrum/esplora.
+2. Optional: multi-sig/script-path finalize support (today Partial residual only); RBF replace PSBT rebuild; bdk electrum/esplora.
 3. Do not claim BOLT12; do not store BIP-39 in CredentialsStore or watch_session.json.
 4. cargo test -p grok-bitcoin-wallet --lib
    cargo test -p xai-grok-shell --lib routstr
@@ -174,21 +206,23 @@ cargo clippy -p xai-grok-pager --lib -- -D warnings
 ./scripts/bitcoin-routstr-validate.sh
 ```
 
-## Validation ran (2026-07-19 residual implement — finalize honesty + WatchSession persistence)
+## Validation ran (2026-07-19 residual implement — RBF/CPFP fee + estimates)
 
 | Check | Result |
 |-------|--------|
-| `cargo fmt --all` | pass |
-| `cargo test -p grok-bitcoin-wallet --lib` | pass (184) |
-| `cargo test -p xai-grok-shell --lib routstr` | pass (26 + 1 ignored) |
+| `cargo fmt` (touched packages) | pass |
+| `cargo test -p grok-bitcoin-wallet --lib` | pass (204) |
+| `cargo test -p xai-grok-shell --lib routstr` | pass (27 + 1 ignored) |
 | `cargo test -p xai-grok-shell --lib openrouter` | pass (19) |
 | `cargo test -p xai-grok-pager --lib credit_bar` | pass (41) |
-| `cargo test -p xai-grok-pager --lib routstr` | pass (28) |
+| `cargo test -p xai-grok-pager --lib routstr` | pass (32) |
 | `cargo clippy -p grok-bitcoin-wallet --lib -- -D warnings` | pass |
+| `cargo clippy -p xai-grok-shell --lib -- -D warnings` | pass |
 | `cargo clippy -p xai-grok-pager --lib -- -D warnings` | pass |
 | `./scripts/bitcoin-routstr-validate.sh` | pass |
 | Cashu/LN live flags | still false (honest) |
-| Multi-sig / non-P2WPKH finalize | honest Partial (not broadcast-ready) |
-| WatchSession durable resume | `{GROK_HOME}/bitcoin/watch_session.json` |
-| No BIP-39 in watch persistence | enforced + tests |
-| Network broadcast of signed tx | wired prior (dry-run default) |
+| RBF sequence on built inputs | unchanged (`ENABLE_RBF_NO_LOCKTIME`) |
+| Multi-sig / non-P2WPKH finalize | honest Partial (unchanged) |
+| WatchSession durable resume | unchanged |
+| No BIP-39 in watch persistence | unchanged |
+| Fee estimates default CI | offline parse/Mock; live fetch feature-gated |

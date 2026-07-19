@@ -382,8 +382,8 @@ impl FeeEstimates {
 /// All five fields required; non-negative integers. Rejects missing keys and
 /// non-object bodies. Does **not** require network.
 pub fn parse_mempool_fee_estimates(body: &str) -> std::result::Result<FeeEstimates, String> {
-    let v: serde_json::Value = serde_json::from_str(body.trim())
-        .map_err(|e| format!("fee estimates JSON: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(body.trim()).map_err(|e| format!("fee estimates JSON: {e}"))?;
     let obj = v
         .as_object()
         .ok_or_else(|| "fee estimates JSON: expected object".to_owned())?;
@@ -1215,5 +1215,19 @@ mod tests {
             msg.contains("broadcast") || msg.contains("reject") || msg.contains("fail"),
             "expected honest reject wording: {msg}"
         );
+    }
+
+    /// Live fee ladder probe. Offline CI must not run this.
+    #[test]
+    #[ignore = "network: live mempool.space GET /api/v1/fees/recommended"]
+    #[cfg(feature = "explorer-http")]
+    fn live_mempool_fee_estimates() {
+        let mut client = MempoolHttpClient::with_defaults(BitcoinNetwork::Mainnet).unwrap();
+        let est = client
+            .fetch_fee_estimates()
+            .expect("fee estimates from mempool.space");
+        assert!(est.fastest_sat_vb >= est.half_hour_sat_vb || est.fastest_sat_vb > 0);
+        assert!(est.minimum_sat_vb >= 1 || est.economy_sat_vb >= 1);
+        assert!(est.rate_sat_vb(FeePriority::HalfHour) >= 1);
     }
 }

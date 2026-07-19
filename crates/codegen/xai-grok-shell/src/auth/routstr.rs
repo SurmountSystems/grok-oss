@@ -425,33 +425,61 @@ pub struct RoutstrSpendSuccess {
     pub lines: Vec<String>,
 }
 
-/// Resolve product spend fee rate (sat/vB).
+/// Resolve product spend fee rate (sat/vB) with an injected estimate ladder.
 ///
-/// Order: explicit user override → live mempool.space halfHour estimates
-/// (`explorer-http`) → [`grok_bitcoin_wallet::funding_cli::DEFAULT_SPEND_FEE_RATE_SAT_VB`].
-/// Never invents a rate from a failed fetch; never returns 0.
-pub fn resolve_spend_fee_rate_for_product(user_override: Option<u64>) -> u64 {
-    use grok_bitcoin_wallet::address_ux::BitcoinNetwork;
+/// Pure / offline-testable: no network. Order: explicit override (>0) →
+/// estimates halfHour (>0) →
+/// [`grok_bitcoin_wallet::funding_cli::DEFAULT_SPEND_FEE_RATE_SAT_VB`].
+/// Never returns 0. Callers that treat explicit `0` as invalid must reject
+/// before calling (see [`run_routstr_spend`] / `parse_spend_request`).
+pub fn resolve_spend_fee_rate_with_estimates(
+    user_override: Option<u64>,
+    estimates: Option<&grok_bitcoin_wallet::explorer::FeeEstimates>,
+) -> u64 {
     use grok_bitcoin_wallet::explorer::{FeePriority, resolve_spend_fee_rate_sat_vb};
     use grok_bitcoin_wallet::funding_cli::DEFAULT_SPEND_FEE_RATE_SAT_VB;
 
+    resolve_spend_fee_rate_sat_vb(
+        user_override,
+        estimates,
+        FeePriority::HalfHour,
+        DEFAULT_SPEND_FEE_RATE_SAT_VB,
+    )
+}
+
+/// Try live mempool.space halfHour ladder (`explorer-http`). Returns `None`
+/// on any failure — never invents rates. Blocking; call from CLI / effect
+/// worker, not slash-command parse.
+pub fn try_fetch_live_fee_estimates() -> Option<grok_bitcoin_wallet::explorer::FeeEstimates> {
+    use grok_bitcoin_wallet::address_ux::BitcoinNetwork;
+
+    let network_str = std::env::var("GROK_BITCOIN_NETWORK").unwrap_or_else(|_| "mainnet".into());
+    let btc_net =
+        BitcoinNetwork::from_env_str(network_str.trim()).unwrap_or(BitcoinNetwork::Mainnet);
+    grok_bitcoin_wallet::explorer::MempoolHttpClient::with_defaults(btc_net)
+        .ok()
+        .and_then(|mut c| c.fetch_fee_estimates())
+}
+
+/// Resolve product spend fee rate (sat/vB).
+///
+/// Order: explicit user override (>0) → live mempool.space halfHour estimates
+/// (`explorer-http`) → [`grok_bitcoin_wallet::funding_cli::DEFAULT_SPEND_FEE_RATE_SAT_VB`].
+/// Never invents a rate from a failed fetch; never returns 0.
+///
+/// **Product paths must reject explicit `0` before calling** (CLI uses
+/// `parse_spend_request` first). A `Some(0)` here is treated as unset by the
+/// pure ladder helper — not a product validation substitute.
+///
+/// Blocking network when override is absent; prefer
+/// [`resolve_spend_fee_rate_with_estimates`] in unit tests.
+pub fn resolve_spend_fee_rate_for_product(user_override: Option<u64>) -> u64 {
     if let Some(n) = user_override
         && n > 0
     {
         return n;
     }
-
-    let network_str = std::env::var("GROK_BITCOIN_NETWORK").unwrap_or_else(|_| "mainnet".into());
-    let btc_net = BitcoinNetwork::from_env_str(network_str.trim()).unwrap_or(BitcoinNetwork::Mainnet);
-    let estimates = grok_bitcoin_wallet::explorer::MempoolHttpClient::with_defaults(btc_net)
-        .ok()
-        .and_then(|mut c| c.fetch_fee_estimates());
-    resolve_spend_fee_rate_sat_vb(
-        None,
-        estimates.as_ref(),
-        FeePriority::HalfHour,
-        DEFAULT_SPEND_FEE_RATE_SAT_VB,
-    )
+    resolve_spend_fee_rate_with_estimates(None, try_fetch_live_fee_estimates().as_ref())
 }
 
 /// `grok routstr spend <address> <sats> [--broadcast] [--fee-rate N]`.
@@ -463,6 +491,7 @@ pub fn resolve_spend_fee_rate_for_product(user_override: Option<u64>) -> u64 {
 ///
 /// When `fee_rate_sat_vb` is `None`, uses explorer halfHour estimates when the
 /// HTTP client can fetch them; otherwise the wallet default (5 sat/vB).
+/// Explicit `--fee-rate 0` is rejected (same as TUI `fee=0`).
 pub fn run_routstr_spend(
     grok_home: &Path,
     payment_address: &str,
@@ -477,10 +506,15 @@ pub fn run_routstr_spend(
     use grok_bitcoin_wallet::seed_vault::{SeedVault, UnlockSession, VaultPassword};
     use std::time::Instant;
 
-    // Resolve fee: explicit override → live mempool halfHour estimates → default.
-    let resolved_fee_rate = resolve_spend_fee_rate_for_product(fee_rate_sat_vb);
-    let req = parse_spend_request(payment_address, amount_sats, broadcast, Some(resolved_fee_rate))
+    // Parse with the *user* option first so:
+    // - explicit `Some(0)` is rejected (parity with TUI `fee=0`)
+    // - `fee_rate_explicit` reflects whether the user passed --fee-rate
+    let mut req = parse_spend_request(payment_address, amount_sats, broadcast, fee_rate_sat_vb)
         .map_err(|e| RoutstrCliError::Message(e.to_string()))?;
+    if !req.fee_rate_explicit {
+        // Blocking fetch only when user omitted fee; not on slash parse.
+        req.fee_rate_sat_vb = resolve_spend_fee_rate_for_product(None);
+    }
 
     let aead_path = routstr_seed_aead_path(grok_home);
     let vault = SeedVault::with_aead_path(&aead_path).map_err(RoutstrCliError::Wallet)?;
@@ -1386,10 +1420,51 @@ routstr_enabled = false
         // Explicit override never needs explorer; must not return 0.
         assert_eq!(resolve_spend_fee_rate_for_product(Some(12)), 12);
         assert_eq!(resolve_spend_fee_rate_for_product(Some(1)), 1);
-        // Zero / None → default or live halfHour estimate; never 0.
-        let resolved_zero = resolve_spend_fee_rate_for_product(Some(0));
-        let resolved_none = resolve_spend_fee_rate_for_product(None);
-        assert!(resolved_zero >= 1, "got {resolved_zero}");
-        assert!(resolved_none >= 1, "got {resolved_none}");
+    }
+
+    #[test]
+    fn resolve_spend_fee_rate_offline_fallback_is_default() {
+        use grok_bitcoin_wallet::funding_cli::DEFAULT_SPEND_FEE_RATE_SAT_VB;
+        // No estimates → product default; no network.
+        assert_eq!(
+            resolve_spend_fee_rate_with_estimates(None, None),
+            DEFAULT_SPEND_FEE_RATE_SAT_VB
+        );
+        assert_eq!(
+            resolve_spend_fee_rate_with_estimates(Some(0), None),
+            DEFAULT_SPEND_FEE_RATE_SAT_VB
+        );
+        let est = grok_bitcoin_wallet::explorer::FeeEstimates {
+            fastest_sat_vb: 20,
+            half_hour_sat_vb: 15,
+            hour_sat_vb: 10,
+            economy_sat_vb: 5,
+            minimum_sat_vb: 1,
+        };
+        assert_eq!(resolve_spend_fee_rate_with_estimates(None, Some(&est)), 15);
+        assert_eq!(
+            resolve_spend_fee_rate_with_estimates(Some(9), Some(&est)),
+            9
+        );
+    }
+
+    #[test]
+    fn run_routstr_spend_parse_rejects_explicit_zero_fee_like_tui() {
+        use grok_bitcoin_wallet::funding_cli::{SpendParseError, parse_spend_request};
+        // CLI path now parse_spend_request's first: same rejection as TUI fee=0.
+        assert!(matches!(
+            parse_spend_request("bc1qtest", 100, false, Some(0)),
+            Err(SpendParseError::InvalidFeeRate(_))
+        ));
+        // None is allowed (resolved later to estimate/default).
+        let req = parse_spend_request("bc1qtest", 100, false, None).unwrap();
+        assert!(!req.fee_rate_explicit);
+        assert_eq!(
+            req.fee_rate_sat_vb,
+            grok_bitcoin_wallet::funding_cli::DEFAULT_SPEND_FEE_RATE_SAT_VB
+        );
+        let req = parse_spend_request("bc1qtest", 100, false, Some(8)).unwrap();
+        assert!(req.fee_rate_explicit);
+        assert_eq!(req.fee_rate_sat_vb, 8);
     }
 }

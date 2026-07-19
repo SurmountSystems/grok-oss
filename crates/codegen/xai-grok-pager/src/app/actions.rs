@@ -745,11 +745,15 @@ pub enum Action {
     },
     /// On-chain PSBT spend (dry-run default). BIP-39 never travels on this
     /// action — authorization uses pending state + `/routstr unlock`.
+    ///
+    /// `fee_rate_sat_vb`: `Some(n)` is an explicit user rate (`n > 0`);
+    /// `None` means resolve at spend-effect time (explorer halfHour or default 5).
+    /// Slash parse must not block on fee HTTP.
     RoutstrSpend {
         address: String,
         amount_sats: u64,
         broadcast: bool,
-        fee_rate_sat_vb: u64,
+        fee_rate_sat_vb: Option<u64>,
     },
     /// Commit a read-only list of the queued prompts as a system block
     /// (`/queue`). The surface minimal mode uses in place of the `QueuePane`.
@@ -2120,6 +2124,9 @@ pub enum Effect {
         password: Option<SensitiveString>,
     },
     /// Complete pending on-chain spend after unlock re-entry (no BIP-39 in chat).
+    ///
+    /// `fee_rate_sat_vb`: `Some(n)` explicit; `None` → resolve in the effect
+    /// worker (blocking explorer allowed there, not on slash parse).
     RoutstrSpendComplete {
         agent_id: AgentId,
         grok_home: std::path::PathBuf,
@@ -2128,7 +2135,7 @@ pub enum Effect {
         address: String,
         amount_sats: u64,
         broadcast: bool,
-        fee_rate_sat_vb: u64,
+        fee_rate_sat_vb: Option<u64>,
     },
     /// Background address watch: rate-limited poll loop until stop or confirmed.
     ///

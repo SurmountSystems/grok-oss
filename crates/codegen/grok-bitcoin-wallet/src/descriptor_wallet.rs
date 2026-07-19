@@ -9,6 +9,7 @@
 //! - unsigned PSBT build from [`CoinSelection`] ([`build_unsigned_psbt`])
 //! - BIP84 P2WPKH sign + finalize for inputs resolvable in a derivation gap
 //! - extract + raw-hex helpers; network broadcast via [`crate::explorer::TxBroadcaster`]
+//! - pure RBF / CPFP fee planners ([`plan_rbf_fee_bump`], [`plan_cpfp_child_fee`])
 //!
 //! Seed material stays in [`crate::mnemonic::MnemonicSecret`] / SeedVault only;
 //! this module never persists BIP-39. Signing zeroizes intermediate seed bytes
@@ -478,7 +479,9 @@ pub fn plan_cpfp_child_fee(
     let needed_package_fee = package_vbytes.saturating_mul(target_fee_rate_sat_vb);
     let for_package = needed_package_fee.saturating_sub(parent_fee_sats);
     // Child must pay at least min-relay for its own size (1 sat/vB).
-    let min_relay_child = child_vbytes.saturating_mul(DEFAULT_INCREMENTAL_RELAY_FEE_SAT_VB).max(1);
+    let min_relay_child = child_vbytes
+        .saturating_mul(DEFAULT_INCREMENTAL_RELAY_FEE_SAT_VB)
+        .max(1);
     let min_child_fee_sats = for_package.max(min_relay_child);
     let package_fee_sats = parent_fee_sats.saturating_add(min_child_fee_sats);
     let package_fee_rate_sat_vb = effective_fee_rate_sat_vb(package_fee_sats, package_vbytes);
@@ -2052,7 +2055,10 @@ mod tests {
         let orig_fee = 705u64;
         let plan = plan_rbf_fee_bump(orig_fee, orig_vb, 10, 0).unwrap();
         assert_eq!(plan.original_fee_rate_sat_vb, 5);
-        assert_eq!(plan.incremental_relay_sat_vb, DEFAULT_INCREMENTAL_RELAY_FEE_SAT_VB);
+        assert_eq!(
+            plan.incremental_relay_sat_vb,
+            DEFAULT_INCREMENTAL_RELAY_FEE_SAT_VB
+        );
         // Target 10 * 141 = 1410; increment floor = 705+141=846; higher rate 6*141=846.
         assert_eq!(plan.recommended_fee_sats, 1410);
         assert_eq!(plan.recommended_fee_rate_sat_vb, 10);

@@ -34,7 +34,8 @@ pub struct PendingRoutstrSpend {
     pub address: String,
     pub amount_sats: u64,
     pub broadcast: bool,
-    pub fee_rate_sat_vb: u64,
+    /// Explicit user rate, or `None` to resolve at authorize (halfHour/default).
+    pub fee_rate_sat_vb: Option<u64>,
 }
 
 /// State for the "New Worktree" popup dialog on the welcome screen.

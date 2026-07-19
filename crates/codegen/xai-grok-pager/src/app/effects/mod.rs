@@ -4089,6 +4089,19 @@ pub(crate) fn execute(
             let password = password.map(|p| p.into_inner());
             tasks.spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
+                    // Explicit user rate, or live halfHour / default — blocking
+                    // fetch is OK inside the effect worker, not on slash parse.
+                    let fee_rate = match fee_rate_sat_vb {
+                        Some(n) if n > 0 => n,
+                        Some(_) => {
+                            return Err(
+                                "fee rate must be > 0 sat/vB".to_owned(),
+                            );
+                        }
+                        None => {
+                            xai_grok_shell::auth::resolve_spend_fee_rate_for_product(None)
+                        }
+                    };
                     xai_grok_shell::auth::complete_routstr_spend_reentry_for_tui(
                         &grok_home,
                         &phrase,
@@ -4096,7 +4109,7 @@ pub(crate) fn execute(
                         &address,
                         amount_sats,
                         broadcast,
-                        fee_rate_sat_vb,
+                        fee_rate,
                     )
                     .map_err(|e| e.to_string())
                 })
