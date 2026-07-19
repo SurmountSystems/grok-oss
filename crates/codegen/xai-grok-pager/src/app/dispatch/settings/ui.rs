@@ -11,10 +11,11 @@ use super::setters::{
     set_hunk_tracker_mode_inner, set_invert_scroll_inner, set_keep_text_selection_inner,
     set_max_thoughts_width_inner, set_multiline_mode, set_prompt_suggestions_inner,
     set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
-    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
-    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
-    set_voice_capture_mode_inner, set_voice_stt_language_inner,
+    set_routstr_enabled_inner, set_screen_mode_inner, set_scroll_lines_inner,
+    set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
+    set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
+    set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
+    set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -50,6 +51,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
+    let routstr_enabled_from_app = app.routstr_enabled;
     let auto_compact_from_app = app.auto_compact_threshold_percent;
     let auto_compact_tokens_from_app = app.auto_compact_threshold_tokens;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
@@ -95,6 +97,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
+                routstr_enabled: routstr_enabled_from_app,
             };
         }
     }
@@ -161,6 +164,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(app: &mut AppView) -> Vec
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
+    let routstr_enabled_from_app = app.routstr_enabled;
     let auto_compact_from_app = app.auto_compact_threshold_percent;
     let auto_compact_tokens_from_app = app.auto_compact_threshold_tokens;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
@@ -212,6 +216,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(app: &mut AppView) -> Vec
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
+        routstr_enabled: routstr_enabled_from_app,
     };
     let state = Box::new(SettingsModalState::new(
         registry,
@@ -684,6 +689,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
+        routstr_enabled: app.routstr_enabled,
     }
 }
 
@@ -832,9 +838,10 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("plan_mode", SettingValue::Enum("on")) => {
             Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::On))
         }
-        // show_tips / auto_update / display_refresh_auto_cadence: direct bool.
+        // show_tips / auto_update / routstr_enabled / display_refresh_auto_cadence: direct bool.
         ("show_tips", SettingValue::Bool(b)) => Some(Action::SetShowTips(*b)),
         ("auto_update", SettingValue::Bool(b)) => Some(Action::SetAutoUpdate(*b)),
+        ("routstr_enabled", SettingValue::Bool(b)) => Some(Action::SetRoutstrEnabled(*b)),
         ("auto_compact_threshold_percent", SettingValue::Enum(s)) => {
             crate::settings::parse_auto_compact_threshold_canonical(s)
                 .map(Action::SetAutoCompactThreshold)
@@ -1131,6 +1138,13 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 app.auto_update = None;
             } else {
                 set_auto_update_inner(app, *b);
+            }
+        }
+        ("routstr_enabled", SettingValue::Bool(b)) => {
+            if Some(*b) == pr13_effective_default("routstr_enabled") {
+                app.routstr_enabled = None;
+            } else {
+                set_routstr_enabled_inner(app, *b);
             }
         }
         ("auto_compact_threshold_percent", SettingValue::Enum(s)) => {

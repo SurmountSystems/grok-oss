@@ -67,6 +67,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "hunk_tracker_mode",
     "voice_capture_mode",
     "voice_stt_language",
+    "routstr_enabled",
     // Contextual-hints group + its per-tip child toggles (exercised via the
     // group sub-sheet, not as top-level rows).
     "contextual_hints",
@@ -269,6 +270,9 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("economic_mode", Action::SetEconomicMode(b)) => {
             assert_eq!(b, expected, "SetEconomicMode value differs from expected")
+        }
+        ("routstr_enabled", Action::SetRoutstrEnabled(b)) => {
+            assert_eq!(b, expected, "SetRoutstrEnabled value differs from expected")
         }
         ("group_tool_verbs", Action::SetGroupToolVerbs(b)) => {
             assert_eq!(b, expected, "SetGroupToolVerbs value differs from expected")
@@ -1609,6 +1613,7 @@ fn registry_kind_membership_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             "auto_update",
             "show_tips",
+            "routstr_enabled",
             // Per-tip contextual-hint children (hidden from the top-level list,
             // toggled inside the group sub-sheet) are still Bool settings.
             "contextual_hints.undo",
@@ -1782,6 +1787,7 @@ fn defaults_round_trip_through_registry() {
             "prompt_suggestions" => SettingValue::Bool(true),
             "auto_run_implement" => SettingValue::Bool(true),
             "economic_mode" => SettingValue::Bool(true),
+            "routstr_enabled" => SettingValue::Bool(true),
             "auto_compact_threshold_percent" => SettingValue::Enum("95"),
             "group_tool_verbs" => SettingValue::Bool(true),
             "collapsed_edit_blocks" => SettingValue::Bool(false),
@@ -6110,7 +6116,7 @@ fn mouse_click_on_voice_stt_language_indicator_opens_picker_in_one_click() {
 }
 
 // ---------------------------------------------------------------------------
-// CLI batch: show_tips, auto_update (SHELL Bool, restart_required)
+// CLI batch: show_tips, auto_update, routstr_enabled (SHELL Bool, restart_required)
 // ---------------------------------------------------------------------------
 
 /// Space-toggle on `show_tips` dispatches typed setter.
@@ -6128,6 +6134,15 @@ fn pr13_space_on_auto_update_dispatches_typed_setter() {
     navigate_to(&mut s, "auto_update");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     assert_set_bool_action(outcome, "auto_update", false);
+}
+
+/// Space-toggle on `routstr_enabled` dispatches typed setter (default on → false).
+#[test]
+fn routstr_enabled_space_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "routstr_enabled");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "routstr_enabled", false);
 }
 
 /// Value-column click on `show_tips` toggles in one click.
@@ -6174,11 +6189,26 @@ fn pr13_mouse_click_on_auto_update_two_stage_select_then_toggle() {
     assert_set_bool_action(outcome, "auto_update", false);
 }
 
+/// Value-column click on `routstr_enabled` toggles in one click.
+#[test]
+fn routstr_enabled_mouse_click_on_indicator_toggles_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "routstr_enabled") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "routstr_enabled", false);
+}
+
 /// CLI-batch settings are all `restart_required: true`.
 #[test]
 fn pr13_cli_batch_all_settings_are_restart_required() {
     let reg = SettingsRegistry::defaults();
-    for key in ["show_tips", "auto_update"] {
+    for key in ["show_tips", "auto_update", "routstr_enabled"] {
         let meta = reg
             .find(key)
             .unwrap_or_else(|| panic!("registry must contain `{key}` (PR 13)"));
@@ -6200,7 +6230,11 @@ fn pr13_cli_batch_defaults_roundtrip_via_current_value_for() {
     use xai_grok_pager::settings::current_value_for;
     let ui = UiConfig::default();
     let pager = PagerLocalSnapshot::default();
-    for (key, expected) in [("show_tips", true), ("auto_update", true)] {
+    for (key, expected) in [
+        ("show_tips", true),
+        ("auto_update", true),
+        ("routstr_enabled", true),
+    ] {
         let value = current_value_for(key, &ui, &pager)
             .unwrap_or_else(|| panic!("current_value_for(`{key}`) must resolve"));
         assert_eq!(
@@ -6216,7 +6250,11 @@ fn pr13_cli_batch_defaults_roundtrip_via_current_value_for() {
 #[test]
 fn pr13_cli_batch_settings_are_discoverable_via_search() {
     let reg = SettingsRegistry::defaults();
-    let cases = [("tip", "show_tips"), ("auto-update", "auto_update")];
+    let cases = [
+        ("tip", "show_tips"),
+        ("auto-update", "auto_update"),
+        ("routstr", "routstr_enabled"),
+    ];
     for (query, expected_key) in cases {
         let hits = reg.search(query);
         assert!(

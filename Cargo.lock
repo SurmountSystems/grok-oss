@@ -13770,6 +13770,7 @@ dependencies = [
  "enum_delegate",
  "flate2",
  "git2",
+ "grok-bitcoin-wallet",
  "image",
  "indexmap",
  "insta",

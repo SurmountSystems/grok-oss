@@ -189,6 +189,23 @@ pub enum RoutstrCommand {
     Refund,
     /// Create or unlock local wallet, confirm BIP-39 backup, show receive address
     Fund,
+    /// Build (and optionally broadcast) a BIP84 P2WPKH payment from the local wallet.
+    ///
+    /// Dry-run by default: fee-aware select + sign + extract only. Pass
+    /// `--broadcast` to submit via rate-limited mempool.space. Requires SeedVault
+    /// unlock + recovery-phrase re-entry.
+    Spend {
+        /// Destination Bitcoin address
+        address: String,
+        /// Amount to send in satoshis
+        sats: u64,
+        /// Submit the signed transaction to the network (default: dry-run only)
+        #[arg(long)]
+        broadcast: bool,
+        /// Fee rate in sat/vB (default: 5)
+        #[arg(long)]
+        fee_rate: Option<u64>,
+    },
 }
 /// Arguments for the `wrap` subcommand: the command to run, then its args.
 #[derive(Debug, clap::Args, Clone)]
@@ -1325,6 +1342,55 @@ mod tests {
                 command: RoutstrCommand::Fund
             }))
         ));
+    }
+
+    #[test]
+    fn routstr_spend_parses_dry_run_and_broadcast() {
+        let dry = PagerArgs::try_parse_from([
+            "grok",
+            "routstr",
+            "spend",
+            "bc1qtestaddress000000000000000000000",
+            "21000",
+        ])
+        .expect("routstr spend dry-run parses");
+        match dry.command {
+            Some(Command::Routstr(RoutstrArgs {
+                command:
+                    RoutstrCommand::Spend {
+                        address,
+                        sats: 21_000,
+                        broadcast: false,
+                        fee_rate: None,
+                    },
+            })) => {
+                assert!(address.starts_with("bc1q"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let live = PagerArgs::try_parse_from([
+            "grok",
+            "routstr",
+            "spend",
+            "bc1qtestaddress000000000000000000000",
+            "1000",
+            "--broadcast",
+            "--fee-rate",
+            "8",
+        ])
+        .expect("routstr spend --broadcast parses");
+        match live.command {
+            Some(Command::Routstr(RoutstrArgs {
+                command:
+                    RoutstrCommand::Spend {
+                        sats: 1000,
+                        broadcast: true,
+                        fee_rate: Some(8),
+                        ..
+                    },
+            })) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {

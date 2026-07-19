@@ -508,9 +508,64 @@ fn show_usage_returns_fetch_billing_effect() {
     // together and renders a single summary.
     assert_eq!(effects.len(), 1, "got: {effects:?}");
     assert!(
-        matches!(&effects[0], Effect::FetchBilling { agent_id, silent } if *agent_id == AgentId(0) && !*silent),
-        "effect should be a non-silent FetchBilling, got: {effects:?}"
+        matches!(
+            &effects[0],
+            Effect::FetchBilling {
+                agent_id,
+                silent: false,
+                fetch_openrouter: false,
+            } if *agent_id == AgentId(0)
+        ),
+        "effect should be a non-silent FetchBilling without OR fetch by default, got: {effects:?}"
     );
+}
+
+#[test]
+fn show_usage_fetches_openrouter_when_active_model_is_or() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let or_id = acp::ModelId::new(std::sync::Arc::from(
+        xai_grok_shell::auth::OPENROUTER_GROK_45_CATALOG_ID,
+    ));
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.models.available.insert(
+        or_id.clone(),
+        acp::ModelInfo::new(or_id.clone(), "OpenRouter Grok 4.5".to_string()),
+    );
+    agent.session.models.current = Some(or_id);
+    let effects = dispatch(Action::ShowUsage, &mut app);
+    assert_eq!(effects.len(), 1, "got: {effects:?}");
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::FetchBilling {
+                silent: false,
+                fetch_openrouter: true,
+                ..
+            }
+        ),
+        "OR model must request OpenRouter credits fetch: {effects:?}"
+    );
+}
+
+#[test]
+fn agent_needs_openrouter_balance_fetch_tracks_catalog_id() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    assert!(
+        !crate::app::dispatch::agent_needs_openrouter_balance_fetch(agent),
+        "default fixture model is not OpenRouter"
+    );
+    let or_id = acp::ModelId::new(std::sync::Arc::from("openrouter-grok-4.5"));
+    agent.session.models.current = Some(or_id);
+    assert!(crate::app::dispatch::agent_needs_openrouter_balance_fetch(
+        agent
+    ));
+    agent.session.models.current = Some(acp::ModelId::new(std::sync::Arc::from("grok-4.5")));
+    assert!(!crate::app::dispatch::agent_needs_openrouter_balance_fetch(
+        agent
+    ));
 }
 
 // ── BillingFetched dispatch tests ───────────────────────────────────

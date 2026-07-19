@@ -1084,6 +1084,43 @@ fn pr13_set_show_tips_emits_persist_with_rollback() {
     }
     assert_eq!(app.show_tips, Some(true));
 }
+
+#[test]
+fn set_routstr_enabled_emits_persist_with_rollback() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    assert_eq!(app.routstr_enabled, None);
+    let effects = dispatch(Action::SetRoutstrEnabled(false), &mut app);
+    assert_eq!(effects.len(), 1, "must emit exactly one effect");
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "routstr_enabled");
+            assert_eq!(*value, SettingValue::Bool(false));
+            assert_eq!(*rollback_value, SettingValue::Bool(true));
+        }
+        other => panic!("expected PersistSetting effect, got {other:?}"),
+    }
+    assert_eq!(app.routstr_enabled, Some(false));
+    // Idempotent re-commit.
+    let effects = dispatch(Action::SetRoutstrEnabled(false), &mut app);
+    assert!(effects.is_empty(), "re-commit of same value must no-op");
+    // First commit of default from None still persists.
+    let mut app2 = test_app_with_agent();
+    assert_eq!(app2.routstr_enabled, None);
+    let effects = dispatch(Action::SetRoutstrEnabled(true), &mut app2);
+    assert_eq!(effects.len(), 1);
+    assert_eq!(app2.routstr_enabled, Some(true));
+    // Rollback to default restores None.
+    apply_setting_rollback(&mut app, "routstr_enabled", &SettingValue::Bool(true));
+    assert_eq!(
+        app.routstr_enabled, None,
+        "rollback to effective default must restore None"
+    );
+}
 // ── auto_compact_threshold (percent or tokens) ─────────────────────
 
 #[test]
@@ -1400,6 +1437,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "auto_update" => {
             let _ = dispatch(Action::SetAutoUpdate(false), app);
+        }
+        "routstr_enabled" => {
+            let _ = dispatch(Action::SetRoutstrEnabled(false), app);
         }
         "auto_compact_threshold_percent" => {
             let _ = dispatch(

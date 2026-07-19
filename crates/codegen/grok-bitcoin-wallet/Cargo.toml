@@ -23,6 +23,12 @@ qr = ["dep:qrcode"]
 # Real HTTP client for mempool.space (reqwest blocking). Off by default so CI
 # stays offline-safe; enable for local integration / ignored network tests.
 explorer-http = ["dep:reqwest"]
+# Reserved feature names for future CDK / LDK deps (RESIDUAL.md P3/P4).
+# Empty today: enabling the flag does **not** wire a backend or flip live
+# capability flags. `default_*_backend()` still returns stubs. Do not enable
+# in default CI until real deps land and tests go green.
+cashu-cdk = []
+ldk = []
 
 [dependencies]
 thiserror = { workspace = true }

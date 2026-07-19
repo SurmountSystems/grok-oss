@@ -1123,6 +1123,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "routstr_enabled" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("routstr_enabled", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_routstr_enabled(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "auto_compact_threshold_percent" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch(
@@ -1405,12 +1413,21 @@ pub(super) fn has_prepaid_credits(
     balance.and_then(|b| b.prepaid_balance_cents).map(i64::abs).is_some_and(|c| c > 0)
 }
 
-/// Fetch OpenRouter account credits for the footer when a key is configured.
+/// Fetch OpenRouter account credits for the footer when needed and a key is set.
 ///
-/// Returns `None` on missing key / transport / parse errors so callers keep
-/// any previously cached balance.
+/// `needed` comes from [`xai_grok_shell::auth::should_fetch_openrouter_balance`]
+/// (active OpenRouter model / dual-footer). When false, skips the network call
+/// so non-OR sessions do not hit OpenRouter even if a key is configured.
+///
+/// Returns `None` on intentional skip / missing key / transport / parse errors
+/// so callers keep any previously cached balance.
 pub(super) async fn fetch_openrouter_credit_balance(
+    needed: bool,
 ) -> Option<crate::views::credit_bar::OpenRouterCreditBalance> {
+    if !xai_grok_shell::auth::should_fetch_openrouter_balance(needed) {
+        tracing::debug!("openrouter credits: skipped (active model is not OpenRouter)");
+        return None;
+    }
     let cents = xai_grok_shell::auth::fetch_openrouter_credit_balance_cents().await?;
     Some(crate::views::credit_bar::OpenRouterCreditBalance {
         balance_cents: cents,
@@ -1419,7 +1436,9 @@ pub(super) async fn fetch_openrouter_credit_balance(
 
 /// Fetch Routstr account balance (msats) for the footer when a key is configured.
 ///
-/// Returns `None` on missing key / transport / parse errors so callers keep
+/// Skips the network call when `[features] routstr_enabled = false` (gate is
+/// inside [`xai_grok_shell::auth::fetch_routstr_balance_msats`]). Returns `None`
+/// on disabled feature / missing key / transport / parse errors so callers keep
 /// any previously cached balance.
 pub(super) async fn fetch_routstr_credit_balance(
 ) -> Option<crate::views::credit_bar::RoutstrCreditBalance> {

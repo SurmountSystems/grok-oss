@@ -285,6 +285,9 @@ pub struct PagerLocalSnapshot {
     /// language actually in effect when `[ui].voice_stt_language` is unset but
     /// an explicit `[voice].language` applies.
     pub voice_stt_language: String,
+    /// `[features].routstr_enabled` mirror. `None` = no TOML override → default
+    /// `true` (catalog + balance chrome on).
+    pub routstr_enabled: Option<bool>,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -310,6 +313,7 @@ impl Default for PagerLocalSnapshot {
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
+            routstr_enabled: None,
         }
     }
 }
@@ -776,6 +780,8 @@ pub fn current_value_for(
         // CLI batch: snapshot mirrors; `None` → effective default `true`.
         "show_tips" => Some(SettingValue::Bool(pager.show_tips.unwrap_or(true))),
         "auto_update" => Some(SettingValue::Bool(pager.auto_update.unwrap_or(true))),
+        // SHELL — `[features].routstr_enabled`; None → default on.
+        "routstr_enabled" => Some(SettingValue::Bool(pager.routstr_enabled.unwrap_or(true))),
         // Session auto-compact: token mode wins; else percent (default 95).
         "auto_compact_threshold_percent" => {
             Some(SettingValue::Enum(canonical_auto_compact_threshold(
@@ -1012,6 +1018,13 @@ mod tests {
                         *default,
                         "auto_update registry default must be true \
                          (matches auto_update.rs's `.unwrap_or(true)`)"
+                    );
+                }
+                ("routstr_enabled", SettingKind::Bool { default }) => {
+                    assert!(
+                        *default,
+                        "routstr_enabled registry default must be true \
+                         (matches Features::routstr_enabled.unwrap_or(true))"
                     );
                 }
                 // Session auto-compact: no UiConfig field; default pinned to

@@ -4771,13 +4771,9 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
     // failover_api_keys; this is cross-host.
     let failover_providers = match provider {
         ThirdPartyProvider::OpenRouter | ThirdPartyProvider::Routstr if api_key.is_some() => {
-            first_party_credit_failover_provider(
-                &info.model,
-                session_key,
-                XAI_API_BASE_URL_DEFAULT,
-            )
-            .into_iter()
-            .collect()
+            first_party_credit_failover_provider(&info.model, session_key, XAI_API_BASE_URL_DEFAULT)
+                .into_iter()
+                .collect()
         }
         _ => Vec::new(),
     };
@@ -6101,7 +6097,10 @@ reasoning_effort = "low"
     }
 
     #[test]
+    #[serial]
     fn openrouter_resolve_attaches_xai_provider_failover_from_session() {
+        let _guard = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
         let model = test_model_entry(
             "x-ai/grok-4.5",
             "https://openrouter.ai/api/v1",
@@ -6137,6 +6136,56 @@ reasoning_effort = "low"
         );
         let creds = resolve_credentials(&model, None);
         assert_eq!(creds.api_key.as_deref(), Some("or-only"));
+        assert!(
+            creds.failover_providers.is_empty(),
+            "no session and no XAI_API_KEY → cannot fail over to Grok API"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn routstr_resolve_attaches_xai_provider_failover_from_session() {
+        // Prefer session key for deterministic assertion (ambient XAI_API_KEY would win).
+        let _guard = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        // Mirror OpenRouter: Routstr 402 must be able to fail over to Grok API.
+        let model = test_model_entry(
+            "grok-4.5",
+            "https://api.routstr.com/v1",
+            Some("routstr-sk-primary"),
+            None,
+            None,
+        );
+        let creds = resolve_credentials(&model, Some("session-jwt-for-grok-api"));
+        assert_eq!(creds.api_key.as_deref(), Some("routstr-sk-primary"));
+        assert_eq!(creds.base_url, "https://api.routstr.com/v1");
+        assert_eq!(
+            creds.failover_providers.len(),
+            1,
+            "Routstr with session must attach first-party Grok API failover"
+        );
+        let p = &creds.failover_providers[0];
+        assert_eq!(p.api_key, "session-jwt-for-grok-api");
+        assert_eq!(p.base_url, XAI_API_BASE_URL_DEFAULT);
+        assert_eq!(p.model, "grok-4.5");
+        let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(sampling.failover_providers.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn routstr_resolve_without_xai_has_empty_provider_failover() {
+        let _guard = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        let model = test_model_entry(
+            "grok-4.5",
+            "https://api.routstr.com/v1",
+            Some("routstr-only"),
+            None,
+            None,
+        );
+        let creds = resolve_credentials(&model, None);
+        assert_eq!(creds.api_key.as_deref(), Some("routstr-only"));
         assert!(
             creds.failover_providers.is_empty(),
             "no session and no XAI_API_KEY → cannot fail over to Grok API"

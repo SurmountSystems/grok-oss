@@ -23,6 +23,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use xai_acp_lib::AcpAgentTx;
+/// Pending `/routstr spend` parameters awaiting `/routstr unlock` re-entry.
+///
+/// Holds only payment parameters — never BIP-39 or passwords.
+/// `agent_id` records the agent that staged the spend so unlock cannot route
+/// a money path to a different agent after the user switches sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRoutstrSpend {
+    pub agent_id: crate::app::agent::AgentId,
+    pub address: String,
+    pub amount_sats: u64,
+    pub broadcast: bool,
+    pub fee_rate_sat_vb: u64,
+}
+
 /// State for the "New Worktree" popup dialog on the welcome screen.
 #[derive(Debug, Default)]
 pub struct NewWorktreeDialogState {
@@ -670,6 +684,31 @@ pub struct AppView {
     /// Routstr account balance in msats (when a Routstr key is configured).
     /// Shown in the prompt footer when the active model is Routstr-backed.
     pub routstr_credit_balance: Option<crate::views::credit_bar::RoutstrCreditBalance>,
+    /// Generation for in-flight `/routstr watch` task; ticks with a lower
+    /// generation are dropped after stop/restart.
+    ///
+    /// **Singleton:** one process-wide watch (not per-agent). Mirrors
+    /// [`grok_bitcoin_wallet::watcher::WatchTaskLifecycle`] generation rules;
+    /// see `dispatch/routstr.rs` for the product wiring and supersede notes.
+    pub routstr_watch_generation: u64,
+    /// Address currently watched (after fund or explicit `/routstr watch`).
+    pub routstr_watch_address: Option<String>,
+    /// Agent that owns the current singleton watch (for supersede messaging).
+    pub routstr_watch_agent_id: Option<crate::app::agent::AgentId>,
+    /// Last watch status line for footer / system messages.
+    pub routstr_watch_status: Option<String>,
+    /// Last non-error status line pushed to scrollback (dedupe identical polls).
+    pub routstr_watch_last_scrollback: Option<String>,
+    /// Consecutive watch poll errors (cap scrollback spam).
+    pub routstr_watch_error_streak: u32,
+    /// Pending on-chain spend waiting for `/routstr unlock` re-entry.
+    ///
+    /// Set by `/routstr spend`; cleared on cancel (`/routstr fund`), supersede
+    /// (re-stage spend), or unlock re-entry consumption into the spend effect.
+    /// **Not** cleared when an in-flight spend task completes — that would
+    /// silently drop a newer stage started while the prior task was running.
+    /// Never stores BIP-39 — only payment parameters (+ staging agent_id).
+    pub pending_routstr_spend: Option<PendingRoutstrSpend>,
     /// Periodic billing poll requested (credits >= 99%).
     pub billing_poll_wanted: bool,
     /// Leader-mode session roster (FleetView dashboard). Populated from
@@ -995,6 +1034,9 @@ pub struct AppView {
     pub auto_compact_threshold_tokens: Option<u64>,
     /// Persisted `[cli].auto_update` mirror. `None` = no override (default `true`).
     pub auto_update: Option<bool>,
+    /// Persisted `[features].routstr_enabled` mirror. `None` = no override
+    /// (default `true` — Routstr catalog + balance chrome on).
+    pub routstr_enabled: Option<bool>,
     /// Persisted `[toolset.ask_user_question].timeout_enabled` mirror, seeded
     /// from the effective TOML merge like `show_tips`. `None` = unset in TOML
     /// (default `true`); toggles write the user layer.
@@ -1323,6 +1365,7 @@ impl AppView {
             auto_compact_threshold_percent: None,
             auto_compact_threshold_tokens: None,
             auto_update: None,
+            routstr_enabled: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
             usage_billing_redirect_url: None,
@@ -1357,6 +1400,13 @@ impl AppView {
             auto_topup: None,
             openrouter_credit_balance: None,
             routstr_credit_balance: None,
+            routstr_watch_generation: 0,
+            routstr_watch_address: None,
+            routstr_watch_agent_id: None,
+            routstr_watch_status: None,
+            routstr_watch_last_scrollback: None,
+            routstr_watch_error_streak: 0,
+            pending_routstr_spend: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
@@ -3931,6 +3981,7 @@ impl AppView {
                             chat_mode: self.chat_mode,
                             credit_balance: self.credit_balance.as_ref(),
                             auto_topup: self.auto_topup.as_ref(),
+                            routstr_balance: self.routstr_credit_balance.as_ref(),
                             usage_visible: self.usage_visible,
                             is_api_key_auth: self.is_api_key_auth,
                             changelog_bullets: &self.changelog_bullets,
@@ -5233,6 +5284,7 @@ pub(crate) mod tests {
             auto_compact_threshold_percent: None,
             auto_compact_threshold_tokens: None,
             auto_update: None,
+            routstr_enabled: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
             usage_billing_redirect_url: None,
@@ -5320,6 +5372,13 @@ pub(crate) mod tests {
             auto_topup: None,
             openrouter_credit_balance: None,
             routstr_credit_balance: None,
+            routstr_watch_generation: 0,
+            routstr_watch_address: None,
+            routstr_watch_agent_id: None,
+            routstr_watch_status: None,
+            routstr_watch_last_scrollback: None,
+            routstr_watch_error_streak: 0,
+            pending_routstr_spend: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),

@@ -298,6 +298,7 @@ pub fn usage_warning_for_session_with_openrouter(
 /// 2. OpenRouter model → USD credits; when Grok/xAI balance is also known,
 ///    append ` · Grok used: N%` so first-party pool stays visible for failover
 /// 3. else xAI Build billing path
+#[allow(clippy::too_many_arguments)] // Per-provider balances + model flags.
 pub fn usage_warning_for_session_with_providers(
     balance: Option<&CreditBalance>,
     autotopup: Option<&AutoTopupInfo>,

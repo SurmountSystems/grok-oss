@@ -381,9 +381,7 @@ fn try_rotate_to_failover_provider(
     config.failover_providers.retain(|p| {
         let k = p.api_key.trim();
         let u = p.base_url.trim();
-        !(k.is_empty()
-            || u.is_empty()
-            || (k == active_key && u.eq_ignore_ascii_case(&active_url)))
+        !(k.is_empty() || u.is_empty() || (k == active_key && u.eq_ignore_ascii_case(&active_url)))
     });
     let Some(next) = config.failover_providers.first().cloned() else {
         return false;
@@ -412,10 +410,7 @@ fn try_rotate_to_failover_provider(
     rebuild_client_after_failover(config, client)
 }
 
-fn rebuild_client_after_failover(
-    config: &mut SamplerConfig,
-    client: &mut SamplingClient,
-) -> bool {
+fn rebuild_client_after_failover(config: &mut SamplerConfig, client: &mut SamplingClient) -> bool {
     match SamplingClient::new(config.clone()) {
         Ok(fresh) => {
             *client = fresh;
@@ -430,6 +425,84 @@ fn rebuild_client_after_failover(
         }
     }
 }
+
+/// Parse OpenRouter-style "can only afford N max_tokens" from a credit error body.
+///
+/// Returns `Some(n)` when `n >= 1`. Used to clamp+retry the **same** key before
+/// multi-key or provider failover.
+pub(crate) fn parse_affordable_max_tokens(message: &str) -> Option<u32> {
+    let lower = message.to_ascii_lowercase();
+    // Common OR patterns: "can only afford 1234 max_tokens", "fewer max_tokens (1234)"
+    for needle in [
+        "can only afford ",
+        "affordable max_tokens ",
+        "max_tokens to ",
+    ] {
+        if let Some(idx) = lower.find(needle) {
+            let rest = &lower[idx + needle.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u32>()
+                && n >= 1
+            {
+                return Some(n);
+            }
+        }
+    }
+    // Fallback: "... max_tokens: 512" / "max_tokens=512"
+    for sep in ["max_tokens:", "max_tokens=", "max_tokens "] {
+        if let Some(idx) = lower.find(sep) {
+            let rest = lower[idx + sep.len()..].trim_start();
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u32>()
+                && n >= 1
+                && (lower.contains("afford") || lower.contains("fewer"))
+            {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// Clamp `request.max_output_tokens` down to `affordable` when the current
+/// value is higher (or unset with a high default). Returns `true` when the
+/// request was modified and a same-key retry is warranted.
+pub(crate) fn try_clamp_max_tokens_for_afford(
+    request: &mut ConversationRequest,
+    affordable: u32,
+) -> bool {
+    if affordable < 1 {
+        return false;
+    }
+    match request.max_output_tokens {
+        Some(cur) if cur > affordable => {
+            tracing::info!(
+                target: crate::sampling_log::TARGET,
+                from = cur,
+                to = affordable,
+                "credit error: clamping max_output_tokens for same-key retry"
+            );
+            request.max_output_tokens = Some(affordable);
+            true
+        }
+        None => {
+            // Unset often means provider default (large). Clamp so the retry
+            // has a finite budget the balance can cover.
+            tracing::info!(
+                target: crate::sampling_log::TARGET,
+                to = affordable,
+                "credit error: setting max_output_tokens for same-key retry"
+            );
+            request.max_output_tokens = Some(affordable);
+            true
+        }
+        Some(_) => false,
+    }
+}
+
+/// Marker embedded in Retrying.reason after OpenRouter/Routstr → Grok API rotate.
+/// Pager may surface a mid-turn toast when this substring is present.
+pub const PROVIDER_FAILOVER_REASON_MARKER: &str = "Failing over to Grok API";
 
 /// Apply a [`RetryDecision`]. Returns `true` if the loop should
 /// continue, `false` if the request is finished (either fatal or
@@ -449,17 +522,36 @@ async fn apply_retry_decision(
     config: &mut SamplerConfig,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
 ) -> bool {
-    // Credit exhaustion is fatal for one account/provider but not for the
-    // request if another key (same host) or provider (e.g. OpenRouter → xAI)
-    // still has balance. Rotate before classify so we do not surface a
-    // billing failure while failover remains.
-    if err.is_credit_exhausted()
-        && (try_rotate_to_failover_key(config, client)
-            || try_rotate_to_failover_provider(config, client))
-    {
-        *retry_count += 1;
-        emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
-        return true;
+    // Credit path order (same request, no permanent-fail spin):
+    // 1) clamp max_tokens from "can only afford N" (same key)
+    // 2) same-host multi-key failover
+    // 3) cross-provider failover (OpenRouter/Routstr → Grok API)
+    if err.is_credit_exhausted() {
+        let msg = err.to_string();
+        if let Some(n) = parse_affordable_max_tokens(&msg)
+            && try_clamp_max_tokens_for_afford(request, n)
+        {
+            *retry_count += 1;
+            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            return true;
+        }
+        if try_rotate_to_failover_key(config, client) {
+            *retry_count += 1;
+            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            return true;
+        }
+        if try_rotate_to_failover_provider(config, client) {
+            *retry_count += 1;
+            emit_provider_failover_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+            );
+            return true;
+        }
     }
 
     let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
@@ -888,6 +980,32 @@ fn emit_retrying(
     });
 }
 
+/// Like [`emit_retrying`] but annotates OpenRouter/Routstr → Grok API rotate
+/// so the pager can show a mid-turn toast.
+fn emit_provider_failover_retrying(
+    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    request_id: &RequestId,
+    attempt: u32,
+    max_retries: u32,
+    err: &SamplingError,
+    config: &SamplerConfig,
+) {
+    let info = SamplingErrorInfo::from(err);
+    let reason = format!(
+        "{err}. {PROVIDER_FAILOVER_REASON_MARKER} ({})",
+        config.model
+    );
+    let _ = event_tx.send(SamplingEvent::Retrying {
+        request_id: request_id.clone(),
+        attempt,
+        max_retries,
+        kind: info.kind,
+        reason,
+        doom_loop_triggers: info.doom_loop_triggers,
+        doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
+    });
+}
+
 fn handle_cancellation(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
@@ -1112,5 +1230,128 @@ mod tests {
         assert!(config.failover_api_keys.is_empty());
         assert!(config.failover_providers.is_empty());
         assert!(!try_rotate_to_failover_provider(&mut config, &mut client));
+    }
+
+    #[test]
+    fn rotate_failover_provider_routstr_to_grok_api() {
+        use crate::config::FailoverProvider;
+
+        // Smoke: Routstr 402 path uses the same rotate helper as OpenRouter.
+        let mut config = SamplerConfig {
+            api_key: Some("routstr-sk".into()),
+            failover_api_keys: Vec::new(),
+            failover_providers: vec![FailoverProvider {
+                api_key: "xai-key".into(),
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4.5".into(),
+                auth_scheme: Default::default(),
+            }],
+            base_url: "https://api.routstr.com/v1".into(),
+            model: "grok-4.5".into(),
+            ..Default::default()
+        };
+        let mut client = SamplingClient::new(config.clone()).expect("client");
+        assert!(try_rotate_to_failover_provider(&mut config, &mut client));
+        assert_eq!(config.api_key.as_deref(), Some("xai-key"));
+        assert_eq!(config.base_url, "https://api.x.ai/v1");
+        assert_eq!(config.model, "grok-4.5");
+    }
+
+    #[test]
+    fn parse_affordable_max_tokens_openrouter_phrasing() {
+        assert_eq!(
+            parse_affordable_max_tokens(
+                "This request requires more credits. You can only afford 2048 max_tokens."
+            ),
+            Some(2048)
+        );
+        assert_eq!(
+            parse_affordable_max_tokens("can only afford 1 max_tokens with current balance"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_affordable_max_tokens("try fewer max_tokens: 512 for this balance"),
+            Some(512)
+        );
+        assert_eq!(
+            parse_affordable_max_tokens("out of credits"),
+            None,
+            "plain credit message must not invent a clamp"
+        );
+        assert_eq!(
+            parse_affordable_max_tokens("can only afford 0 max_tokens"),
+            None
+        );
+    }
+
+    fn sample_request(max_output_tokens: Option<u32>) -> ConversationRequest {
+        ConversationRequest {
+            items: vec![],
+            tools: vec![],
+            hosted_tools: vec![],
+            tool_choice: None,
+            model: None,
+            temperature: None,
+            max_output_tokens,
+            top_p: None,
+            x_grok_conv_id: None,
+            x_grok_req_id: None,
+            x_grok_session_id: None,
+            x_grok_turn_idx: None,
+            x_grok_agent_id: None,
+            x_grok_deployment_id: None,
+            x_grok_user_id: None,
+            trace: None,
+            reasoning_effort: None,
+            json_schema: None,
+        }
+    }
+
+    #[test]
+    fn clamp_max_tokens_only_lowers() {
+        let mut req = sample_request(Some(8000));
+        assert!(try_clamp_max_tokens_for_afford(&mut req, 1024));
+        assert_eq!(req.max_output_tokens, Some(1024));
+        assert!(
+            !try_clamp_max_tokens_for_afford(&mut req, 2048),
+            "must not raise max_tokens"
+        );
+        assert_eq!(req.max_output_tokens, Some(1024));
+        assert!(!try_clamp_max_tokens_for_afford(&mut req, 0));
+    }
+
+    #[test]
+    fn clamp_max_tokens_sets_when_none() {
+        let mut req = sample_request(None);
+        assert!(
+            try_clamp_max_tokens_for_afford(&mut req, 512),
+            "unset max_output_tokens must be set to affordable budget"
+        );
+        assert_eq!(req.max_output_tokens, Some(512));
+        // Already at budget: no further change.
+        assert!(!try_clamp_max_tokens_for_afford(&mut req, 512));
+        assert_eq!(req.max_output_tokens, Some(512));
+    }
+
+    /// Credit path order in `apply_retry_decision`:
+    /// 1) clamp max_tokens from "can only afford N" (same key)
+    /// 2) same-host multi-key failover
+    /// 3) cross-provider failover
+    ///
+    /// When clamp can apply, rotate helpers must not be required. This locks
+    /// the parse→clamp success branch that short-circuits before rotate.
+    #[test]
+    fn credit_afford_clamp_short_circuits_before_rotate() {
+        let msg = "insufficient credits: can only afford 256 max_tokens for this balance";
+        let n = parse_affordable_max_tokens(msg).expect("must parse affordable N");
+        assert_eq!(n, 256);
+        let mut req = sample_request(Some(8000));
+        assert!(
+            try_clamp_max_tokens_for_afford(&mut req, n),
+            "clamp must succeed so apply_retry_decision returns before try_rotate_*"
+        );
+        assert_eq!(req.max_output_tokens, Some(256));
+        // Marker is only for provider rotate (step 3), not same-key clamp.
+        assert!(!PROVIDER_FAILOVER_REASON_MARKER.is_empty());
     }
 }

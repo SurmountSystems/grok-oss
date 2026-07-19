@@ -1704,5 +1704,33 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        // SHELL-owned: `[features].routstr_enabled` (default on). Catalog
+        // resolve + balance fetch gate. Restart-required for the model
+        // picker; balance fetch re-reads disk after save (no restart).
+        SettingMeta {
+            key: "routstr_enabled",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Routstr",
+            description: "Show Routstr Grok 4.5 in the model picker and fetch Routstr balance \
+                          for the credit bar. When off, the catalog entry is omitted and \
+                          balance network fetch is skipped. Writes [features] routstr_enabled. \
+                          Restart required for the model catalog. Default on.",
+            keywords: &[
+                "routstr",
+                "bitcoin",
+                "cashu",
+                "lightning",
+                "balance",
+                "catalog",
+                "model",
+                "features",
+                "msats",
+                "bolt11",
+            ],
+            kind: SettingKind::Bool { default: true },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
     ]
 }

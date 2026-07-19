@@ -151,7 +151,8 @@ xai-grok-auth = { workspace = true, features = ["middleware"] }
 xai-grok-telemetry = { workspace = true }
 xai-grok-http = { workspace = true }
 # Bitcoin SeedVault + funding CLI for Routstr (never CredentialsStore for BIP-39).
-grok-bitcoin-wallet = { workspace = true }
+# explorer-http: live UTXO fetch + mempool.space broadcast for `grok routstr spend`.
+grok-bitcoin-wallet = { workspace = true, features = ["explorer-http"] }
 xai-grok-models = { workspace = true }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
 flate2 = { workspace = true }

@@ -1957,6 +1957,18 @@ async fn async_main() -> Result<()> {
                         xai_grok_shell::auth::run_routstr_fund(&grok_home)
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
                     }
+                    RoutstrCommand::Spend {
+                        address,
+                        sats,
+                        broadcast,
+                        fee_rate,
+                    } => {
+                        let grok_home = xai_grok_shell::util::grok_home::grok_home();
+                        xai_grok_shell::auth::run_routstr_spend(
+                            &grok_home, &address, sats, broadcast, fee_rate,
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    }
                 }
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }

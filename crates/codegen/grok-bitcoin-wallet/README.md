@@ -12,13 +12,14 @@ Reasoning: [`docs/bitcoin-routstr/`](../../../docs/bitcoin-routstr/README.md).
 | `mnemonic` | BIP-39 generate (`getrandom`) / import / validate / zeroize |
 | `seed_vault` | OS keyring + AEAD file; `UnlockSession` TTL; `MnemonicBackupGate` |
 | `nip06` | NIP-06 npub; nsec/hex only via controlled API |
-| `onchain` | BIP84 receive address (bitcoin+bip32; full BDK residual) |
+| `onchain` | BIP84 receive address (bitcoin+bip32) |
+| `descriptor_wallet` | BIP84 descriptors + `list_unspent` / fee-aware `select_coins` + mock/`MempoolChainSource` (`explorer-http`); unsigned PSBT + BIP84 P2WPKH sign/finalize/extract; `TxBroadcaster` submit |
 | `address_ux` | PaymentDisplay, BIP21, mempool.space URLs, QR ascii |
-| `explorer` | RateLimitedExplorer; optional `explorer-http` MempoolHttpClient |
+| `explorer` | RateLimitedExplorer; `TxBroadcaster` + optional `explorer-http` MempoolHttpClient (GET + POST `/api/tx`) |
 | `watcher` | Address/tx poll → FundingWizard confirmations (injected producer) |
-| `funding_cli` | Backup gate + unlock session before ShowAddress (CLI product path) |
-| `lightning` | `LightningCapability` trait + channel wizard; `BOLT12_SUPPORTED=false` |
-| `cashu` | CashuToken + FundingWizard (backup gate before ShowAddress) |
+| `funding_cli` | Backup gate + unlock before ShowAddress; spend parse helpers; topup/refund via `default_*_backend` seams; receive QR lines |
+| `lightning` | `LightningCapability` + `default_lightning_backend()`; invoice/pay outcomes; channel wizard; `BOLT12_SUPPORTED=false` |
+| `cashu` | CashuToken + `CashuBackend` + `default_cashu_backend()`; FundingWizard |
 
 ## Docs
 
@@ -40,6 +41,7 @@ Bitcoin / Lightning / Cashu (Chaumian eCash). Never “crypto.”
 | Unlock TTL + backup gate | done (unit tested) |
 | Address UX + rate-limited explorer | done |
 | mempool.space HTTP (`explorer-http`) | done (ignored live test) |
-| BIP84 receive address | done (not full BDK wallet) |
-| LDK pay / BOLT12 | stub / deferred |
-| CDK Cashu mint/spend | types + wizard only |
+| BIP84 receive address | done |
+| Descriptor wallet + fee-aware UTXO select + PSBT + broadcast | done (sign/finalize/extract + TxBroadcaster; CLI/TUI dry-run default) |
+| LDK pay / BOLT12 | stub / deferred (`BOLT12_SUPPORTED=false`; optional `ldk` feature flag only) |
+| CDK Cashu mint/spend | capability seams + default backend factory; stubs never claim live mint/refund; optional `cashu-cdk` feature flag only |

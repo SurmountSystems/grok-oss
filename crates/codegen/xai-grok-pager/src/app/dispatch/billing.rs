@@ -17,6 +17,43 @@ pub(crate) use xai_grok_shell::sampling::error::is_free_usage_exhausted_error;
 /// After this, the user can still manually check via the [Refresh] button.
 pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Whether this agent session needs an OpenRouter `/credits` network fetch.
+///
+/// True only when the active model is OpenRouter-backed (footer USD line and
+/// dual-footer with Grok usage when both balances are known).
+pub(crate) fn agent_needs_openrouter_balance_fetch(agent: &AgentView) -> bool {
+    xai_grok_shell::auth::should_fetch_openrouter_balance_for_model_id(
+        agent.session.models.current_model_id_str(),
+    )
+}
+
+/// Build a [`Effect::FetchBilling`] with the OpenRouter gate derived from the
+/// agent's current model.
+pub(crate) fn effect_fetch_billing(agent: &AgentView, agent_id: AgentId, silent: bool) -> Effect {
+    Effect::FetchBilling {
+        agent_id,
+        silent,
+        fetch_openrouter: agent_needs_openrouter_balance_fetch(agent),
+    }
+}
+
+/// Like [`effect_fetch_billing`] when only `agent_id` + app are available.
+pub(crate) fn effect_fetch_billing_for_app(
+    app: &AppView,
+    agent_id: AgentId,
+    silent: bool,
+) -> Effect {
+    let fetch_openrouter = app
+        .agents
+        .get(&agent_id)
+        .is_some_and(agent_needs_openrouter_balance_fetch);
+    Effect::FetchBilling {
+        agent_id,
+        silent,
+        fetch_openrouter,
+    }
+}
+
 /// Whether the user is at the highest subscription tier (SuperGrok Heavy).
 ///
 /// Returns `true` only when `subscription_tier` **positively matches** a
@@ -91,22 +128,18 @@ pub(crate) fn is_credit_limit_error(http_status: Option<u16>, message: &str) -> 
 /// True when the credit error clearly came from OpenRouter (not xAI weekly pool).
 ///
 /// Used so the pager does not show SuperGrok "weekly limit" copy for OR 402s.
+#[allow(dead_code)] // Called from credit upsell routing / future prompt handlers.
 pub(crate) fn is_openrouter_credit_error(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
-    m.contains("openrouter")
-        || m.contains("can only afford")
-        || m.contains("fewer max_tokens")
+    m.contains("openrouter") || m.contains("can only afford") || m.contains("fewer max_tokens")
 }
 
 /// OpenRouter / third-party credit failure: do **not** claim SuperGrok weekly
 /// limit. Point at OpenRouter credits and mention first-party Grok API if
 /// that balance is known.
-pub(super) fn open_openrouter_credit_upsell(
-    agent: &mut AgentView,
-    grok_usage_pct: Option<f64>,
-) {
-    use crate::scrollback::blocks::CreditLimitCardAction;
+pub(super) fn open_openrouter_credit_upsell(agent: &mut AgentView, grok_usage_pct: Option<f64>) {
     use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::CreditLimitCardAction;
 
     let mut body = "OpenRouter credits are too low for this request (or max_tokens is too high for the remaining balance)."
         .to_string();
@@ -132,9 +165,7 @@ pub(super) fn open_openrouter_credit_upsell(
         CreditLimitCardAction::PurchaseCredits,
         UPSELL_URL_OPENROUTER,
     ));
-    agent
-        .scrollback
-        .push_block(RenderBlock::system(body));
+    agent.scrollback.push_block(RenderBlock::system(body));
 }
 
 /// Open the credit-limit upsell on the given agent.
@@ -395,6 +426,7 @@ pub(super) fn apply_auto_topup(
 
 // TaskResult handlers.
 
+#[allow(clippy::too_many_arguments)] // Dual-provider balance params (xAI / OR / Routstr).
 pub(super) fn handle_billing_fetched(
     app: &mut AppView,
     agent_id: AgentId,
@@ -614,10 +646,7 @@ pub(super) fn handle_credit_limit_recheck_complete(
     agent.credit_limit_stashed_prompt = None;
 
     let mut effects = maybe_drain_queue(agent);
-    effects.push(Effect::FetchBilling {
-        agent_id,
-        silent: true,
-    });
+    effects.push(effect_fetch_billing(agent, agent_id, true));
     note_peek_page_flip_after_drain(app, agent_id);
     effects
 }

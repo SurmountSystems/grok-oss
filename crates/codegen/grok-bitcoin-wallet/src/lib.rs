@@ -13,16 +13,21 @@
 //! - [`nip06`]: Nostr key derivation (feature `nip06`)
 //! - [`address_ux`]: QR + copy + BIP21 + mempool.space helpers
 //! - [`onchain`]: BIP84 receive address from mnemonic (feature `onchain-address`)
-//! - [`lightning`]: capability trait + BOLT12 honesty flag
-//! - [`cashu`]: Cashu token newtype + funding wizard state machine
-//! - [`explorer`]: rate-limited mempool.space client (+ optional HTTP feature)
+//! - [`descriptor_wallet`]: BIP84 descriptors + list_unspent + fee-aware select_coins;
+//!   mock + optional mempool `ChainSource` (`explorer-http`); unsigned PSBT build +
+//!   BIP84 P2WPKH sign/finalize/extract; broadcast via [`explorer::TxBroadcaster`]
+//! - [`lightning`]: capability trait + BOLT12 honesty flag + `default_lightning_backend`
+//! - [`cashu`]: Cashu token newtype + funding wizard + `default_cashu_backend` seams
+//! - [`explorer`]: rate-limited mempool.space client + TxBroadcaster (+ optional HTTP)
 //! - [`watcher`]: address/tx poll → FundingWizard confirmations
-//! - [`funding_cli`]: backup gate + unlock session before ShowAddress (CLI)
+//! - [`funding_cli`]: backup gate + unlock; topup/refund via default backends (CLI/TUI)
 
 #![forbid(unsafe_code)]
 
 pub mod address_ux;
 pub mod cashu;
+#[cfg(feature = "onchain-address")]
+pub mod descriptor_wallet;
 pub mod error;
 pub mod explorer;
 pub mod funding_cli;

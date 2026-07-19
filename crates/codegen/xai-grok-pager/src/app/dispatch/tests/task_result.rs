@@ -597,12 +597,103 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
     );
     // Success message pushed to scrollback.
     assert_eq!(app.agents[&id].scrollback.len(), initial_scrollback + 1);
-    // PersistPreferredModel effect emitted.
-    assert_eq!(effects.len(), 1);
+    // Persist preferred model + silent billing refresh (OR gate follows new model).
+    assert_eq!(effects.len(), 2, "got: {effects:?}");
     assert!(matches!(
         &effects[0],
         Effect::PersistPreferredModel { model_id: mid, .. } if *mid == model_id.clone()
     ));
+    assert!(
+        matches!(
+            &effects[1],
+            Effect::FetchBilling {
+                silent: true,
+                fetch_openrouter: false,
+                ..
+            }
+        ),
+        "non-OR switch must silent-fetch without OpenRouter: {effects:?}"
+    );
+}
+
+#[test]
+fn switch_model_complete_to_openrouter_fetches_or_balance() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let or_id = acp::ModelId::new(std::sync::Arc::from(
+        xai_grok_shell::auth::OPENROUTER_GROK_45_CATALOG_ID,
+    ));
+    let native_id = acp::ModelId::new(std::sync::Arc::from("grok-4.5"));
+
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.models.available.insert(
+        or_id.clone(),
+        acp::ModelInfo::new(or_id.clone(), "OpenRouter Grok 4.5".to_string()),
+    );
+    agent.session.models.available.insert(
+        native_id.clone(),
+        acp::ModelInfo::new(native_id.clone(), "Grok 4.5".to_string()),
+    );
+    // Start on a native model so the switch is a real change.
+    agent.session.models.current = Some(native_id);
+    agent.session.model_switch_pending = true;
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            model_id: or_id.clone(),
+            effort: None,
+            result: Ok(()),
+            prev_model_id: None,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(app.agents[&id].session.models.current, Some(or_id.clone()));
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistPreferredModel { model_id: mid, .. } if *mid == or_id
+        )),
+        "expected PersistPreferredModel for OR: {effects:?}"
+    );
+    // Dual-footer refresh: silent billing with OpenRouter credits enabled.
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::FetchBilling {
+                silent: true,
+                fetch_openrouter: true,
+                ..
+            }
+        )),
+        "switch to openrouter-* must request OR credits fetch: {effects:?}"
+    );
+
+    // Switching *away* from OR still silent-refreshes but skips OR network.
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.model_switch_pending = true;
+    let effects_away = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            model_id: acp::ModelId::new(std::sync::Arc::from("grok-4.5")),
+            effort: None,
+            result: Ok(()),
+            prev_model_id: Some(or_id),
+        }),
+        &mut app,
+    );
+    assert!(
+        effects_away.iter().any(|e| matches!(
+            e,
+            Effect::FetchBilling {
+                silent: true,
+                fetch_openrouter: false,
+                ..
+            }
+        )),
+        "switch away from OR must silent-fetch without OpenRouter: {effects_away:?}"
+    );
 }
 
 #[test]
@@ -691,7 +782,7 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
         Some(ReasoningEffort::Xhigh)
     );
 
-    assert_eq!(effects.len(), 1);
+    assert_eq!(effects.len(), 2, "got: {effects:?}");
     match &effects[0] {
         Effect::PersistPreferredModel {
             model_id: mid,
@@ -707,6 +798,10 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
         }
         other => panic!("expected PersistPreferredModel, got {other:?}"),
     }
+    assert!(
+        matches!(&effects[1], Effect::FetchBilling { silent: true, .. }),
+        "expected silent billing refresh after model switch: {effects:?}"
+    );
 }
 
 #[test]
@@ -757,7 +852,7 @@ fn switch_to_non_reasoning_model_clears_persisted_effort() {
         "reasoning_effort must be cleared when switching to a non-reasoning model",
     );
 
-    assert_eq!(effects.len(), 1);
+    assert_eq!(effects.len(), 2, "got: {effects:?}");
     match &effects[0] {
         Effect::PersistPreferredModel {
             reasoning_effort, ..
@@ -769,6 +864,10 @@ fn switch_to_non_reasoning_model_clears_persisted_effort() {
         }
         other => panic!("expected PersistPreferredModel, got {other:?}"),
     }
+    assert!(
+        matches!(&effects[1], Effect::FetchBilling { silent: true, .. }),
+        "expected silent billing refresh after model switch: {effects:?}"
+    );
 }
 
 #[test]

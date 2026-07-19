@@ -3907,15 +3907,21 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchBilling { agent_id, silent } => {
+        Effect::FetchBilling {
+            agent_id,
+            silent,
+            fetch_openrouter,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     use xai_grok_shell::extensions::billing::BillingConfigResponse;
-                    // Always refresh OpenRouter / Routstr balances alongside xAI
-                    // billing so provider-only sessions still update the footer
-                    // when the xAI extension is unavailable (no grok.com auth).
-                    let openrouter_balance = fetch_openrouter_credit_balance().await;
+                    // OpenRouter: only when the active model is OR-backed (dual-
+                    // footer / Credits left). Routstr: feature-gated inside fetch.
+                    // Provider-only sessions still update the footer when the
+                    // xAI extension is unavailable (no grok.com auth).
+                    let openrouter_balance =
+                        fetch_openrouter_credit_balance(fetch_openrouter).await;
                     let routstr_balance = fetch_routstr_credit_balance().await;
                     let provider_balance_ok =
                         openrouter_balance.is_some() || routstr_balance.is_some();
@@ -4034,6 +4040,111 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::RoutstrFundProbe { agent_id, grok_home } => {
+            tasks.spawn(async move {
+                let probe = tokio::task::spawn_blocking(move || {
+                    xai_grok_shell::auth::probe_routstr_fund_for_tui(&grok_home)
+                })
+                .await
+                .unwrap_or_else(|e| xai_grok_shell::auth::RoutstrFundProbe::Error {
+                    message: format!("fund probe task failed: {e}"),
+                });
+                TaskResult::RoutstrFundProbed { agent_id, probe }
+            });
+        }
+        Effect::RoutstrFundComplete {
+            agent_id,
+            grok_home,
+            phrase,
+            password,
+        } => {
+            // Move secrets into the blocking task; drop SensitiveString wrappers here.
+            let phrase = phrase.into_inner();
+            let password = password.map(|p| p.into_inner());
+            tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    xai_grok_shell::auth::complete_routstr_fund_reentry_for_tui(
+                        &grok_home,
+                        &phrase,
+                        password.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("fund complete task failed: {e}")));
+                TaskResult::RoutstrFundCompleted { agent_id, result }
+            });
+        }
+        Effect::RoutstrSpendComplete {
+            agent_id,
+            grok_home,
+            phrase,
+            password,
+            address,
+            amount_sats,
+            broadcast,
+            fee_rate_sat_vb,
+        } => {
+            let phrase = phrase.into_inner();
+            let password = password.map(|p| p.into_inner());
+            tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    xai_grok_shell::auth::complete_routstr_spend_reentry_for_tui(
+                        &grok_home,
+                        &phrase,
+                        password.as_deref(),
+                        &address,
+                        amount_sats,
+                        broadcast,
+                        fee_rate_sat_vb,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("spend complete task failed: {e}")));
+                TaskResult::RoutstrSpendCompleted { agent_id, result }
+            });
+        }
+        Effect::RoutstrWatchLoop {
+            agent_id,
+            address,
+            generation,
+            network,
+            skip_sleep,
+        } => {
+            tasks.spawn(async move {
+                // First arm (fund auto-watch / slash watch) polls immediately;
+                // re-arms sleep first for rate-limit honesty.
+                if !skip_sleep {
+                    tokio::time::sleep(
+                        grok_bitcoin_wallet::watcher::DEFAULT_WATCH_POLL_INTERVAL,
+                    )
+                    .await;
+                }
+                let address_for_err = address.clone();
+                let poll = tokio::task::spawn_blocking(move || {
+                    routstr_watch_poll_once(&address, &network)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("watch task failed: {e}")));
+                match poll {
+                    Ok((status_line, confirmed, address)) => TaskResult::RoutstrWatchTick {
+                        agent_id,
+                        generation,
+                        status_line,
+                        confirmed,
+                        address,
+                    },
+                    Err(message) => TaskResult::RoutstrWatchTick {
+                        agent_id,
+                        generation,
+                        status_line: format!("Watch error: {message}"),
+                        confirmed: false,
+                        address: address_for_err,
+                    },
+                }
+            });
+        }
         Effect::FetchAppBilling => {
             let tx = acp_tx.clone();
             tasks
@@ -4067,8 +4178,10 @@ pub(crate) fn execute(
                                     } else {
                                         crate::views::credit_bar::AutoTopupFetch::Cleared
                                     };
+                                    // Welcome / app-level: no active model → do
+                                    // not hit OpenRouter (dual-footer is session).
                                     let openrouter_balance =
-                                        fetch_openrouter_credit_balance().await;
+                                        fetch_openrouter_credit_balance(false).await;
                                     let routstr_balance = fetch_routstr_credit_balance().await;
                                     TaskResult::AppBillingFetched {
                                         balance,
@@ -4079,7 +4192,7 @@ pub(crate) fn execute(
                                 }
                                 Err(_) => {
                                     let openrouter_balance =
-                                        fetch_openrouter_credit_balance().await;
+                                        fetch_openrouter_credit_balance(false).await;
                                     let routstr_balance = fetch_routstr_credit_balance().await;
                                     TaskResult::AppBillingFetched {
                                         balance: None,
@@ -4091,7 +4204,8 @@ pub(crate) fn execute(
                             }
                         }
                         Err(_) => {
-                            let openrouter_balance = fetch_openrouter_credit_balance().await;
+                            let openrouter_balance =
+                                fetch_openrouter_credit_balance(false).await;
                             let routstr_balance = fetch_routstr_credit_balance().await;
                             TaskResult::AppBillingFetched {
                                 balance: None,
@@ -4250,6 +4364,46 @@ async fn lookup_session_title(session_id: &acp::SessionId) -> Option<String> {
         .find(|s| s.info.id == *session_id)
         .and_then(|s| s.display_title_opt())
 }
+/// One rate-limited mempool poll for `/routstr watch` (blocking; call from spawn_blocking).
+///
+/// **One-shot by design:** each effect arm builds a fresh `WatchSession` +
+/// `MempoolHttpClient`. State does not accumulate across ticks because a single
+/// successful poll can advance ShowAddress → confirmed in one `apply_to_wizard`
+/// (full UTXO history is not required for the funding-wizard path). Inter-poll
+/// spacing is the outer `skip_sleep` / `DEFAULT_WATCH_POLL_INTERVAL` sleep plus
+/// explorer rate limits; client cache is not shared across arms.
+///
+/// Generation cancel lives on `AppView` (effect re-arm model) rather than
+/// `WatchTaskLifecycle` so stale ticks are dropped without a long-lived JoinSet
+/// holding the session. Prefer a long-lived session only if polls become more
+/// frequent or multi-step wizard progress needs intermediate state.
+fn routstr_watch_poll_once(
+    address: &str,
+    network: &str,
+) -> Result<(String, bool, String), String> {
+    use grok_bitcoin_wallet::address_ux::BitcoinNetwork;
+    use grok_bitcoin_wallet::explorer::MempoolHttpClient;
+    use grok_bitcoin_wallet::watcher::{WatchSession, poll_with_http_client};
+
+    let net = BitcoinNetwork::from_env_str(network).unwrap_or(BitcoinNetwork::Mainnet);
+    let mut session = WatchSession::start(address, net, 3);
+    let mut client = MempoolHttpClient::with_defaults(net)
+        .map_err(|e| format!("mempool client: {e}"))?;
+    let update = poll_with_http_client(session.watcher_mut(), &mut client);
+    grok_bitcoin_wallet::watcher::AddressWatcher::apply_to_wizard(
+        &update,
+        session.wizard_mut(),
+    )
+    .map_err(|e| e.to_string())?;
+    let confirmed = session.is_confirmed_enough();
+    let status = grok_bitcoin_wallet::watcher::format_watch_status_line(
+        session.wizard().step,
+        &update,
+        session.wizard().required_confirmations,
+    );
+    Ok((status, confirmed, address.to_owned()))
+}
+
 /// Format session info into a human-readable string.
 ///
 /// Mirrors the TUI's `render_session_info` for pager display.

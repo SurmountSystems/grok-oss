@@ -7,6 +7,7 @@ use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
 use bitcoin::key::CompressedPublicKey;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{Address, KnownHrp, Network};
+use zeroize::Zeroize;
 
 use crate::error::{Result, WalletError};
 use crate::mnemonic::MnemonicSecret;
@@ -61,10 +62,11 @@ pub fn derive_bip84_receive_address_with_passphrase(
     network: Network,
     index: u32,
 ) -> Result<String> {
-    let seed = mnemonic.to_seed(passphrase);
+    let mut seed = mnemonic.to_seed(passphrase);
     let secp = Secp256k1::new();
     let master = Xpriv::new_master(network, &seed)
         .map_err(|e| WalletError::Onchain(format!("master: {e}")))?;
+    seed.zeroize();
     let path = receive_path(network, index)?;
     let child = master
         .derive_priv(&secp, &path)

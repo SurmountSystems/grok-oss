@@ -1084,6 +1084,7 @@ pub(crate) async fn run(
     let config_session_bools = load_initial_config_session_bools();
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;
+    app.routstr_enabled = config_session_bools.routstr_enabled;
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
     app.auto_compact_threshold_percent = config_session_bools.auto_compact_threshold_percent;
     app.auto_compact_threshold_tokens = config_session_bools.auto_compact_threshold_tokens;
@@ -1954,10 +1955,9 @@ pub(crate) async fn run(
             _ = billing_poll => {
                 billing_poll_at = None;
                 if let ActiveView::Agent(id) = app.active_view {
-                    let effs = vec![Effect::FetchBilling {
-                        agent_id: id,
-                        silent: true,
-                    }];
+                    let effs = vec![crate::app::dispatch::effect_fetch_billing_for_app(
+                        &app, id, true,
+                    )];
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;
                     }
@@ -2472,6 +2472,7 @@ pub(crate) fn load_initial_ui_config() -> xai_grok_shell::agent::config::UiConfi
 struct InitialConfigSessionBools {
     show_tips: Option<bool>,
     auto_update: Option<bool>,
+    routstr_enabled: Option<bool>,
     ask_user_question_timeout_enabled: Option<bool>,
     auto_compact_threshold_percent: Option<u8>,
     auto_compact_threshold_tokens: Option<u64>,
@@ -2502,6 +2503,10 @@ fn load_initial_config_session_bools() -> InitialConfigSessionBools {
     InitialConfigSessionBools {
         show_tips: cli_bool("show_tips"),
         auto_update: cli_bool("auto_update"),
+        routstr_enabled: root
+            .get("features")
+            .and_then(|f| f.get("routstr_enabled"))
+            .and_then(|v| v.as_bool()),
         ask_user_question_timeout_enabled: root
             .get("toolset")
             .and_then(|t| t.get("ask_user_question"))

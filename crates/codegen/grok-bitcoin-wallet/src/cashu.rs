@@ -1,13 +1,112 @@
 //! Cashu (Chaumian eCash) token newtype + funding wizard state machine.
 //!
-//! Full CDK mint/spend is residual; this module provides safe types and the
-//! wizard transitions that glue deposit → channel → Cashu → inference.
+//! Full CDK mint/spend is residual; this module provides safe types, the
+//! wizard transitions that glue deposit → channel → Cashu → inference, and
+//! honest [`CashuBackend`] capability seams so stubs never claim a live mint
+//! invoice or completed refund.
 
 use std::fmt;
 
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::{Result, WalletError};
+
+/// Capability flags for a Cashu backend (CDK mint/wallet when live).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CashuCapabilities {
+    /// Can request a mint quote / BOLT11 to acquire Cashu tokens.
+    pub mint_live: bool,
+    /// Can spend Cashu tokens against a Routstr (or other) mint.
+    pub spend_live: bool,
+    /// Can return / melt Cashu back to Lightning or on-chain.
+    pub refund_live: bool,
+}
+
+/// Pre-CDK stub: nothing live.
+pub const STUB_CASHU_CAPABILITIES: CashuCapabilities = CashuCapabilities {
+    mint_live: false,
+    spend_live: false,
+    refund_live: false,
+};
+
+/// Outcome of requesting a Cashu mint (top-up) invoice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MintQuoteOutcome {
+    /// Live mint quote with a real BOLT11 (only when `mint_live`).
+    Invoice {
+        bolt11: String,
+        quote_id: String,
+    },
+    /// Backend cannot mint in this build.
+    Unsupported(&'static str),
+    Failed(String),
+}
+
+/// Outcome of a Cashu refund / melt attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CashuRefundOutcome {
+    /// Live refund completed (only when `refund_live`).
+    Completed {
+        detail: String,
+    },
+    Unsupported(&'static str),
+    Failed(String),
+}
+
+/// Cashu mint/spend/refund surface for Routstr top up / refund product paths.
+///
+/// Stubs **must** report false capability flags and return
+/// [`MintQuoteOutcome::Unsupported`] / [`CashuRefundOutcome::Unsupported`].
+pub trait CashuBackend {
+    fn capabilities(&self) -> CashuCapabilities {
+        STUB_CASHU_CAPABILITIES
+    }
+
+    /// Request a mint invoice for approximately `amount_sats`.
+    ///
+    /// Must not return a fabricated `lnbc…` string when `mint_live` is false.
+    fn request_mint_invoice(&self, amount_sats: Option<u64>) -> Result<MintQuoteOutcome>;
+
+    /// Attempt to refund / melt held Cashu balance.
+    fn refund(&self) -> Result<CashuRefundOutcome>;
+}
+
+/// Pre-CDK Cashu backend: honest unsupported outcomes only.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StubCashu;
+
+impl CashuBackend for StubCashu {
+    fn capabilities(&self) -> CashuCapabilities {
+        STUB_CASHU_CAPABILITIES
+    }
+
+    fn request_mint_invoice(&self, _amount_sats: Option<u64>) -> Result<MintQuoteOutcome> {
+        Ok(MintQuoteOutcome::Unsupported(
+            "CDK mint path not wired (stub CashuBackend)",
+        ))
+    }
+
+    fn refund(&self) -> Result<CashuRefundOutcome> {
+        Ok(CashuRefundOutcome::Unsupported(
+            "CDK refund / melt path not wired (stub CashuBackend)",
+        ))
+    }
+}
+
+/// Product default Cashu backend for top up / refund CLI+TUI paths.
+///
+/// Returns an opaque [`CashuBackend`] so a future live CDK type can replace
+/// the body without changing the public signature (keep `impl CashuBackend`,
+/// or switch to a private owned enum if multiple concrete types are needed).
+///
+/// Today this is always [`StubCashu`] (`mint_live` / `spend_live` /
+/// `refund_live` all false). The optional Cargo feature `cashu-cdk` is a
+/// **reservation only** until real deps land (RESIDUAL.md P4); enabling it
+/// does not change this factory. Product copy routes through
+/// [`crate::funding_cli::topup_next_steps_for_backends`].
+pub fn default_cashu_backend() -> impl CashuBackend {
+    StubCashu
+}
 
 /// Bearer Cashu token (`cashuA…`). Never `Debug`-prints the full token.
 pub struct CashuToken(SecretString);
@@ -136,10 +235,7 @@ impl FundingWizard {
     /// completed backup confirm + durable SeedVault store + address reveal.
     /// This constructor does **not** display BIP-39 and must never be used to
     /// skip the fund path for a new wallet.
-    pub fn for_watch_after_fund(
-        address: impl Into<String>,
-        required_confirmations: u32,
-    ) -> Self {
+    pub fn for_watch_after_fund(address: impl Into<String>, required_confirmations: u32) -> Self {
         Self {
             step: FundingStep::ShowAddress,
             receive_address: Some(address.into()),
@@ -284,6 +380,48 @@ fn as_u64(v: &serde_json::Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stub_cashu_never_claims_live_mint_or_refund() {
+        let c = StubCashu;
+        let caps = c.capabilities();
+        assert!(!caps.mint_live);
+        assert!(!caps.spend_live);
+        assert!(!caps.refund_live);
+
+        let mint = c.request_mint_invoice(Some(21_000)).unwrap();
+        assert!(
+            matches!(mint, MintQuoteOutcome::Unsupported(_)),
+            "stub must not invent mint invoice: {mint:?}"
+        );
+        if let MintQuoteOutcome::Invoice { bolt11, .. } = mint {
+            panic!("stub fabricated bolt11: {bolt11}");
+        }
+
+        let refnd = c.refund().unwrap();
+        assert!(
+            matches!(refnd, CashuRefundOutcome::Unsupported(_)),
+            "stub must not claim refund completed: {refnd:?}"
+        );
+        assert!(!matches!(refnd, CashuRefundOutcome::Completed { .. }));
+    }
+
+    #[test]
+    fn default_cashu_backend_is_stub_with_live_flags_false() {
+        let c = default_cashu_backend();
+        let caps = c.capabilities();
+        assert!(!caps.mint_live);
+        assert!(!caps.spend_live);
+        assert!(!caps.refund_live);
+        assert!(matches!(
+            c.request_mint_invoice(Some(1)).unwrap(),
+            MintQuoteOutcome::Unsupported(_)
+        ));
+        assert!(matches!(
+            c.refund().unwrap(),
+            CashuRefundOutcome::Unsupported(_)
+        ));
+    }
 
     #[test]
     fn parse_cashu_token() {

@@ -361,6 +361,7 @@ pub(super) fn dispatch_send_prompt_inner(
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
+    let routstr_enabled_from_app = app.routstr_enabled;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
@@ -466,6 +467,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     auto_mode_gate: auto_mode_gate_from_app,
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                     voice_stt_language: voice_stt_language_from_app,
+                    routstr_enabled: routstr_enabled_from_app,
                 },
             };
 
@@ -1473,10 +1475,9 @@ pub(super) fn handle_prompt_response(
             });
         }
 
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-        });
+        effects.push(crate::app::dispatch::effect_fetch_billing(
+            agent, agent_id, true,
+        ));
         // Agent borrow ends here; note needs dashboard + agents together.
         note_peek_page_flip_after_drain(app, agent_id);
         return effects;

@@ -678,6 +678,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
+            // SHELL-owned routstr_enabled (Models; `[features]` flag).
+            "routstr_enabled",
             // Session category.
             "auto_compact_threshold_percent",
             // Advanced category.

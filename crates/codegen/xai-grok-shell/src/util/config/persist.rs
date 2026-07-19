@@ -44,6 +44,7 @@ pub async fn save_config(config: &Config) -> Result<()> {
     merge_section(table, "harness", &config.harness);
     merge_section(table, "session", &config.session);
     merge_ask_user_question_section(table, &config.ask_user_question);
+    merge_features_settings_writable(table, config.routstr_enabled);
 
     if config.skills == SkillsConfig::default() {
         table.remove("skills");
@@ -150,6 +151,31 @@ pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std:
         return Err(e);
     }
     Ok(())
+}
+
+/// Merge only settings-writable `[features]` keys. Full `Features` must never
+/// round-trip wholesale: non-`Option` defaults (`support_permission`,
+/// `codebase_indexing`, `non_git_warning`, …) would splat into user config.
+/// When `routstr_enabled` is `None`, leave any existing `[features]` section
+/// untouched (other keys + hand-edited siblings survive).
+fn merge_features_settings_writable(
+    table: &mut TomlMap<String, TomlValue>,
+    routstr_enabled: Option<bool>,
+) {
+    let Some(enabled) = routstr_enabled else {
+        return;
+    };
+    let features = table
+        .entry("features".to_string())
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    // Mirror merge_section recovery: replace a non-table `features` scalar so
+    // a user-initiated write never silently vanishes after the success toast.
+    if !matches!(features, TomlValue::Table(_)) {
+        *features = TomlValue::Table(TomlMap::new());
+    }
+    if let TomlValue::Table(features_table) = features {
+        features_table.insert("routstr_enabled".to_string(), TomlValue::Boolean(enabled));
+    }
 }
 
 /// Merge `[toolset.ask_user_question]` into the root table. `[toolset]` is
@@ -302,6 +328,64 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(false),
             "scalar [toolset] must be replaced so the write lands"
+        );
+    }
+
+    /// `[features].routstr_enabled` write must not splat other Features fields
+    /// and must preserve hand-written sibling keys under `[features]`.
+    #[test]
+    fn features_routstr_enabled_merge_preserves_siblings_and_skips_none() {
+        let root_val: TomlValue =
+            toml::from_str("[features]\nweb_fetch = false\nfeedback = true\n").unwrap();
+        let mut root = root_val.as_table().unwrap().clone();
+        merge_features_settings_writable(&mut root, Some(false));
+        let features = root.get("features").and_then(|v| v.as_table()).unwrap();
+        assert_eq!(
+            features.get("routstr_enabled").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            features.get("web_fetch").and_then(|v| v.as_bool()),
+            Some(false),
+            "hand-written sibling keys must survive"
+        );
+        assert_eq!(
+            features.get("feedback").and_then(|v| v.as_bool()),
+            Some(true),
+            "hand-written sibling keys must survive"
+        );
+        // Must not invent non-Option Features defaults.
+        assert!(
+            features.get("support_permission").is_none(),
+            "must not splat Features::support_permission default"
+        );
+        assert!(
+            features.get("non_git_warning").is_none(),
+            "must not splat Features::non_git_warning default"
+        );
+
+        let reparsed = load_config_from_toml(&TomlValue::Table(root.clone()));
+        assert_eq!(reparsed.routstr_enabled, Some(false));
+
+        // None leaves [features] untouched (and does not create the section).
+        let mut empty_root: TomlMap<String, TomlValue> = TomlMap::new();
+        merge_features_settings_writable(&mut empty_root, None);
+        assert!(
+            empty_root.is_empty(),
+            "None must not create an empty [features] header"
+        );
+
+        // Scalar [features] is replaced so the write still lands.
+        let mut scalar_root: TomlMap<String, TomlValue> = TomlMap::new();
+        scalar_root.insert("features".into(), TomlValue::String("bogus".into()));
+        merge_features_settings_writable(&mut scalar_root, Some(true));
+        assert_eq!(
+            scalar_root
+                .get("features")
+                .and_then(|v| v.get("routstr_enabled"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "scalar [features] must be replaced so the write lands"
         );
     }
 

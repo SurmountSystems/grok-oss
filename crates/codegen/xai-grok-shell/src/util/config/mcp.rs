@@ -49,6 +49,10 @@ pub struct Config {
     /// the settings modal writes; the rest of `[toolset]` never round-trips
     /// (it carries runtime-only structs whose defaults must not hit disk).
     pub ask_user_question: crate::tools::config::AskUserQuestionToolConfig,
+    /// Settings-writable slice of `[features]`. Only `routstr_enabled` today.
+    /// Full [`crate::agent::config::Features`] must **not** round-trip here:
+    /// it has non-`Option` defaults that would splat into user config.toml.
+    pub routstr_enabled: Option<bool>,
 }
 
 pub fn get_mcp_server_config(name: &str) -> Option<McpServerConfig> {

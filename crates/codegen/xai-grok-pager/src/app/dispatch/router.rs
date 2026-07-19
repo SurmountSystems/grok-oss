@@ -54,6 +54,11 @@ use super::rewind::{
     dispatch_rewind_dismiss_error, dispatch_rewind_picker_select, dispatch_rewind_select_mode,
     dispatch_rewind_show_picker,
 };
+use super::routstr::{
+    dispatch_routstr_balance, dispatch_routstr_fund, dispatch_routstr_fund_reentry,
+    dispatch_routstr_qr, dispatch_routstr_refund, dispatch_routstr_spend, dispatch_routstr_topup,
+    dispatch_routstr_watch, dispatch_routstr_watch_stop,
+};
 use super::session::foreign::dispatch_fetch_session_list;
 use super::session::fork::{
     apply_persist_worktree_mode, dispatch_fork, dispatch_fork_resolved, dispatch_project_selected,
@@ -83,9 +88,10 @@ use super::settings::setters::{
     set_economic_mode, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
     set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
     set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_stt_language,
+    set_respect_manual_folds, set_routstr_enabled, set_screen_mode, set_scroll_lines,
+    set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips, set_simple_mode,
+    set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
+    set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -903,6 +909,22 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::RenameSession { title } => dispatch_rename_session(app, title),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
+        Action::RoutstrBalance => dispatch_routstr_balance(app),
+        Action::RoutstrFund => dispatch_routstr_fund(app),
+        Action::RoutstrFundReentry { phrase, password } => {
+            dispatch_routstr_fund_reentry(app, phrase, password)
+        }
+        Action::RoutstrSpend {
+            address,
+            amount_sats,
+            broadcast,
+            fee_rate_sat_vb,
+        } => dispatch_routstr_spend(app, address, amount_sats, broadcast, fee_rate_sat_vb),
+        Action::RoutstrTopup { sats } => dispatch_routstr_topup(app, sats),
+        Action::RoutstrRefund => dispatch_routstr_refund(app),
+        Action::RoutstrWatch { address } => dispatch_routstr_watch(app, address),
+        Action::RoutstrWatchStop => dispatch_routstr_watch_stop(app),
+        Action::RoutstrQr { address } => dispatch_routstr_qr(app, address),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
         Action::ShowPlan => dispatch_show_plan(app),
@@ -969,6 +991,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetMaxThoughtsWidth(v) => set_max_thoughts_width(app, v),
         Action::SetShowTips(v) => set_show_tips(app, v),
         Action::SetAutoUpdate(v) => set_auto_update(app, v),
+        Action::SetRoutstrEnabled(v) => set_routstr_enabled(app, v),
         Action::SetAutoCompactThreshold(v) => set_auto_compact_threshold(app, v),
         Action::SetDisplayRefreshAutoCadence(v) => set_display_refresh_auto_cadence(app, v),
         Action::PreviewTheme(v) => preview_theme(app, v),

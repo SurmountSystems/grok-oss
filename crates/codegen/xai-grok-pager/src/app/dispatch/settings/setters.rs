@@ -2048,13 +2048,14 @@ pub(in crate::app::dispatch) fn set_auto_compact_threshold(
 // ---------------------------------------------------------------------------
 
 /// Effective-default lookup for the `Option<bool>` AppView mirrors
-/// (`show_tips`, `auto_update`, ask_user_question timeout).
+/// (`show_tips`, `auto_update`, `routstr_enabled`, ask_user_question timeout).
 /// Matches the consumer's `.unwrap_or(...)` fallback.
 pub(super) fn pr13_effective_default(key: &str) -> Option<bool> {
     use xai_grok_tools::implementations::grok_build::ask_user_question;
     match key {
         "show_tips" => Some(true),
         "auto_update" => Some(true),
+        "routstr_enabled" => Some(true),
         "toolset.ask_user_question.timeout_enabled" => {
             Some(ask_user_question::DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED)
         }
@@ -2094,6 +2095,38 @@ pub(in crate::app::dispatch) fn set_show_tips(app: &mut AppView, new: bool) -> V
 /// State-only mutation for `auto_update`.
 pub(super) fn set_auto_update_inner(app: &mut AppView, value: bool) {
     app.auto_update = Some(value);
+}
+
+/// State-only mutation for `routstr_enabled`.
+pub(super) fn set_routstr_enabled_inner(app: &mut AppView, value: bool) {
+    app.routstr_enabled = Some(value);
+}
+
+/// Outer dispatcher for `Action::SetRoutstrEnabled`.
+///
+/// SHELL-OWNED: AppView mirror + `[features].routstr_enabled` via
+/// `Effect::PersistSetting`. Catalog resolve is restart-required; balance
+/// fetch re-reads disk after save. Default ON.
+pub(in crate::app::dispatch) fn set_routstr_enabled(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev_state = app.routstr_enabled;
+    let prev_effective = prev_state.unwrap_or(true);
+    if prev_effective == new && prev_state.is_some() {
+        // Idempotent fast-path. `.is_some()` lets the first commit of
+        // the default value persist (so the resolver sees user intent).
+        return vec![];
+    }
+    set_routstr_enabled_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "routstr_enabled", value = new, "setting changed");
+    app.show_toast(&format!(
+        "{} (restart to apply catalog)",
+        save_success_toast("Routstr", new),
+    ));
+    vec![Effect::PersistSetting {
+        key: "routstr_enabled",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev_effective),
+    }]
 }
 
 /// Outer dispatcher for `Action::SetAutoUpdate`.

@@ -201,6 +201,16 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 refresh_context_used(agent, *tokens_after);
                 agent.todo.update_todos(Vec::new());
             }
+            // Mid-turn toast when sampler fails over OpenRouter/Routstr → Grok API.
+            // Match the shared marker (not a bare string) so toast stays in sync
+            // with `emit_provider_failover_retrying`.
+            if let XaiSessionUpdate::RetryState(
+                xai_grok_shell::extensions::notification::RetryState::Retrying { reason, .. },
+            ) = update
+                && reason.contains(xai_grok_shell::sampling::PROVIDER_FAILOVER_REASON_MARKER)
+            {
+                agent.show_toast("Switching to Grok API (provider failover)");
+            }
             changed
         }
         XaiSessionUpdate::ImageCompressed {

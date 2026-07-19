@@ -632,6 +632,9 @@ pub struct WelcomeRenderParams<'a> {
     pub credit_balance: Option<&'a crate::views::credit_bar::CreditBalance>,
     /// Auto top-up rule paired with `credit_balance` for the welcome warning.
     pub auto_topup: Option<&'a crate::views::credit_bar::AutoTopupInfo>,
+    /// App-level Routstr prepaid float (msats) when a key was loaded on startup.
+    /// Surfaced as an informational line; does not replace SuperGrok / xAI warnings.
+    pub routstr_balance: Option<&'a crate::views::credit_bar::RoutstrCreditBalance>,
     /// Whether /usage is visible (false for team users — suppresses the warning).
     pub usage_visible: bool,
     /// Cached changelog bullets for the welcome screen (up to 3).
@@ -2079,10 +2082,18 @@ fn render_welcome_done(
         let warning = p.credit_balance.and_then(|bal| {
             crate::views::credit_bar::usage_warning(bal, p.auto_topup, p.usage_visible)
         });
-        let (usage_warning_text, usage_warning_critical) = match warning {
+        let (mut usage_warning_text, usage_warning_critical) = match warning {
             Some((text, critical)) => (Some(text), critical),
             None => (None, false),
         };
+        // Optional Routstr float line (app-level fetch already populated cache).
+        if let Some(r) = p.routstr_balance {
+            let routstr_line = crate::views::credit_bar::format_routstr_usage_summary(r);
+            usage_warning_text = Some(match usage_warning_text {
+                Some(xai) => format!("{xai} · {routstr_line}"),
+                None => routstr_line,
+            });
+        }
         let usage_info = PromptInfo {
             model_name: p.model_name,
             flags: p.flags,
@@ -2570,6 +2581,7 @@ mod tests {
             cwd: std::path::Path::new("/repo"),
             credit_balance: None,
             auto_topup: None,
+            routstr_balance: None,
             usage_visible: true,
             changelog_bullets: &[],
             changelog_has_full_notes: false,

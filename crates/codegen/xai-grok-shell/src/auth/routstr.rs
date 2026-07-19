@@ -224,16 +224,56 @@ pub fn parse_routstr_balance_msats(body: &str) -> Option<u64> {
     None
 }
 
+/// Whether product code should attempt a Routstr balance network fetch.
+///
+/// When `[features] routstr_enabled = false`, the catalog entry is omitted and
+/// balance chrome must not hit the Routstr API either. Pure helper for tests
+/// and call sites that already know the feature flag.
+pub fn should_fetch_routstr_balance(routstr_enabled: bool) -> bool {
+    routstr_enabled
+}
+
+/// Read `[features].routstr_enabled` from a raw TOML config root (default true).
+///
+/// Mirrors [`crate::agent::config::routstr_catalog_enabled`] without needing a
+/// fully parsed [`crate::agent::config::Config`].
+pub fn routstr_enabled_from_raw_config(root: &toml::Value) -> bool {
+    root.get("features")
+        .and_then(|f| f.get("routstr_enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// Load disk config and return whether Routstr balance fetches are allowed.
+///
+/// Defaults to **enabled** when config is unreadable so a missing/broken file
+/// never silently disables a configured key path.
+pub fn routstr_balance_fetch_enabled_from_disk() -> bool {
+    match crate::config::load_effective_config_disk_only() {
+        Ok(root) => should_fetch_routstr_balance(routstr_enabled_from_raw_config(&root)),
+        Err(_) => true,
+    }
+}
+
 /// Fetch remaining Routstr balance (msats) for the configured key.
 ///
-/// Returns `None` when no key is available, the request fails, or the body
-/// cannot be parsed.
+/// Returns `None` when Routstr is disabled in config, no key is available, the
+/// request fails, or the body cannot be parsed.
 pub async fn fetch_routstr_balance_msats() -> Option<u64> {
+    if !routstr_balance_fetch_enabled_from_disk() {
+        tracing::debug!("routstr balance: skipped (features.routstr_enabled=false)");
+        return None;
+    }
     let key = load_routstr_api_key_default().ok().flatten()?;
     fetch_routstr_balance_msats_with_key(&key).await
 }
 
-/// Same as [`fetch_routstr_balance_msats`] with an explicit API key.
+/// Fetch Routstr balance with an explicit API key.
+///
+/// **Ungated:** does **not** consult `[features] routstr_enabled`. Use only from
+/// tests or callers that already decided a network hit is allowed.
+/// Product paths must use [`fetch_routstr_balance_msats`], which applies the
+/// feature gate (and key load) before calling this helper.
 pub async fn fetch_routstr_balance_msats_with_key(api_key: &str) -> Option<u64> {
     let key = api_key.trim();
     if key.is_empty() {
@@ -331,6 +371,10 @@ pub fn format_routstr_balance_line(msats: u64) -> String {
 
 /// `grok routstr balance`: fetch remaining prepaid float when a key is present.
 pub async fn run_routstr_balance() -> Result<(), RoutstrCliError> {
+    // Config-disabled is not a network/key failure — surface that before fetch.
+    if !routstr_balance_fetch_enabled_from_disk() {
+        return Err(RoutstrCliError::FeatureDisabled);
+    }
     if !has_routstr_api_key() {
         return Err(RoutstrCliError::NoApiKey);
     }
@@ -347,33 +391,353 @@ pub async fn run_routstr_balance() -> Result<(), RoutstrCliError> {
 }
 
 /// `grok routstr topup`: next steps until CDK/LN pay path lands.
+///
+/// Honest stub: does **not** create invoices or spend Bitcoin.
 pub fn run_routstr_topup(sats: Option<u64>) -> Result<(), RoutstrCliError> {
-    eprintln!("Routstr top up (Lightning / Cashu pay path is not wired yet).");
-    if let Some(s) = sats {
-        eprintln!("Requested amount: {s} sats.");
+    for line in grok_bitcoin_wallet::funding_cli::topup_next_steps_lines(sats) {
+        eprintln!("{line}");
     }
-    eprintln!("Next steps:");
-    eprintln!("  1. `grok login --routstr` with a sk- or cashuA… bearer if you have one.");
-    eprintln!("  2. `grok routstr fund` to create a local wallet and show a receive address.");
-    eprintln!("  3. Pay a Routstr BOLT11 invoice from docs.routstr.com when you need node float.");
-    eprintln!("  4. `grok routstr balance` to verify prepaid float after funding.");
-    eprintln!("Local LDK pay and CDK mint/spend remain residual (see RESIDUAL.md).");
     Ok(())
 }
 
 /// `grok routstr refund`: next steps until CDK refund path lands.
+///
+/// Honest stub: does **not** claim a completed refund.
 pub fn run_routstr_refund() -> Result<(), RoutstrCliError> {
-    eprintln!("Routstr refund (Cashu return path is not wired yet).");
-    eprintln!("Next steps:");
-    eprintln!(
-        "  1. Prefer spending down hot float rather than leaving large balances on the node."
-    );
-    eprintln!(
-        "  2. Use Routstr account tools / docs.routstr.com for manual Cashu export if available."
-    );
-    eprintln!("  3. `grok routstr balance` to check remaining float.");
-    eprintln!("Automated refund via CDK remains residual (see RESIDUAL.md).");
+    for line in grok_bitcoin_wallet::funding_cli::refund_next_steps_lines() {
+        eprintln!("{line}");
+    }
     Ok(())
+}
+
+/// Successful local prepare (+ optional broadcast) for on-chain spend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutstrSpendSuccess {
+    pub payment_address: String,
+    pub payment_sats: u64,
+    pub fee_sats: u64,
+    pub change_sats: u64,
+    pub txid: String,
+    pub raw_hex: String,
+    /// Set only when a broadcaster accepted the tx (never invented).
+    pub broadcast_txid: Option<String>,
+    pub network_label: String,
+    pub lines: Vec<String>,
+}
+
+/// `grok routstr spend <address> <sats> [--broadcast] [--fee-rate N]`.
+///
+/// **Dry-run by default** (build/sign/extract only). Explicit `--broadcast`
+/// submits via rate-limited mempool.space. Requires SeedVault unlock + full
+/// recovery-phrase re-entry (same gate as fund). Never mints a new wallet;
+/// keyring errors never mint.
+pub fn run_routstr_spend(
+    grok_home: &Path,
+    payment_address: &str,
+    amount_sats: u64,
+    broadcast: bool,
+    fee_rate_sat_vb: Option<u64>,
+) -> Result<RoutstrSpendSuccess, RoutstrCliError> {
+    use grok_bitcoin_wallet::funding_cli::{
+        FundPathDecision, fund_path_decision_from_load, keyring_blocked_message,
+        parse_spend_request, password_required_message,
+    };
+    use grok_bitcoin_wallet::seed_vault::{SeedVault, UnlockSession, VaultPassword};
+    use std::time::Instant;
+
+    let req = parse_spend_request(payment_address, amount_sats, broadcast, fee_rate_sat_vb)
+        .map_err(|e| RoutstrCliError::Message(e.to_string()))?;
+
+    let aead_path = routstr_seed_aead_path(grok_home);
+    let vault = SeedVault::with_aead_path(&aead_path).map_err(RoutstrCliError::Wallet)?;
+    let network_str = std::env::var("GROK_BITCOIN_NETWORK").unwrap_or_else(|_| "mainnet".into());
+    let network_label = {
+        let t = network_str.trim();
+        if t.is_empty() { "mainnet" } else { t }
+    }
+    .to_owned();
+
+    let mnemonic = match vault.load(None) {
+        Ok(m) => m,
+        Err(e) => match fund_path_decision_from_load::<()>(Err(e)) {
+            FundPathDecision::NeedPassword => {
+                let pw_raw = read_secret_prompt("Unlock seed file password: ")?;
+                let pw = VaultPassword::new(pw_raw);
+                if pw.expose().is_empty() {
+                    return Err(RoutstrCliError::Message(password_required_message().into()));
+                }
+                vault.load(Some(&pw)).map_err(RoutstrCliError::Wallet)?
+            }
+            FundPathDecision::KeyringBlocked { reason } => {
+                return Err(RoutstrCliError::Message(keyring_blocked_message(&reason)));
+            }
+            FundPathDecision::NewWallet => {
+                return Err(RoutstrCliError::Message(
+                    "no local wallet found. Run `grok routstr fund` first (new-wallet path)."
+                        .into(),
+                ));
+            }
+            FundPathDecision::LoadError { message } => {
+                return Err(RoutstrCliError::Message(message));
+            }
+            FundPathDecision::ReturningUnlock => {
+                return Err(RoutstrCliError::Message(
+                    "internal spend path: unexpected ReturningUnlock on load error".into(),
+                ));
+            }
+        },
+    };
+
+    // Re-entry gate (same as fund): authorize spend without re-displaying words.
+    eprintln!(
+        "Authorize on-chain spend: re-enter your recovery phrase (words are not re-displayed)."
+    );
+    eprint!("Recovery phrase: ");
+    io::stderr().flush()?;
+    let mut reentry = String::new();
+    io::stdin().read_line(&mut reentry)?;
+
+    let mut session = UnlockSession::unlock_default(mnemonic);
+    let unlocked = session
+        .mnemonic(Instant::now())
+        .map_err(RoutstrCliError::Wallet)?;
+    // Confirm re-entry matches vault material (begin_reentry + confirm).
+    {
+        use grok_bitcoin_wallet::seed_vault::MnemonicBackupGate;
+        let mut gate = MnemonicBackupGate::new();
+        gate.begin_reentry_without_display(unlocked)
+            .map_err(RoutstrCliError::Wallet)?;
+        if reentry.trim().is_empty() {
+            session.lock();
+            return Err(RoutstrCliError::Message(
+                "recovery phrase re-entry cancelled; not spending".into(),
+            ));
+        }
+        gate.confirm_reentry(&reentry).map_err(|e| {
+            session.lock();
+            RoutstrCliError::Wallet(e)
+        })?;
+    }
+
+    let unlocked = session
+        .mnemonic(Instant::now())
+        .map_err(RoutstrCliError::Wallet)?;
+
+    let success = complete_routstr_spend_with_mnemonic(
+        unlocked,
+        &network_str,
+        &req.payment_address,
+        req.amount_sats,
+        req.broadcast,
+        req.fee_rate_sat_vb,
+    )?;
+    session.lock();
+
+    for line in &success.lines {
+        // Prepared summary on stderr; keep the full raw-hex block off stderr so
+        // dry-run can put hex alone on stdout for pipes (filter label + body +
+        // copy note, not just the "Raw tx hex" prefix).
+        if grok_bitcoin_wallet::funding_cli::is_spend_raw_hex_output_line(line, &success.raw_hex) {
+            continue;
+        }
+        eprintln!("{line}");
+    }
+    if success.broadcast_txid.is_none() && !req.broadcast {
+        println!("{}", success.raw_hex);
+        eprintln!("(Full raw tx hex written to stdout above for inspection / external broadcast.)");
+    } else if let Some(ref txid) = success.broadcast_txid {
+        println!("{txid}");
+    }
+
+    let _ = network_label; // success.network_label already set
+    Ok(success)
+}
+
+/// Core spend after vault unlock + re-entry (shared by CLI and TUI complete path).
+///
+/// Does **not** print or return BIP-39. Uses live mempool ChainSource + optional
+/// broadcast when `explorer-http` is compiled in (shell enables it).
+pub fn complete_routstr_spend_with_mnemonic(
+    mnemonic: &grok_bitcoin_wallet::mnemonic::MnemonicSecret,
+    network_str: &str,
+    payment_address: &str,
+    amount_sats: u64,
+    broadcast: bool,
+    fee_rate_sat_vb: u64,
+) -> Result<RoutstrSpendSuccess, RoutstrCliError> {
+    use grok_bitcoin_wallet::address_ux::BitcoinNetwork;
+    use grok_bitcoin_wallet::descriptor_wallet::{
+        DEFAULT_RECEIVE_GAP, DescriptorWallet, broadcast_raw_tx, select_and_prepare_bip84_spend,
+    };
+    use grok_bitcoin_wallet::funding_cli::{
+        format_spend_broadcast_failed_lines, format_spend_broadcast_success_lines,
+        format_spend_prepared_lines,
+    };
+
+    let network_label = {
+        let t = network_str.trim();
+        if t.is_empty() { "mainnet" } else { t }
+    }
+    .to_owned();
+    let btc_net = BitcoinNetwork::from_env_str(&network_label).unwrap_or(BitcoinNetwork::Mainnet);
+
+    let wallet =
+        DescriptorWallet::from_mnemonic_env_network(mnemonic, &network_label, DEFAULT_RECEIVE_GAP)
+            .map_err(RoutstrCliError::Wallet)?;
+
+    // Live chain: MempoolChainSource (shell/pager enable explorer-http).
+    let chain = grok_bitcoin_wallet::descriptor_wallet::MempoolChainSource::with_defaults(btc_net)
+        .map_err(RoutstrCliError::Wallet)?;
+
+    let prepared = select_and_prepare_bip84_spend(
+        &wallet,
+        &chain,
+        mnemonic,
+        payment_address,
+        amount_sats,
+        fee_rate_sat_vb,
+        DEFAULT_RECEIVE_GAP,
+    )
+    .map_err(RoutstrCliError::Wallet)?;
+
+    let raw_hex = prepared.raw_hex();
+    let txid = prepared.txid_hex();
+    let mut lines = format_spend_prepared_lines(
+        payment_address,
+        prepared.payment_sats,
+        prepared.fee_sats,
+        prepared.change_sats,
+        &txid,
+        &raw_hex,
+        broadcast,
+    );
+
+    let broadcast_txid = if broadcast {
+        let mut client = grok_bitcoin_wallet::explorer::MempoolHttpClient::with_defaults(btc_net)
+            .map_err(RoutstrCliError::Wallet)?;
+        match broadcast_raw_tx(&mut client, &raw_hex) {
+            Ok(res) => {
+                lines.extend(format_spend_broadcast_success_lines(
+                    &res.txid,
+                    &network_label,
+                ));
+                Some(res.txid)
+            }
+            Err(e) => {
+                // Failure after local prepare: append full hex so CLI/TUI can
+                // external-broadcast without re-running unlock (never claims accept).
+                lines.extend(format_spend_broadcast_failed_lines(
+                    &e.to_string(),
+                    &raw_hex,
+                ));
+                return Err(RoutstrCliError::Message(lines.join("\n")));
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(RoutstrSpendSuccess {
+        payment_address: payment_address.to_owned(),
+        payment_sats: prepared.payment_sats,
+        fee_sats: prepared.fee_sats,
+        change_sats: prepared.change_sats,
+        txid,
+        raw_hex,
+        broadcast_txid,
+        network_label,
+        lines,
+    })
+}
+
+/// TUI spend after unlock re-entry (no BIP-39 in returned payload).
+pub fn complete_routstr_spend_reentry_for_tui(
+    grok_home: &Path,
+    reentry_phrase: &str,
+    password: Option<&str>,
+    payment_address: &str,
+    amount_sats: u64,
+    broadcast: bool,
+    fee_rate_sat_vb: u64,
+) -> Result<RoutstrSpendSuccess, RoutstrCliError> {
+    use grok_bitcoin_wallet::funding_cli::{
+        FundPathDecision, fund_path_decision_from_load, keyring_blocked_message,
+        password_required_message,
+    };
+    use grok_bitcoin_wallet::seed_vault::{
+        MnemonicBackupGate, SeedVault, UnlockSession, VaultPassword,
+    };
+    use std::time::Instant;
+
+    let aead_path = routstr_seed_aead_path(grok_home);
+    let vault = SeedVault::with_aead_path(&aead_path).map_err(RoutstrCliError::Wallet)?;
+    let network_str = std::env::var("GROK_BITCOIN_NETWORK").unwrap_or_else(|_| "mainnet".into());
+
+    let pw;
+    let password_ref = match password.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            pw = VaultPassword::new(raw.to_owned());
+            Some(&pw)
+        }
+        None => None,
+    };
+
+    let mnemonic = match vault.load(password_ref) {
+        Ok(m) => m,
+        Err(e) => match fund_path_decision_from_load::<()>(Err(e)) {
+            FundPathDecision::NeedPassword => {
+                return Err(RoutstrCliError::Message(password_required_message().into()));
+            }
+            FundPathDecision::KeyringBlocked { reason } => {
+                return Err(RoutstrCliError::Message(keyring_blocked_message(&reason)));
+            }
+            FundPathDecision::NewWallet => {
+                return Err(RoutstrCliError::Message(
+                    "no local wallet found. Run `grok routstr fund` in a private terminal first."
+                        .into(),
+                ));
+            }
+            FundPathDecision::LoadError { message } => {
+                return Err(RoutstrCliError::Message(message));
+            }
+            FundPathDecision::ReturningUnlock => {
+                return Err(RoutstrCliError::Message(
+                    "internal spend path: unexpected ReturningUnlock on load error".into(),
+                ));
+            }
+        },
+    };
+
+    let mut session = UnlockSession::unlock_default(mnemonic);
+    let unlocked = session
+        .mnemonic(Instant::now())
+        .map_err(RoutstrCliError::Wallet)?;
+    let mut gate = MnemonicBackupGate::new();
+    gate.begin_reentry_without_display(unlocked)
+        .map_err(RoutstrCliError::Wallet)?;
+    if reentry_phrase.trim().is_empty() {
+        session.lock();
+        return Err(RoutstrCliError::Message(
+            "recovery phrase re-entry cancelled; not spending".into(),
+        ));
+    }
+    gate.confirm_reentry(reentry_phrase).map_err(|e| {
+        session.lock();
+        RoutstrCliError::Wallet(e)
+    })?;
+    let unlocked = session
+        .mnemonic(Instant::now())
+        .map_err(RoutstrCliError::Wallet)?;
+    let success = complete_routstr_spend_with_mnemonic(
+        unlocked,
+        &network_str,
+        payment_address,
+        amount_sats,
+        broadcast,
+        fee_rate_sat_vb,
+    )?;
+    session.lock();
+    Ok(success)
 }
 
 /// AEAD seed blob path under grok home (never `provider_credentials.json`).
@@ -457,16 +821,16 @@ fn store_seed_in_vault(
     }
 }
 
-fn print_fund_success(address: &str, step_label: &str, network_label: &str) {
+fn print_fund_success(address: &str, step_label: &str, network_label: &str, saved: bool) {
     println!();
-    println!("Backup confirmed. Wallet saved. Receive address ({network_label}):");
-    println!("{address}");
-    println!("Funding status: {step_label}");
-    println!(
-        "Send only Bitcoin to this address. After you broadcast a deposit, confirmation \
-         watching uses the rate-limited mempool.space client."
-    );
-    println!("BOLT12 offers are not supported in this build.");
+    for line in grok_bitcoin_wallet::funding_cli::format_fund_success_lines(
+        address,
+        step_label,
+        network_label,
+        saved,
+    ) {
+        println!("{line}");
+    }
 }
 
 /// `grok routstr fund`: backup gate + unlock, then print BIP84 receive address.
@@ -481,21 +845,15 @@ fn print_fund_success(address: &str, step_label: &str, network_label: &str) {
 /// `$GROK_HOME/bitcoin/seed.aead`). Hard keyring errors never mint a new wallet.
 pub fn run_routstr_fund(grok_home: &Path) -> Result<(), RoutstrCliError> {
     use grok_bitcoin_wallet::BOLT12_SUPPORTED;
-    use grok_bitcoin_wallet::cashu::FundingWizard;
-    use grok_bitcoin_wallet::error::WalletError;
     use grok_bitcoin_wallet::funding_cli::{
         generate_new_wallet_mnemonic, run_backup_gate_to_show_address_stdio,
     };
     use grok_bitcoin_wallet::onchain::derive_bip84_receive_address_env_network;
-    use grok_bitcoin_wallet::seed_vault::{
-        MnemonicBackupGate, SeedVault, UnlockSession, VaultPassword,
-    };
+    use grok_bitcoin_wallet::seed_vault::{SeedVault, UnlockSession, VaultPassword};
     use std::time::Instant;
 
-    debug_assert!(
-        !BOLT12_SUPPORTED,
-        "BOLT12 must stay false until offer routing lands"
-    );
+    // Compile-time honesty: BOLT12 must stay false until offer routing lands.
+    const _: () = assert!(!BOLT12_SUPPORTED);
 
     let aead_path = routstr_seed_aead_path(grok_home);
     let vault = SeedVault::with_aead_path(&aead_path).map_err(RoutstrCliError::Wallet)?;
@@ -506,58 +864,73 @@ pub fn run_routstr_fund(grok_home: &Path) -> Result<(), RoutstrCliError> {
     };
 
     // Prefer keyring; AEAD may need a password. Never treat Keyring errors as empty.
+    // Shared classify with TUI fund path (`funding_cli::fund_path_decision_from_load`).
     let existing = match vault.load(None) {
         Ok(m) => Some(m),
-        Err(WalletError::NotFound) => None,
-        Err(WalletError::PasswordRequired) => {
-            let pw_raw = read_secret_prompt("Unlock seed file password: ")?;
-            let pw = VaultPassword::new(pw_raw);
-            if pw.expose().is_empty() {
-                return Err(RoutstrCliError::Message(
-                    "password required to unlock existing seed file".into(),
-                ));
+        Err(e) => {
+            use grok_bitcoin_wallet::funding_cli::{
+                FundPathDecision, fund_path_decision_from_load, keyring_blocked_message,
+                password_required_message,
+            };
+            match fund_path_decision_from_load::<()>(Err(e)) {
+                FundPathDecision::NewWallet => None,
+                FundPathDecision::NeedPassword => {
+                    let pw_raw = read_secret_prompt("Unlock seed file password: ")?;
+                    let pw = VaultPassword::new(pw_raw);
+                    if pw.expose().is_empty() {
+                        return Err(RoutstrCliError::Message(password_required_message().into()));
+                    }
+                    Some(vault.load(Some(&pw)).map_err(RoutstrCliError::Wallet)?)
+                }
+                FundPathDecision::KeyringBlocked { reason } => {
+                    return Err(RoutstrCliError::Message(keyring_blocked_message(&reason)));
+                }
+                FundPathDecision::LoadError { message } => {
+                    return Err(RoutstrCliError::Message(message));
+                }
+                FundPathDecision::ReturningUnlock => {
+                    // Unreachable: we only classify Err here.
+                    return Err(RoutstrCliError::Message(
+                        "internal fund path: unexpected ReturningUnlock on load error".into(),
+                    ));
+                }
             }
-            Some(vault.load(Some(&pw)).map_err(RoutstrCliError::Wallet)?)
         }
-        Err(WalletError::Keyring(e)) => {
-            return Err(RoutstrCliError::Message(format!(
-                "could not read seed vault ({e}); not creating a new wallet. \
-                 Fix keyring access or unlock the AEAD seed file, then retry."
-            )));
-        }
-        Err(e) => return Err(RoutstrCliError::Wallet(e)),
     };
 
     if let Some(mnemonic) = existing {
-        // Returning user: re-entry without re-displaying words.
+        // Returning user: re-entry without re-displaying words (shared with TUI).
         eprintln!(
             "Local wallet found. Re-enter your recovery phrase to unlock the receive address."
         );
         eprintln!("(Words are not re-displayed.)");
-
-        let mut gate = MnemonicBackupGate::new();
-        gate.begin_reentry_without_display(&mnemonic)
-            .map_err(RoutstrCliError::Wallet)?;
         eprint!("Recovery phrase: ");
         io::stderr().flush()?;
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
-        gate.confirm_reentry(&line)
-            .map_err(RoutstrCliError::Wallet)?;
 
         let mut session = UnlockSession::unlock_default(mnemonic);
         let now = Instant::now();
         let unlocked = session.mnemonic(now).map_err(RoutstrCliError::Wallet)?;
         let address = derive_bip84_receive_address_env_network(unlocked, &network_str, 0)
             .map_err(RoutstrCliError::Wallet)?;
+        // Re-borrow for re-entry gate (same material; no clone of phrase).
+        let unlocked = session
+            .mnemonic(Instant::now())
+            .map_err(RoutstrCliError::Wallet)?;
+        let reveal = grok_bitcoin_wallet::funding_cli::returning_user_reveal_after_reentry(
+            unlocked, &line, address,
+        )
+        .map_err(RoutstrCliError::Wallet)?;
         session.lock();
 
-        let mut wizard = FundingWizard::new();
-        wizard
-            .show_address_with_backup_gate(address.clone(), &gate)
-            .map_err(RoutstrCliError::Wallet)?;
-
-        print_fund_success(&address, wizard.step.user_label(), network_label);
+        // Returning unlock: vault already held the seed; do not claim "Wallet saved."
+        print_fund_success(
+            &reveal.address,
+            reveal.wizard.step.user_label(),
+            network_label,
+            false,
+        );
         return Ok(());
     }
 
@@ -588,12 +961,156 @@ pub fn run_routstr_fund(grok_home: &Path) -> Result<(), RoutstrCliError> {
         return Err(e);
     }
 
+    // New wallet: durable store succeeded above.
     print_fund_success(
         &reveal.address,
         reveal.wizard.step.user_label(),
         network_label,
+        true,
     );
     Ok(())
+}
+
+/// TUI probe after vault load (no secrets). Drives pager fund UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutstrFundProbe {
+    /// No seed: recovery phrase must be shown once. Prefer private terminal CLI.
+    NeedCliNewWallet { aead_hint: String },
+    /// AEAD present; need password before re-entry.
+    NeedPassword,
+    /// Keyring hard error: do not mint.
+    KeyringBlocked { message: String },
+    /// Seed available (keyring): collect re-entry phrase in TUI (not re-displayed).
+    NeedReentry,
+    /// Other load failure.
+    Error { message: String },
+}
+
+/// Successful TUI fund reveal (address only; never includes BIP-39).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutstrFundSuccess {
+    pub address: String,
+    pub network_label: String,
+    pub step_label: String,
+    pub lines: Vec<String>,
+}
+
+/// Probe seed vault for TUI `/routstr fund` without minting or printing seeds.
+pub fn probe_routstr_fund_for_tui(grok_home: &Path) -> RoutstrFundProbe {
+    use grok_bitcoin_wallet::funding_cli::{
+        FundPathDecision, fund_path_decision_from_load, keyring_blocked_message,
+    };
+    use grok_bitcoin_wallet::seed_vault::SeedVault;
+
+    let aead_path = routstr_seed_aead_path(grok_home);
+    let aead_hint = aead_path.display().to_string();
+    let vault = match SeedVault::with_aead_path(&aead_path) {
+        Ok(v) => v,
+        Err(e) => {
+            return RoutstrFundProbe::Error {
+                message: e.to_string(),
+            };
+        }
+    };
+    match fund_path_decision_from_load(vault.load(None)) {
+        FundPathDecision::NewWallet => RoutstrFundProbe::NeedCliNewWallet { aead_hint },
+        FundPathDecision::ReturningUnlock => RoutstrFundProbe::NeedReentry,
+        FundPathDecision::NeedPassword => RoutstrFundProbe::NeedPassword,
+        FundPathDecision::KeyringBlocked { reason } => RoutstrFundProbe::KeyringBlocked {
+            message: keyring_blocked_message(&reason),
+        },
+        FundPathDecision::LoadError { message } => RoutstrFundProbe::Error { message },
+    }
+}
+
+/// Complete TUI fund for returning wallet: password (optional) + re-entry + address.
+///
+/// Never mints a new wallet. Never puts BIP-39 in the returned success payload.
+pub fn complete_routstr_fund_reentry_for_tui(
+    grok_home: &Path,
+    reentry_phrase: &str,
+    password: Option<&str>,
+) -> Result<RoutstrFundSuccess, RoutstrCliError> {
+    use grok_bitcoin_wallet::funding_cli::{
+        FundPathDecision, fund_path_decision_from_load, keyring_blocked_message,
+        password_required_message, returning_user_reveal_after_reentry,
+    };
+    use grok_bitcoin_wallet::onchain::derive_bip84_receive_address_env_network;
+    use grok_bitcoin_wallet::seed_vault::{SeedVault, UnlockSession, VaultPassword};
+    use std::time::Instant;
+
+    let aead_path = routstr_seed_aead_path(grok_home);
+    let vault = SeedVault::with_aead_path(&aead_path).map_err(RoutstrCliError::Wallet)?;
+    let network_str = std::env::var("GROK_BITCOIN_NETWORK").unwrap_or_else(|_| "mainnet".into());
+    let network_label = {
+        let t = network_str.trim();
+        if t.is_empty() { "mainnet" } else { t }
+    }
+    .to_owned();
+
+    let pw;
+    let password_ref = match password.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            pw = VaultPassword::new(raw.to_owned());
+            Some(&pw)
+        }
+        None => None,
+    };
+
+    let mnemonic = match vault.load(password_ref) {
+        Ok(m) => m,
+        Err(e) => match fund_path_decision_from_load::<()>(Err(e)) {
+            FundPathDecision::NeedPassword => {
+                return Err(RoutstrCliError::Message(password_required_message().into()));
+            }
+            FundPathDecision::KeyringBlocked { reason } => {
+                return Err(RoutstrCliError::Message(keyring_blocked_message(&reason)));
+            }
+            FundPathDecision::NewWallet => {
+                return Err(RoutstrCliError::Message(
+                    "no local wallet found. Run `grok routstr fund` in a private terminal \
+                     to create one (recovery phrase is shown only once)."
+                        .into(),
+                ));
+            }
+            FundPathDecision::LoadError { message } => {
+                return Err(RoutstrCliError::Message(message));
+            }
+            FundPathDecision::ReturningUnlock => {
+                return Err(RoutstrCliError::Message(
+                    "internal fund path: unexpected ReturningUnlock on load error".into(),
+                ));
+            }
+        },
+    };
+
+    let mut session = UnlockSession::unlock_default(mnemonic);
+    let unlocked = session
+        .mnemonic(Instant::now())
+        .map_err(RoutstrCliError::Wallet)?;
+    let address = derive_bip84_receive_address_env_network(unlocked, &network_str, 0)
+        .map_err(RoutstrCliError::Wallet)?;
+    let unlocked = session
+        .mnemonic(Instant::now())
+        .map_err(RoutstrCliError::Wallet)?;
+    let reveal = returning_user_reveal_after_reentry(unlocked, reentry_phrase, address)
+        .map_err(RoutstrCliError::Wallet)?;
+    session.lock();
+
+    let step_label = reveal.wizard.step.user_label().to_owned();
+    // TUI re-entry never stores again; avoid "Wallet saved." copy.
+    let lines = grok_bitcoin_wallet::funding_cli::format_fund_success_lines(
+        &reveal.address,
+        &step_label,
+        &network_label,
+        false,
+    );
+    Ok(RoutstrFundSuccess {
+        address: reveal.address,
+        network_label,
+        step_label,
+        lines,
+    })
 }
 
 /// Errors from `grok routstr` product subcommands.
@@ -603,6 +1120,9 @@ pub enum RoutstrCliError {
     NoApiKey,
     #[error("Could not fetch Routstr balance. Check network access and that the key is valid.")]
     BalanceUnavailable,
+    /// `[features] routstr_enabled = false` — network fetch intentionally skipped.
+    #[error("Routstr is disabled (`[features] routstr_enabled = false`). Balance fetch skipped.")]
+    FeatureDisabled,
     #[error(transparent)]
     Wallet(#[from] grok_bitcoin_wallet::error::WalletError),
     #[error(transparent)]
@@ -638,6 +1158,58 @@ mod tests {
     }
 
     #[test]
+    fn should_fetch_routstr_balance_respects_feature_flag() {
+        assert!(should_fetch_routstr_balance(true));
+        assert!(!should_fetch_routstr_balance(false));
+    }
+
+    #[test]
+    fn feature_disabled_cli_error_is_not_network_or_key_wording() {
+        let msg = RoutstrCliError::FeatureDisabled.to_string();
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            lower.contains("disabled") && lower.contains("routstr_enabled"),
+            "expected feature-disabled wording: {msg}"
+        );
+        assert!(
+            !lower.contains("network") && !lower.contains("key is valid"),
+            "must not look like BalanceUnavailable: {msg}"
+        );
+        // BalanceUnavailable remains the transport/key failure path.
+        let unavail = RoutstrCliError::BalanceUnavailable
+            .to_string()
+            .to_ascii_lowercase();
+        assert!(unavail.contains("network") || unavail.contains("key"));
+    }
+
+    #[test]
+    fn routstr_enabled_from_raw_config_defaults_true() {
+        let empty: toml::Value = toml::from_str("").unwrap();
+        assert!(routstr_enabled_from_raw_config(&empty));
+
+        let on: toml::Value = toml::from_str(
+            r#"
+[features]
+routstr_enabled = true
+"#,
+        )
+        .unwrap();
+        assert!(routstr_enabled_from_raw_config(&on));
+
+        let off: toml::Value = toml::from_str(
+            r#"
+[features]
+routstr_enabled = false
+"#,
+        )
+        .unwrap();
+        assert!(!routstr_enabled_from_raw_config(&off));
+        assert!(!should_fetch_routstr_balance(
+            routstr_enabled_from_raw_config(&off)
+        ));
+    }
+
+    #[test]
     fn format_balance_line_sats_and_remainder() {
         assert_eq!(
             format_routstr_balance_line(2_100_000),
@@ -654,6 +1226,21 @@ mod tests {
         let p = routstr_seed_aead_path(std::path::Path::new("/tmp/grok-home"));
         assert!(p.ends_with("bitcoin/seed.aead"));
         assert!(!p.ends_with("provider_credentials.json"));
+    }
+
+    #[test]
+    fn topup_and_refund_stubs_do_not_claim_live_pay() {
+        // Shared copy with TUI (`funding_cli`); CLI must stay honest.
+        let top = grok_bitcoin_wallet::funding_cli::topup_next_steps_lines(Some(1000))
+            .join(" ")
+            .to_ascii_lowercase();
+        assert!(top.contains("not wired") || top.contains("not available"));
+        assert!(!top.contains("invoice created"));
+        let refnd = grok_bitcoin_wallet::funding_cli::refund_next_steps_lines()
+            .join(" ")
+            .to_ascii_lowercase();
+        assert!(refnd.contains("not wired") || refnd.contains("not available"));
+        assert!(!refnd.contains("refund completed"));
     }
 
     #[test]

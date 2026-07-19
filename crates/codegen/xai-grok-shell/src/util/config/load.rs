@@ -105,6 +105,12 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .and_then(|t| t.get("ask_user_question"))
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default(),
+        // Only the settings-writable Features key — never load full Features
+        // into util Config (save would otherwise risk dumping defaults).
+        routstr_enabled: table
+            .get("features")
+            .and_then(|f| f.get("routstr_enabled"))
+            .and_then(|v| v.as_bool()),
     }
 }
 /// Resolve permission config with project override semantics.

@@ -980,10 +980,9 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 session_id: hydrate_sid.clone(),
             });
         }
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-        });
+        effects.push(crate::app::dispatch::effect_fetch_billing(
+            agent, agent_id, true,
+        ));
         if let Some((model_id, effort)) = deferred {
             agent.session.model_switch_pending = true;
             effects.push(Effect::SwitchModel {

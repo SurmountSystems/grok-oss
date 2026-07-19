@@ -24,6 +24,10 @@ use super::rewind::{
     handle_rewind_preview_complete, handle_rewind_preview_failed,
 };
 use super::router::{dispatch, dispatch_action_result};
+use super::routstr::{
+    handle_routstr_fund_completed, handle_routstr_fund_probed, handle_routstr_spend_completed,
+    handle_routstr_watch_tick,
+};
 use super::session::foreign::{
     handle_foreign_sessions_scanned, handle_session_list_failed, handle_session_list_loaded,
 };
@@ -278,6 +282,22 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::RoutstrSpendCompleted { agent_id, result } => {
+            handle_routstr_spend_completed(app, agent_id, result)
+        }
+        TaskResult::RoutstrFundProbed { agent_id, probe } => {
+            handle_routstr_fund_probed(app, agent_id, probe)
+        }
+        TaskResult::RoutstrFundCompleted { agent_id, result } => {
+            handle_routstr_fund_completed(app, agent_id, result)
+        }
+        TaskResult::RoutstrWatchTick {
+            agent_id,
+            generation,
+            status_line,
+            confirmed,
+            address,
+        } => handle_routstr_watch_tick(app, agent_id, generation, status_line, confirmed, address),
         TaskResult::GateRefreshed { settings } => handle_gate_refreshed(app, settings),
         TaskResult::SessionLoaded {
             agent_id,

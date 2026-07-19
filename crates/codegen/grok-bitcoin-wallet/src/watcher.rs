@@ -696,6 +696,78 @@ mod tests {
 /// callers must not spin tighter than this without a user-triggered refresh.
 pub const DEFAULT_WATCH_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Pure lifecycle for a pager / TUI background watch task.
+///
+/// Holds no explorer handles; product code owns a [`WatchSession`] and uses this
+/// to decide whether an async poll result is still current after stop/restart.
+///
+/// **Product wiring:** the pager currently mirrors these generation/running/
+/// address rules on `AppView` fields (`routstr_watch_generation`,
+/// `routstr_watch_address`, …) via `dispatch/routstr.rs` helpers
+/// (`start_routstr_watch_for_agent`, `watch_tick_accepts`). Keep those in sync
+/// with [`WatchTaskLifecycle::start`] / [`stop`] / [`accepts`] when changing
+/// semantics. Full embed of this type on `AppView` remains optional residual.
+///
+/// **Singleton:** one watch per process is intentional today; concurrent
+/// per-agent watches would need a map of lifecycles keyed by agent id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchTaskLifecycle {
+    generation: u64,
+    running: bool,
+    address: Option<String>,
+}
+
+impl Default for WatchTaskLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WatchTaskLifecycle {
+    pub fn new() -> Self {
+        Self {
+            generation: 0,
+            running: false,
+            address: None,
+        }
+    }
+
+    /// Start (or restart) watching `address`. Bumps generation so in-flight
+    /// ticks from a previous run are rejected via [`Self::accepts`].
+    pub fn start(&mut self, address: impl Into<String>) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        self.running = true;
+        self.address = Some(address.into());
+        self.generation
+    }
+
+    /// Stop watching. Further ticks with the old generation must be dropped.
+    pub fn stop(&mut self) {
+        if self.running {
+            self.generation = self.generation.saturating_add(1);
+        }
+        self.running = false;
+        self.address = None;
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn address(&self) -> Option<&str> {
+        self.address.as_deref()
+    }
+
+    /// Whether a completed poll with `tick_generation` should update UI state.
+    pub fn accepts(&self, tick_generation: u64) -> bool {
+        self.running && tick_generation == self.generation && self.generation > 0
+    }
+}
+
 /// One logical watch session: address watcher + funding wizard transitions.
 ///
 /// Designed for pager / TUI background tasks: call [`WatchSession::poll_tick`]
@@ -907,7 +979,14 @@ fn shorten_address(addr: &str) -> String {
         return a.to_owned();
     }
     let prefix: String = a.chars().take(8).collect();
-    let suffix: String = a.chars().rev().take(4).collect::<String>().chars().rev().collect();
+    let suffix: String = a
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     format!("{prefix}…{suffix}")
 }
 
@@ -917,7 +996,14 @@ fn shorten_txid(txid: &str) -> String {
         return t.to_owned();
     }
     let prefix: String = t.chars().take(6).collect();
-    let suffix: String = t.chars().rev().take(4).collect::<String>().chars().rev().collect();
+    let suffix: String = t
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     format!("{prefix}…{suffix}")
 }
 
@@ -930,9 +1016,10 @@ mod watch_session_tests {
     const TXID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn fast_ex() -> RateLimitedExplorer {
+        // Zero cache so progressive multi-poll tests can change producer bodies.
         RateLimitedExplorer::new(ExplorerConfig {
             min_interval: Duration::ZERO,
-            cache_ttl: Duration::from_secs(60),
+            cache_ttl: Duration::ZERO,
             ..ExplorerConfig::default()
         })
     }
@@ -979,9 +1066,7 @@ mod watch_session_tests {
         let tick = session
             .poll_tick(t0 + Duration::from_secs(2), |url| {
                 if url.contains("/tx/") && !url.contains("/txs") {
-                    FetchResult::Ok(
-                        r#"{"status":{"confirmed":true,"block_height":100}}"#.into(),
-                    )
+                    FetchResult::Ok(r#"{"status":{"confirmed":true,"block_height":100}}"#.into())
                 } else if url.contains("tip") {
                     FetchResult::Ok("102".into())
                 } else {
@@ -1045,5 +1130,22 @@ mod watch_session_tests {
     #[test]
     fn default_poll_interval_is_polite() {
         assert!(DEFAULT_WATCH_POLL_INTERVAL >= Duration::from_secs(15));
+    }
+
+    #[test]
+    fn watch_task_lifecycle_rejects_stale_generation() {
+        let mut life = WatchTaskLifecycle::new();
+        assert!(!life.accepts(0));
+        let g1 = life.start(ADDR);
+        assert!(life.is_running());
+        assert!(life.accepts(g1));
+        assert!(!life.accepts(g1.saturating_sub(1)));
+        life.stop();
+        assert!(!life.is_running());
+        assert!(!life.accepts(g1), "stopped task must drop prior generation");
+        let g2 = life.start(ADDR);
+        assert_ne!(g1, g2);
+        assert!(life.accepts(g2));
+        assert!(!life.accepts(g1));
     }
 }

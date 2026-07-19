@@ -28,6 +28,7 @@ mod prompt;
 mod queue;
 mod rewind;
 mod router;
+mod routstr;
 mod session;
 mod settings;
 mod status;
@@ -36,8 +37,11 @@ mod transcript;
 mod turn;
 mod voice;
 
+#[cfg(test)]
+pub(crate) use billing::agent_needs_openrouter_balance_fetch;
 pub(crate) use billing::{
-    UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error, is_free_usage_exhausted_error,
+    UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, effect_fetch_billing, effect_fetch_billing_for_app,
+    is_credit_limit_error, is_free_usage_exhausted_error,
 };
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};

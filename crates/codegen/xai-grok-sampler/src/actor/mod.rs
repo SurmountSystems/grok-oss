@@ -8,6 +8,9 @@
 pub(crate) mod request_task;
 pub(crate) mod state;
 
+/// Marker in Retrying.reason after OpenRouter/Routstr → Grok API failover.
+pub use request_task::PROVIDER_FAILOVER_REASON_MARKER;
+
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;

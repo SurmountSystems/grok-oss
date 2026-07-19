@@ -874,10 +874,9 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 session_id: session_id_clone.clone(),
             });
         }
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-        });
+        effects.push(crate::app::dispatch::effect_fetch_billing(
+            agent, agent_id, true,
+        ));
         if let Some((model_id, effort)) = deferred {
             effects.push(Effect::SwitchModel {
                 agent_id,
@@ -965,10 +964,9 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 session_id: session_id_clone.clone(),
             });
         }
-        effects.push(Effect::FetchBilling {
-            agent_id,
-            silent: true,
-        });
+        effects.push(crate::app::dispatch::effect_fetch_billing(
+            agent, agent_id, true,
+        ));
         if let Some((model_id, effort)) = deferred {
             effects.push(Effect::SwitchModel {
                 agent_id,
@@ -1088,10 +1086,18 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 if unchanged {
                     vec![]
                 } else {
-                    vec![Effect::PersistPreferredModel {
+                    let mut effs = vec![Effect::PersistPreferredModel {
                         model_id: model_id.clone(),
                         reasoning_effort: resolved_effort,
-                    }]
+                    }];
+                    // Model may have become OpenRouter-backed (or left OR).
+                    // Re-fetch so dual-footer / OR credits appear without waiting
+                    // for the next turn-end poll. Gate is derived from the new
+                    // current model inside effect_fetch_billing.
+                    effs.push(crate::app::dispatch::effect_fetch_billing(
+                        agent, agent_id, true,
+                    ));
+                    effs
                 }
             }
             Err(SwitchModelError::IncompatibleAgent { .. }) => {

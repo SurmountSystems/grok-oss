@@ -53,18 +53,22 @@ pub use openrouter::{
     fetch_openrouter_credit_balance_cents_with_key, has_openrouter_api_key,
     is_openrouter_catalog_id, load_openrouter_api_key, load_openrouter_api_key_default,
     openrouter_balance_usd_from_credits, run_openrouter_login, run_openrouter_logout,
+    should_fetch_openrouter_balance, should_fetch_openrouter_balance_for_model_id,
     store_openrouter_api_key, usd_to_cents,
 };
 pub(crate) use refresh::DiagnosticUploader;
 pub use routstr::{
     ROUTSTR_API_KEY_ENV, ROUTSTR_API_KEYS_ENV, ROUTSTR_API_URL, ROUTSTR_GROK_45_CATALOG_ID,
-    ROUTSTR_GROK_45_MODEL, RoutstrAuthError, RoutstrBalanceInfo, RoutstrCliError,
-    clear_routstr_api_key, fetch_routstr_balance_msats, fetch_routstr_balance_msats_with_key,
-    format_routstr_balance_line, has_routstr_api_key, is_routstr_base_url, is_routstr_catalog_id,
-    load_routstr_api_key, load_routstr_api_key_default, parse_routstr_balance_msats,
-    routstr_balance_msats_from_info, routstr_seed_aead_path, run_routstr_balance, run_routstr_fund,
-    run_routstr_login, run_routstr_logout, run_routstr_refund, run_routstr_topup,
-    store_routstr_api_key,
+    ROUTSTR_GROK_45_MODEL, RoutstrAuthError, RoutstrBalanceInfo, RoutstrCliError, RoutstrFundProbe,
+    RoutstrFundSuccess, RoutstrSpendSuccess, clear_routstr_api_key,
+    complete_routstr_fund_reentry_for_tui, complete_routstr_spend_reentry_for_tui,
+    fetch_routstr_balance_msats, fetch_routstr_balance_msats_with_key, format_routstr_balance_line,
+    has_routstr_api_key, is_routstr_base_url, is_routstr_catalog_id, load_routstr_api_key,
+    load_routstr_api_key_default, parse_routstr_balance_msats, probe_routstr_fund_for_tui,
+    routstr_balance_fetch_enabled_from_disk, routstr_balance_msats_from_info,
+    routstr_enabled_from_raw_config, routstr_seed_aead_path, run_routstr_balance, run_routstr_fund,
+    run_routstr_login, run_routstr_logout, run_routstr_refund, run_routstr_spend,
+    run_routstr_topup, should_fetch_routstr_balance, store_routstr_api_key,
 };
 pub use storage::{
     clear_api_key, read_api_key, read_auth_json, read_token_by_scope, store_api_key,

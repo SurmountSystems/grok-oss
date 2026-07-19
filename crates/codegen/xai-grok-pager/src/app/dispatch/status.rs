@@ -266,10 +266,10 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     }
     // Non-silent fetch: the effect also pulls the auto top-up rule so the
     // summary can render usage, prepaid credits, and auto top-up together.
-    vec![Effect::FetchBilling {
-        agent_id: id,
-        silent: false,
-    }]
+    // OpenRouter /credits only when the active model is OR-backed.
+    vec![crate::app::dispatch::effect_fetch_billing_for_app(
+        app, id, false,
+    )]
 }
 
 /// Commit a one-line "update available" notice into the active agent's

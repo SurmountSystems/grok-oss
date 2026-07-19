@@ -33,14 +33,15 @@ pub mod types;
 
 // Public re-exports — the API surface consumers see.
 pub use actor::SamplerActor;
+// Marker in Retrying.reason after OpenRouter/Routstr → Grok API failover (pager toast).
+pub use actor::PROVIDER_FAILOVER_REASON_MARKER;
 pub use attribution::{
     Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SamplingConsumer, SharedAttributionCallback,
 };
 pub use client::{ApiBackend, SamplingClient, user_agent_string_for};
 pub use config::{
     AuthScheme, BearerResolver, FailoverProvider, HeaderInjector, OriginClientInfo, RetryPolicy,
-    SamplerConfig,
-    SharedBearerResolver, SharedHeaderInjector,
+    SamplerConfig, SharedBearerResolver, SharedHeaderInjector,
 };
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};

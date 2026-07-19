@@ -51,6 +51,7 @@ pub mod remember;
 pub mod rename;
 pub mod resume;
 pub mod rewind;
+pub mod routstr;
 pub mod screen_mode_switch;
 pub mod scroll_debug;
 pub mod session_info;
@@ -134,6 +135,9 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(logout::LogoutCommand),
         Arc::new(import_claude::ImportClaudeCommand),
         Arc::new(usage::UsageCommand),
+        Arc::new(routstr::RoutstrCommand),
+        // Dedicated `/fund` (not an alias of `/routstr` — empty /routstr = balance).
+        Arc::new(routstr::FundCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
         Arc::new(release_notes::ReleaseNotesCommand),

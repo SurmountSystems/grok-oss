@@ -149,7 +149,7 @@ impl RateLimitedExplorer {
         &mut self,
         key: &str,
         now: Instant,
-        producer: impl FnOnce() -> FetchResult,
+        mut producer: impl FnMut() -> FetchResult,
     ) -> Option<String> {
         if let Some(c) = self.get_cached(key, now) {
             return Some(c.to_owned());
@@ -174,13 +174,21 @@ impl RateLimitedExplorer {
         }
     }
 
+    /// Max HTTP 429 responses to absorb in [`Self::get_or_fetch_blocking`]
+    /// (sleeps `wait_hint` / backoff between attempts). After this many 429s,
+    /// returns `None` (fail closed). Does not bypass rate gates.
+    pub const BLOCKING_MAX_429_RETRIES: u32 = 3;
+
     /// Block until [`Self::can_fetch`] (sleeps `wait_hint`), then
-    /// [`Self::get_or_fetch`]. Still returns `None` on 429 / error.
+    /// [`Self::get_or_fetch`]. On HTTP 429, waits out backoff and retries up to
+    /// [`Self::BLOCKING_MAX_429_RETRIES`] additional times. Still returns
+    /// `None` on hard error or exhausted 429 retries. Never bypasses gates.
     pub fn get_or_fetch_blocking(
         &mut self,
         key: &str,
-        producer: impl FnOnce() -> FetchResult,
+        mut producer: impl FnMut() -> FetchResult,
     ) -> Option<String> {
+        let mut rate_limit_hits = 0u32;
         loop {
             let now = Instant::now();
             if let Some(c) = self.get_cached(key, now) {
@@ -190,7 +198,94 @@ impl RateLimitedExplorer {
                 std::thread::sleep(wait);
                 continue;
             }
-            return self.get_or_fetch(key, Instant::now(), producer);
+            // Snapshot attempt count so we can tell 429 (mark_429) from Error
+            // (mark_request) when both return None.
+            let attempts_before = self.attempt_count;
+            let backoff_before = self.backoff_until;
+            match self.get_or_fetch(key, Instant::now(), &mut producer) {
+                Some(body) => return Some(body),
+                None => {
+                    let now = Instant::now();
+                    // Cache may have been filled by a concurrent path; re-check.
+                    if let Some(c) = self.get_cached(key, now) {
+                        return Some(c.to_owned());
+                    }
+                    let was_429 = self.backoff_until.is_some()
+                        && self.backoff_until != backoff_before
+                        && self.attempt_count > attempts_before;
+                    if was_429 {
+                        rate_limit_hits += 1;
+                        if rate_limit_hits > Self::BLOCKING_MAX_429_RETRIES {
+                            return None;
+                        }
+                        // Loop: wait_hint will sleep until backoff_until.
+                        continue;
+                    }
+                    // Hard error or still gated without progress — fail closed.
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// POST-style fetch: respects min-interval + 429 backoff, **never caches**.
+    ///
+    /// Used for broadcast (`POST /api/tx`) so a prior body is never replayed as
+    /// success. When rate-gated, returns `None` without calling `producer`.
+    pub fn post_no_cache(
+        &mut self,
+        now: Instant,
+        mut producer: impl FnMut() -> FetchResult,
+    ) -> Option<String> {
+        if !self.can_fetch(now) {
+            return None;
+        }
+        match producer() {
+            FetchResult::Ok(body) => {
+                self.mark_request(now);
+                Some(body)
+            }
+            FetchResult::RateLimited => {
+                self.mark_429(now);
+                None
+            }
+            FetchResult::Error => {
+                self.mark_request(now);
+                None
+            }
+        }
+    }
+
+    /// Blocking POST helper with 429 retries (no cache). Same 429 budget as GET.
+    pub fn post_no_cache_blocking(
+        &mut self,
+        mut producer: impl FnMut() -> FetchResult,
+    ) -> Option<String> {
+        let mut rate_limit_hits = 0u32;
+        loop {
+            let now = Instant::now();
+            if let Some(wait) = self.wait_hint(now) {
+                std::thread::sleep(wait);
+                continue;
+            }
+            let attempts_before = self.attempt_count;
+            let backoff_before = self.backoff_until;
+            match self.post_no_cache(Instant::now(), &mut producer) {
+                Some(body) => return Some(body),
+                None => {
+                    let was_429 = self.backoff_until.is_some()
+                        && self.backoff_until != backoff_before
+                        && self.attempt_count > attempts_before;
+                    if was_429 {
+                        rate_limit_hits += 1;
+                        if rate_limit_hits > Self::BLOCKING_MAX_429_RETRIES {
+                            return None;
+                        }
+                        continue;
+                    }
+                    return None;
+                }
+            }
         }
     }
 }
@@ -221,6 +316,18 @@ pub fn mempool_api_tip_height_url(network: BitcoinNetwork) -> String {
     format!("{}/api/blocks/tip/height", mempool_base_url(network))
 }
 
+/// REST address UTXO list: `GET /api/address/{addr}/utxo`.
+pub fn mempool_api_address_utxo_url(network: BitcoinNetwork, address: &str) -> String {
+    format!("{}/utxo", mempool_api_address_url(network, address))
+}
+
+/// REST broadcast endpoint: `POST /api/tx` with raw transaction hex body.
+///
+/// mempool.space returns the txid (64 hex) as plain text on success.
+pub fn mempool_api_broadcast_tx_url(network: BitcoinNetwork) -> String {
+    format!("{}/api/tx", mempool_base_url(network))
+}
+
 /// Map HTTP status + body into a [`FetchResult`] (shared by real client + tests).
 pub fn fetch_result_from_http(status: u16, body: String) -> FetchResult {
     if status == 429 {
@@ -230,6 +337,144 @@ pub fn fetch_result_from_http(status: u16, body: String) -> FetchResult {
         return FetchResult::Ok(body);
     }
     FetchResult::Error
+}
+
+/// Outcome of mapping an HTTP broadcast response (pure; no network).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BroadcastHttpOutcome {
+    /// Explorer accepted the tx; body is a 64-hex txid.
+    Accepted { txid: String },
+    /// HTTP 429 — retry after rate-limit backoff.
+    RateLimited,
+    /// Non-success status or unparseable body. Never treat as broadcast success.
+    Rejected { status: u16, message: String },
+}
+
+/// Bitcoin txid: exactly 64 ASCII hex characters (no `0x` prefix).
+pub fn is_valid_txid_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Parse mempool.space-shaped broadcast response body (plain 64-hex txid).
+///
+/// Trims whitespace; accepts mixed-case hex and normalizes to lowercase.
+pub fn parse_broadcast_txid_body(body: &str) -> std::result::Result<String, String> {
+    let t = body.trim();
+    if !is_valid_txid_hex(t) {
+        let preview: String = t.chars().take(80).collect();
+        return Err(format!(
+            "broadcast response is not a 64-hex txid (len {}); body starts: {preview:?}",
+            t.len()
+        ));
+    }
+    Ok(t.to_ascii_lowercase())
+}
+
+/// Map HTTP status + body for `POST /api/tx` (offline-testable).
+///
+/// Success requires 2xx **and** a parseable txid body. Never claims acceptance
+/// from a bare 200 with garbage body.
+pub fn broadcast_outcome_from_http(status: u16, body: String) -> BroadcastHttpOutcome {
+    if status == 429 {
+        return BroadcastHttpOutcome::RateLimited;
+    }
+    if !(200..300).contains(&status) {
+        let preview: String = body.trim().chars().take(120).collect();
+        return BroadcastHttpOutcome::Rejected {
+            status,
+            message: if preview.is_empty() {
+                format!("HTTP {status}")
+            } else {
+                format!("HTTP {status}: {preview}")
+            },
+        };
+    }
+    match parse_broadcast_txid_body(&body) {
+        Ok(txid) => BroadcastHttpOutcome::Accepted { txid },
+        Err(message) => BroadcastHttpOutcome::Rejected { status, message },
+    }
+}
+
+/// Successful network broadcast result (txid as returned by the explorer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BroadcastResult {
+    pub txid: String,
+}
+
+/// Injectable transaction broadcaster (mempool.space / electrum push / mock).
+///
+/// Product code must not claim broadcast success without a successful
+/// [`BroadcastResult`] from this trait.
+pub trait TxBroadcaster {
+    /// Submit raw transaction hex (no `0x` prefix). Returns explorer txid.
+    fn broadcast_raw_tx_hex(&mut self, raw_tx_hex: &str) -> crate::error::Result<BroadcastResult>;
+}
+
+/// Trim and validate raw transaction hex before any network POST.
+///
+/// Shared by [`crate::descriptor_wallet::broadcast_raw_tx`] and live
+/// [`MempoolHttpClient`] so neither path can bypass empty / non-hex gates.
+/// Returns the trimmed hex slice on success.
+pub fn validate_raw_tx_hex(raw_tx_hex: &str) -> crate::error::Result<&str> {
+    let trimmed = raw_tx_hex.trim();
+    if trimmed.is_empty() {
+        return Err(crate::error::WalletError::Onchain(
+            "cannot broadcast empty transaction hex".into(),
+        ));
+    }
+    if !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) || !trimmed.len().is_multiple_of(2) {
+        return Err(crate::error::WalletError::Onchain(
+            "transaction hex must be even-length ASCII hex".into(),
+        ));
+    }
+    Ok(trimmed)
+}
+
+/// In-memory broadcaster for unit tests (records hex; scripted outcomes).
+#[derive(Debug, Default)]
+pub struct MockTxBroadcaster {
+    /// Scripted results (pop front). Empty → error "mock broadcaster exhausted".
+    pub scripted: std::collections::VecDeque<crate::error::Result<BroadcastResult>>,
+    /// Last submitted raw hex (for request-construction assertions).
+    pub last_raw_hex: Option<String>,
+    /// All submitted hex bodies (in order).
+    pub submitted: Vec<String>,
+}
+
+impl MockTxBroadcaster {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Always accept and echo a fixed txid (or derive from a placeholder).
+    pub fn always_accept(txid: impl Into<String>) -> Self {
+        let mut m = Self::new();
+        m.scripted
+            .push_back(Ok(BroadcastResult { txid: txid.into() }));
+        m
+    }
+
+    pub fn push_ok(&mut self, txid: impl Into<String>) {
+        self.scripted
+            .push_back(Ok(BroadcastResult { txid: txid.into() }));
+    }
+
+    pub fn push_err(&mut self, msg: impl Into<String>) {
+        self.scripted
+            .push_back(Err(crate::error::WalletError::Explorer(msg.into())));
+    }
+}
+
+impl TxBroadcaster for MockTxBroadcaster {
+    fn broadcast_raw_tx_hex(&mut self, raw_tx_hex: &str) -> crate::error::Result<BroadcastResult> {
+        self.last_raw_hex = Some(raw_tx_hex.to_owned());
+        self.submitted.push(raw_tx_hex.to_owned());
+        self.scripted.pop_front().unwrap_or_else(|| {
+            Err(crate::error::WalletError::Explorer(
+                "mock broadcaster exhausted (no scripted response)".into(),
+            ))
+        })
+    }
 }
 
 /// HTTP client that always goes through [`RateLimitedExplorer`] gates.
@@ -298,6 +543,14 @@ impl MempoolHttpClient {
         self.get_text(&url)
     }
 
+    /// Address UTXO list JSON from mempool.space (`/api/address/{addr}/utxo`).
+    ///
+    /// Always goes through [`RateLimitedExplorer`] gates (no bypass).
+    pub fn fetch_address_utxos(&mut self, address: &str) -> Option<String> {
+        let url = mempool_api_address_utxo_url(self.network, address);
+        self.get_text(&url)
+    }
+
     /// Transaction JSON from mempool.space.
     pub fn fetch_tx(&mut self, txid: &str) -> Option<String> {
         let url = mempool_api_tx_url(self.network, txid);
@@ -308,6 +561,78 @@ impl MempoolHttpClient {
     pub fn fetch_tip_height(&mut self) -> Option<String> {
         let url = mempool_api_tip_height_url(self.network);
         self.get_text(&url)
+    }
+
+    /// Broadcast raw transaction hex via `POST /api/tx`.
+    ///
+    /// Always goes through [`RateLimitedExplorer`] gates (no cache, no bypass).
+    /// Rejects empty / non-hex bodies **before** POST (same gate as
+    /// [`crate::descriptor_wallet::broadcast_raw_tx`]).
+    /// Returns [`WalletError::Explorer`] on rate-limit exhaustion, network
+    /// error, or rejected body — never a success without a parseable txid.
+    pub fn broadcast_raw_tx_hex(&mut self, raw_tx_hex: &str) -> Result<BroadcastResult> {
+        let trimmed = validate_raw_tx_hex(raw_tx_hex)?;
+        let url = mempool_api_broadcast_tx_url(self.network);
+        let client = &self.client;
+        let hex_body = trimmed.to_owned();
+        // Capture HTTP status for honest error mapping after the rate-limited
+        // call (producer only returns FetchResult; stash last status/body).
+        let last_status = std::cell::Cell::new(0u16);
+        let last_body = std::cell::RefCell::new(String::new());
+        let maybe = self.explorer.post_no_cache_blocking(|| {
+            match client
+                .post(&url)
+                .header(reqwest::header::CONTENT_TYPE, "text/plain")
+                .body(hex_body.clone())
+                .send()
+            {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().unwrap_or_default();
+                    last_status.set(status);
+                    *last_body.borrow_mut() = body.clone();
+                    fetch_result_from_http(status, body)
+                }
+                Err(e) => {
+                    last_status.set(0);
+                    *last_body.borrow_mut() = e.to_string();
+                    FetchResult::Error
+                }
+            }
+        });
+        match maybe {
+            Some(body) => match broadcast_outcome_from_http(200, body) {
+                BroadcastHttpOutcome::Accepted { txid } => Ok(BroadcastResult { txid }),
+                BroadcastHttpOutcome::Rejected { message, .. } => Err(WalletError::Explorer(
+                    format!("broadcast rejected: {message}"),
+                )),
+                BroadcastHttpOutcome::RateLimited => Err(WalletError::Explorer(
+                    "broadcast rate-limited after retries".into(),
+                )),
+            },
+            None => {
+                let status = last_status.get();
+                let body = last_body.into_inner();
+                match broadcast_outcome_from_http(if status == 0 { 503 } else { status }, body) {
+                    BroadcastHttpOutcome::RateLimited => Err(WalletError::Explorer(
+                        "broadcast rate-limited (or gated) after retries".into(),
+                    )),
+                    BroadcastHttpOutcome::Rejected { message, .. } => Err(WalletError::Explorer(
+                        format!("broadcast failed: {message}"),
+                    )),
+                    BroadcastHttpOutcome::Accepted { .. } => Err(WalletError::Explorer(
+                        "broadcast returned empty after rate-limit gate".into(),
+                    )),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "explorer-http")]
+impl TxBroadcaster for MempoolHttpClient {
+    fn broadcast_raw_tx_hex(&mut self, raw_tx_hex: &str) -> Result<BroadcastResult> {
+        MempoolHttpClient::broadcast_raw_tx_hex(self, raw_tx_hex)
     }
 }
 
@@ -420,6 +745,140 @@ mod tests {
         assert_eq!(t, "https://mempool.space/signet/api/tx/abcd");
         let h = mempool_api_tip_height_url(BitcoinNetwork::Mainnet);
         assert_eq!(h, "https://mempool.space/api/blocks/tip/height");
+        let u = mempool_api_address_utxo_url(BitcoinNetwork::Mainnet, "bc1qxyz");
+        assert_eq!(u, "https://mempool.space/api/address/bc1qxyz/utxo");
+        let u_s = mempool_api_address_utxo_url(BitcoinNetwork::Signet, "tb1qxyz");
+        assert_eq!(u_s, "https://mempool.space/signet/api/address/tb1qxyz/utxo");
+        let b = mempool_api_broadcast_tx_url(BitcoinNetwork::Mainnet);
+        assert_eq!(b, "https://mempool.space/api/tx");
+        let b_s = mempool_api_broadcast_tx_url(BitcoinNetwork::Signet);
+        assert_eq!(b_s, "https://mempool.space/signet/api/tx");
+    }
+
+    #[test]
+    fn validate_raw_tx_hex_rejects_empty_odd_and_non_hex() {
+        assert!(
+            validate_raw_tx_hex("")
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
+        assert!(
+            validate_raw_tx_hex("   ")
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
+        assert!(
+            validate_raw_tx_hex("abc")
+                .unwrap_err()
+                .to_string()
+                .contains("even-length")
+        );
+        assert!(
+            validate_raw_tx_hex("zz")
+                .unwrap_err()
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("hex")
+        );
+        assert_eq!(validate_raw_tx_hex("  deadbeef\n").unwrap(), "deadbeef");
+    }
+
+    #[test]
+    fn parse_broadcast_txid_body_accepts_hex() {
+        let id = "a".repeat(64);
+        assert_eq!(parse_broadcast_txid_body(&id).unwrap(), id);
+        let upper = "AB".repeat(32);
+        assert_eq!(
+            parse_broadcast_txid_body(&format!("  {upper}\n")).unwrap(),
+            upper.to_ascii_lowercase()
+        );
+        assert!(parse_broadcast_txid_body("too-short").is_err());
+        assert!(parse_broadcast_txid_body(&"g".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn broadcast_outcome_from_http_maps_status() {
+        let id = "b".repeat(64);
+        assert_eq!(
+            broadcast_outcome_from_http(200, id.clone()),
+            BroadcastHttpOutcome::Accepted { txid: id.clone() }
+        );
+        assert!(matches!(
+            broadcast_outcome_from_http(429, "slow".into()),
+            BroadcastHttpOutcome::RateLimited
+        ));
+        assert!(matches!(
+            broadcast_outcome_from_http(400, "bad-tx".into()),
+            BroadcastHttpOutcome::Rejected { status: 400, .. }
+        ));
+        // 200 with garbage body must not be Accepted.
+        assert!(matches!(
+            broadcast_outcome_from_http(200, "not-a-txid".into()),
+            BroadcastHttpOutcome::Rejected { status: 200, .. }
+        ));
+    }
+
+    #[test]
+    fn mock_tx_broadcaster_records_hex_and_returns_scripted() {
+        let mut mock = MockTxBroadcaster::new();
+        mock.push_ok("c".repeat(64));
+        let res = mock.broadcast_raw_tx_hex("deadbeef").unwrap();
+        assert_eq!(res.txid, "c".repeat(64));
+        assert_eq!(mock.last_raw_hex.as_deref(), Some("deadbeef"));
+        assert_eq!(mock.submitted, vec!["deadbeef".to_owned()]);
+        // Exhausted → error (never silent success).
+        let err = mock.broadcast_raw_tx_hex("aa").unwrap_err();
+        assert!(err.to_string().contains("exhausted"));
+    }
+
+    #[test]
+    fn post_no_cache_never_serves_cache_and_respects_rate_limit() {
+        let mut ex = RateLimitedExplorer::new(ExplorerConfig {
+            min_interval: Duration::from_millis(100),
+            cache_ttl: Duration::from_secs(60),
+            ..ExplorerConfig::default()
+        });
+        let t0 = Instant::now();
+        // Seed a GET cache entry that must not be used by post.
+        ex.put_cache("https://mempool.space/api/tx", "cached-wrong", t0);
+        let body = ex
+            .post_no_cache(t0, || FetchResult::Ok("d".repeat(64)))
+            .unwrap();
+        assert_eq!(body, "d".repeat(64));
+        assert_eq!(ex.attempt_count, 1);
+        // Immediate second post blocked by min_interval.
+        let mut called = false;
+        assert!(
+            ex.post_no_cache(t0, || {
+                called = true;
+                FetchResult::Ok("nope".into())
+            })
+            .is_none()
+        );
+        assert!(!called);
+    }
+
+    #[test]
+    fn post_no_cache_blocking_retries_429() {
+        let mut ex = RateLimitedExplorer::new(ExplorerConfig {
+            min_interval: Duration::ZERO,
+            initial_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(20),
+            cache_ttl: Duration::from_secs(30),
+        });
+        let mut calls = 0u32;
+        let body = ex.post_no_cache_blocking(|| {
+            calls += 1;
+            if calls == 1 {
+                FetchResult::RateLimited
+            } else {
+                FetchResult::Ok("e".repeat(64))
+            }
+        });
+        assert_eq!(body, Some("e".repeat(64)));
+        assert_eq!(calls, 2);
     }
 
     #[test]
@@ -439,6 +898,49 @@ mod tests {
             .is_none()
         );
         assert!(!called);
+    }
+
+    #[test]
+    fn get_or_fetch_blocking_retries_after_429() {
+        let mut ex = RateLimitedExplorer::new(ExplorerConfig {
+            min_interval: Duration::ZERO,
+            initial_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(20),
+            cache_ttl: Duration::from_secs(30),
+        });
+        let mut calls = 0u32;
+        let body = ex.get_or_fetch_blocking("retry-key", || {
+            calls += 1;
+            if calls == 1 {
+                FetchResult::RateLimited
+            } else {
+                FetchResult::Ok(r#"{"ok":true}"#.into())
+            }
+        });
+        assert_eq!(body.as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(calls, 2, "first 429 then success");
+    }
+
+    #[test]
+    fn get_or_fetch_blocking_gives_up_after_max_429_retries() {
+        let mut ex = RateLimitedExplorer::new(ExplorerConfig {
+            min_interval: Duration::ZERO,
+            initial_backoff: Duration::from_millis(2),
+            max_backoff: Duration::from_millis(8),
+            cache_ttl: Duration::from_secs(30),
+        });
+        let mut calls = 0u32;
+        let body = ex.get_or_fetch_blocking("always-429", || {
+            calls += 1;
+            FetchResult::RateLimited
+        });
+        assert!(body.is_none());
+        // 1 initial + BLOCKING_MAX_429_RETRIES retries, then give up.
+        assert_eq!(
+            calls,
+            RateLimitedExplorer::BLOCKING_MAX_429_RETRIES + 1,
+            "exhausted 429 budget"
+        );
     }
 
     /// Live mempool.space tip-height probe. Offline CI must not run this.
@@ -464,6 +966,23 @@ mod tests {
             client.explorer().attempt_count,
             attempts_after,
             "cache hit must not mark another request"
+        );
+    }
+
+    /// Live broadcast path shape check: invalid hex must not yield Accepted.
+    /// Does not broadcast a real payment. Offline CI must not run this.
+    #[test]
+    #[ignore = "network: live mempool.space POST /api/tx reject path"]
+    #[cfg(feature = "explorer-http")]
+    fn live_mempool_broadcast_rejects_invalid_hex() {
+        let mut client = MempoolHttpClient::with_defaults(BitcoinNetwork::Signet).unwrap();
+        let err = client
+            .broadcast_raw_tx_hex("00")
+            .expect_err("invalid tx must not be accepted");
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(
+            msg.contains("broadcast") || msg.contains("reject") || msg.contains("fail"),
+            "expected honest reject wording: {msg}"
         );
     }
 }

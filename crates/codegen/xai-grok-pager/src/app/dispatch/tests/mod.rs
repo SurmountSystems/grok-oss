@@ -157,6 +157,7 @@ fn test_app() -> AppView {
         auto_compact_threshold_percent: None,
         auto_compact_threshold_tokens: None,
         auto_update: None,
+        routstr_enabled: None,
         ask_user_question_timeout_enabled: None,
         zdr_access_enabled: false,
         usage_billing_redirect_url: None,
@@ -243,6 +244,13 @@ fn test_app() -> AppView {
         auto_topup: None,
         openrouter_credit_balance: None,
         routstr_credit_balance: None,
+        routstr_watch_generation: 0,
+        routstr_watch_address: None,
+        routstr_watch_agent_id: None,
+        routstr_watch_status: None,
+        routstr_watch_last_scrollback: None,
+        routstr_watch_error_streak: 0,
+        pending_routstr_spend: None,
         billing_poll_wanted: false,
         leader_roster: Vec::new(),
         dashboard_local_sessions: Vec::new(),
@@ -515,7 +523,7 @@ fn system_text_from_end(app: &AppView, id: AgentId, offset: usize) -> String {
 /// `session_id` and `active_pane` are populated to mirror the
 /// existing `test_app_with_agent` setup; these tests do not read
 /// either field.
-fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
+pub(crate) fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
     let mut agent = AgentView::new(
         AgentSession {
             id,

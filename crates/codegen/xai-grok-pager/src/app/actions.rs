@@ -10,6 +10,65 @@ use super::agent::AgentId;
 use crate::scrollback::entry::EntryId;
 use agent_client_protocol as acp;
 use xai_grok_shell::sampling::types::ReasoningEffort;
+
+/// Opaque secret string that redacts on `Debug` (BIP-39 phrases, passwords).
+///
+/// Prevents `{action:?}` / `{effect:?}` panic and test dumps from leaking
+/// recovery material. Prefer moving out via [`SensitiveString::into_inner`]
+/// into the blocking fund task so the effect value does not retain a copy.
+#[derive(Clone)]
+pub struct SensitiveString(String);
+
+impl SensitiveString {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.trim().is_empty()
+    }
+}
+
+impl std::fmt::Debug for SensitiveString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("***")
+    }
+}
+
+impl AsRef<str> for SensitiveString {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<&str> for SensitiveString {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<str> for SensitiveString {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq for SensitiveString {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for SensitiveString {}
+
 /// Typed error for model switch failures. Replaces the raw `String` in
 /// `TaskResult::SwitchModelComplete` so dispatch can match on the variant
 /// instead of parsing strings.
@@ -568,6 +627,9 @@ pub enum Action {
     /// Commit the `auto_update` preference. Persisted to `[cli].auto_update`.
     /// Restart-required — auto-update check fires once at startup.
     SetAutoUpdate(bool),
+    /// Commit `[features].routstr_enabled`. Restart-required for the model
+    /// catalog; balance fetch re-reads disk after save.
+    SetRoutstrEnabled(bool),
     /// Commit auto-compact threshold: percent of window **or** absolute tokens.
     /// Persists `[session].auto_compact_threshold_percent` or
     /// `[session].auto_compact_threshold_tokens` (clearing the sibling field).
@@ -655,6 +717,40 @@ pub enum Action {
     ShowContextInfo,
     /// Show credit usage via /usage command.
     ShowUsage,
+    /// Routstr balance / fund / top up / refund / watch (slash `/routstr`).
+    RoutstrBalance,
+    /// Start TUI fund path (probe vault; re-entry or CLI for new wallet).
+    RoutstrFund,
+    /// Complete returning-user fund after re-entry (and optional AEAD password).
+    /// Secrets use [`SensitiveString`] so Debug never dumps BIP-39 / password.
+    RoutstrFundReentry {
+        phrase: SensitiveString,
+        password: Option<SensitiveString>,
+    },
+    /// Honest top-up next steps (no live mint spend).
+    RoutstrTopup {
+        sats: Option<u64>,
+    },
+    /// Honest refund next steps (no live CDK return).
+    RoutstrRefund,
+    /// Start background address watch after fund (or explicit address).
+    RoutstrWatch {
+        address: String,
+    },
+    /// Stop background address watch.
+    RoutstrWatchStop,
+    /// Show BIP21 QR + copy receive address (`None` → last watch address).
+    RoutstrQr {
+        address: Option<String>,
+    },
+    /// On-chain PSBT spend (dry-run default). BIP-39 never travels on this
+    /// action — authorization uses pending state + `/routstr unlock`.
+    RoutstrSpend {
+        address: String,
+        amount_sats: u64,
+        broadcast: bool,
+        fee_rate_sat_vb: u64,
+    },
     /// Commit a read-only list of the queued prompts as a system block
     /// (`/queue`). The surface minimal mode uses in place of the `QueuePane`.
     ShowQueue,
@@ -2001,7 +2097,51 @@ pub enum Effect {
     /// When `silent` is true the result updates `credit_balance` without
     /// pushing a system message into scrollback (used for automatic refreshes
     /// on session init and after each turn).
-    FetchBilling { agent_id: AgentId, silent: bool },
+    ///
+    /// `fetch_openrouter`: when true, also hit OpenRouter `/credits` (active
+    /// model is OpenRouter-backed — footer USD line and dual-footer with Grok
+    /// usage). When false, skip the OR network call even if a key is present.
+    FetchBilling {
+        agent_id: AgentId,
+        silent: bool,
+        fetch_openrouter: bool,
+    },
+    /// Probe SeedVault for TUI `/routstr fund` (filesystem; off event loop).
+    RoutstrFundProbe {
+        agent_id: AgentId,
+        grok_home: std::path::PathBuf,
+    },
+    /// Complete returning-user fund re-entry (filesystem + derive address).
+    /// Secrets use [`SensitiveString`] so Debug never dumps BIP-39 / password.
+    RoutstrFundComplete {
+        agent_id: AgentId,
+        grok_home: std::path::PathBuf,
+        phrase: SensitiveString,
+        password: Option<SensitiveString>,
+    },
+    /// Complete pending on-chain spend after unlock re-entry (no BIP-39 in chat).
+    RoutstrSpendComplete {
+        agent_id: AgentId,
+        grok_home: std::path::PathBuf,
+        phrase: SensitiveString,
+        password: Option<SensitiveString>,
+        address: String,
+        amount_sats: u64,
+        broadcast: bool,
+        fee_rate_sat_vb: u64,
+    },
+    /// Background address watch: rate-limited poll loop until stop or confirmed.
+    ///
+    /// When `skip_sleep` is true, the first poll runs immediately (fund auto-watch
+    /// and slash `/routstr watch`). Subsequent re-arms set `skip_sleep: false` so
+    /// polls are spaced by `DEFAULT_WATCH_POLL_INTERVAL`.
+    RoutstrWatchLoop {
+        agent_id: AgentId,
+        address: String,
+        generation: u64,
+        network: String,
+        skip_sleep: bool,
+    },
     /// Fetch billing data at the app level (no agent required).
     /// Used on startup to populate the welcome-screen credit warning.
     FetchAppBilling,
@@ -2680,6 +2820,29 @@ pub enum TaskResult {
         openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
         /// Routstr account balance (msats) when a key is available (`None` = keep cache).
         routstr_balance: Option<crate::views::credit_bar::RoutstrCreditBalance>,
+    },
+    /// TUI fund vault probe finished.
+    RoutstrFundProbed {
+        agent_id: AgentId,
+        probe: xai_grok_shell::auth::RoutstrFundProbe,
+    },
+    /// TUI fund re-entry completed or failed.
+    RoutstrFundCompleted {
+        agent_id: AgentId,
+        result: Result<xai_grok_shell::auth::RoutstrFundSuccess, String>,
+    },
+    /// TUI on-chain spend completed or failed (no BIP-39 in payload).
+    RoutstrSpendCompleted {
+        agent_id: AgentId,
+        result: Result<xai_grok_shell::auth::RoutstrSpendSuccess, String>,
+    },
+    /// One address-watch poll snapshot (drop if generation stale).
+    RoutstrWatchTick {
+        agent_id: AgentId,
+        generation: u64,
+        status_line: String,
+        confirmed: bool,
+        address: String,
     },
     GateRefreshed {
         settings: Option<xai_grok_shell::util::config::RemoteSettings>,

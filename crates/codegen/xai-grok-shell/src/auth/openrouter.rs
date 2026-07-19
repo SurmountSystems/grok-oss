@@ -164,6 +164,29 @@ pub fn is_openrouter_catalog_id(model_id: &str) -> bool {
     id == OPENROUTER_GROK_45_CATALOG_ID || id.starts_with("openrouter-")
 }
 
+/// Whether product code should attempt an OpenRouter credits network fetch.
+///
+/// Named product gate (mirrors [`super::should_fetch_routstr_balance`]) so call
+/// sites and tests share one predicate. Today the policy is exactly "active
+/// model is OpenRouter-backed" — no extra conditions — which is when the footer
+/// needs USD credits, including the dual-footer case (`Credits left: $N ·
+/// Grok used: N%`) once xAI billing is also known.
+///
+/// Prefer [`should_fetch_openrouter_balance_for_model_id`] when you have a
+/// catalog id; pass `false` when there is no active model (welcome app-level).
+pub fn should_fetch_openrouter_balance(active_model_is_openrouter: bool) -> bool {
+    active_model_is_openrouter
+}
+
+/// Catalog / model id form of the OpenRouter balance-fetch gate.
+///
+/// Policy lives here: `None` (no model yet) and non-`openrouter-*` ids skip the
+/// network; `openrouter-*` / [`OPENROUTER_GROK_45_CATALOG_ID`] fetch. Delegates
+/// to [`should_fetch_openrouter_balance`] so bool and id call sites stay in sync.
+pub fn should_fetch_openrouter_balance_for_model_id(model_id: Option<&str>) -> bool {
+    should_fetch_openrouter_balance(model_id.is_some_and(is_openrouter_catalog_id))
+}
+
 /// Account-wide credits payload from `GET /api/v1/credits`.
 ///
 /// Works with regular user API keys (not only management keys). Balance is
@@ -194,6 +217,11 @@ pub fn usd_to_cents(usd: f64) -> i64 {
 
 /// Fetch remaining OpenRouter account credits (USD cents) for the configured key.
 ///
+/// **Ungated on model:** always hits the network when a key is present. Product
+/// paths must consult [`should_fetch_openrouter_balance`] /
+/// [`should_fetch_openrouter_balance_for_model_id`] first and skip this call
+/// when the active model is not OpenRouter-backed.
+///
 /// Returns `None` when no key is available, the request fails, or the body
 /// cannot be parsed. Callers treat that as "keep last known / hide OR line".
 pub async fn fetch_openrouter_credit_balance_cents() -> Option<i64> {
@@ -202,6 +230,8 @@ pub async fn fetch_openrouter_credit_balance_cents() -> Option<i64> {
 }
 
 /// Same as [`fetch_openrouter_credit_balance_cents`] with an explicit API key.
+///
+/// **Ungated on model** — see [`fetch_openrouter_credit_balance_cents`].
 pub async fn fetch_openrouter_credit_balance_cents_with_key(api_key: &str) -> Option<i64> {
     let key = api_key.trim();
     if key.is_empty() {
@@ -314,6 +344,32 @@ mod tests {
         assert!(is_openrouter_catalog_id("openrouter-other"));
         assert!(!is_openrouter_catalog_id("grok-4.5"));
         assert!(!is_openrouter_catalog_id("x-ai/grok-4.5"));
+    }
+
+    #[test]
+    fn should_fetch_openrouter_balance_only_for_active_or_model() {
+        assert!(should_fetch_openrouter_balance(true));
+        assert!(!should_fetch_openrouter_balance(false));
+        assert!(should_fetch_openrouter_balance_for_model_id(Some(
+            OPENROUTER_GROK_45_CATALOG_ID
+        )));
+        assert!(should_fetch_openrouter_balance_for_model_id(Some(
+            "openrouter-other"
+        )));
+        assert!(!should_fetch_openrouter_balance_for_model_id(Some(
+            "grok-4.5"
+        )));
+        assert!(!should_fetch_openrouter_balance_for_model_id(Some(
+            "x-ai/grok-4.5"
+        )));
+        // No model yet (welcome / app-level) → skip network.
+        assert!(!should_fetch_openrouter_balance_for_model_id(None));
+        // Dual-footer is a subset of active OR: when the flag is true the
+        // product still pairs OR credits with Grok usage once both are known.
+        assert!(
+            should_fetch_openrouter_balance(true),
+            "active OR model must fetch so dual-footer can show Credits + Grok used"
+        );
     }
 
     #[test]

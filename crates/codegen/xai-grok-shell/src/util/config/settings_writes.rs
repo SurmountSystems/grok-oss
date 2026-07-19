@@ -300,6 +300,14 @@ pub async fn set_auto_update(value: bool) -> Result<()> {
     update_config(|cfg| cfg.cli.auto_update = Some(value)).await
 }
 
+/// Persist `[features].routstr_enabled` via `update_config`.
+///
+/// Writes only this key under `[features]` (never the full Features struct).
+/// Restart-required for the model catalog; balance fetch re-reads disk.
+pub async fn set_routstr_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.routstr_enabled = Some(value)).await
+}
+
 /// Persist `[session].auto_compact_threshold_percent` via `update_config`.
 ///
 /// Clears any absolute-token preference so percent mode is active.
