@@ -40,6 +40,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
             };
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
+                failover_api_keys: Vec::new(),
                 base_url: "http://localhost".to_string(),
                 model: "test".to_string(),
                 max_completion_tokens: None,
@@ -150,8 +151,11 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
+                    threshold_tokens: std::cell::Cell::new(None),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
+                    economic_mode: std::cell::Cell::new(false),
+                    model_context_window: std::cell::Cell::new(0),
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),
@@ -337,6 +341,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
             };
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
+                failover_api_keys: Vec::new(),
                 base_url: "http://localhost".to_string(),
                 model: "test-model".to_string(),
                 max_completion_tokens: None,
@@ -471,6 +476,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
+                failover_api_keys: Vec::new(),
                 base_url: "http://localhost".to_string(),
                 model: "test-model".to_string(),
                 max_completion_tokens: None,
@@ -602,8 +608,11 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
+                    threshold_tokens: std::cell::Cell::new(None),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
+                    economic_mode: std::cell::Cell::new(false),
+                    model_context_window: std::cell::Cell::new(0),
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),
@@ -873,10 +882,13 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
+                    threshold_tokens: std::cell::Cell::new(None),
                     force_compact: std::sync::Arc::new(
                         std::sync::atomic::AtomicBool::new(false),
                     ),
                     context_window_override: None,
+                    economic_mode: std::cell::Cell::new(false),
+                    model_context_window: std::cell::Cell::new(0),
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),
@@ -1789,6 +1801,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             });
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
+                failover_api_keys: Vec::new(),
                 base_url: format!("http://{addr}/v1"),
                 model: "test-model".to_string(),
                 max_completion_tokens: None,
@@ -1917,10 +1930,13 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 forked_tool_override: None,
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
+                    threshold_tokens: std::cell::Cell::new(None),
                     force_compact: std::sync::Arc::new(
                         std::sync::atomic::AtomicBool::new(false),
                     ),
                     context_window_override: None,
+                    economic_mode: std::cell::Cell::new(false),
+                    model_context_window: std::cell::Cell::new(0),
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),

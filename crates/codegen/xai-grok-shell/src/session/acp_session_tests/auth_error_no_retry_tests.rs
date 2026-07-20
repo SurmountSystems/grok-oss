@@ -111,6 +111,7 @@ async fn make_actor_with_method_and_credentials(
         .chat_state_handle
         .update_credentials(xai_chat_state::Credentials {
             api_key: Some(api_key),
+            failover_api_keys: Vec::new(),
             auth_type,
             ..Default::default()
         });
@@ -927,6 +928,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
             // third-party endpoint.
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("byok-key".to_string()),
+                failover_api_keys: Vec::new(),
                 base_url: "https://third-party.example/v1".to_string(),
                 model: model.clone(),
                 max_completion_tokens: None,
@@ -955,7 +957,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 header_injector: None,
             };
             let _ = actor
-                .handle_set_session_model(cfg, false, false, true, 85)
+                .handle_set_session_model(cfg, false, false, true, 85, None)
                 .await;
 
             assert!(
