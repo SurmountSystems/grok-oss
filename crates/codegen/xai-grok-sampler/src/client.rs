@@ -2025,6 +2025,7 @@ mod tests {
     fn minimal_config() -> SamplerConfig {
         SamplerConfig {
             api_key: Some("test-key".to_string()),
+            failover_api_keys: Vec::new(),
             base_url: "https://example.test".to_string(),
             model: "test-model".to_string(),
             max_completion_tokens: None,
@@ -2262,6 +2263,7 @@ mod tests {
     fn messages_plus_anthropic_api_key_uses_x_api_key_and_not_authorization() {
         let cfg = SamplerConfig {
             api_key: Some("anthropic-key-abc123".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             ..minimal_config()
@@ -2280,6 +2282,7 @@ mod tests {
     fn messages_plus_bearer_uses_authorization_and_not_x_api_key() {
         let cfg = SamplerConfig {
             api_key: Some("bearer-key-abc123".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::Bearer,
             ..minimal_config()
@@ -2397,6 +2400,7 @@ mod tests {
     fn extract_sent_bearer_strips_bearer_prefix_for_openai_compat() {
         let cfg = SamplerConfig {
             api_key: Some("test-bearer-1234567890".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
@@ -2417,6 +2421,7 @@ mod tests {
     fn extract_sent_bearer_reads_x_api_key_for_messages() {
         let cfg = SamplerConfig {
             api_key: Some("anthropic-key-abc123".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             ..minimal_config()
@@ -2435,6 +2440,7 @@ mod tests {
     fn extract_sent_bearer_returns_none_when_no_header() {
         let cfg = SamplerConfig {
             api_key: None,
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
@@ -2446,6 +2452,7 @@ mod tests {
     fn live_bearer_resolver_uses_authorization_for_messages_plus_bearer() {
         let cfg = SamplerConfig {
             api_key: Some("stale-bearer".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::Bearer,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-bearer"))),
@@ -2474,6 +2481,7 @@ mod tests {
     fn post_emits_single_authorization_with_api_key_and_bearer_resolver() {
         let cfg = SamplerConfig {
             api_key: Some("stale-bearer".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Responses,
             auth_scheme: AuthScheme::Bearer,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-bearer"))),
@@ -2502,6 +2510,7 @@ mod tests {
     fn live_bearer_resolver_uses_x_api_key_for_messages_plus_anthropic_api_key() {
         let cfg = SamplerConfig {
             api_key: Some("stale-anthropic".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-anthropic"))),
@@ -2527,6 +2536,7 @@ mod tests {
     fn extract_sent_bearer_short_bearer_passes_through_unchanged() {
         let cfg = SamplerConfig {
             api_key: Some("abc".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
@@ -2545,6 +2555,7 @@ mod tests {
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let cfg = SamplerConfig {
             api_key: Some("the-bearer-1234567890-extra-tail".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             attribution_callback: Some(cb_dyn),
             bearer_resolver: None,
@@ -2642,6 +2653,7 @@ mod tests {
             std::sync::Arc::new(StaticResolver("fresh-token".to_string()));
         let cfg = SamplerConfig {
             api_key: Some("stale-token".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Responses,
             bearer_resolver: Some(resolver),
             ..minimal_config()
@@ -2675,6 +2687,7 @@ mod tests {
     fn record_401_attribution_is_noop_without_callback() {
         let cfg = SamplerConfig {
             api_key: Some("bearer".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             attribution_callback: None,
             bearer_resolver: None,

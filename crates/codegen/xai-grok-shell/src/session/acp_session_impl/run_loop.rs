@@ -677,8 +677,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, auto_compact_threshold_tokens, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, auto_compact_threshold_tokens).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
@@ -708,7 +708,13 @@ pub(super) async fn run_session(
                                 if let Some(cw) = context_window
                                     && session.compaction.context_window_override.is_none()
                                 {
-                                    cfg.context_window = cw;
+                                    session.compaction.model_context_window.set(cw.get());
+                                    let effective = crate::util::config::apply_economic_context_cap(
+                                        cw.get(),
+                                        session.compaction.economic_mode.get(),
+                                    );
+                                    cfg.context_window =
+                                        std::num::NonZeroU64::new(effective).unwrap_or(cw);
                                 }
                                 session.chat_state_handle.update_sampling_config(cfg);
 
@@ -716,6 +722,7 @@ pub(super) async fn run_session(
                                 if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str(), existing.api_key.as_deref()) {
                                     session.chat_state_handle.update_credentials(xai_chat_state::Credentials {
                                         api_key: r.api_key,
+                                        failover_api_keys: r.failover_api_keys,
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
