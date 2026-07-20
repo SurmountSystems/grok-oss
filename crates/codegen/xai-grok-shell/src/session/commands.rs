@@ -468,7 +468,33 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<()>,
     },
     SetSessionModel {
+<<<<<<< HEAD
         switch: SessionModelSwitch,
+=======
+        sampling_config: xai_grok_sampler::SamplerConfig,
+        use_concise: bool,
+        /// When `false`, skip the system prompt rewrite (concise/default swap).
+        /// Set to `false` for forked sessions so mid-session model switches
+        /// cannot contaminate the inherited prompt configuration.
+        apply_prompt_override: bool,
+        /// When `true`, suppress the system prompt rewrite even though
+        /// `apply_prompt_override` may be `true`. Set by the model-switch
+        /// orchestrator immediately after a successful
+        /// `RebuildAgentForDefinition` so the fresh harness's prompt
+        /// (already installed by the rebuild handler) is not clobbered by
+        /// the concise/default swap below.
+        skip_prompt_rewrite: bool,
+        /// Re-resolved auto-compact threshold for the new model. Computed
+        /// by `MvpAgent` against the new model id so per-model remote settings
+        /// and per-model user TOML overrides target the right model after a
+        /// `/model` switch. The session actor stores this on
+        /// `compaction.threshold_percent` (which is `Cell<u8>` so it can
+        /// update without `&mut self`).
+        auto_compact_threshold_percent: u8,
+        /// Absolute token threshold when the user chose token-count mode;
+        /// `None` keeps percent mode.
+        auto_compact_threshold_tokens: Option<u64>,
+>>>>>>> 4ee1ce8e (impl (#7))
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
     },
     /// Set only the reasoning effort on the session's live model. Carrying no

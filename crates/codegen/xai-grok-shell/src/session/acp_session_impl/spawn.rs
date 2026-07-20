@@ -241,6 +241,7 @@ pub(crate) async fn spawn_session_actor(
     mut startup_hints: StartupHints,
     client_type: ClientType,
     auto_compact_threshold_percent: u8,
+    auto_compact_threshold_tokens: Option<u64>,
     system_prompt_label: String,
     compaction_mode: xai_chat_state::CompactionMode,
     compaction_verbatim_input: bool,
@@ -584,11 +585,26 @@ pub(crate) async fn spawn_session_actor(
             std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
                 .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
         });
+    let economic_mode = crate::util::config::economic_mode_from_disk();
+    let effective_context_window = context_window_override.unwrap_or_else(|| {
+        let capped = crate::util::config::apply_economic_context_cap(
+            baseline_context_window.get(),
+            economic_mode,
+        );
+        std::num::NonZeroU64::new(capped).unwrap_or(baseline_context_window)
+    });
     if let Some(cw) = context_window_override {
         tracing::warn!(
             override_context_window = cw.get(),
             original_context_window = baseline_context_window.get(),
             "GROK_DEBUG_CONTEXT_WINDOW override active"
+        );
+    } else if economic_mode && effective_context_window.get() < baseline_context_window.get() {
+        tracing::info!(
+            catalog_context_window = baseline_context_window.get(),
+            effective_context_window = effective_context_window.get(),
+            cap = crate::util::config::ECONOMIC_CONTEXT_CAP,
+            "economic mode: effective context window capped for pricing"
         );
     }
     let resolved_max_retries = xai_grok_sampler::resolve_max_retries(session_max_retries_source(
@@ -608,11 +624,15 @@ pub(crate) async fn spawn_session_actor(
         rate_limit_retry_threshold: sampling_config.rate_limit_retry_threshold,
         api_backend: sampling_config.api_backend.clone(),
         extra_headers: sampling_config.extra_headers.clone(),
+<<<<<<< HEAD
         conversation_group_id: sampling_config.conversation_group_id.clone(),
         query_params: sampling_config.query_params.clone(),
         env_http_headers: sampling_config.env_http_headers.clone(),
         context_window: context_window_override.unwrap_or(baseline_context_window),
         max_request_bytes: sampling_config.max_request_bytes,
+=======
+        context_window: effective_context_window,
+>>>>>>> 4ee1ce8e (impl (#7))
         reasoning_effort: sampling_config.reasoning_effort,
         reasoning_summary: sampling_config.reasoning_summary,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
@@ -1855,9 +1875,15 @@ pub(crate) async fn spawn_session_actor(
         forked_tool_override,
         compaction: super::compaction_config::CompactionConfig {
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
+            threshold_tokens: std::cell::Cell::new(auto_compact_threshold_tokens),
             force_compact: force_compact.clone(),
             context_window_override,
+<<<<<<< HEAD
             context_window_selection: context_window_selection.clone(),
+=======
+            economic_mode: std::cell::Cell::new(economic_mode),
+            model_context_window: std::cell::Cell::new(baseline_context_window.get()),
+>>>>>>> 4ee1ce8e (impl (#7))
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
@@ -2573,6 +2599,7 @@ pub(crate) async fn spawn_session_on_thread(
     startup_hints: StartupHints,
     client_type: ClientType,
     auto_compact_threshold_percent: u8,
+    auto_compact_threshold_tokens: Option<u64>,
     system_prompt_label: String,
     compaction_mode: xai_chat_state::CompactionMode,
     compaction_verbatim_input: bool,
@@ -2732,6 +2759,7 @@ pub(crate) async fn spawn_session_on_thread(
                 }
             };
             let local = tokio::task::LocalSet::new();
+<<<<<<< HEAD
             let actor_main = async move {
                 let _trace_span = parent_traceparent
                     .as_ref()
@@ -2751,6 +2779,121 @@ pub(crate) async fn spawn_session_on_thread(
                         session_id = %session_info.id.0,
                         client_type = ?client_type,
                         start_type = if initial_prompt_texts.is_empty() { "new" } else { "resumed" },
+=======
+            local.block_on(&rt, async move {
+                let _trace_span = parent_traceparent.as_ref().map(|tp| {
+                    let meta = serde_json::json!({ "traceparent" : tp })
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
+                    let span = xai_file_utils::trace_context::span_from_meta_traceparent(&meta);
+                    span.entered()
+                });
+                let (handle, permission_events_rx, system_prompt, session_done_rx) =
+                    match spawn_session_actor(
+                        session_info,
+                        gateway,
+                        sampling_config,
+                        credentials,
+                        auth_method_id,
+                        auth_manager,
+                        attribution_callback,
+                        tool_context,
+                        mcp_servers,
+                        initial_client_mcp_servers,
+                        mcp_meta_config_map,
+                        parent_mcp_pool,
+                        acp_mcp_servers,
+                        support_permission,
+                        telemetry_enabled,
+                        auto_update,
+                        persistence,
+                        conversation,
+                        rewind_points_path,
+                        initial_last_compaction,
+                        initial_prompt_texts,
+                        fs_notify_config,
+                        initial_total_tokens,
+                        startup_hints,
+                        client_type,
+                        auto_compact_threshold_percent,
+                        auto_compact_threshold_tokens,
+                        system_prompt_label,
+                        compaction_mode,
+                        compaction_verbatim_input,
+                        two_pass_enabled,
+                        buffering_settings,
+                        origin_client,
+                        codebase_indexes,
+                        code_nav_enabled,
+                        fs_watch_caps,
+                        feedback_proxy_url,
+                        feedback_user_token,
+                        feedback_alpha_test_key,
+                        deployment_key,
+                        client_terminal_capable,
+                        client_fs_capable,
+                        gateway_enabled,
+                        agent_definition,
+                        session_default_agent_profile,
+                        skills_config,
+                        preloaded_skills,
+                        compat,
+                        incremental_bash_output,
+                        persisted_signals,
+                        persisted_plan_mode,
+                        persisted_goal_mode,
+                        persisted_announcement_state,
+                        memory_config,
+                        loc_tracking_enabled,
+                        feedback_flags,
+                        managed_mcp_handle,
+                        managed_mcp_expires_at,
+                        managed_mcp_proxy_base_url,
+                        session_model_id,
+                        session_yolo_mode,
+                        session_auto_mode,
+                        session_client_identifier,
+                        inference_idle_timeout_secs,
+                        max_retries,
+                        web_search_sampling_config,
+                        web_fetch_config,
+                        image_gen_config,
+                        video_gen_config,
+                        app_builder_deployer_config,
+                        write_file_enabled,
+                        goal_enabled,
+                        subagents_enabled,
+                        ask_user_question_enabled,
+                        client_hooks,
+                        prompt_display_cwd,
+                        subagent_toggle,
+                        persona_summaries,
+                        prompt_audience,
+                        role_instructions,
+                        persona_instructions,
+                        disable_web_search,
+                        backend_tools_enabled,
+                        respect_gitignore,
+                        path_not_found_hints,
+                        tool_params_json,
+                        plugin_registry,
+                        plugin_registry_handle,
+                        models_manager,
+                        inherited_permission_handle,
+                        api_key_provider,
+                        image_description_model,
+                        hook_registry_override,
+                        workspace_ops,
+                        cli_permission_rules,
+                        todo_gate,
+                        remote_settings,
+                        laziness_debug_log,
+                        parent_terminal_backend,
+                        parent_scheduler_handle,
+                        max_turns,
+                        forked_tool_override,
+>>>>>>> 4ee1ce8e (impl (#7))
                     )
                     }
                     None => {

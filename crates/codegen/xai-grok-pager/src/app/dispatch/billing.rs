@@ -310,26 +310,41 @@ pub(super) fn handle_billing_fetched(
     silent: bool,
     subscription_tier: Option<String>,
     autotopup: crate::views::credit_bar::AutoTopupFetch,
+<<<<<<< HEAD
     nonce: u64,
+=======
+    openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+>>>>>>> 4ee1ce8e (impl (#7))
 ) -> Vec<Effect> {
     // Parse/transport failures route to `BillingError`, so a `None` balance here means the response carried no billing config
     // Clear the cached balance and polling so the status bar agrees with the "No billing data available." message rather than showing a stale value
     app.credit_balance = balance.clone();
     apply_auto_topup(&mut app.auto_topup, &autotopup);
+    // OpenRouter: only overwrite when the fetch succeeded (`Some`).
+    if let Some(or) = openrouter_balance {
+        app.openrouter_credit_balance = Some(or);
+    }
     app.billing_poll_wanted = balance
         .as_ref()
         .map(|b| b.usage_pct >= 99.0)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        // Keep polling when OpenRouter is in use so the footer balance refreshes.
+        || app.openrouter_credit_balance.is_some();
     if let Some(tier) = subscription_tier {
         app.subscription_tier = Some(tier);
     }
     // Render the `/usage` summary from the now-current cached rule.
     let summary_topup = app.auto_topup.clone();
+<<<<<<< HEAD
     let tier_now = app.subscription_tier.clone();
+=======
+    let app_or = app.openrouter_credit_balance;
+>>>>>>> 4ee1ce8e (impl (#7))
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         // Gateway/chat-kind: do not attach Build coding credits.
         let mut topup = agent.auto_topup.clone();
         apply_auto_topup(&mut topup, &autotopup);
+<<<<<<< HEAD
         agent.apply_credit_balance(balance.clone(), topup);
         // The open usage modal renders from the mirrors updated above
         // Only its own fetch generation may settle the loading/error flags (background refreshes carry nonce 0)
@@ -340,6 +355,9 @@ pub(super) fn handle_billing_fetched(
             state.billing_error = None;
             state.ctx.subscription_tier = tier_now;
         }
+=======
+        agent.apply_credit_balance(balance.clone(), topup, app_or);
+>>>>>>> 4ee1ce8e (impl (#7))
         if !silent && !agent.chat_kind {
             let msg = match &balance {
                 Some(bal) => {

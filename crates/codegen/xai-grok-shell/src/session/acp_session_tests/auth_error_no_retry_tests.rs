@@ -164,6 +164,7 @@ async fn make_actor_parts_with_method_and_credentials(
         .chat_state_handle
         .update_credentials(xai_chat_state::Credentials {
             api_key: Some(api_key),
+            failover_api_keys: Vec::new(),
             auth_type,
             ..Default::default()
         });
@@ -1547,6 +1548,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
             // Switch to the same model_id, now a per-model BYOK model on a third-party endpoint
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("byok-key".to_string()),
+                failover_api_keys: Vec::new(),
                 base_url: "https://third-party.example/v1".to_string(),
                 model: model.clone(),
                 context_window: 256_000,
@@ -1555,7 +1557,11 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 ..Default::default()
             };
             let _ = actor
+<<<<<<< HEAD
                 .handle_set_session_model(config_only_model_switch(cfg))
+=======
+                .handle_set_session_model(cfg, false, false, true, 85, None)
+>>>>>>> 4ee1ce8e (impl (#7))
                 .await;
 
             let expected_max_retries = xai_grok_sampler::resolve_max_retries(Some(6));

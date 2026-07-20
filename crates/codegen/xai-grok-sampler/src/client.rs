@@ -2344,6 +2344,7 @@ mod tests {
     fn minimal_config() -> SamplerConfig {
         SamplerConfig {
             api_key: Some("test-key".to_string()),
+            failover_api_keys: Vec::new(),
             base_url: "https://example.test".to_string(),
             model: "test-model".to_string(),
             context_window: 8192,
@@ -2865,6 +2866,7 @@ mod tests {
     fn messages_plus_anthropic_api_key_uses_x_api_key_and_not_authorization() {
         let cfg = SamplerConfig {
             api_key: Some("anthropic-key-abc123".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             ..minimal_config()
@@ -2883,6 +2885,7 @@ mod tests {
     fn messages_plus_bearer_uses_authorization_and_not_x_api_key() {
         let cfg = SamplerConfig {
             api_key: Some("bearer-key-abc123".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::Bearer,
             ..minimal_config()
@@ -3053,6 +3056,7 @@ mod tests {
     fn post_captures_bearer_tail_for_openai_compat() {
         let cfg = SamplerConfig {
             api_key: Some("test-bearer-1234567890".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
@@ -3073,6 +3077,7 @@ mod tests {
     fn post_captures_x_api_key_tail_for_messages() {
         let cfg = SamplerConfig {
             api_key: Some("anthropic-key-abc123".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             ..minimal_config()
@@ -3094,6 +3099,7 @@ mod tests {
     fn post_captures_none_when_no_header() {
         let cfg = SamplerConfig {
             api_key: None,
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
@@ -3153,6 +3159,7 @@ mod tests {
     fn live_bearer_resolver_uses_authorization_for_messages_plus_bearer() {
         let cfg = SamplerConfig {
             api_key: Some("stale-bearer".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::Bearer,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-bearer"))),
@@ -3176,6 +3183,7 @@ mod tests {
     fn post_emits_single_authorization_with_api_key_and_bearer_resolver() {
         let cfg = SamplerConfig {
             api_key: Some("stale-bearer".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Responses,
             auth_scheme: AuthScheme::Bearer,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-bearer"))),
@@ -3202,6 +3210,7 @@ mod tests {
     fn live_bearer_resolver_uses_x_api_key_for_messages_plus_anthropic_api_key() {
         let cfg = SamplerConfig {
             api_key: Some("stale-anthropic".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-anthropic"))),
@@ -3220,11 +3229,33 @@ mod tests {
 
     /// The callback receives the `post()`-captured fragment only; the full bearer never crosses the crate boundary.
     #[test]
+<<<<<<< HEAD
     fn record_401_attribution_invokes_callback_with_captured_bearer() {
+=======
+    fn extract_sent_bearer_short_bearer_passes_through_unchanged() {
+        let cfg = SamplerConfig {
+            api_key: Some("abc".to_string()),
+            failover_api_keys: Vec::new(),
+            api_backend: ApiBackend::ChatCompletions,
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert_eq!(client.extract_sent_bearer().as_deref(), Some("abc"));
+    }
+
+    /// `record_401_attribution` invokes the wired callback with the
+    /// expected `consumer` and the truncated bearer prefix that the
+    /// wire would carry. The key assertion is that the callback
+    /// receives the prefix only -- the full bearer never crosses the
+    /// crate boundary.
+    #[test]
+    fn record_401_attribution_invokes_callback_with_extracted_bearer() {
+>>>>>>> 4ee1ce8e (impl (#7))
         let cb = std::sync::Arc::new(CountingCallback::default());
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let cfg = SamplerConfig {
             api_key: Some("the-bearer-1234567890-extra-tail".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             attribution_callback: Some(cb_dyn),
             bearer_resolver: None,
@@ -3289,6 +3320,7 @@ mod tests {
 
         let cfg = SamplerConfig {
             api_key: Some("stale-token".to_string()),
+            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Responses,
             bearer_resolver: Some(std::sync::Arc::new(EmptyResolver)),
             ..minimal_config()
@@ -3306,9 +3338,36 @@ mod tests {
         );
     }
 
+<<<<<<< HEAD
     /// `response.completed` carrying `usage.context_details.{input_tokens, output_tokens}` rewrites `usage.total_tokens` in place.
     /// The new value is the live context length (`ctx.input + ctx.output`).
     /// Billing fields stay on the wire's cumulative values.
+=======
+    /// `record_401_attribution` is a no-op when `attribution_callback`
+    /// is `None` (the BYOK / sampler-only path). The previous tests
+    /// in this module construct clients without a callback and rely
+    /// on this property holding.
+    #[test]
+    fn record_401_attribution_is_noop_without_callback() {
+        let cfg = SamplerConfig {
+            api_key: Some("bearer".to_string()),
+            failover_api_keys: Vec::new(),
+            api_backend: ApiBackend::ChatCompletions,
+            attribution_callback: None,
+            bearer_resolver: None,
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        // Must not panic.
+        client.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
+    }
+
+    /// `response.completed` carrying
+    /// `usage.context_details.{input_tokens, output_tokens}` rewrites
+    /// `usage.total_tokens` in place to the live context length
+    /// (`ctx.input + ctx.output`). Billing fields stay on the wire's
+    /// cumulative values.
+>>>>>>> 4ee1ce8e (impl (#7))
     #[test]
     fn deserialize_response_event_overrides_total_tokens_from_context_details() {
         let sse = r#"{

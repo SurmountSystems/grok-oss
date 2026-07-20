@@ -237,6 +237,7 @@ pub(crate) async fn apply(
         false
     };
     let model_unchanged = previous_model_id == model_id.0;
+<<<<<<< HEAD
     let (tx, rx) = oneshot::channel();
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
         switch: SessionModelSwitch {
@@ -250,6 +251,35 @@ pub(crate) async fn apply(
             context_window_selection: context_window,
             supported_context_windows,
         },
+=======
+    let (new_threshold_percent, new_threshold_tokens) = {
+        let cfg = agent.cfg.borrow();
+        let models = agent.models_manager.models();
+        let model = config::find_model_by_id(&models, model_sampling.model.as_str());
+        let resolved = crate::util::config::resolve_auto_compact_threshold(
+            &cfg,
+            model_sampling.model.as_str(),
+            model.map(|e| &e.info),
+        );
+        let cw = model
+            .map(|e| e.info.context_window.get())
+            .unwrap_or(200_000);
+        match resolved {
+            crate::util::config::AutoCompactThreshold::Percent(p) => (p, None),
+            crate::util::config::AutoCompactThreshold::Tokens(t) => {
+                (resolved.as_percent_of(cw), Some(t))
+            }
+        }
+    };
+    let (tx, rx) = oneshot::channel();
+    let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
+        sampling_config: model_sampling,
+        use_concise,
+        apply_prompt_override,
+        skip_prompt_rewrite: did_rebuild || model_unchanged,
+        auto_compact_threshold_percent: new_threshold_percent,
+        auto_compact_threshold_tokens: new_threshold_tokens,
+>>>>>>> 4ee1ce8e (impl (#7))
         responds_to: tx,
     });
     let updated_model = rx

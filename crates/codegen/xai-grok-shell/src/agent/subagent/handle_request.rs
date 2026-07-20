@@ -1248,6 +1248,7 @@ pub(crate) async fn run_shell_child(
     let inherited_auth_type = subagent_auth_type(model_entry, &ctx.auth_method_id);
     let credentials = xai_chat_state::Credentials {
         api_key: effective_sampling_config.api_key.clone(),
+        failover_api_keys: effective_sampling_config.failover_api_keys.clone(),
         auth_type: inherited_auth_type,
         alpha_test_key: ctx.alpha_test_key.clone(),
         client_version: effective_sampling_config.client_version.clone(),
@@ -1581,6 +1582,7 @@ pub(crate) async fn run_shell_child(
                 agent_permission_mode,
                 xai_grok_agent::config::PermissionMode::BypassPermissions
             ),
+<<<<<<< HEAD
         false,
         None,
         ctx.inference_idle_timeout_secs,
@@ -1614,6 +1616,123 @@ pub(crate) async fn run_shell_child(
         ctx.path_not_found_hints,
         std::mem::take(&mut ctx.tool_params_json),
         crate::session::session_create_prefetch::SessionCreatePrefetch::ready(
+=======
+            Some(ctx.auth_manager.clone()),
+            attribution_callback,
+            tool_ctx,
+            agent_mcp_servers,
+            vec![],
+            Default::default(),
+            parent_mcp_pool,
+            Vec::new(),
+            true,
+            false,
+            None,
+            persistence,
+            forked_conversation,
+            None,
+            None,
+            initial_child_tokens,
+            crate::session::StartupHints {
+                inherited_prefix_len: Some(inherited_prefix_len),
+                is_subagent: true,
+                parent_session_id: Some(ctx.parent_session_id.clone()),
+                subagent_type: Some(request.subagent_type.clone()),
+                preserve_inherited_system: verbatim_mirror_fork,
+                ..Default::default()
+            },
+            xai_grok_workspace::permission::ClientType::Generic,
+            ctx.resolve_auto_compact_threshold_percent(&subagent_model_id),
+            // Absolute-token mode is session-scoped only; subagents keep percent tiers.
+            None,
+            xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
+            xai_chat_state::CompactionMode::Summary,
+            ctx.resolve_compaction_verbatim_input(),
+            false,
+            None,
+            None,
+            std::sync::Arc::new(
+                parking_lot::Mutex::new(
+                    xai_grok_workspace::file_system::CodebaseIndexManager::new(),
+                ),
+            ),
+            false,
+            subagent_fs_watch,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            definition,
+            subagent_session_default_agent_profile,
+            if inherit_skills {
+                ctx.parent_skills_config.clone()
+            } else {
+                xai_grok_agent::prompt::skills::SkillsConfig::default()
+            },
+            if inherit_skills { ctx.parent_skills.take() } else { None },
+            ctx.parent_compat,
+            false,
+            None,
+            None,
+            None,
+            None,
+            if verbatim_mirror_fork {
+                None
+            } else if let Some(scope) = agent_memory_scope {
+                ctx.memory_config
+                    .as_ref()
+                    .map(|mc| {
+                        let mut c = mc.clone();
+                        let resolved = scope
+                            .resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
+                        c.enabled = true;
+                        c.root_dir_override = Some(resolved.path);
+                        c.flat_memory_root = resolved.is_project_scoped;
+                        c
+                    })
+            } else {
+                ctx.memory_config.clone()
+            },
+            false,
+            Default::default(),
+            ctx.managed_mcp_state.clone(),
+            None,
+            ctx.managed_mcp_proxy_base_url.clone(),
+            effective_model_id,
+            ctx.yolo_mode
+                || matches!(
+                    agent_permission_mode,
+                    xai_grok_agent::config::PermissionMode::BypassPermissions
+                ),
+            false,
+            None,
+            ctx.inference_idle_timeout_secs,
+            None,
+            ctx.web_search_sampling_config.clone(),
+            ctx.web_fetch_config.clone(),
+            ctx.image_gen_config.clone(),
+            ctx.video_gen_config.clone(),
+            ctx.app_builder_deployer_config.clone(),
+            ctx.write_file_enabled,
+            ctx.goal_enabled,
+            true,
+            ctx.ask_user_question_enabled,
+            ctx.client_hooks.clone(),
+            None,
+            std::collections::HashMap::new(),
+            ctx.persona_io_summaries.clone(),
+            xai_grok_agent::prompt::context::PromptAudience::Subagent,
+            effective_runtime.role_prompt.clone(),
+            None,
+            ctx.disable_web_search,
+            ctx.backend_tools_enabled,
+            ctx.respect_gitignore,
+            ctx.path_not_found_hints,
+            ctx.resolve_tool_params_json(),
+>>>>>>> 4ee1ce8e (impl (#7))
             ctx.plugin_registry.clone(),
         ),
         None,

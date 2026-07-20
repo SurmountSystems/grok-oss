@@ -33,6 +33,16 @@ pub struct CreditBalance {
     pub is_unified_billing_user: Option<bool>,
 }
 
+/// OpenRouter account credits remaining (USD cents), from `GET /api/v1/credits`.
+///
+/// Separate from xAI [`CreditBalance`] so switching models can show the right
+/// provider balance without overwriting Build prepaid / usage state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenRouterCreditBalance {
+    /// Remaining account balance in USD cents (can be zero or negative).
+    pub balance_cents: i64,
+}
+
 impl CreditBalance {
     /// Label for the percentage allowance, chosen from the period type: "Weekly limit" / "Monthly limit", falling back to "Usage" when unknown.
     pub fn usage_label(&self) -> &'static str {
@@ -159,9 +169,43 @@ pub fn usage_warning_for_session(
     usage_visible: bool,
     gateway_chat: bool,
 ) -> Option<(String, bool)> {
+    usage_warning_for_session_with_openrouter(
+        Some(balance),
+        autotopup,
+        None,
+        usage_visible,
+        gateway_chat,
+        false,
+    )
+}
+
+/// Prompt info-row warning, optionally preferring OpenRouter account credits
+/// when the active model is OpenRouter-backed.
+///
+/// When `openrouter_model` is true and an OR balance is known, always shows
+/// `Credits left: $N` (yellow when ≤ $10). xAI Build billing is ignored for
+/// that model so the footer matches the provider actually being charged.
+pub fn usage_warning_for_session_with_openrouter(
+    balance: Option<&CreditBalance>,
+    autotopup: Option<&AutoTopupInfo>,
+    openrouter: Option<&OpenRouterCreditBalance>,
+    usage_visible: bool,
+    gateway_chat: bool,
+    openrouter_model: bool,
+) -> Option<(String, bool)> {
     if gateway_chat || !usage_visible {
         return None;
     }
+
+    if openrouter_model {
+        let or = openrouter?;
+        // Show remaining even at $0 so the user sees the balance was fetched.
+        let text = format!("Credits left: {}", fmt_dollars(or.balance_cents.abs()));
+        let critical = or.balance_cents.abs() <= LOW_BALANCE_CENTS || or.balance_cents <= 0;
+        return Some((text, critical));
+    }
+
+    let balance = balance?;
 
     // A non-zero prepaid balance (stored as signed cents) means the credits model.
     let credits = balance
@@ -267,6 +311,12 @@ mod tests {
             prepaid_balance_cents: None,
             period_type: None,
             is_unified_billing_user: None,
+        }
+    }
+
+    fn or_bal(cents: i64) -> OpenRouterCreditBalance {
+        OpenRouterCreditBalance {
+            balance_cents: cents,
         }
     }
 
@@ -609,6 +659,67 @@ mod tests {
         );
     }
 
+<<<<<<< HEAD
+=======
+    // ── usage_warning: OpenRouter account credits ────────────────────
+
+    #[test]
+    fn warning_openrouter_shows_balance_always() {
+        assert_eq!(
+            usage_warning_for_session_with_openrouter(
+                Some(&bal(50.0)),
+                None,
+                Some(&or_bal(6386)),
+                true,
+                false,
+                true,
+            ),
+            Some(("Credits left: $63.86".to_string(), false))
+        );
+        // Low balance → critical (yellow).
+        assert_eq!(
+            usage_warning_for_session_with_openrouter(
+                None,
+                None,
+                Some(&or_bal(500)),
+                true,
+                false,
+                true,
+            ),
+            Some(("Credits left: $5".to_string(), true))
+        );
+        // OR model without a fetched balance → no warning (don't fall back to xAI).
+        assert_eq!(
+            usage_warning_for_session_with_openrouter(
+                Some(&CreditBalance {
+                    prepaid_balance_cents: Some(9999),
+                    ..bal(100.0)
+                }),
+                Some(&topup(false, None, None)),
+                None,
+                true,
+                false,
+                true,
+            ),
+            None
+        );
+        // Non-OR model ignores OR balance.
+        assert_eq!(
+            usage_warning_for_session_with_openrouter(
+                Some(&bal(50.0)),
+                None,
+                Some(&or_bal(6386)),
+                true,
+                false,
+                false,
+            ),
+            None
+        );
+    }
+
+    // ── usage_warning: pay-as-you-go (monthly on-demand) ─────────────
+
+>>>>>>> 4ee1ce8e (impl (#7))
     fn pay_as_you_go(usage_pct: f64, cap_cents: i64, used_cents: i64) -> CreditBalance {
         CreditBalance {
             pay_as_you_go: true,

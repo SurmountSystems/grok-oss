@@ -29,6 +29,7 @@ pub async fn settle_pool() {
 pub fn test_config(base_url: &str, api_key: &str) -> SamplerConfig {
     SamplerConfig {
         api_key: Some(api_key.to_string()),
+        failover_api_keys: Vec::new(),
         base_url: base_url.to_string(),
         model: "test-model".to_string(),
         ..SamplerConfig::default()

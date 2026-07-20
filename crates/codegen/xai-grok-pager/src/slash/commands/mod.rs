@@ -14,8 +14,12 @@ pub mod dashboard;
 pub mod debug;
 pub mod delete;
 pub mod docs;
+<<<<<<< HEAD
 pub mod doctor;
 pub mod edit_prompt;
+=======
+pub mod economic_mode;
+>>>>>>> 4ee1ce8e (impl (#7))
 pub mod effort;
 pub mod effort_levels;
 pub mod exit;
@@ -76,9 +80,43 @@ use std::sync::Arc;
 /// This is the single source of truth for the builtin command set. The registry is constructed from this list.
 pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
     vec![
+<<<<<<< HEAD
         // The rows the dropdown shows before it scrolls.
         Arc::new(tutorial::TutorialCommand),
         Arc::new(settings_cmd::SettingsCommand),
+=======
+        Arc::new(exit::ExitCommand),
+        Arc::new(help::HelpCommand),
+        Arc::new(docs::DocsCommand),
+        Arc::new(home::HomeCommand),
+        Arc::new(new::NewCommand),
+        Arc::new(fork::ForkCommand),
+        Arc::new(compact::CompactCommand),
+        Arc::new(economic_mode::EconomicModeCommand),
+        Arc::new(copy::CopyCommand),
+        Arc::new(find::FindCommand),
+        Arc::new(history::HistoryCommand),
+        Arc::new(export::ExportCommand),
+        Arc::new(transcript::TranscriptCommand),
+        Arc::new(expand::ExpandCommand),
+        Arc::new(context::ContextCommand),
+        Arc::new(screen_mode_switch::ScreenModeSwitchCommand::minimal()),
+        Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
+        Arc::new(model::ModelCommand),
+        Arc::new(effort::EffortCommand),
+        Arc::new(always_approve::AlwaysApproveCommand),
+        Arc::new(auto::AutoCommand),
+        Arc::new(multiline::MultilineCommand),
+        Arc::new(compact_mode::CompactModeCommand),
+        Arc::new(vim_mode::VimModeCommand),
+        Arc::new(plugin::HooksCommand),
+        Arc::new(plugin::PluginsCommand),
+        Arc::new(plugin::MarketplaceCommand),
+        Arc::new(plugin::SkillsCommand),
+        Arc::new(share::ShareCommand),
+        Arc::new(session_info::SessionInfoCommand),
+        Arc::new(rename::RenameCommand),
+>>>>>>> 4ee1ce8e (impl (#7))
         Arc::new(dashboard::DashboardCommand),
         Arc::new(workflows::WorkflowsCommand),
         Arc::new(plugin::PluginsCommand),

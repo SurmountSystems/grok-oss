@@ -501,8 +501,18 @@ pub enum Action {
     /// Set whether a follow-up `/implement` in the prior prompt is auto-run after a successful turn.
     /// SHELL-owned: updates the process-wide cache mirror and persists to `[ui].auto_run_implement` via `Effect::PersistSetting`.
     SetAutoRunImplement(bool),
+<<<<<<< HEAD
     /// Set `[scrollback.scroll].respect_manual_folds`.
     /// PAGER-owned: live-applied via `AppView::set_appearance` and persisted to pager.toml via `Effect::PersistSetting`.
+=======
+    /// Set economic mode (200K context soft-cap for pricing). SHELL-owned:
+    /// process-wide cache + `[ui].economic_mode`. New sessions seed from this;
+    /// use `/economic-mode` for the current conversation.
+    SetEconomicMode(bool),
+    /// Set `[scrollback.scroll].respect_manual_folds`. PAGER-owned:
+    /// live-applied via `AppView::set_appearance` and persisted to
+    /// pager.toml via `Effect::PersistSetting`.
+>>>>>>> 4ee1ce8e (impl (#7))
     SetRespectManualFolds(bool),
     /// Set the canonical for `[ui].default_selected_permission`. Persists via `Effect::PersistSetting`.
     /// Payload is the registry's canonical string (`default` | `allow_once` | `allow_always` | `reject`).
@@ -585,7 +595,17 @@ pub enum Action {
     /// Commit the `auto_update` preference. Persisted to `[cli].auto_update`.
     /// Restart-required: auto-update check fires once at startup.
     SetAutoUpdate(bool),
+<<<<<<< HEAD
     /// Commit `[ui.display_refresh].auto_cadence_enabled`. Restart-required: cadence is pinned once at startup.
+=======
+    /// Commit auto-compact threshold: percent of window **or** absolute tokens.
+    /// Persists `[session].auto_compact_threshold_percent` or
+    /// `[session].auto_compact_threshold_tokens` (clearing the sibling field).
+    /// Restart-required — sessions resolve the threshold at build time.
+    SetAutoCompactThreshold(crate::settings::AutoCompactThresholdChoice),
+    /// Commit `[ui.display_refresh].auto_cadence_enabled`. Restart-required —
+    /// cadence is pinned once at startup.
+>>>>>>> 4ee1ce8e (impl (#7))
     SetDisplayRefreshAutoCadence(bool),
     /// Preview a theme without persisting; updates the live display only.
     /// Used by the picker on Up/Down and Esc (revert).
@@ -3158,13 +3178,19 @@ pub enum TaskResult {
         subscription_tier: Option<String>,
         /// Auto top-up rule fetch result; `Unchanged` keeps any cached rule.
         autotopup: crate::views::credit_bar::AutoTopupFetch,
+<<<<<<< HEAD
         /// Usage-modal fetch generation (`0` means a background refresh).
         nonce: u64,
+=======
+        /// OpenRouter account credits when a key is available (`None` = keep cache).
+        openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+>>>>>>> 4ee1ce8e (impl (#7))
     },
     /// App-level billing data (welcome screen, dashboard usage modal).
     AppBillingFetched {
         balance: Option<crate::views::credit_bar::CreditBalance>,
         autotopup: crate::views::credit_bar::AutoTopupFetch,
+<<<<<<< HEAD
         /// Usage-modal fetch generation (`0` means a background refresh).
         nonce: u64,
     },
@@ -3173,6 +3199,10 @@ pub enum TaskResult {
         error: String,
         /// Usage-modal fetch generation (`0` means a background refresh).
         nonce: u64,
+=======
+        /// OpenRouter account credits when a key is available (`None` = keep cache).
+        openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+>>>>>>> 4ee1ce8e (impl (#7))
     },
     GateRefreshed {
         settings: Option<xai_grok_shell::util::config::RemoteSettings>,

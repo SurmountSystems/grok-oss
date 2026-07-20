@@ -378,6 +378,7 @@ pub fn test_sampler_config(
     // Shell `Client` is `xai_grok_sampler::SamplingClient`, which takes a `SamplerConfig` directly
     SamplerConfig {
         api_key: Some("test-api-key".to_string()),
+        failover_api_keys: Vec::new(),
         base_url: base_url.to_string(),
         model: "test-model".to_string(),
         max_completion_tokens: Some(1000),

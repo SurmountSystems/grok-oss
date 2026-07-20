@@ -88,6 +88,13 @@ follow_up_behavior = "queue"           # mid-turn follow-ups: "queue" (wait for 
                                        # next tool/model safe gap). See Keyboard Shortcuts → Mid-turn.
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
+auto_run_implement = true              # after a successful turn, auto-queue a full multi-line
+                                       # /implement block (token through EOF) from a follow-up or
+                                       # trailing residual (default: true)
+economic_mode = true                   # soft-cap effective context at 200k (Grok 4.5 price cliff)
+                                       # for compaction / context bar; also clamps auto-run
+                                       # /implement --effort above 1 to 1 (default: true).
+                                       # Override one conversation with /economic-mode
 
 [features]
 telemetry = false                      # anonymous usage telemetry
@@ -100,7 +107,21 @@ remote_fetch = true                    # allow optional online model-catalog fet
                                        # managed-config sync has its own switch: managed_config)
 
 [session]
+<<<<<<< HEAD
 auto_compact_threshold_percent = 85    # auto-compact at this % of context window (default: 85)
+=======
+auto_compact_threshold_percent = 95    # auto-compact at this % of the *effective* context window
+                                       # (0–100; settings UI offers 85 / 90 / 95 / 98;
+                                       # default 95; restart required for open sessions).
+                                       # With [ui] economic_mode = true the window is soft-capped
+                                       # at 200k, so 95% ≈ 190k tokens.
+# Or pin an absolute token budget instead (wins over percent when set):
+# auto_compact_threshold_tokens = 200000  # Grok 4.5 long-context price cliff (same 200k as
+#                                         # economic mode). Costs double for the entire request
+#                                         # above 200k when the window is uncapped.
+# auto_compact_threshold_tokens = 475000  # 95% of Grok 4.5's 500k catalog window; prefer when
+#                                         # economic mode is off
+>>>>>>> 4ee1ce8e (impl (#7))
 load_envrc = true                      # load .envrc environment variables
 
 [tools]

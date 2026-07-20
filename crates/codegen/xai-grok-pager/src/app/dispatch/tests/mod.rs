@@ -199,6 +199,8 @@ fn test_app() -> AppView {
         coding_data_pending_write: None,
         coding_data_write_seq: 0,
         show_tips: None,
+        auto_compact_threshold_percent: None,
+        auto_compact_threshold_tokens: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
         subagent_model_inheritance: crate::settings::FeatureOverrideState::new(
@@ -312,6 +314,7 @@ fn test_app() -> AppView {
         leader_mode: true,
         credit_balance: None,
         auto_topup: None,
+        openrouter_credit_balance: None,
         billing_poll_wanted: false,
         leader_roster: Vec::new(),
         dashboard_local_sessions: Vec::new(),

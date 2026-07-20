@@ -618,7 +618,18 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
     );
 }
 
+<<<<<<< HEAD
 /// The default registry contains Appearance settings (3 bools + 3 enums + 1 int = 7 entries).
+=======
+/// The default registry contains Appearance settings
+/// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
+/// `multiline_mode`, the Agent entries `permission_mode` and
+/// `plan_mode`, the Privacy entry `coding_data_sharing`, the
+/// Models entry `default_model`, the Session entry
+/// `auto_compact_threshold_percent`, and the Advanced entries
+/// `show_tips` and `auto_update`. `default_reasoning_effort` is
+/// not exposed in the modal.
+>>>>>>> 4ee1ce8e (impl (#7))
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
     let prev_voice = crate::app::voice_mode_enabled();
@@ -644,8 +655,14 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Agent,
             &SettingCategory::Privacy,
             &SettingCategory::Models,
+<<<<<<< HEAD
             // The Session category has no registered settings, so its header is not emitted
             // Advanced category (first entries: `show_tips`, `auto_update`)
+=======
+            &SettingCategory::Session,
+            // Advanced category (first entries:
+            // `show_tips`, `auto_update`).
+>>>>>>> 4ee1ce8e (impl (#7))
             &SettingCategory::Advanced,
         ]
     );
@@ -721,6 +738,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "plan_mode",
             // SHELL-owned auto_run_implement (Agent category; live cache).
             "auto_run_implement",
+            // SHELL-owned economic_mode (Agent; after auto_run_implement).
+            "economic_mode",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
@@ -729,7 +748,12 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "subagent_model_inheritance",
             // Models category. `default_reasoning_effort`, `web_search_model`, and `session_summary_model` are not exposed in the modal.
             "fork_secondary_model",
+<<<<<<< HEAD
             // `auto_compact_threshold_percent` (Session category) is not exposed in the modal
+=======
+            // Session category.
+            "auto_compact_threshold_percent",
+>>>>>>> 4ee1ce8e (impl (#7))
             // Advanced category.
             "show_tips",
             // Per-tip contextual-hints GROUP row, placed right after `show_tips`

@@ -255,6 +255,7 @@ fn dispatch_load_session_ungated(
         &app.tier_restricted_commands,
     );
     agent_mut.chat_kind = chat_kind || app.chat_mode;
+<<<<<<< HEAD
     agent_mut.conversation_entry = conversation_entry;
     #[cfg(feature = "local-workspace")]
     {
@@ -284,6 +285,13 @@ fn dispatch_load_session_ungated(
         agent_mut.workspace_mode_cli_locked = cli_locked;
     }
     agent_mut.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+=======
+    agent_mut.apply_credit_balance(
+        app.credit_balance.clone(),
+        app.auto_topup.clone(),
+        app.openrouter_credit_balance,
+    );
+>>>>>>> 4ee1ce8e (impl (#7))
     agent_mut
         .prompt
         .slash_controller
@@ -1175,6 +1183,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             &app.tier_restricted_commands,
         );
         agent.chat_kind = app.chat_mode;
+<<<<<<< HEAD
         agent.conversation_entry = conversation_entry;
         #[cfg(feature = "local-workspace")]
         {
@@ -1198,6 +1207,13 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             agent.workspace_mode_cli_locked = cli_locked;
         }
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+=======
+        agent.apply_credit_balance(
+            app.credit_balance.clone(),
+            app.auto_topup.clone(),
+            app.openrouter_credit_balance,
+        );
+>>>>>>> 4ee1ce8e (impl (#7))
         agent
             .prompt
             .slash_controller
@@ -1561,6 +1577,7 @@ pub(in crate::app::dispatch) fn handle_session_restored(
         supersede_open_reload_window(agent, agent_id, "SessionRestored");
         agent.bind_session_id(sid);
         agent.chat_kind = app.chat_mode;
+<<<<<<< HEAD
         agent.conversation_entry = conversation_entry;
         #[cfg(feature = "local-workspace")]
         {
@@ -1584,6 +1601,13 @@ pub(in crate::app::dispatch) fn handle_session_restored(
             agent.workspace_mode_cli_locked = cli_locked;
         }
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+=======
+        agent.apply_credit_balance(
+            app.credit_balance.clone(),
+            app.auto_topup.clone(),
+            app.openrouter_credit_balance,
+        );
+>>>>>>> 4ee1ce8e (impl (#7))
         agent.scrollback.push_block(RenderBlock::system(format!(
             "Session restored. Loading {local_session_id}..."
         )));

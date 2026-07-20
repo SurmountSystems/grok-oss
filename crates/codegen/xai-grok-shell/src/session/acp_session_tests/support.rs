@@ -377,11 +377,28 @@ async fn create_test_actor_inner(
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),
         forked_tool_override: None,
+<<<<<<< HEAD
         compaction: test_compaction_config(threshold_percent),
         long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
             enabled: false,
             tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
             delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
+=======
+        compaction: crate::session::compaction_config::CompactionConfig {
+            threshold_percent: std::cell::Cell::new(threshold_percent),
+            threshold_tokens: std::cell::Cell::new(None),
+            force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            context_window_override: None,
+            economic_mode: std::cell::Cell::new(false),
+            model_context_window: std::cell::Cell::new(0),
+            count: std::sync::atomic::AtomicU64::new(0),
+            auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            previous_model: std::cell::Cell::new(None),
+            compaction_mode: xai_chat_state::CompactionMode::Transcript,
+            verbatim_input: true,
+            prefire: crate::session::compaction_config::PrefireState::default(),
+            prefix_released: std::sync::atomic::AtomicBool::new(false),
+>>>>>>> 4ee1ce8e (impl (#7))
         },
         long_reasoning_turn_state: Default::default(),
         memory: crate::session::memory_state::SessionMemory {

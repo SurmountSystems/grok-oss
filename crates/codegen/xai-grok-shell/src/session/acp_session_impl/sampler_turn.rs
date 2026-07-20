@@ -743,7 +743,12 @@ impl SessionActor {
         );
         let request_compression = crate::util::config::request_compression_for_url(&cfg.base_url);
         SamplingConfig {
+<<<<<<< HEAD
             api_key,
+=======
+            api_key: creds.api_key,
+            failover_api_keys: creds.failover_api_keys,
+>>>>>>> 4ee1ce8e (impl (#7))
             base_url: cfg.base_url,
             mtls_cert_dir: cfg.mtls_cert_dir,
             model: cfg.model,
@@ -1275,7 +1280,18 @@ impl SessionActor {
                     && let Some(new_cw) = std::num::NonZeroU64::new(cw)
                     && self.compaction.context_window_override.is_none()
                 {
+<<<<<<< HEAD
                     cfg.context_window = self.context_window_after_overflow(&cfg, new_cw);
+=======
+                    if new_cw.get() > self.compaction.model_context_window.get() {
+                        self.compaction.model_context_window.set(new_cw.get());
+                    }
+                    let effective = crate::util::config::apply_economic_context_cap(
+                        self.compaction.model_context_window.get().max(new_cw.get()),
+                        self.compaction.economic_mode.get(),
+                    );
+                    cfg.context_window = std::num::NonZeroU64::new(effective).unwrap_or(new_cw);
+>>>>>>> 4ee1ce8e (impl (#7))
                     self.chat_state_handle.update_sampling_config(cfg);
                 }
 
