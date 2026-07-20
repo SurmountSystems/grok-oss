@@ -537,12 +537,8 @@ impl SessionActor {
         let mut new_context_window = current_config.context_window;
         let mut new_max_completion_tokens = current_config.max_completion_tokens;
         if let Some(new_cw) = metadata.context_window.and_then(std::num::NonZeroU64::new)
-<<<<<<< HEAD
             && current_config.context_window != new_cw
             && !self.is_context_window_fixed(current_config.context_window)
-=======
-            && self.compaction.context_window_override.is_none()
->>>>>>> 4ee1ce8e (impl (#7))
         {
             // Track catalog size (pre-economic cap) for later restore.
             if new_cw.get() > self.compaction.model_context_window.get() {

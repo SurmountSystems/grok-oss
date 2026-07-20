@@ -1557,11 +1557,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 ..Default::default()
             };
             let _ = actor
-<<<<<<< HEAD
                 .handle_set_session_model(config_only_model_switch(cfg))
-=======
-                .handle_set_session_model(cfg, false, false, true, 85, None)
->>>>>>> 4ee1ce8e (impl (#7))
                 .await;
 
             let expected_max_retries = xai_grok_sampler::resolve_max_retries(Some(6));

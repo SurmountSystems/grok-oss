@@ -2099,89 +2099,8 @@ pub(in crate::app::dispatch) fn set_max_thoughts_width(app: &mut AppView, new: i
     }]
 }
 
-<<<<<<< HEAD
 // The `auto_compact_threshold_percent` setter was removed alongside its registry entry
 // The mirror field stays for compat
-=======
-// ---------------------------------------------------------------------------
-// auto_compact_threshold — SHELL-OWNED dual preference (percent or tokens).
-// Restart-required (threshold resolved when a session is built).
-// ---------------------------------------------------------------------------
-
-/// State-only mutation for percent mode (clears tokens mirror).
-pub(super) fn set_auto_compact_threshold_percent_inner(app: &mut AppView, value: u8) {
-    app.auto_compact_threshold_percent = Some(value);
-    app.auto_compact_threshold_tokens = None;
-}
-
-/// State-only mutation for absolute-token mode (clears percent mirror).
-pub(super) fn set_auto_compact_threshold_tokens_inner(app: &mut AppView, value: u64) {
-    app.auto_compact_threshold_tokens = Some(value);
-    app.auto_compact_threshold_percent = None;
-}
-
-/// Outer dispatcher for `Action::SetAutoCompactThreshold`.
-pub(in crate::app::dispatch) fn set_auto_compact_threshold(
-    app: &mut AppView,
-    new: crate::settings::AutoCompactThresholdChoice,
-) -> Vec<Effect> {
-    use crate::settings::AutoCompactThresholdChoice;
-
-    let prev_canonical = crate::settings::canonical_auto_compact_threshold(
-        app.auto_compact_threshold_percent,
-        app.auto_compact_threshold_tokens,
-    );
-    let new_canonical = new.as_canonical();
-    // Idempotent when both mirrors already match the committed choice.
-    let already = match new {
-        AutoCompactThresholdChoice::Percent(p) => {
-            app.auto_compact_threshold_percent == Some(p)
-                && app.auto_compact_threshold_tokens.is_none()
-        }
-        AutoCompactThresholdChoice::Tokens(t) => {
-            app.auto_compact_threshold_tokens == Some(t)
-                && app.auto_compact_threshold_percent.is_none()
-        }
-    };
-    if already {
-        return vec![];
-    }
-    // First commit of the default (None, None → 95%) still persists.
-    match new {
-        AutoCompactThresholdChoice::Percent(p) => {
-            set_auto_compact_threshold_percent_inner(app, p.min(100));
-        }
-        AutoCompactThresholdChoice::Tokens(t) => {
-            set_auto_compact_threshold_tokens_inner(app, t);
-        }
-    }
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "auto_compact_threshold_percent",
-        value = new_canonical,
-        "setting changed",
-    );
-    let toast_label = match new {
-        AutoCompactThresholdChoice::Percent(p) => format!("{p}%"),
-        AutoCompactThresholdChoice::Tokens(t) => {
-            if t >= 1000 {
-                format!("{}k tokens", t / 1000)
-            } else {
-                format!("{t} tokens")
-            }
-        }
-    };
-    app.show_toast(&format!(
-        "\u{2713} Auto-compact at: {toast_label} (restart to apply)"
-    ));
-    vec![Effect::PersistSetting {
-        key: "auto_compact_threshold_percent",
-        value: crate::settings::SettingValue::Enum(new_canonical),
-        rollback_value: crate::settings::SettingValue::Enum(prev_canonical),
-    }]
-}
->>>>>>> 4ee1ce8e (impl (#7))
 
 // show_tips and auto_update are SHELL-OWNED `Option<bool>` setters
 // Changes take effect on next session start (restart_required: true).

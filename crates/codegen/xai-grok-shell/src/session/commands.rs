@@ -468,9 +468,7 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<()>,
     },
     SetSessionModel {
-<<<<<<< HEAD
-        switch: SessionModelSwitch,
-=======
+
         sampling_config: xai_grok_sampler::SamplerConfig,
         use_concise: bool,
         /// When `false`, skip the system prompt rewrite (concise/default swap).
@@ -494,7 +492,6 @@ pub enum SessionCommand {
         /// Absolute token threshold when the user chose token-count mode;
         /// `None` keeps percent mode.
         auto_compact_threshold_tokens: Option<u64>,
->>>>>>> 4ee1ce8e (impl (#7))
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
     },
     /// Set only the reasoning effort on the session's live model. Carrying no

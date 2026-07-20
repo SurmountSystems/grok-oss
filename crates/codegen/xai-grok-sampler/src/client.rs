@@ -3229,28 +3229,7 @@ mod tests {
 
     /// The callback receives the `post()`-captured fragment only; the full bearer never crosses the crate boundary.
     #[test]
-<<<<<<< HEAD
     fn record_401_attribution_invokes_callback_with_captured_bearer() {
-=======
-    fn extract_sent_bearer_short_bearer_passes_through_unchanged() {
-        let cfg = SamplerConfig {
-            api_key: Some("abc".to_string()),
-            failover_api_keys: Vec::new(),
-            api_backend: ApiBackend::ChatCompletions,
-            ..minimal_config()
-        };
-        let client = SamplingClient::new(cfg).expect("client should build");
-        assert_eq!(client.extract_sent_bearer().as_deref(), Some("abc"));
-    }
-
-    /// `record_401_attribution` invokes the wired callback with the
-    /// expected `consumer` and the truncated bearer prefix that the
-    /// wire would carry. The key assertion is that the callback
-    /// receives the prefix only -- the full bearer never crosses the
-    /// crate boundary.
-    #[test]
-    fn record_401_attribution_invokes_callback_with_extracted_bearer() {
->>>>>>> 4ee1ce8e (impl (#7))
         let cb = std::sync::Arc::new(CountingCallback::default());
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let cfg = SamplerConfig {
@@ -3320,7 +3299,6 @@ mod tests {
 
         let cfg = SamplerConfig {
             api_key: Some("stale-token".to_string()),
-            failover_api_keys: Vec::new(),
             api_backend: ApiBackend::Responses,
             bearer_resolver: Some(std::sync::Arc::new(EmptyResolver)),
             ..minimal_config()
@@ -3338,36 +3316,9 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
     /// `response.completed` carrying `usage.context_details.{input_tokens, output_tokens}` rewrites `usage.total_tokens` in place.
     /// The new value is the live context length (`ctx.input + ctx.output`).
     /// Billing fields stay on the wire's cumulative values.
-=======
-    /// `record_401_attribution` is a no-op when `attribution_callback`
-    /// is `None` (the BYOK / sampler-only path). The previous tests
-    /// in this module construct clients without a callback and rely
-    /// on this property holding.
-    #[test]
-    fn record_401_attribution_is_noop_without_callback() {
-        let cfg = SamplerConfig {
-            api_key: Some("bearer".to_string()),
-            failover_api_keys: Vec::new(),
-            api_backend: ApiBackend::ChatCompletions,
-            attribution_callback: None,
-            bearer_resolver: None,
-            ..minimal_config()
-        };
-        let client = SamplingClient::new(cfg).expect("client should build");
-        // Must not panic.
-        client.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
-    }
-
-    /// `response.completed` carrying
-    /// `usage.context_details.{input_tokens, output_tokens}` rewrites
-    /// `usage.total_tokens` in place to the live context length
-    /// (`ctx.input + ctx.output`). Billing fields stay on the wire's
-    /// cumulative values.
->>>>>>> 4ee1ce8e (impl (#7))
     #[test]
     fn deserialize_response_event_overrides_total_tokens_from_context_details() {
         let sse = r#"{

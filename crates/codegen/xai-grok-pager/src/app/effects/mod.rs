@@ -4978,11 +4978,7 @@ pub(crate) fn execute(
                         silent,
                         subscription_tier,
                         autotopup,
-<<<<<<< HEAD
                         nonce,
-=======
-                        openrouter_balance,
->>>>>>> 4ee1ce8e (impl (#7))
                     }
                 });
         }
@@ -5034,7 +5030,6 @@ pub(crate) fn execute(
                             .expect("serialize billing params")
                             .into(),
                     );
-<<<<<<< HEAD
                     let resp = match acp_send(req, &tx).await {
                         Ok(resp) => resp,
                         Err(e) => {
@@ -5056,56 +5051,6 @@ pub(crate) fn execute(
                                 error: format!("Parse error: {e}"),
                                 nonce,
                             };
-=======
-                    match acp_send(req, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            let result = wrapper.get("result").unwrap_or(&wrapper);
-                            match serde_json::from_value::<
-                                BillingConfigResponse,
-                            >(result.clone()) {
-                                Ok(billing) => {
-                                    let balance = billing
-                                        .config
-                                        .map(|c| crate::views::credit_bar::CreditBalance {
-                                            period_end_display: None,
-                                            ..credit_balance_from_config(c)
-                                        });
-                                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
-                                        fetch_auto_topup_info(&tx).await
-                                    } else {
-                                        crate::views::credit_bar::AutoTopupFetch::Cleared
-                                    };
-                                    let openrouter_balance =
-                                        fetch_openrouter_credit_balance().await;
-                                    TaskResult::AppBillingFetched {
-                                        balance,
-                                        autotopup,
-                                        openrouter_balance,
-                                    }
-                                }
-                                Err(_) => {
-                                    let openrouter_balance =
-                                        fetch_openrouter_credit_balance().await;
-                                    TaskResult::AppBillingFetched {
-                                        balance: None,
-                                        autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-                                        openrouter_balance,
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            let openrouter_balance = fetch_openrouter_credit_balance().await;
-                            TaskResult::AppBillingFetched {
-                                balance: None,
-                                autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-                                openrouter_balance,
-                            }
->>>>>>> 4ee1ce8e (impl (#7))
                         }
                     };
                     let balance = billing.config.map(credit_balance_from_config);

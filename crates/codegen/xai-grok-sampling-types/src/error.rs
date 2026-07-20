@@ -533,29 +533,11 @@ impl SamplingError {
         }
     }
 
-<<<<<<< HEAD
     /// Retry vetoes shared by every retry loop: the sampler actor's `classify_error` and one-shot callers like `/btw`.
     /// `x-should-retry: false`: the server says the request content caused the failure, not something transient;
     /// Context-length overflow: deterministic; re-sending the same payload always fails.
     pub fn is_retry_vetoed(&self) -> bool {
         self.should_retry_header() == Some(false) || self.is_context_length_error()
-=======
-    /// True when the provider rejected the request because the account is out
-    /// of credits / over its spending limit (not a transient throttle).
-    ///
-    /// Used by multi-key failover: another credential with remaining balance
-    /// may still succeed. Matches 402 Payment Required and credit-flavored
-    /// 403/429 bodies (OpenRouter and xAI Build wording).
-    pub fn is_credit_exhausted(&self) -> bool {
-        match self {
-            SamplingError::Api {
-                status, message, ..
-            } => is_credit_exhausted_status_and_message(status.as_u16(), message),
-            SamplingError::StreamError { message, .. } => is_credit_exhausted_message(message),
-            SamplingError::Auth(message) => is_credit_exhausted_message(message),
-            _ => false,
-        }
->>>>>>> 4ee1ce8e (impl (#7))
     }
 }
 

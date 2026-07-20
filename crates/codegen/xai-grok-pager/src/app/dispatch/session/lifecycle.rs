@@ -429,35 +429,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     configure_agent_composer(app, agent_id);
     {
         let agent = app.agents.get_mut(&agent_id).unwrap();
-<<<<<<< HEAD
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-=======
-        agent.prompt.set_compact(app.appearance.prompt.compact);
-        agent.prompt.adopt_slash_mru(app.slash_mru.clone());
-        agent
-            .prompt
-            .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
-        agent.set_session_recap_available(app.session_recap_available);
-        agent.set_voice_mode_available(app.voice_mode_enabled);
-        agent.apply_app_scoped_gates(
-            app.sharing_enabled,
-            app.usage_visible,
-            app.chat_mode,
-            app.screen_mode,
-            &app.active_announcements,
-            &app.tier_restricted_commands,
-        );
-        agent.apply_credit_balance(
-            app.credit_balance.clone(),
-            app.auto_topup.clone(),
-            app.openrouter_credit_balance,
-        );
-        agent
-            .prompt
-            .slash_controller
-            .registry_mut()
-            .set_plugins_visible(!app.appearance.disable_plugins);
->>>>>>> 4ee1ce8e (impl (#7))
         agent.active_pane = ActivePane::Prompt;
     }
     if stay_on_welcome {
@@ -470,7 +442,6 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     if app.screen_mode.is_minimal() {
         app.minimal_state.welcome_pending = true;
     }
-<<<<<<< HEAD
     let chat_kind = if stay_on_welcome {
         false
     } else {
@@ -498,23 +469,6 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
                 );
             agent.workspace_mode = mode;
             agent.workspace_mode_cli_locked = locked;
-=======
-    if !app.needs_project_picker() {
-        let chat_kind = consume_chat_kind(app);
-        if let Some(agent) = app.agents.get_mut(&agent_id) {
-            agent.chat_kind = chat_kind;
-            agent.apply_credit_balance(
-                app.credit_balance.clone(),
-                app.auto_topup.clone(),
-                app.openrouter_credit_balance,
-            );
-            agent.mcp_init_progress = Some(McpInitProgress {
-                total: 0,
-                connected: 0,
-                started_at: Instant::now(),
-            });
-            agent.session.prompt_history_loading = true;
->>>>>>> 4ee1ce8e (impl (#7))
         }
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
         agent.session_starting_since = Some(Instant::now());
@@ -1325,7 +1279,6 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             &app.tier_restricted_commands,
         );
         agent.chat_kind = chat_kind;
-<<<<<<< HEAD
         agent.conversation_entry = chat_kind;
         #[cfg(feature = "local-workspace")]
         {
@@ -1348,13 +1301,6 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             agent.workspace_mode_cli_locked = locked;
         }
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-=======
-        agent.apply_credit_balance(
-            app.credit_balance.clone(),
-            app.auto_topup.clone(),
-            app.openrouter_credit_balance,
-        );
->>>>>>> 4ee1ce8e (impl (#7))
         agent
             .prompt
             .slash_controller
@@ -1433,49 +1379,6 @@ pub(in crate::app::dispatch) fn refuse_chat_mode_build_agent(app: &mut AppView, 
         }
     }
 }
-<<<<<<< HEAD
-=======
-/// Dismiss the project picker and create a session in the current directory.
-pub(in crate::app::dispatch) fn skip_picker_and_create_session(
-    app: &mut AppView,
-    agent_id: AgentId,
-) -> Vec<Effect> {
-    if app
-        .agents
-        .get(&agent_id)
-        .is_some_and(|a| a.session.session_id.is_some() || a.mcp_init_progress.is_some())
-    {
-        return vec![];
-    }
-    app.mark_project_picker_done();
-    let chat_kind = consume_chat_kind(app);
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
-        agent.chat_kind = chat_kind;
-        agent.apply_credit_balance(
-            app.credit_balance.clone(),
-            app.auto_topup.clone(),
-            app.openrouter_credit_balance,
-        );
-        agent.mcp_init_progress = Some(McpInitProgress {
-            total: 0,
-            connected: 0,
-            started_at: Instant::now(),
-        });
-        agent.session.prompt_history_loading = true;
-        if let Some(qv) = agent.question_view.take() {
-            agent.prompt.restore(qv.stashed_prompt);
-        }
-    }
-    let preferred_session_id = app.deferred_startup.preferred_session_id.take();
-    vec![Effect::CreateSession {
-        agent_id,
-        cwd: app.cwd.clone(),
-        model_id: None,
-        preferred_session_id,
-        chat_kind,
-    }]
-}
->>>>>>> 4ee1ce8e (impl (#7))
 pub(in crate::app::dispatch) fn handle_session_created(
     app: &mut AppView,
     agent_id: AgentId,

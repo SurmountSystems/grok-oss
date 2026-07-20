@@ -159,7 +159,6 @@ const PLAN_MODE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
-<<<<<<< HEAD
 // Mid-turn follow-up routing. SHARED-owned, persisted to `[ui].follow_up_behavior`.
 // Canonicals match `FollowUpBehavior::as_canonical`
 const FOLLOW_UP_BEHAVIOR_CHOICES: &[EnumChoice] = &[
@@ -178,69 +177,6 @@ const FOLLOW_UP_BEHAVIOR_CHOICES: &[EnumChoice] = &[
 // Mermaid-rendering catalog. SHELL-owned: persisted to `[ui].render_mermaid`. A pager-side process-wide cache
 // mirror (`appearance::cache::*_render_mermaid`) serves the render hot path. Canonicals match
 // `RenderMermaid::as_canonical`.
-=======
-// ---------------------------------------------------------------------------
-// Auto-compact threshold catalog.
-//
-// SHELL-owned dual preference: percent of context window OR absolute token
-// count (Grok 4.5 model-card presets). Discrete choices so the modal stays
-// scannable; raw TOML / env still accept any percent 0..=100 or token count.
-// Default matches `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT` (95%).
-//
-// Canonicals:
-//   "85" | "90" | "95" | "98"  → percent mode
-//   "200k"                     → 200_000 tokens (Grok 4.5 long-context price cliff)
-//   "475k"                     → 475_000 tokens (95% of Grok 4.5 500k window)
-// ---------------------------------------------------------------------------
-
-/// Canonical string for the registry default (must match
-/// `xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`).
-pub(crate) const AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL: &str = "95";
-
-const AUTO_COMPACT_THRESHOLD_CHOICES: &[EnumChoice] = &[
-    EnumChoice {
-        canonical: "85",
-        display: "85%",
-        description: "Compact earlier — frees context sooner, more frequent summaries.",
-    },
-    EnumChoice {
-        canonical: "90",
-        display: "90%",
-        description: "Compact a bit earlier than the default.",
-    },
-    EnumChoice {
-        canonical: "95",
-        display: "95%",
-        description: "Default. Compact when the context window is nearly full.",
-    },
-    EnumChoice {
-        canonical: "98",
-        display: "98%",
-        description: "Compact as late as practical — longer threads before summarising.",
-    },
-    EnumChoice {
-        canonical: "200k",
-        display: "200k tokens",
-        description: "Grok 4.5 long-context price cliff (same cap Economic mode uses) — \
-                      stay at short-context rates (entire request doubles above 200k).",
-    },
-    EnumChoice {
-        canonical: "475k",
-        display: "475k tokens",
-        description: "95% of the Grok 4.5 500k catalog window as an absolute budget. \
-                      With Economic mode on the effective window is already 200k, so \
-                      prefer 200k tokens or a % threshold instead.",
-    },
-];
-
-// ---------------------------------------------------------------------------
-// Mermaid-rendering catalog.
-//
-// SHELL-owned: persisted to `[ui].render_mermaid`, with a pager-side
-// process-wide cache mirror (`appearance::cache::*_render_mermaid`) for the
-// render hot path. Canonicals match `RenderMermaid::as_canonical`.
-// ---------------------------------------------------------------------------
->>>>>>> 4ee1ce8e (impl (#7))
 
 const RENDER_MERMAID_CHOICES: &[EnumChoice] = &[
     EnumChoice {

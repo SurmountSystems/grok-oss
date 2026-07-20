@@ -45,44 +45,8 @@ pub(crate) fn resolve_compaction_tool_choice_from(
 
 pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROK_AUTO_COMPACT_THRESHOLD_PERCENT";
 
-<<<<<<< HEAD
 /// Precedence (highest first): env `GROK_AUTO_COMPACT_THRESHOLD_PERCENT` user TOML `[model.<id>].auto_compact_threshold_percent` (`cfg.config_models`, the merge of user and managed `[model.<id>]` sections) user TOML `[session].auto_compact_threshold_percent` remote settings per-model `ModelInfo.auto_compact_threshold_percent` (kept out of `ConfigModelOverride::apply` so the user and remote per-model tiers stay distinct) remote settings global `RemoteSettings.auto_compact_threshold_percent` default `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`
 pub(crate) fn resolve_auto_compact_threshold_percent(
-=======
-/// Env-var override for absolute-token auto-compact. When set and valid, wins
-/// over percent tiers (including `GROK_AUTO_COMPACT_THRESHOLD_PERCENT`).
-pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_TOKENS: &str = "GROK_AUTO_COMPACT_THRESHOLD_TOKENS";
-
-/// Resolve auto-compact threshold percent (0-100) for the given model.
-///
-/// Prefer [`resolve_auto_compact_threshold`] when absolute-token preferences
-/// must be honored. This percent-only form ignores
-/// `[session].auto_compact_threshold_tokens` (legacy call sites / tests).
-///
-/// Two scopes (per-model and global) across two tiers (user TOML and
-/// remote settings). User-tier always wins over remote; within a tier, per-model
-/// wins over global. Env var sits on top as a per-process override.
-///
-/// Precedence (highest first):
-///   1. env `GROK_AUTO_COMPACT_THRESHOLD_PERCENT`
-///   2. user TOML `[model.<id>].auto_compact_threshold_percent`
-///      (read from `cfg.config_models`; the effective merge of user +
-///      managed `[model.<id>]` sections)
-///   3. user TOML `[session].auto_compact_threshold_percent`
-///      (read from `cfg.session.auto_compact_threshold_percent: Option<u8>`)
-///   4. remote settings per-model `ModelInfo.auto_compact_threshold_percent`
-///      (populated from `grok_build_models[i].auto_compact_threshold_percent`;
-///      intentionally NOT collapsed via `ConfigModelOverride::apply` so the
-///      user-vs-GB per-model distinction is preserved)
-///   5. remote settings global `RemoteSettings.auto_compact_threshold_percent`
-///      (populated from `grok_build_settings.auto_compact_threshold_percent`)
-///   6. default `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT` (95)
-///
-/// Values outside `0..=100` from the env var are ignored with a debug log and
-/// the resolver falls through to the next tier. TOML/remote fields are typed
-/// `u8` and so naturally constrained.
-pub fn resolve_auto_compact_threshold_percent(
->>>>>>> 4ee1ce8e (impl (#7))
     cfg: &crate::agent::config::Config,
     model_id: &str,
     model: Option<&crate::agent::config::ModelInfo>,
@@ -99,58 +63,9 @@ pub fn resolve_auto_compact_threshold_percent(
     )
 }
 
-<<<<<<< HEAD
 /// [`resolve_auto_compact_threshold_percent`] for callers without a `Config`, e.g. subagent spawn paths that pass the parent's tiers explicitly.
 /// There the per-model tier uses the subagent's resolved model id, not the parent's.
 pub(crate) fn resolve_auto_compact_threshold_percent_from_tiers(
-=======
-/// Resolve the full auto-compact preference (percent **or** absolute tokens).
-///
-/// Precedence (highest first):
-///   1. env `GROK_AUTO_COMPACT_THRESHOLD_TOKENS` (absolute)
-///   2. env `GROK_AUTO_COMPACT_THRESHOLD_PERCENT`
-///   3. user TOML `[session].auto_compact_threshold_tokens` (absolute;
-///      wins over session percent when both set)
-///   4. percent tiers from [`resolve_auto_compact_threshold_percent`]
-///      (model / session percent / remote / default 95)
-///
-/// Absolute-token mode is session-scoped only (no per-model remote tier yet);
-/// percent mode keeps the full 6-tier chain.
-pub fn resolve_auto_compact_threshold(
-    cfg: &crate::agent::config::Config,
-    model_id: &str,
-    model: Option<&crate::agent::config::ModelInfo>,
-) -> AutoCompactThreshold {
-    if let Some(t) = std::env::var(ENV_AUTO_COMPACT_THRESHOLD_TOKENS)
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|&t| t > 0)
-    {
-        return AutoCompactThreshold::Tokens(t);
-    }
-    // Percent env still wins over session tokens so ops can force %.
-    if std::env::var(ENV_AUTO_COMPACT_THRESHOLD_PERCENT).is_ok() {
-        return AutoCompactThreshold::Percent(resolve_auto_compact_threshold_percent(
-            cfg, model_id, model,
-        ));
-    }
-    if let Some(t) = cfg.session.auto_compact_threshold_tokens.filter(|&t| t > 0) {
-        return AutoCompactThreshold::Tokens(t);
-    }
-    AutoCompactThreshold::Percent(resolve_auto_compact_threshold_percent(cfg, model_id, model))
-}
-
-/// Lower-level form of [`resolve_auto_compact_threshold_percent`] that takes
-/// the four tiers as plain `Option<u8>` values rather than reaching into a
-/// `Config`. Useful from sites that don't hold a `Config` reference (e.g.,
-/// subagent spawn paths where the parent's config tiers are plumbed in
-/// explicitly and the per-model lookup uses the SUBAGENT's resolved model id,
-/// not the parent's).
-///
-/// Precedence: env > `user_per_model` > `user_global` > `gb_per_model`
-/// > `gb_global` > `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`.
-pub fn resolve_auto_compact_threshold_percent_from_tiers(
->>>>>>> 4ee1ce8e (impl (#7))
     user_per_model: Option<u8>,
     user_global: Option<u8>,
     gb_per_model: Option<u8>,
@@ -225,30 +140,8 @@ mod compaction_wall_clock_budget_tests {
     }
 }
 
+
 #[cfg(test)]
-<<<<<<< HEAD
-mod compaction_tool_choice_tests {
-    use super::{CompactionToolChoice, resolve_compaction_tool_choice_from as resolve};
-
-    #[test]
-    fn default_is_auto() {
-        assert_eq!(resolve(None, None, None), CompactionToolChoice::Auto);
-    }
-
-    #[test]
-    fn precedence_env_over_config_over_remote() {
-        assert_eq!(
-            resolve(Some("none"), Some("auto"), Some("auto")),
-            CompactionToolChoice::None
-        );
-        assert_eq!(
-            resolve(None, Some("none"), Some("auto")),
-            CompactionToolChoice::None
-        );
-        assert_eq!(
-            resolve(None, None, Some("none")),
-            CompactionToolChoice::None
-=======
 mod resolve_auto_compact_threshold_dual_mode_tests {
     use super::*;
     use crate::agent::config::{Config, SessionConfig};
@@ -281,29 +174,10 @@ mod resolve_auto_compact_threshold_dual_mode_tests {
         assert_eq!(
             resolve_auto_compact_threshold(&cfg, "any", None),
             AutoCompactThreshold::Tokens(200_000)
->>>>>>> 4ee1ce8e (impl (#7))
         );
     }
 
     #[test]
-<<<<<<< HEAD
-    fn garbage_falls_through() {
-        assert_eq!(
-            resolve(Some("garbage"), None, Some("none")),
-            CompactionToolChoice::None
-        );
-        assert_eq!(
-            resolve(Some("garbage"), Some("also-bad"), None),
-            CompactionToolChoice::Auto
-        );
-    }
-
-    #[test]
-    fn from_str_case_insensitive() {
-        assert_eq!("AUTO".parse(), Ok(CompactionToolChoice::Auto));
-        assert_eq!(" None ".parse(), Ok(CompactionToolChoice::None));
-        assert!("required".parse::<CompactionToolChoice>().is_err());
-=======
     fn session_percent_when_tokens_unset() {
         let mut cfg = bare_cfg();
         cfg.session = SessionConfig {
@@ -315,6 +189,5 @@ mod resolve_auto_compact_threshold_dual_mode_tests {
             resolve_auto_compact_threshold(&cfg, "any", None),
             AutoCompactThreshold::Percent(90)
         );
->>>>>>> 4ee1ce8e (impl (#7))
     }
 }

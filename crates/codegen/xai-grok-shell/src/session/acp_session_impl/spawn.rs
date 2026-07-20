@@ -624,15 +624,11 @@ pub(crate) async fn spawn_session_actor(
         rate_limit_retry_threshold: sampling_config.rate_limit_retry_threshold,
         api_backend: sampling_config.api_backend.clone(),
         extra_headers: sampling_config.extra_headers.clone(),
-<<<<<<< HEAD
         conversation_group_id: sampling_config.conversation_group_id.clone(),
         query_params: sampling_config.query_params.clone(),
         env_http_headers: sampling_config.env_http_headers.clone(),
         context_window: context_window_override.unwrap_or(baseline_context_window),
         max_request_bytes: sampling_config.max_request_bytes,
-=======
-        context_window: effective_context_window,
->>>>>>> 4ee1ce8e (impl (#7))
         reasoning_effort: sampling_config.reasoning_effort,
         reasoning_summary: sampling_config.reasoning_summary,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
@@ -1878,12 +1874,9 @@ pub(crate) async fn spawn_session_actor(
             threshold_tokens: std::cell::Cell::new(auto_compact_threshold_tokens),
             force_compact: force_compact.clone(),
             context_window_override,
-<<<<<<< HEAD
-            context_window_selection: context_window_selection.clone(),
-=======
+
             economic_mode: std::cell::Cell::new(economic_mode),
             model_context_window: std::cell::Cell::new(baseline_context_window.get()),
->>>>>>> 4ee1ce8e (impl (#7))
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
@@ -2759,27 +2752,7 @@ pub(crate) async fn spawn_session_on_thread(
                 }
             };
             let local = tokio::task::LocalSet::new();
-<<<<<<< HEAD
-            let actor_main = async move {
-                let _trace_span = parent_traceparent
-                    .as_ref()
-                    .map(|tp| {
-                        let meta = serde_json::json!({ "traceparent": tp })
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default();
-                        let span = xai_grok_otel::span_from_meta_traceparent(&meta);
-                        span.entered()
-                    });
-                let session_spawn_span = match spawn_trace {
-                    Some(ctx) => {
-                        tracing::info_span!(
-                        parent: &ctx.parent,
-                        "session.spawn",
-                        session_id = %session_info.id.0,
-                        client_type = ?client_type,
-                        start_type = if initial_prompt_texts.is_empty() { "new" } else { "resumed" },
-=======
+
             local.block_on(&rt, async move {
                 let _trace_span = parent_traceparent.as_ref().map(|tp| {
                     let meta = serde_json::json!({ "traceparent" : tp })
@@ -2893,7 +2866,6 @@ pub(crate) async fn spawn_session_on_thread(
                         parent_scheduler_handle,
                         max_turns,
                         forked_tool_override,
->>>>>>> 4ee1ce8e (impl (#7))
                     )
                     }
                     None => {

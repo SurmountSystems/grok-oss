@@ -707,13 +707,8 @@ mod tests {
 
     #[test]
     fn build_lines_auto_compact_eta_uses_millions_for_wide_windows() {
-<<<<<<< HEAD
         // 4M window at 0% used: remaining = ceil(4_000_000 * 85 / 100) = 3_400_000.
         // Renders via fmt_tok_big as "3.4m", not "3400k"
-=======
-        // 4M window at 0% used: remaining = ceil(4_000_000 * 95 / 100) = 3_800_000.
-        // Should render via fmt_tok_big as "3.8m", not "3800k".
->>>>>>> 4ee1ce8e (impl (#7))
         let mut snap = snapshot();
         snap.total = 4_000_000;
         snap.used = 0;
@@ -730,11 +725,7 @@ mod tests {
 
     #[test]
     fn build_lines_auto_compact_eta_arithmetic_at_known_snapshot() {
-<<<<<<< HEAD
         // 1M window, 36_700 used: ceil(850_000) - 36_700 = 813_300, rendered as "813k"
-=======
-        // 1M window, 36_700 used: ceil(950_000) - 36_700 = 913_300 → "913k".
->>>>>>> 4ee1ce8e (impl (#7))
         let block = ContextInfoBlock::new(snapshot(), "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);

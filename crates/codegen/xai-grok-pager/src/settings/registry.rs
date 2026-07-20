@@ -354,10 +354,7 @@ pub struct PagerLocalSnapshot {
     pub show_tips: Option<bool>,
     /// `[cli].auto_update` mirror; `None` means no TOML override, so the default `true` applies.
     pub auto_update: Option<bool>,
-<<<<<<< HEAD
-    /// Process-wide vim-mode scrollback flag.
-    /// Mirrors `appearance::cache::load_vim_mode()` at snapshot time.
-=======
+
     /// `[session].auto_compact_threshold_percent` mirror.
     /// `None` = no TOML override → default 95 (unless tokens are set).
     pub auto_compact_threshold_percent: Option<u8>,
@@ -366,7 +363,6 @@ pub struct PagerLocalSnapshot {
     pub auto_compact_threshold_tokens: Option<u64>,
     /// Process-wide vim-mode scrollback flag. Mirrors
     /// `appearance::cache::load_vim_mode()` at snapshot time.
->>>>>>> 4ee1ce8e (impl (#7))
     pub vim_mode: bool,
     /// Process-wide mouse-wheel scroll speed (1-100).
     /// Mirrors `appearance::cache::load_scroll_speed()` at snapshot time.
@@ -427,11 +423,7 @@ pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
     }
 }
 
-<<<<<<< HEAD
-/// Canonicalize a raw voice STT language to a settings choice. Delegates to
-/// [`xai_grok_voice::canonicalize_stt_language`] so the pager and the STT client share one catalog. The catalog is
-/// the official Grok STT languages plus the client-only `auto`.
-=======
+
 /// Parsed auto-compact modal choice: percent of window or absolute tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoCompactThresholdChoice {
@@ -542,7 +534,6 @@ pub fn canonical_auto_compact_threshold_from_percent(percent: u8) -> &'static st
 /// Delegates to [`xai_grok_voice::canonicalize_stt_language`] so the pager and
 /// the STT client share one catalog (official Grok STT languages + client-only
 /// `auto`). Unknown/blank/`None` → `en`.
->>>>>>> 4ee1ce8e (impl (#7))
 pub fn canonical_voice_stt_language(value: Option<&str>) -> &'static str {
     xai_grok_voice::canonicalize_stt_language(value)
 }
@@ -894,11 +885,7 @@ pub fn current_value_for(
         // CLI batch: snapshot mirrors; `None` means the effective default `true`
         "show_tips" => Some(SettingValue::Bool(pager.show_tips.unwrap_or(true))),
         "auto_update" => Some(SettingValue::Bool(pager.auto_update.unwrap_or(true))),
-<<<<<<< HEAD
-        // fork_secondary_model: the baseline value folds to the empty string
-        // The mirror persists the ModelId slug but the DynamicEnum canonicals are catalog display names, so resolve via the snapshot
-        // A stale id passes through raw
-=======
+
         // Session auto-compact: token mode wins; else percent (default 95).
         "auto_compact_threshold_percent" => {
             Some(SettingValue::Enum(canonical_auto_compact_threshold(
@@ -907,7 +894,6 @@ pub fn current_value_for(
             )))
         }
         // fork_secondary_model: baseline value folds to empty string.
->>>>>>> 4ee1ce8e (impl (#7))
         "fork_secondary_model" => Some(SettingValue::String({
             let baseline = xai_grok_shell::models::default_model();
             if ui.fork_secondary_model == baseline {
@@ -1180,9 +1166,7 @@ mod tests {
                          (matches auto_update.rs's `.unwrap_or(true)`)"
                     );
                 }
-<<<<<<< HEAD
-                // vim_mode: Option<bool>; None reads as false
-=======
+
                 // Session auto-compact: no UiConfig field; default pinned to
                 // the shell/compaction crate constant (95).
                 ("auto_compact_threshold_percent", SettingKind::Enum { default, .. }) => {
@@ -1198,7 +1182,6 @@ mod tests {
                     );
                 }
                 // vim_mode: Option<bool>; None → false.
->>>>>>> 4ee1ce8e (impl (#7))
                 ("vim_mode", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
@@ -1560,11 +1543,7 @@ mod tests {
         assert_eq!(canonical_voice_capture_mode(None), "hold");
     }
 
-<<<<<<< HEAD
-    /// With the UI key unset, `current_value_for` shows the live language.
-    /// That is the snapshot mirror of `voice_config.language`, e.g. an explicit `[voice].language`.
-    /// A set UI key wins.
-=======
+
     #[test]
     fn canonical_auto_compact_threshold_exact_and_nearest() {
         assert_eq!(canonical_auto_compact_threshold_percent(85), "85");
@@ -1641,7 +1620,6 @@ mod tests {
     /// With the UI key unset, `current_value_for` shows the live language
     /// (snapshot mirror of `voice_config.language` — e.g. an explicit
     /// `[voice].language`); a set UI key wins.
->>>>>>> 4ee1ce8e (impl (#7))
     #[test]
     fn voice_stt_language_current_value_falls_back_to_live_config() {
         let pager = PagerLocalSnapshot {

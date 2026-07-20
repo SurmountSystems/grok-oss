@@ -4414,8 +4414,7 @@ impl MvpAgent {
             ?startup_hints,
             "startup hints"
         );
-<<<<<<< HEAD
-=======
+
         let (auto_compact_threshold_percent, auto_compact_threshold_tokens) = {
             let cfg = self.cfg.borrow();
             let models = self.models_manager.models();
@@ -4446,7 +4445,6 @@ impl MvpAgent {
             )
         };
         let compaction_mode = self.cfg.borrow().resolve_compaction_mode();
->>>>>>> 4ee1ce8e (impl (#7))
         let compaction_verbatim_input = self
             .cfg
             .borrow()

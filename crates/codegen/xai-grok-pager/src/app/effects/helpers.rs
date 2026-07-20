@@ -1695,7 +1695,7 @@ pub(super) fn has_prepaid_credits(
 /// any previously cached balance.
 pub(super) async fn fetch_openrouter_credit_balance(
 ) -> Option<crate::views::credit_bar::OpenRouterCreditBalance> {
-    let cents = xai_grok_shell::auth::fetch_openrouter_credit_balance_cents().await?;
+    let cents = xai_grok_shell::auth::openrouter::fetch_openrouter_credit_balance_cents().await?;
     Some(crate::views::credit_bar::OpenRouterCreditBalance {
         balance_cents: cents,
     })

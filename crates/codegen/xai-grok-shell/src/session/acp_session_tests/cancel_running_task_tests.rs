@@ -147,16 +147,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
                 forked_tool_override: None,
-<<<<<<< HEAD
-                compaction: test_compaction_config(85),
-                long_reasoning_reminder:
-                    crate::session::long_reasoning_reminder::LongReasoningReminder {
-                        enabled: false,
-                        tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
-                        delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
-                    },
-                long_reasoning_turn_state: Default::default(),
-=======
+
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
                     threshold_tokens: std::cell::Cell::new(None),
@@ -172,7 +163,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
                 },
->>>>>>> 4ee1ce8e (impl (#7))
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: None,
                     v2_config: Default::default(),
@@ -467,7 +457,6 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 cwd: session_dir.path().to_string_lossy().to_string(),
             };
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
-<<<<<<< HEAD
                     api_key: Some("test-key".to_string()),
                     base_url: "http://localhost".to_string(),
                     model: "test-model".to_string(),
@@ -475,38 +464,6 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     ..Default::default()
                 })
                 .expect("sampling client should build for persistence actor");
-=======
-                api_key: Some("test-key".to_string()),
-                failover_api_keys: Vec::new(),
-                base_url: "http://localhost".to_string(),
-                model: "test-model".to_string(),
-                max_completion_tokens: None,
-                extra_headers: Default::default(),
-                temperature: None,
-                top_p: None,
-                api_backend: Default::default(),
-                auth_scheme: Default::default(),
-                context_window: 100_000,
-                client_version: None,
-                force_http1: false,
-                max_retries: None,
-                stream_tool_calls: false,
-                idle_timeout_secs: None,
-                client_identifier: None,
-                reasoning_effort: None,
-                deployment_id: None,
-                user_id: None,
-                origin_client: None,
-                attribution_callback: None,
-                bearer_resolver: None,
-                supports_backend_search: false,
-                compactions_remaining: None,
-                compaction_at_tokens: None,
-                doom_loop_recovery: None,
-                header_injector: None,
-            })
-            .expect("sampling client should build for persistence actor");
->>>>>>> 4ee1ce8e (impl (#7))
             let persistence = crate::session::persistence::new_with_explicit_dir(
                     &crate::session::info::Info {
                         id: session_info.id.clone(),
@@ -733,16 +690,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
                 forked_tool_override: None,
-<<<<<<< HEAD
-                compaction: test_compaction_config(85),
-                long_reasoning_reminder:
-                    crate::session::long_reasoning_reminder::LongReasoningReminder {
-                        enabled: false,
-                        tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
-                        delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
-                    },
-                long_reasoning_turn_state: Default::default(),
-=======
+
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
                     threshold_tokens: std::cell::Cell::new(None),
@@ -758,7 +706,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
                 },
->>>>>>> 4ee1ce8e (impl (#7))
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: Some(crate::config::MemoryMode::Legacy),
                     v2_config: Default::default(),
@@ -1081,30 +1028,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
                 forked_tool_override: None,
-<<<<<<< HEAD
-                compaction: test_compaction_config(85),
-                long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
-                    enabled: false,
-                    tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
-                    delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
-                },
-                long_reasoning_turn_state: Default::default(),
-                memory: crate::session::memory_state::SessionMemory {
-                    configured_mode: None,
-                    v2_config: Default::default(),
-                    configured_storage: None,
-                    process_disabled: false,
-                    config_opt_out: false,
-                    v2_legacy_carryover: false,
-                    prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
-                    flush_config: crate::config::MemoryFlushConfig::default(),
-                    is_flushing: std::sync::Arc::new(
-                        std::sync::atomic::AtomicBool::new(false),
-                    ),
-                    capture_worker: std::cell::RefCell::new(None),
-                    dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
-                    last_capture_failure: std::cell::RefCell::new(None),
-=======
+
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
                     threshold_tokens: std::cell::Cell::new(None),
@@ -1122,10 +1046,22 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
                 },
+                long_reasoning_turn_state: Default::default(),
                 memory: crate::session::memory_state::SessionMemory {
+                    configured_mode: None,
+                    v2_config: Default::default(),
+                    configured_storage: None,
+                    process_disabled: false,
+                    config_opt_out: false,
+                    v2_legacy_carryover: false,
+                    prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
                     flush_config: crate::config::MemoryFlushConfig::default(),
-                    is_flushing: std::sync::atomic::AtomicBool::new(false),
->>>>>>> 4ee1ce8e (impl (#7))
+                    is_flushing: std::sync::Arc::new(
+                        std::sync::atomic::AtomicBool::new(false),
+                    ),
+                    capture_worker: std::cell::RefCell::new(None),
+                    dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+                    last_capture_failure: std::cell::RefCell::new(None),
                     last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
                     storage: std::cell::RefCell::new(None),
                     save_on_end: true,
@@ -2662,30 +2598,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
                 forked_tool_override: None,
-<<<<<<< HEAD
-                compaction: test_compaction_config(85),
-                long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
-                    enabled: false,
-                    tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
-                    delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
-                },
-                long_reasoning_turn_state: Default::default(),
-                memory: crate::session::memory_state::SessionMemory {
-                    configured_mode: None,
-                    v2_config: Default::default(),
-                    configured_storage: None,
-                    process_disabled: false,
-                    config_opt_out: false,
-                    v2_legacy_carryover: false,
-                    prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
-                    flush_config: crate::config::MemoryFlushConfig::default(),
-                    is_flushing: std::sync::Arc::new(
-                        std::sync::atomic::AtomicBool::new(false),
-                    ),
-                    capture_worker: std::cell::RefCell::new(None),
-                    dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
-                    last_capture_failure: std::cell::RefCell::new(None),
-=======
+
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
                     threshold_tokens: std::cell::Cell::new(None),
@@ -2703,10 +2616,22 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
                 },
+                long_reasoning_turn_state: Default::default(),
                 memory: crate::session::memory_state::SessionMemory {
+                    configured_mode: None,
+                    v2_config: Default::default(),
+                    configured_storage: None,
+                    process_disabled: false,
+                    config_opt_out: false,
+                    v2_legacy_carryover: false,
+                    prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
                     flush_config: crate::config::MemoryFlushConfig::default(),
-                    is_flushing: std::sync::atomic::AtomicBool::new(false),
->>>>>>> 4ee1ce8e (impl (#7))
+                    is_flushing: std::sync::Arc::new(
+                        std::sync::atomic::AtomicBool::new(false),
+                    ),
+                    capture_worker: std::cell::RefCell::new(None),
+                    dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+                    last_capture_failure: std::cell::RefCell::new(None),
                     last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
                     storage: std::cell::RefCell::new(None),
                     save_on_end: true,

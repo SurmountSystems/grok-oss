@@ -26,11 +26,7 @@ Not `/config-agents` (alias `/agents`), which manages agent *definitions* and pe
 
 ### `/compact`
 
-<<<<<<< HEAD
-Compress conversation history to reclaim context-window space.
 
-Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
-=======
 When the context window fills up, Grok auto-compacts at 95% usage by default
 (configurable via `/settings` → **Auto-compact at**, or
 `[session] auto_compact_threshold_percent` / `auto_compact_threshold_tokens` in
@@ -52,7 +48,8 @@ Default **on** for new sessions (`[ui] economic_mode`). Also clamps auto-run
 ```
 
 Aliases: `/economic`, `/econ`
->>>>>>> 4ee1ce8e (impl (#7))
+
+Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
 
 ### `/context`
 

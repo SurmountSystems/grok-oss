@@ -28,7 +28,7 @@ pub const GROK_45_CONTEXT_WINDOW_TOKENS: u64 = 500_000;
 /// this cliff keeps short-context pricing.
 pub const GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS: u64 = 200_000;
 
-/// 95% of [`GROK_45_CONTEXT_WINDOW_TOKENS`] — the token equivalent of the
+/// 95% of [`GROK_45_CONTEXT_WINDOW_TOKENS`], the token equivalent of the
 /// default percent threshold on the Grok 4.5 card.
 pub const GROK_45_DEFAULT_AUTO_COMPACT_TOKENS: u64 =
     GROK_45_CONTEXT_WINDOW_TOKENS * (DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT as u64) / 100;

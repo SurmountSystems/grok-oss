@@ -187,16 +187,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
                 forked_tool_override: None,
-<<<<<<< HEAD
-                compaction: test_compaction_config(85),
-                long_reasoning_reminder:
-                    crate::session::long_reasoning_reminder::LongReasoningReminder {
-                        enabled: false,
-                        tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
-                        delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
-                    },
-                long_reasoning_turn_state: Default::default(),
-=======
+
                 compaction: crate::session::compaction_config::CompactionConfig {
                     threshold_percent: std::cell::Cell::new(85),
                     threshold_tokens: std::cell::Cell::new(None),
@@ -212,7 +203,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
                 },
->>>>>>> 4ee1ce8e (impl (#7))
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: None,
                     v2_config: Default::default(),

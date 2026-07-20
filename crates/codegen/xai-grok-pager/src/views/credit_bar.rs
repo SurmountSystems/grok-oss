@@ -659,67 +659,6 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
-=======
-    // ── usage_warning: OpenRouter account credits ────────────────────
-
-    #[test]
-    fn warning_openrouter_shows_balance_always() {
-        assert_eq!(
-            usage_warning_for_session_with_openrouter(
-                Some(&bal(50.0)),
-                None,
-                Some(&or_bal(6386)),
-                true,
-                false,
-                true,
-            ),
-            Some(("Credits left: $63.86".to_string(), false))
-        );
-        // Low balance → critical (yellow).
-        assert_eq!(
-            usage_warning_for_session_with_openrouter(
-                None,
-                None,
-                Some(&or_bal(500)),
-                true,
-                false,
-                true,
-            ),
-            Some(("Credits left: $5".to_string(), true))
-        );
-        // OR model without a fetched balance → no warning (don't fall back to xAI).
-        assert_eq!(
-            usage_warning_for_session_with_openrouter(
-                Some(&CreditBalance {
-                    prepaid_balance_cents: Some(9999),
-                    ..bal(100.0)
-                }),
-                Some(&topup(false, None, None)),
-                None,
-                true,
-                false,
-                true,
-            ),
-            None
-        );
-        // Non-OR model ignores OR balance.
-        assert_eq!(
-            usage_warning_for_session_with_openrouter(
-                Some(&bal(50.0)),
-                None,
-                Some(&or_bal(6386)),
-                true,
-                false,
-                false,
-            ),
-            None
-        );
-    }
-
-    // ── usage_warning: pay-as-you-go (monthly on-demand) ─────────────
-
->>>>>>> 4ee1ce8e (impl (#7))
     fn pay_as_you_go(usage_pct: f64, cap_cents: i64, used_cents: i64) -> CreditBalance {
         CreditBalance {
             pay_as_you_go: true,

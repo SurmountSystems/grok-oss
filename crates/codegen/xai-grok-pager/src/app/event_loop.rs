@@ -1606,12 +1606,10 @@ pub(crate) async fn run(
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
-<<<<<<< HEAD
-=======
+
     app.auto_compact_threshold_percent = config_session_bools.auto_compact_threshold_percent;
     app.auto_compact_threshold_tokens = config_session_bools.auto_compact_threshold_tokens;
     // Prime thread-local caches so first render doesn't hit disk.
->>>>>>> 4ee1ce8e (impl (#7))
     crate::appearance::cache::prime(&app.current_ui);
     crate::appearance::cache::apply_remote_keep_text_selection_default(
         remote_settings
@@ -2981,14 +2979,8 @@ pub(crate) fn load_initial_ui_config() -> xai_grok_shell::agent::config::UiConfi
         })
         .clone()
 }
-<<<<<<< HEAD
 /// Config `Option<bool>` mirrors seeded once at startup.
 /// `None` means no TOML override; the modal falls back to the per-setting default.
-=======
-
-/// Config mirrors seeded once at startup. `None` = no TOML override;
-/// the modal falls back to the per-setting default.
->>>>>>> 4ee1ce8e (impl (#7))
 #[derive(Default)]
 struct InitialConfigSessionBools {
     show_tips: Option<bool>,
