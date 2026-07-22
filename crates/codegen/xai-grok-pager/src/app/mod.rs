@@ -1476,13 +1476,13 @@ mod tests {
     #[test]
     fn terminal_title_uses_product_cli_brand() {
         // Surmount Grok OSS: tab/window titles must not say bare "grok".
-        assert_eq!(
-            crate::client_identity::PRODUCT_CLI_NAME,
-            "grok-oss"
-        );
+        assert_eq!(crate::client_identity::PRODUCT_CLI_NAME, "grok-oss");
         let t = terminal_title_string("session");
         assert!(t.ends_with(" - grok-oss"), "got {t}");
-        assert!(!t.ends_with(" - grok"), "must not use bare upstream brand: {t}");
+        assert!(
+            !t.ends_with(" - grok"),
+            "must not use bare upstream brand: {t}"
+        );
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {
