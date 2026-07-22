@@ -22,26 +22,38 @@ often **no merge-base**. Do not “Sync fork” or reset Surmount `main` to thei
 We absorb **trees** (`git rev-parse <export>^{tree}`), not their parent graph.
 Whether they stop rewriting history is **unknown** — do not promise stability.
 
-## Two directions
+## Two directions (+ join for a landable PR)
 
 | Job | Script | Branch | When |
 |-----|--------|--------|------|
 | **Their tree → Surmount** | `scripts/import-upstream-export.sh` | `import/*` | Product archive on Surmount `main` after review |
 | **Our commits → their tip** | `scripts/put-history-on-xai.sh` | `onto-xai/<short>` | Preferred when histories break: one branch that is a **descendant of their tip** and carries Grok OSS |
+| **Join `main` into onto** | `scripts/join-main-into-onto.sh` | same `onto-xai/*` | After put-history: make the tip also a **descendant of Surmount `main`** so GitHub compare / PR works |
 
 ```
 xai-org/main  (force-pushed snapshots)
       │
       ├── import/*     ← their tree into Surmount base + fork paths
       │
-      └── onto-xai/*   ← real cherry-pick of Surmount product commits onto their tip
+      └── onto-xai/*   ← cherry-pick product onto their tip
+              │
+              └── join main (-s ours)  ← main becomes ancestor; tip tree unchanged
+                        │
+                        └── PR → Surmount main
 ```
 
-**Preferred HITL when they rewrite history:** put **our product work on their
-current tip** (put-history). Import remains the way to record a reviewed
-content absorption into Surmount’s archive.
+**Preferred HITL when they rewrite history:**
 
-Tool branches still land on **`main` through normal PRs** (feature-branch git flow).
+1. **Put** our product commits on their current tip (`put-history`).
+2. **Join** Surmount `main` into that tip (`join-main-into-onto`, strategy
+   **ours**) so the branch is in our history graph and is PR-able.
+3. Open a normal PR: **base `main` ← head `onto-xai/*`**.
+
+Import remains the way to record a reviewed **content absorption** into
+Surmount’s archive under Surmount-first parents (different job from the join).
+
+Without step 2, GitHub often says **“entirely different commit histories”**
+(no merge-base). That is expected until you join.
 
 Detect: `./scripts/detect-upstream-export.sh` or `just upstream-detect`.
 
@@ -67,6 +79,43 @@ CONTINUE=1 ./scripts/put-history-on-xai.sh
 
 Does not push. Does not rewrite Surmount `main`. Does not touch xAI (pull-only).
 
+## Join Surmount `main` into an onto tip (landable graph)
+
+After put-history, `onto-xai/*` sits on an xAI root and usually shares **no**
+merge-base with Surmount `main`. To open a normal PR you must **join** our
+archive history into the tip **without** replacing the tip-aligned tree.
+
+```bash
+# on onto-xai/<short>, clean worktree
+./scripts/join-main-into-onto.sh
+# stages merge -s ours --allow-unrelated-histories; tree identity checked
+# human TTY:
+git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
+  -m "Join Surmount archive history so main is an ancestor of this tip." \
+  -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
+
+# or try commit in-script when GPG/TTY works:
+# DO_COMMIT=1 ./scripts/join-main-into-onto.sh
+
+just check
+git push -u origin HEAD
+# PR base=main head=onto-xai/<short>
+```
+
+| Check | Expect |
+|-------|--------|
+| `git merge-base --is-ancestor origin/main HEAD` | true |
+| `git rev-parse HEAD^{tree}` | same as pre-join onto tree |
+| GitHub `main...onto` | renders a real compare (not “entirely different histories”) |
+
+**Strategy `ours`:** second parent is `main`; **tree stays the onto tip**
+(current export + product). This is not a content merge of older `main` over a
+newer xAI tree. Main-only obsolete paths remain reachable via the second parent.
+
+Just recipes: `just upstream-put-history`, `just upstream-join-main`.
+
+Does not push. Does not rewrite `main`. Does not touch xAI.
+
 ## Import their tree into Surmount
 
 ```bash
@@ -82,11 +131,12 @@ branding, rate-limit seams; run `just check`; append the import log; PR to `main
 
 | Don’t | Do |
 |-------|-----|
-| `git merge xai-org/main` with no merge-base | Content import or put-history |
+| `git merge xai-org/main` with no merge-base (content) | Content **import** or **put-history** |
+| Content-merge older Surmount `main` over a tip-aligned onto tree | **`join-main-into-onto`** (`-s ours`) then PR |
 | GitHub Sync fork that drops Surmount | Branch from Surmount `main` |
 | Blind `reset --hard` to export | Review + re-apply seams |
-| Disable GPG for import/onto commits | Human signs on a real TTY |
-| Reset Surmount `main` to an onto-xai tip “to match” them | Keep archive history |
+| Disable GPG for import/onto/join commits | Human signs on a real TTY |
+| Reset Surmount `main` to an onto-xai tip “to match” them | PR onto → `main` after join |
 
 ## Signed commits
 

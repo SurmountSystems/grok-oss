@@ -38,8 +38,9 @@ apply (`~/.grok/AGENTS.md`).
 ## Upstream (xAI)
 
 - Prefer **product commits on their current tip** when histories break
-  (`scripts/put-history-on-xai.sh` — real cherry-pick). See
-  [`docs/upstream-history.md`](docs/upstream-history.md).
+  (`scripts/put-history-on-xai.sh` — real cherry-pick). Then **join Surmount
+  `main`** into that tip (`scripts/join-main-into-onto.sh`, `merge -s ours`)
+  so the branch is PR-able. See [`docs/upstream-history.md`](docs/upstream-history.md).
 - **Import** absorbs their tree into Surmount history (different job).
 - This fork exists because upstream does not accept external PRs. If that
   changes, open a PR to contribute.

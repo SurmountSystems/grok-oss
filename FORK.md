@@ -45,15 +45,16 @@ xAI publishes force-pushed snapshots (bot author, often orphan roots, sometimes
 short “Synced from monorepo” chains). GitHub may say histories are “entirely
 different.” **Expected.** Treat them as a **tree feed**, not shared ancestry.
 
-**Two maintainer jobs** (do not confuse them):
+**Maintainer jobs** (do not confuse them):
 
 | Job | Script | Result |
 |-----|--------|--------|
 | **Import** — their tree into Surmount history | `./scripts/import-upstream-export.sh` | `import/*` review branch → PR to `main` |
 | **Stack on tip** — our product commits on their tip | `./scripts/put-history-on-xai.sh` | `onto-xai/*` (real **cherry-pick**; no `MODE=overlay`) |
+| **Join `main` into onto** — landable graph | `./scripts/join-main-into-onto.sh` | same tip; `main` becomes ancestor; **tree kept** (`-s ours`) → PR |
 
-When histories keep breaking, prefer **stacking our product work on their
-current tip** so one branch is a descendant of theirs **and** carries Grok OSS.
+When histories keep breaking: **stack product on their tip**, then **join
+Surmount `main`** (`-s ours`) so GitHub compare/PR works, then PR to `main`.
 Detect: `./scripts/detect-upstream-export.sh` or `just upstream-detect`.
 
 Full process: [`docs/upstream-history.md`](docs/upstream-history.md)  
@@ -86,7 +87,8 @@ list when you ship fork work.
 
 ### Process
 
-- [x] **Upstream tooling** — detect / import / put-history / sync scripts; scheduled export watch workflow
+- [x] **Upstream tooling** — detect / import / put-history / **join-main-into-onto** / sync scripts; scheduled export watch workflow
+- [x] **Onto land path** — after product is on their tip, join Surmount `main` with `merge -s ours` so the tip is PR-able (`docs/upstream-history.md`, `just upstream-join-main`)
 - [x] **PRs accepted** — CONTRIBUTING / this fork
 
 Novel Surmount crates use the **`grok-*`** prefix (example: `grok-rate-limit`).

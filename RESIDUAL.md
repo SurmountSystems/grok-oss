@@ -7,17 +7,18 @@ or code — not only here.
 
 1. **Formal content import of current xAI tip into Surmount `main`**  
    Tip `3af4d5d…` / tree `e595174…` is logged as *pending* in the import ledger.
-   The `onto-xai/3af4d5d39897` stack puts product commits on that tip; that is
-   **not** the same as a reviewed import PR into `main`. Decide when to run
-   import + PR.
+   The `onto-xai/3af4d5d39897` stack + **join-main** (`-s ours`) is the landable
+   product path (PR onto → `main`). That is **not** the same as a reviewed
+   import-ledger absorption under Surmount-first parents. Decide when import
+   still needs its own PR/log row.
 
 2. **xAI history stability**  
    Unknown whether force-exports continue. Prefer stacking product on their tip
    when they rewrite; do not promise they will stop.
 
-3. **Onto branch vs `main` for the honesty-pass commit**  
-   Doc/rules work may sit on the current feature/`onto-xai` branch until a normal
-   PR to `main`. No second permanent mainline.
+3. **Finish join + PR for current onto tip**  
+   Merge of `main` into onto is staged or about to be signed; docs/script for
+   the workflow land in a follow-up commit; then push and open PR to `main`.
 
 4. **Confidence notes**  
    If a process detail is still fuzzy after reading FORK + upstream-history,

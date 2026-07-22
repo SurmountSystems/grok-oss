@@ -356,5 +356,13 @@ upstream-detect:
 upstream-import *ARGS:
     ./scripts/import-upstream-export.sh {{ ARGS }}
 
+# Cherry-pick Surmount product onto current xAI tip → onto-xai/<short>
+upstream-put-history *ARGS:
+    ./scripts/put-history-on-xai.sh {{ ARGS }}
+
+# Join Surmount main into current onto tip (-s ours; stages merge for signed commit)
+upstream-join-main *ARGS:
+    ./scripts/join-main-into-onto.sh {{ ARGS }}
+
 upstream-sync *ARGS:
     ./scripts/sync-upstream.sh {{ ARGS }}
