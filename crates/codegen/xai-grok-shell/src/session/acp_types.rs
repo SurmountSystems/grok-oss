@@ -501,7 +501,8 @@ impl ContextInfo {
     }
 }
 
-/// Serde default for the threshold field (keeps old snapshots and partials deserializing without error and gives the historical default of 85).
+/// Serde default for the threshold field (keeps old snapshots and partials
+/// deserializing without error and gives the product default of 95).
 fn default_auto_compact_threshold() -> u8 {
     DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
 }

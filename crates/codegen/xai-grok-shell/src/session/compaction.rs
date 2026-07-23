@@ -2327,15 +2327,28 @@ impl SessionActor {
         });
         self.signals_handle()
             .record_compaction(trigger_info.tokens_used);
+        let threshold_percent = self.compaction.threshold_percent.get();
+        let threshold_tokens = self.compaction.threshold_tokens.get();
         let reason = if trigger_info.reason_override == Some(MODEL_FAMILY_SWITCH_COMPACT_BANNER) {
             MODEL_FAMILY_SWITCH_COMPACT_BANNER.to_string()
         } else {
-            format!("Context window {}% full", trigger_info.percentage)
+            match threshold_tokens {
+                Some(t) => format!(
+                    "Context window {}% full (auto-compact at {t} tokens)",
+                    trigger_info.percentage
+                ),
+                None => format!(
+                    "Context window {}% full (auto-compact at {threshold_percent}%)",
+                    trigger_info.percentage
+                ),
+            }
         };
         self.send_xai_notification(XaiSessionUpdate::AutoCompactStarted {
             tokens_used: trigger_info.tokens_used,
             context_window: trigger_info.context_window,
             percentage: trigger_info.percentage,
+            threshold_percent: Some(threshold_percent),
+            threshold_tokens,
             reason,
         })
         .await;

@@ -80,8 +80,15 @@ pub enum SessionEvent {
     },
     /// Auto-compaction started (context window threshold reached).
     CompactionStarted {
-        /// Percentage of context window used (e.g., 85).
+        /// Usage percentage of context window at fire time (e.g., 81).
+        /// This is **not** the configured threshold — see `threshold_percent`.
         percentage: u8,
+        /// Configured auto-compact threshold percent (live session).
+        /// `None` when the shell did not send it (older payloads).
+        threshold_percent: Option<u8>,
+        /// Configured absolute-token threshold when in tokens mode.
+        threshold_tokens: Option<u64>,
+        /// Tip banner reason. The model-family switch text wins over the threshold line.
         reason: String,
     },
     /// Auto-compaction completed successfully.
@@ -415,11 +422,30 @@ impl SessionEvent {
             } => {
                 format!("Turn failed: {error}")
             }
-            SessionEvent::CompactionStarted { percentage, reason } => {
+            SessionEvent::CompactionStarted {
+                percentage,
+                threshold_percent,
+                threshold_tokens,
+                reason,
+            } => {
                 if reason == MODEL_FAMILY_SWITCH_COMPACT_BANNER {
-                    MODEL_FAMILY_SWITCH_COMPACT_BANNER.to_string()
-                } else {
-                    format!("Context {percentage}% full. Compacting…")
+                    return MODEL_FAMILY_SWITCH_COMPACT_BANNER.to_string();
+                }
+                match (threshold_tokens, threshold_percent) {
+                    (Some(t), _) => {
+                        let label = if *t >= 1000 {
+                            format!("{}k", t / 1000)
+                        } else {
+                            t.to_string()
+                        };
+                        format!(
+                            "Context {percentage}% full (auto-compact at {label} tokens). Compacting…"
+                        )
+                    }
+                    (None, Some(threshold)) => format!(
+                        "Context {percentage}% full (auto-compact at {threshold}%). Compacting…"
+                    ),
+                    (None, None) => format!("Context {percentage}% full. Compacting…"),
                 }
             }
             SessionEvent::CompactionCompleted {
@@ -820,6 +846,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compaction_started_banner_includes_threshold() {
+        let with_threshold = SessionEvent::CompactionStarted {
+            percentage: 81,
+            threshold_percent: Some(80),
+            threshold_tokens: None,
+            reason: String::new(),
+        };
+        assert_eq!(
+            with_threshold.message(),
+            "Context 81% full (auto-compact at 80%). Compacting…"
+        );
+
+        let at_product_default = SessionEvent::CompactionStarted {
+            percentage: 95,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
+            reason: String::new(),
+        };
+        assert_eq!(
+            at_product_default.message(),
+            "Context 95% full (auto-compact at 95%). Compacting…"
+        );
+
+        let tokens_mode = SessionEvent::CompactionStarted {
+            percentage: 80,
+            threshold_percent: None,
+            threshold_tokens: Some(200_000),
+            reason: String::new(),
+        };
+        assert_eq!(
+            tokens_mode.message(),
+            "Context 80% full (auto-compact at 200k tokens). Compacting…"
+        );
+
+        let legacy = SessionEvent::CompactionStarted {
+            percentage: 81,
+            threshold_percent: None,
+            threshold_tokens: None,
+            reason: String::new(),
+        };
+        assert_eq!(legacy.message(), "Context 81% full. Compacting…");
+    }
+
+    #[test]
     fn turn_completed_message() {
         let event = SessionEvent::TurnCompleted {
             elapsed: Some(Duration::from_secs(125)),
@@ -1017,6 +1087,8 @@ mod tests {
     fn compaction_started_switch_reason_renders_reason() {
         let event = SessionEvent::CompactionStarted {
             percentage: 9,
+            threshold_percent: None,
+            threshold_tokens: None,
             reason: MODEL_FAMILY_SWITCH_COMPACT_BANNER.into(),
         };
         assert_eq!(event.message(), MODEL_FAMILY_SWITCH_COMPACT_BANNER);
@@ -1027,6 +1099,8 @@ mod tests {
         for reason in ["Context window 9% full", ""] {
             let event = SessionEvent::CompactionStarted {
                 percentage: 9,
+                threshold_percent: None,
+                threshold_tokens: None,
                 reason: reason.into(),
             };
             assert_eq!(event.message(), "Context 9% full. Compacting…");

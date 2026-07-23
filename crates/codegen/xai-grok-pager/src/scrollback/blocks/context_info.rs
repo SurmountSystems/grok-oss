@@ -15,8 +15,40 @@ use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput
 use crate::theme::{Theme, quantize};
 use xai_grok_shell::session::{ContextInfo, count_detail};
 
-/// Categorical bar: each cell uses its category's glyph and color, filled left-to-right in legend order; free capacity is muted outlines.
-/// The informational rows never enter the bar.
+/// Block that renders a `/context` snapshot in scrollback.
+///
+/// Layout (all left-aligned to column 0):
+///
+/// ```text
+/// Context
+///
+/// 36.7k / 1.0m tokens (3.67%)
+/// grok-4
+///
+/// ◆ ◆ ◆ ◆ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇
+/// ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇
+/// ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇
+/// ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇
+/// ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇ ◇
+///
+/// ◆ System prompt     1.2k tokens  (0.1%)   (gray)
+/// ◆ Messages         29.9k tokens    (3%)
+/// ◇ Free              963k tokens   (96%)
+///
+/// ◈ Tool definitions  5.6k tokens  (0.6%) · 12 tools
+/// ◈ Skills            2.4k tokens  (0.2%) · 21 skills
+/// ◈ MCP servers        320 tokens  (0.1%) ·  4 servers
+///
+/// Auto-compact at 95% · ~812k tokens remaining
+///
+/// Turns: 5 · Tool calls: 12 · Compactions: 0
+/// ```
+///
+/// The bar is a categorical breakdown: each cell uses its category's glyph
+/// and color. System (gray ◆), messages (primary ◆), and reasoning/overhead
+/// (violet ◆) fill left-to-right in legend order, and the remainder renders
+/// as muted ◇ outlines for free capacity. The ◈ informational rows never
+/// enter the bar.
 #[derive(Debug, Clone)]
 pub struct ContextInfoBlock {
     /// The captured context-window snapshot.

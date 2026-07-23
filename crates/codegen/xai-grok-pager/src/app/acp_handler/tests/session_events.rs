@@ -18,6 +18,8 @@
             tokens_used: 90000,
             context_window: 131072,
             percentage: 85,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
             reason: "threshold".into(),
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
@@ -31,7 +33,7 @@
             "hold prompt text for re-auth auto-resubmit if compact fails with auth"
         );
         match last_session_event(&scrollback) {
-            Some(SessionEvent::CompactionStarted { percentage, reason }) => {
+            Some(SessionEvent::CompactionStarted { percentage, reason, .. }) => {
                 assert_eq!(percentage, 85);
                 assert_eq!(reason, "threshold", "threshold compact keeps its reason");
             }
@@ -53,11 +55,13 @@
             tokens_used: 12_000,
             context_window: 200_000,
             percentage: 6,
+            threshold_percent: None,
+            threshold_tokens: None,
             reason: MODEL_FAMILY_SWITCH_COMPACT_BANNER.into(),
         };
         assert!(apply_child_view_session_event(&mut agent, &update, false));
         match last_session_event(&agent.scrollback) {
-            Some(SessionEvent::CompactionStarted { percentage, reason }) => {
+            Some(SessionEvent::CompactionStarted { percentage, reason, .. }) => {
                 assert_eq!(percentage, 6);
                 assert_eq!(reason, MODEL_FAMILY_SWITCH_COMPACT_BANNER);
             }
@@ -123,6 +127,8 @@
             tokens_used: 12_000,
             context_window: 200_000,
             percentage: 6,
+            threshold_percent: None,
+            threshold_tokens: None,
             reason: MODEL_FAMILY_SWITCH_COMPACT_BANNER.into(),
         };
         assert!(apply_child_view_session_event(&mut agent, &started, false));
@@ -155,6 +161,8 @@
             tokens_used: 12_000,
             context_window: 200_000,
             percentage: 6,
+            threshold_percent: None,
+            threshold_tokens: None,
             reason: MODEL_FAMILY_SWITCH_COMPACT_BANNER.into(),
         };
         assert!(apply_child_view_session_event(&mut agent, &update, false));
@@ -197,6 +205,8 @@
             tokens_used: 90_000,
             context_window: 131_072,
             percentage: 85,
+            threshold_percent: None,
+            threshold_tokens: None,
             reason: "threshold".into(),
         };
         assert!(apply_child_view_session_event(&mut agent, &update, false));
@@ -1005,6 +1015,8 @@
             tokens_used: 460_231,
             context_window: 500_000,
             percentage: 92,
+            threshold_percent: None,
+            threshold_tokens: None,
             reason: "threshold".into(),
         };
         assert_eq!(compaction_context_refresh(&started), Some(460_231));
@@ -1160,6 +1172,8 @@
             tokens_used: 95_000,
             context_window: 131_072,
             percentage: 72,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
             reason: "threshold".into(),
         };
         let _ = handle_child_session_notification(update, child_sid, &mut agent, false, None);
@@ -1179,6 +1193,8 @@
             tokens_used: 90000,
             context_window: 131072,
             percentage: 85,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
             reason: "threshold".into(),
         };
         let changed = handle_child_session_notification(update, "unknown-child", &mut agent, false, None);

@@ -5,9 +5,12 @@ apply (`~/.grok/AGENTS.md`).
 
 ## Hard constraints
 
-1. **Do not commit** unless the human explicitly asks. Prefer leaving a clean
-   staged/unstaged tree and giving **signed** multi-message commit commands
-   for a real TTY.
+1. **Never run `git commit`.** Commits are human-only on a real TTY (signed).
+   Agents may do complex git labor when asked (conflict resolve, merge setup,
+   history diagnosis), then **stage and hand** exact `git commit -S …`
+   commands — including after “fix conflicts” / “make the PR mergeable” /
+   even “commit this.” Do **not** push unless he explicitly asked to push.
+   Full policy: `~/.grok/AGENTS.md` § *Commits — agents never commit*.
 2. **Never bypass GPG** (`commit.gpgsign=false`, `--no-gpg-sign`, fake
    `gpg.program`, hook disables, etc.).
 3. **Never bulk find-and-replace.** Bulk **find** (`rg`) is fine. Edits must
@@ -15,6 +18,14 @@ apply (`~/.grok/AGENTS.md`).
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
    replies, product docs, tests, or **filenames**.
+
+## Regressions and deep diagnosis
+
+- Do **not** investigate regressions or multi-file diagnosis in the parent
+  thread (no parent-marathon of greps, logs, or long code walks). Spawn tightly
+  scoped subagents; join on short on-disk summaries only.
+- Full rule: `~/.grok/AGENTS.md` § *Regressions and deep diagnosis — never in
+  the parent thread*.
 
 ## When you ship product work
 

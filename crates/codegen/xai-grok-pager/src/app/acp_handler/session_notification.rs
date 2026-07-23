@@ -1705,9 +1705,15 @@ pub(super) fn apply_session_event(
 ) -> bool {
     match update {
         XaiSessionUpdate::AutoCompactStarted {
-            percentage, reason, ..
+            percentage,
+            threshold_percent,
+            threshold_tokens,
+            reason,
+            ..
         } => {
-            tracing::info!("Auto-compact started: {percentage}% context used");
+            tracing::info!(
+                "Auto-compact started: {percentage}% context used (threshold {threshold_percent:?}/{threshold_tokens:?})"
+            );
             if session.compact_held_prompt.is_none() {
                 session.compact_held_prompt = session.in_flight_prompt.clone();
             }
@@ -1716,6 +1722,8 @@ pub(super) fn apply_session_event(
             scrollback.push_block(RenderBlock::session_event(
                 SessionEvent::CompactionStarted {
                     percentage: *percentage,
+                    threshold_percent: *threshold_percent,
+                    threshold_tokens: *threshold_tokens,
                     reason: reason.clone(),
                 },
             ));
