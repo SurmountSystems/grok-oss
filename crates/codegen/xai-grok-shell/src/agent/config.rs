@@ -3484,12 +3484,9 @@ pub fn resolve_model_list(
                 // per-model value. User session / env / [model.*] still win in
                 // resolve_auto_compact_threshold_percent.
                 if donor.info.auto_compact_threshold_percent.is_none()
-                    && entry
-                        .info
-                        .auto_compact_threshold_percent
-                        .is_some_and(|p| {
-                            p < crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
-                        })
+                    && entry.info.auto_compact_threshold_percent.is_some_and(|p| {
+                        p < crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
+                    })
                 {
                     tracing::debug!(
                         model_key = %key,

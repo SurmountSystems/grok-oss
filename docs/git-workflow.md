@@ -20,7 +20,8 @@ git checkout feat/your-branch
 # If local rebased or diverged by mistake, restore the published tip first:
 #   git reset --hard origin/feat/your-branch
 git merge origin/main
-# resolve conflicts → stage → signed merge commit
+# resolve conflicts → stage → **human** signed merge commit (agents: stop here
+# unless the human explicitly said to commit / push)
 git commit -S -m "Merge origin/main into feat/your-branch"
 git push origin feat/your-branch   # normal push only
 ```
@@ -28,6 +29,12 @@ git push origin feat/your-branch   # normal push only
 During merge conflicts: **HEAD = feature branch**, bottom = `main` (theirs).
 Prefer feature for fork-only work (branding, OpenRouter, `grok-rate-limit`,
 packaging); combine when both sides change the same logic.
+
+**Agents:** never run `git commit`. “Fix the conflicts” / “make the PR
+mergeable” / even “commit this” → resolve + stage + hand the signed commands
+above for a real TTY. Push only if he explicitly asked to push. See
+[`AGENTS.md`](../AGENTS.md) and `~/.grok/AGENTS.md` § *Commits — agents never
+commit*.
 
 ## Wrong: rebase a published PR branch
 
@@ -48,9 +55,11 @@ not choose rebase by default.
 | Do | Don’t |
 |----|--------|
 | `git merge origin/main` into the PR branch | `git rebase origin/main` on a published PR |
-| Normal `git push` | `git push --force` / `--force-with-lease` for conflict catch-up |
+| Resolve conflicts, stage, **hand** signed commit/push commands | Ever run `git commit` (including merge conclusion) |
+| Normal `git push` **only if the human asked to push** | `git push --force` / `--force-with-lease` for conflict catch-up |
 | Match remote tip if you diverged locally (`reset --hard origin/<branch>`) then merge | Keep a rebased local tip and force-push “to match” |
 | Honor `commit.gpgsign` / signed commits | `git -c commit.gpgsign=false commit` |
+| Draft the exact `git commit -S` line for him to run | Invent commit/push from “finish it”, “fix it”, PR URL, or babysit |
 
 See also: [upstream-history.md](upstream-history.md) (xAI content import is
 separate from PR-vs-`main` integration).

@@ -1430,7 +1430,7 @@ auto_update = true
         #[test]
         fn stock_grok_45_model_info_resolves_to_default_95() {
             let _g = EnvVarGuard::unset();
-            use crate::agent::config::{default_model_entries, EndpointsConfig};
+            use crate::agent::config::{EndpointsConfig, default_model_entries};
             let entries = default_model_entries(&EndpointsConfig::default());
             let entry = entries
                 .get("grok-4.5")
@@ -1472,7 +1472,10 @@ auto_update = true
         match field {
             None | Some(serde_json::Value::Null) => {}
             Some(v) => {
-                let p = v.as_u64().expect("auto_compact_threshold_percent must be u64") as u8;
+                let p = v
+                    .as_u64()
+                    .expect("auto_compact_threshold_percent must be u64")
+                    as u8;
                 assert!(
                     p >= DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
                     "grok-4.5 auto_compact_threshold_percent={p} undercuts product default {}",
@@ -1487,7 +1490,7 @@ auto_update = true
     #[test]
     fn resolve_model_list_drops_remote_auto_compact_undercut_on_stock_grok_45() {
         use crate::agent::config::{
-            default_model_entries, resolve_model_list, Config, EndpointsConfig,
+            Config, EndpointsConfig, default_model_entries, resolve_model_list,
         };
         use crate::util::config::{
             DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, resolve_auto_compact_threshold_percent,
@@ -1496,10 +1499,7 @@ auto_update = true
 
         let cfg = Config::default();
         let defaults = default_model_entries(&EndpointsConfig::default());
-        let mut stock = defaults
-            .get("grok-4.5")
-            .expect("grok-4.5")
-            .clone();
+        let mut stock = defaults.get("grok-4.5").expect("grok-4.5").clone();
         // Simulate remote models_cache reintroducing the old 80 undercut.
         stock.info.auto_compact_threshold_percent = Some(80);
         let mut prefetched = IndexMap::new();
@@ -1521,7 +1521,7 @@ auto_update = true
     #[test]
     fn resolve_model_list_keeps_remote_only_fleet_auto_compact() {
         use crate::agent::config::{
-            resolve_model_list, Config, EndpointsConfig, ModelEntry, ModelInfo,
+            Config, EndpointsConfig, ModelEntry, ModelInfo, resolve_model_list,
         };
         use indexmap::IndexMap;
         use std::num::NonZeroU64;
