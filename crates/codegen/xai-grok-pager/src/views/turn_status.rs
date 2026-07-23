@@ -331,6 +331,13 @@ pub fn render_turn_status(
         return TurnStatusOutput::default();
     }
 
+    // Parked with no watchers left: render nothing. The stopped look must
+    // never fall through to the running-turn chrome (spinner/timers/[stop])
+    // — the wait aborts the moment the user types, so that chrome would lie.
+    if parked {
+        return TurnStatusOutput::default();
+    }
+
     // Determine if cancel button should be shown.
     // Show when: TurnRunning or CommandRunning.
     // Hide when: Idle, Cancelling (already cancelling), or a keyboard-only host

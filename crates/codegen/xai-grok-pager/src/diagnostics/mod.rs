@@ -1393,6 +1393,21 @@ mod tests {
                 .text
                 .contains("action       Run /doctor for details and fixes")
         );
+
+        let remote_container = format_clipboard_diagnostics(ClipboardDiagnosticsInput {
+            container_no_display: true,
+            ..clipboard_input(TerminalName::Unknown)
+        });
+        assert!(
+            remote_container
+                .text
+                .contains("native       container (arboard)")
+        );
+        assert!(
+            remote_container
+                .text
+                .contains("fix          grok wrap <ssh command> or /minimal")
+        );
     }
 
     #[test]

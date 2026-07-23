@@ -1,23 +1,29 @@
-# Onto-xAI replay log
+# Onto-xAI stack log
 
-Append-only record of **Surmount history replayed onto** an xAI export tip.
-Each row is a local (or Surmount-remote) `onto-xai/*` branch whose **parent is
-the xAI tip** — so `git log xai-org/main..<onto tip>` shows our work even when
-GitHub’s compare page refuses unrelated histories.
+Append-only record of Surmount **product stacks parented at an xAI export tip**.
 
-Surmount `main` remains the product archive. These branches are for
-archaeology, contribution-shaped review, and surviving the next force-export.
+Each row is a local (or Surmount-remote) `onto-xai/*` branch whose first parent
+chain includes the xAI tip — so `git log xai-org/main..<onto tip>` shows our
+work. Surmount `main` remains the product archive. These branches are disposable
+and rebuilt after force-exports.
 
-| Date (UTC) | xAI tip | xAI tree | Surmount tip | Onto tip | Mode | Notes |
-|------------|---------|----------|--------------|----------|------|-------|
-| 2026-07-18 | `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` | `b40a1962cb8061b85c2354850ab4d5707f48414b` | `744c2dd9929135bb1ec47b0017f40a2860ac7692` | `1fa4faa7169da96379f0f1f202a22139ebc01749` | history | 3 first-parent commits via commit-tree; tip tree == Surmount main |
-| 2026-07-18 | `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` | `b40a1962cb8061b85c2354850ab4d5707f48414b` | `744c2dd9929135bb1ec47b0017f40a2860ac7692` | `68a053f1ae4325bdf9cc4be9bb8ef4ab97edea95` | overlay | single PR-shaped commit: xAI tree + Surmount seams |
+**Current mechanics:** real `git cherry-pick -x` via `scripts/put-history-on-xai.sh`,
+then optional `scripts/join-main-into-onto.sh` (`merge -s ours`) so `main` is an
+ancestor and GitHub PR compare works. Full HITL runbook:
+[`docs/upstream-history.md`](upstream-history.md) § *HITL runbook*.
 
-## How to append
+There is **no** `MODE=overlay` / commit-tree mode in the current scripts.
+
+| Date (UTC) | xAI tip | xAI tree | Surmount tip stacked | Onto tip | Notes |
+|------------|---------|----------|----------------------|----------|-------|
+| 2026-07-18 | `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` | `b40a1962cb8061b85c2354850ab4d5707f48414b` | (older) | (local) | Historical only (pre cherry-pick script) |
+| 2026-07-22 | `3af4d5d39897855bdcc74f23e690024a5dc05573` | `e595174931be9bfb490aacf149e2c9cc0ca0ebba` | product via cherry-pick | landed as PR #12 (`f8126f9` tip family) | First full HITL land: put-history → join → PR #12 |
+| 2026-07-24 *(in progress)* | `6e386420825bd44ae648c63e7c8cba12fcec9401` | `3db5a3bd92232bb54581fb8701c6ec79ba48293d` | `origin/main` @ `8b933eb` | branch `onto-xai/6e386420825b` **HEAD=`8f2f7f2`** mid-pick **`b53f141`** | #7 landed. **#12 mega (~199 UU) resolved+staged** via 3 subagents (shell/pager/rest). Human: `git cherry-pick --continue` then CONTINUE put-history for #13 → join → PR → close #11+#14. Stash living docs if dirty before mega picks. |
+
+## How to append (after stack lands)
 
 ```bash
-# values printed by scripts/put-history-on-xai.sh
-echo "| $(date -u +%Y-%m-%d) | \`<xai-sha>\` | \`<xai-tree>\` | \`<surmount-sha>\` | \`<onto-sha>\` | <mode> | <notes> |" \
+echo "| $(date -u +%Y-%m-%d) | \`<xai-sha>\` | \`<xai-tree>\` | \`<surmount-sha>\` | \`<onto-sha>\` | <notes> |" \
   >> docs/upstream-onto-log.md
 ```
 
@@ -25,6 +31,20 @@ echo "| $(date -u +%Y-%m-%d) | \`<xai-sha>\` | \`<xai-tree>\` | \`<surmount-sha>
 
 ```bash
 git fetch xai-org main --force
-./scripts/put-history-on-xai.sh          # history (default); replaces onto-xai/*
-MODE=overlay ./scripts/put-history-on-xai.sh
+FORCE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh
+# resolve conflicts carefully; signed cherry-pick --continue on TTY
+./scripts/join-main-into-onto.sh
+git commit -S …   # human
+just check && git push -u origin HEAD
 ```
+
+## HITL checklist (short)
+
+1. Fetch tip; do **not** stack an obsolete issue SHA if tip moved.
+2. Cherry-pick product; **sign every continue** on a real TTY.
+3. Conflict rules: tip APIs = HEAD; Grok OSS seams = re-apply product; union imports/features; no bulk marker strip.
+4. Join with `-s ours` before PR to `main`.
+5. Append this log; close related `upstream-export` issues.
+6. Never agent-run `git commit` / never disable GPG.
+
+Detail: [`upstream-history.md`](upstream-history.md).

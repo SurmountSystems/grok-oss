@@ -668,7 +668,7 @@ impl JsonlStorageAdapter {
             .filter_map(Result::ok)
             .take(MAX_RESTORED_WORKFLOW_RUNS.saturating_add(1))
             .collect();
-        let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
+        let mut entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
         entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
         entries.sort_by_key(|entry| entry.file_name());
         if entries_truncated {
@@ -686,6 +686,10 @@ impl JsonlStorageAdapter {
             };
             if run_meta.file_type().is_symlink() || !run_meta.is_dir() {
                 continue;
+            }
+            if restored.len() >= MAX_RESTORED_WORKFLOW_RUNS {
+                entries_truncated = true;
+                break;
             }
             if std::fs::symlink_metadata(run_dir.join("cleared"))
                 .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
@@ -754,6 +758,13 @@ impl JsonlStorageAdapter {
                 script,
                 args,
             });
+        }
+        if entries_truncated {
+            tracing::warn!(
+                path = %workflows_dir.display(),
+                limit = MAX_RESTORED_WORKFLOW_RUNS,
+                "workflow restore run-count cap reached; ignoring remaining entries"
+            );
         }
         Ok(restored)
     }

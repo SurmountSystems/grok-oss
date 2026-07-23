@@ -76,53 +76,229 @@ Git may never see a merge-base with `xai-org/main`. **That is fine.** We use
 *opposite* direction (their tree into Surmount).
 
 After each export, rebuild a branch **parented at their tip** that carries
-Surmount’s product narrative. When they force-break history again, re-run —
-nothing depends on a stable xAI parent chain.
+Surmount product commits via **real `git cherry-pick -x`**. When they
+force-break history again, re-run with `FORCE=1` — nothing depends on a
+stable xAI parent chain.
 
 ```
-xai-org/main @ T2  (orphan / re-rooted tip)
+xai-org/main @ export tip
         │
-        ├── onto-xai/<short>  (MODE=history)     ← put-history-on-xai.sh
-        │     Surmount first-parent commits stacked via commit-tree
-        │     final tree == Surmount main; parents start at T2
-        │
-        └── onto-xai/<short>  (MODE=overlay)
-              single commit: T2 tree + Surmount fork/product seams
+        └── onto-xai/<short>   ← put-history-on-xai.sh (cherry-pick product)
+                │
+                └── join-main-into-onto.sh  (merge -s ours origin/main)
+                          │
+                          └── PR base=main ← head=onto-xai/*
 ```
 
 | Goal | Command |
 |------|---------|
-| Stack **current branch** on their tip | `./scripts/put-history-on-xai.sh` |
-| Stack published main only | `SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh` |
-| One contribution-shaped commit on their tip | `MODE=overlay ./scripts/put-history-on-xai.sh` |
-| Rebuild after next force-export | `./scripts/put-history-on-xai.sh` (replaces `onto-xai/*`) |
+| Stack Surmount product on current xAI tip | `SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh` |
+| Resume after conflict resolution | `CONTINUE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh` |
+| Rebuild stack from scratch (backs up first) | `FORCE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh` |
+| Join Surmount `main` for a landable PR | `./scripts/join-main-into-onto.sh` then signed merge commit |
 | Log | [`docs/upstream-onto-log.md`](upstream-onto-log.md) |
 
-Default Surmount tip is **HEAD of the branch you are on** (e.g. `merge-2`), so
-in-flight commits are included. Only when you are on `onto-xai/*` / `import/*`
-(or detached) does it fall back to `origin/main`.
+**There is no `MODE=overlay` / commit-tree mode** in the current script. Older
+notes that mentioned those modes are obsolete — do not invent them.
 
-`scripts/replay-onto-upstream.sh` is a thin alias of the same script.
+`scripts/replay-onto-upstream.sh` is a thin alias of put-history.
 
-**How history mode works:** cherry-pick/format-patch usually fails (export
-trees diverge). We **stack trees** with `git commit-tree`: each Surmount
-first-parent commit after the seed becomes a new commit with the same tree
-and message, parented on the previous stack commit (first parent = xAI tip).
-Result: `git merge-base --is-ancestor xai-org/main onto-xai/…` is true, and
-`git log xai-org/main..onto-xai/…` lists our work.
+**How it works:** cherry-pick each non-merge Surmount commit after the seed
+(`docs/upstream-import-log.md` seed / `b189869…`) onto `xai-org/main`. Conflicts
+stop for human/agent resolution; each continue is a **signed** commit on a real
+TTY. Result: xAI tip is an ancestor of `onto-xai/*`, product sits on top.
 
 **Limits (honest):**
 
 - We **cannot** force-push or rewrite `xai-org/main` (pull-only remote).
-- GitHub’s fork compare may still say “different histories” until a PR head
-  is pushed that is a **descendant** of their current tip (onto-xai branches are).
-- History mode tip tree is **pure Surmount**, not “xAI plus delta” — use
-  overlay when you want their latest export files under our seams.
-- Overlay is not a full three-way merge of every file; it overlays known fork
-  paths, product seams, and paths added on Surmount since seed. Re-review
-  before opening a PR to xAI.
+- Without **join**, GitHub may still say “entirely different histories” vs
+  Surmount `main` (no merge-base). Join records `main` as second parent and
+  **keeps the onto tip tree** (`merge -s ours`).
+- Mega product PRs on `main` (e.g. “Merge 2”, prior “merge xai 2”) re-touch
+  hundreds of files and **will conflict hard** against a newer tip. Resolve
+  carefully — never blind `--ours` / `--theirs` across the whole tree.
 
 **Never** reset Surmount `main` to an onto-xai tip to “match” them.
+
+## HITL runbook — put-history + join (compaction-safe)
+
+### When bot issues fire
+
+Detect workflow opens issues labeled `upstream-export` (e.g. #11, #14). Tips
+age fast — **always re-fetch** and stack the **current** `xai-org/main`, not an
+older issue SHA. Closing older issues as superseded is correct once a newer tip
+lands.
+
+Proved path: PR [#12](https://github.com/SurmountSystems/grok-oss/pull/12)
+(`onto-xai/3af4d5d39897` → `main` after join).
+
+### Full sequence
+
+```bash
+git fetch origin main
+git fetch xai-org main --force
+./scripts/detect-upstream-export.sh   # record XAI_TIP / XAI_TREE
+
+# clean worktree preferred
+SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh
+# on conflict: resolve carefully (see rules below), then:
+git add -u
+git cherry-pick --continue            # SIGNED on real TTY — agent never commits
+CONTINUE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh
+
+# when stack complete:
+./scripts/join-main-into-onto.sh
+git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
+  -m "Join Surmount archive history so main is an ancestor of this tip." \
+  -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
+
+just check
+git push -u origin HEAD
+# PR: base=main head=onto-xai/<short>  — close related export issues
+# append docs/upstream-onto-log.md
+```
+
+### Scripts missing mid-stack
+
+Early cherry-picks start from bare xAI tip — **`scripts/put-history-on-xai.sh`
+does not exist until a later product commit lands**. Fish may run
+“find-the-command” and fail. Use a temp copy with fixed `ROOT` until the pick
+that adds `scripts/` lands:
+
+```bash
+REPO=/home/hunter/Projects/surmount/grok-build
+git show origin/main:scripts/put-history-on-xai.sh \
+  | sed "s|ROOT=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")/..\" && pwd)\"|ROOT=\"$REPO\"|" \
+  > /tmp/put-history-on-xai.sh
+chmod +x /tmp/put-history-on-xai.sh
+CONTINUE=1 SURMOUNT_REF=origin/main bash /tmp/put-history-on-xai.sh
+```
+
+### Conflict resolution rules (fork)
+
+| Prefer | When |
+|--------|------|
+| **HEAD (onto tip)** | Upstream tip APIs evolved (new fields, ExitInfo, terminal recovery, spawn arity, Doctor absorbing old commands) |
+| **Incoming product** | Grok OSS seams: `grok-oss` branding, OpenRouter, `grok-rate-limit`, economic mode, auto-compact thresholds, `oss_update`, updater default-off, `cli_hint_name()`, auto_implement, settings_modal **directory** only |
+| **Union** | Import lists / Cargo features / both cancel_token **and** mut config for sampler failover |
+| **origin/main as reference** | Product intent when ambiguous — do **not** wholesale overwrite tip-shaped files with older main |
+
+**Hard anti-patterns:**
+
+- No bulk find-and-replace; no thoughtless strip of markers without reading both sides
+- No `git checkout --ours/--theirs` across **all** unmerged paths “to finish”
+- No updating tests/fixtures to match the wrong side when intent is ambiguous — stop and compare `origin/main` + commit message
+- No `just ci` mid-pick with markers left (Cargo fails on `<<<<<<<`)
+- Agents **never** `git commit` / never GPG bypass; hand `git cherry-pick --continue` and `git commit -S`
+- **No parent-solo conflict marathons** across many UU files (shell + pager + sampler). Use **strategic subagents** (below).
+- **No wasteful swarm:** not one agent per file, not overlapping scopes, not N identical explores
+
+### Subagents for conflict resolve (strategic, not wasteful)
+
+Multi-file cherry-pick resolve is exactly the work global rules say belongs in
+children: deep reads of both sides, tip vs product, surgical edits. Parent
+holds the goal, the conflict table, and join checks — not full file bodies.
+
+**Good fan-out for #7 (example, ~2–3 agents max):**
+
+| Scope | Paths (disjoint) |
+|-------|------------------|
+| Shell session / spawn / run_loop | `xai-grok-shell/.../acp_session_impl/*`, `handle_request.rs`, cancel tests |
+| Sampler + agent config | `request_task.rs`, `agent/config.rs`, `util/config/*` |
+| Pager UI + docs | router, settings ui/modal, slash mod, user-guide md |
+
+Each child gets: conflict rules from this doc, “prefer HEAD tip APIs / product
+seams / union imports”, reference `origin/main` when product intent unclear,
+**stage resolved files**, write a 5–10 line summary path if useful. Parent
+verifies `git diff --name-only --diff-filter=U` is empty and no markers remain,
+then hands human `git cherry-pick --continue`.
+
+Same pattern for the **#12 mega-pick** with larger but still **disjoint**
+buckets — never tree-wide bulk checkout, never 18 parallel one-file agents.
+
+Detail also in project [`AGENTS.md`](../AGENTS.md) § *Onto / put-history*.
+### Live stack (update when tip moves)
+
+**Snapshot: 2026-07-24 — #12 mega resolved; await human continue.**
+
+| Field | Value |
+|-------|--------|
+| Branch | `onto-xai/6e386420825b` |
+| xAI tip | `6e386420825bd44ae648c63e7c8cba12fcec9401` (tree `3db5a3bd…`) |
+| Stack HEAD (last finished) | `8f2f7f2` — **impl (#7)** |
+| Active pick | `b53f141` **merge xai 2 (#12)** — **all ~199 UU resolved+staged**, 0 markers |
+| After this continue | `8b933eb` (#13), then join `-s ours` |
+| Supersedes issues | #11, #14 (tips under `6e38642`) |
+| Living-docs stash | `stash@{0}` was used mid-stack; HITL content re-applied into this pick index |
+
+**Confusion trap:** if `git cherry-pick --continue` says *no cherry-pick in progress*, the pick **already committed** (`git log -1`). Do not re-continue — use `CONTINUE=1 put-history` instead.
+
+**Dirty living docs blocked #12 start once** — stash them (`git stash push -u -m …`) before mega picks, or they abort the pick.
+
+**Finished on tip:** OpenRouter → Branding → #3 → #4 → #7 (`8f2f7f2`).
+
+**Human now:**
+
+```bash
+git cherry-pick --continue    # signed TTY — lands #12
+CONTINUE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh   # #13 next
+# then join-main-into-onto.sh (now present after #12 lands) → just check → PR
+```
+
+**#12 resolve notes:** 3 strategic subagents (shell 75 / pager 77 / rest 47). Summaries under `/tmp/onto-resolve-12/{shell,pager,rest}.md`. Prefer HEAD tip APIs; product seams kept (economic, openrouter, failover+cancel, scripts/join).#### #7 — 18 unmerged paths (resolve carefully)
+
+| Path | Intent (summary) |
+|------|------------------|
+| `xai-grok-shell/.../run_loop.rs` | Prefer **HEAD tip APIs**; port product tokens / economic / failover seams from incoming |
+| `xai-grok-shell/.../spawn.rs` | Union: tip `query_params` / `env_http_headers` **and** product `effective_context_window` |
+| `xai-grok-shell/.../handle_request.rs` | Prefer HEAD shape; product may pass `None` for tokens where tip differs |
+| `xai-grok-shell/.../sampler_turn.rs` | Tip turn APIs + product economic/auto-compact wiring |
+| `xai-grok-shell/.../model_switch.rs` | Tip switch path + product model/economic awareness |
+| `xai-grok-sampler/.../request_task.rs` | **Union:** mut config **and** `cancel_token` (failover needs both) |
+| `xai-grok-shell/.../agent/config.rs` | Tip config fields + product economic/compaction knobs |
+| `xai-grok-shell/.../util/config/persist.rs` | Persist product settings without dropping tip keys |
+| `xai-grok-shell/.../util/config/resolve/compaction.rs` | Product auto-compact thresholds on tip resolve path |
+| `xai-grok-shell/.../cancel_running_task_tests.rs` | Match **resolved** production cancel API — not the wrong side blindly |
+| `xai-grok-pager/.../router.rs` | **Union** imports: tip settings routes + economic/auto_compact |
+| `xai-grok-pager/.../settings/ui.rs` | Tip UI dispatch + product economic/auto-compact setters |
+| `xai-grok-pager/.../slash/commands/mod.rs` | Register product `/economic-mode` (file already **A** staged) |
+| `xai-grok-pager/.../settings_modal/state.rs` + `tests.rs` | Tip modal + product economic rows |
+| `xai-grok-pager/.../agent_view/render.rs` | Tip render + product indicators if any |
+| user-guide `04-slash-commands.md`, `05-configuration.md` | Document `/economic-mode` and compact settings |
+
+**Already staged product-only adds (keep):**
+
+- `xai-grok-pager/src/slash/commands/economic_mode.rs` (**A**)
+- `xai-grok-shell/src/util/config/economic_mode.rs` (**A**)
+- Plus many **M** staged seams (`compaction_config`, openrouter, setters, actions, …)
+
+**Hard anti-patterns for this pick (and #12):** no bulk `--ours`/`--theirs`; no blind marker strip; compare `origin/main` when product intent is unclear; leave `just ci` until markers are gone.
+
+#### Human commands after stack + join
+
+```bash
+# after #7, #12, #13 all cherry-picked cleanly:
+test -x scripts/join-main-into-onto.sh \
+  || git show origin/main:scripts/join-main-into-onto.sh > scripts/join-main-into-onto.sh
+chmod +x scripts/join-main-into-onto.sh
+./scripts/join-main-into-onto.sh
+git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
+  -m "Join Surmount archive history so main is an ancestor of this tip." \
+  -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
+just check
+git push -u origin HEAD
+# PR base=main head=onto-xai/6e386420825b ; close #11 #14 ; final onto-log row
+```
+
+**MSRV / Cargo.lock (rustc 1.92.0):** tip lockfiles may pull crates needing 1.94+.
+Regenerate with MSRV-aware resolver, not bare HEAD lock:
+
+```bash
+CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo generate-lockfile
+# or start from origin/main lock then the same
+```
+
+Never ship `aws-config` 1.9 / `kstring` 2.0.3 while toolchain is 1.92.0.
 
 ## Tools
 

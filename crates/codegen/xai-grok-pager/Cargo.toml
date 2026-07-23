@@ -288,7 +288,7 @@ default-bazel = [
     "jemalloc",
     "sandbox-enforce",
     "test-support",
-    ]
+]
 # No-op on this crate: the actual `#[global_allocator]` (and the
 # `tikv-jemallocator` dep) live on the composition-root binary
 # `xai-grok-pager-bin`, which owns `main.rs`. Kept as an empty feature so the

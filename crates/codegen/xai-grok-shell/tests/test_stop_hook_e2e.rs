@@ -4,6 +4,7 @@
 //! cargo test -p xai-grok-shell --test test_stop_hook_e2e -- --ignored
 //! ```
 
+use xai_grok_test_support::env::test_env_cmd_tokio;
 use xai_grok_test_support::*;
 
 /// Everything a test needs to assert on after a headless run with a Stop hook.
@@ -11,6 +12,8 @@ struct StopHookRun {
     result: HeadlessResult,
     server: MockInferenceServer,
     state_dir: tempfile::TempDir,
+    _home: tempfile::TempDir,
+    _workdir: tempfile::TempDir,
 }
 
 impl StopHookRun {
@@ -99,6 +102,8 @@ async fn run_with_stop_hook(respond: &str) -> StopHookRun {
         result,
         server,
         state_dir,
+        _home: home,
+        _workdir: workdir,
     }
 }
 

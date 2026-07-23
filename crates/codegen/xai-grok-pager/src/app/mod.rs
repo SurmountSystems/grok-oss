@@ -1409,13 +1409,21 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// BEL/ESC (titles can arrive from grok.com conversation metadata) would
 /// terminate the OSC early and let the remainder inject arbitrary escape
 /// sequences into the terminal.
+///
+/// Empty or all-control titles fall back to the product binary name
+/// ([`crate::client_identity::PRODUCT_CLI_NAME`]); non-empty titles get
+/// `" - {product}"` appended (Surmount: `grok-oss`).
 fn terminal_title_string(title: &str) -> String {
+    use crate::client_identity::PRODUCT_CLI_NAME;
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
-        "grok-oss".into()
+        PRODUCT_CLI_NAME.into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 10).collect();
-        format!("{truncated} - grok-oss")
+        // Reserve room for `" - "` + product brand within an 80-char budget.
+        let suffix_len = 3 + PRODUCT_CLI_NAME.len();
+        let body_budget = 80usize.saturating_sub(suffix_len);
+        let truncated: String = sanitized.chars().take(body_budget).collect();
+        format!("{truncated} - {PRODUCT_CLI_NAME}")
     }
 }
 fn set_panic_hook(mode: ScreenMode) {
@@ -1496,6 +1504,18 @@ mod tests {
         assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok-oss");
         assert_eq!(terminal_title_string(""), "grok-oss");
         assert_eq!(terminal_title_string("My chat"), "My chat - grok-oss");
+    }
+
+    #[test]
+    fn terminal_title_uses_product_cli_brand() {
+        // Surmount Grok OSS: tab/window titles must not say bare "grok".
+        assert_eq!(crate::client_identity::PRODUCT_CLI_NAME, "grok-oss");
+        let t = terminal_title_string("session");
+        assert!(t.ends_with(" - grok-oss"), "got {t}");
+        assert!(
+            !t.ends_with(" - grok"),
+            "must not use bare upstream brand: {t}"
+        );
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {

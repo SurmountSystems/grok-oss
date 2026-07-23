@@ -1064,6 +1064,7 @@ mod tests {
         let state = manager.tracker.lock().get(&run_id).unwrap();
         for status in [
             crate::session::workflow::tracker::WorkflowRunStatus::Complete,
+            crate::session::workflow::tracker::WorkflowRunStatus::Failed,
             crate::session::workflow::tracker::WorkflowRunStatus::Cancelled,
             crate::session::workflow::tracker::WorkflowRunStatus::Interrupted,
         ] {

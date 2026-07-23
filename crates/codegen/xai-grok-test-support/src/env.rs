@@ -80,13 +80,7 @@ fn ensure_local_grok_binary(binary: &Path) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut cmd = Command::new(&cargo);
     cmd.current_dir(workspace_root())
-        .args([
-            "build",
-            "-p",
-            "xai-grok-pager-bin",
-            "--bin",
-            GROK_OSS_BIN,
-        ])
+        .args(["build", "-p", "xai-grok-pager-bin", "--bin", GROK_OSS_BIN])
         .stdin(std::process::Stdio::null())
         .envs(xai_tty_utils::pager_env());
     xai_tty_utils::detach_std_command(&mut cmd);

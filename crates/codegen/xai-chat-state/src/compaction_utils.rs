@@ -2969,7 +2969,8 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             summary_count: 1,
         });
         assert!(!compacted.iter().any(|item| {
-            matches!(item, ConversationItem::User(user) if user.synthetic_reason == Some(SyntheticReason::ProjectInstructions))
+            matches!(item, ConversationItem::User(user)
+            if user.synthetic_reason == Some(SyntheticReason::ProjectInstructions))
         }));
     }
     /// The AGENTS.md slot must use the structural project-instructions tag.
