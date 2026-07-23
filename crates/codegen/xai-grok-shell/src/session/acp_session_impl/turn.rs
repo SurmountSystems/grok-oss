@@ -3024,6 +3024,10 @@ impl SessionActor {
             if salvage.enabled() {
                 request.length_policy = xai_grok_sampling_types::LengthPolicy::CompletePartial;
             }
+            request.max_output_tokens = self
+                .tool_context
+                .clamp_task_model_request(request.max_output_tokens)
+                .map_err(|message| acp::Error::internal_error().data(message))?;
             self.emit_event(crate::session::events::Event::PhaseChanged {
                 phase: crate::session::events::Phase::WaitingForModel,
             });

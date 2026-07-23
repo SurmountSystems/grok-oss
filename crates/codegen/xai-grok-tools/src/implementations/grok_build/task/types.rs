@@ -27,6 +27,34 @@ use xai_tool_types::{
     HandedOffSubagentState, SubagentCapabilityMode, SubagentIsolationMode, WaitMode,
 };
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SubagentOwner {
+    #[default]
+    Task,
+    Workflow {
+        run_id: String,
+    },
+}
+
+impl SubagentOwner {
+    pub fn workflow(run_id: impl Into<String>) -> Self {
+        Self::Workflow {
+            run_id: run_id.into(),
+        }
+    }
+
+    pub fn workflow_run_id(&self) -> Option<&str> {
+        match self {
+            Self::Task => None,
+            Self::Workflow { run_id } => Some(run_id),
+        }
+    }
+
+    pub fn is_workflow(&self) -> bool {
+        matches!(self, Self::Workflow { .. })
+    }
+}
+
 use crate::register_resource;
 
 pub use super::active_message::{

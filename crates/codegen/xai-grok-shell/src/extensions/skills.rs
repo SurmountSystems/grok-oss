@@ -523,6 +523,25 @@ pub async fn handle(
             super::to_ext_response(Ok(serde_json::json!({ "workflows": workflows })))
         }
 
+        "x.ai/workflows/list" => {
+            let req: WorkflowsListRequest = serde_json::from_str(args.params.get())?;
+            let Some(handle) = agent.session_handle_waiting_for_load(&req.session_id).await else {
+                return super::to_ext_response(Err::<serde_json::Value, _>(anyhow::anyhow!(
+                    "unknown session id: {}",
+                    req.session_id.0
+                )));
+            };
+            let (launches_enabled, _management_available) = handle.workflow_catalog_state().await;
+            let workflows = if launches_enabled {
+                crate::session::workflow::registry::list_workflows(Some(
+                    handle.tool_context.cwd.as_path(),
+                ))
+            } else {
+                Vec::new()
+            };
+            super::to_ext_response(Ok(serde_json::json!({ "workflows": workflows })))
+        }
+
         "x.ai/skills/config" => {
             let params: CwdParams =
                 serde_json::from_str(args.params.get()).unwrap_or(CwdParams { cwd: None });

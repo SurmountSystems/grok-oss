@@ -8,6 +8,8 @@
 
 #![allow(dead_code)]
 
+#![allow(dead_code)]
+
 pub(crate) mod evidence;
 
 use crate::session::events::{Event, GoalClassifierFailOpenReason};

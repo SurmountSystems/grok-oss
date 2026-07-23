@@ -262,6 +262,7 @@ impl AgentRebuildSpec {
             blocking_wait_depth,
             respect_gitignore,
             path_not_found_hints,
+            scheduler_background_loops,
             mcp_state,
             managed_gateway_tool_client,
             is_non_interactive,
@@ -545,6 +546,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         session_id_str: "test-session".to_string(),
         blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),
         respect_gitignore: false,
+        scheduler_background_loops: true,
         path_not_found_hints: false,
         mcp_state: Arc::new(tokio::sync::Mutex::new(
             crate::session::mcp_servers::McpState::new(vec![]),

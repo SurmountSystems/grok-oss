@@ -249,6 +249,21 @@ pub fn update_from_marketplace_entry_transactional(
         })
         .transpose()?;
 
+    let remote_source = entry
+        .remote_url
+        .as_deref()
+        .map(|url| {
+            // Catalog pins published as `ref` still need hoisting for the verified clone path.
+            let (git_ref, git_sha) = git_install::hoist_pin_slots(
+                entry.remote_ref.as_deref(),
+                entry.remote_sha.as_deref(),
+            );
+            let source = git_install::clone_operands(url, git_ref, git_sha)?;
+            git_install::ensure_pinned(require_sha, source.2, &entry.name, source.0)?;
+            Ok::<_, InstallError>(source)
+        })
+        .transpose()?;
+
     let install_dir = registry.install_dir().to_path_buf();
     std::fs::create_dir_all(&install_dir).map_err(|e| InstallError::Io {
         path: install_dir.clone(),
@@ -899,6 +914,38 @@ mod tests {
     }
 
     #[test]
+    fn transactional_sha_git_args_terminate_options_before_operands() {
+        assert_eq!(
+            git_install::remote_add_args("repo"),
+            ["remote", "add", "--", "origin", "repo"]
+        );
+        assert_eq!(
+            git_install::fetch_sha_args("0123456789abcdef0123456789abcdef01234567"),
+            [
+                "fetch",
+                "--depth",
+                "1",
+                "--",
+                "origin",
+                "0123456789abcdef0123456789abcdef01234567",
+            ]
+        );
+    }
+
+    #[test]
+    fn transactional_sha_clone_rejects_before_target_creation() {
+        for bad in ["deadbeef", "--upload-pack=cmd"] {
+            let root = tempfile::tempdir().unwrap();
+            let target = root.path().join("staging");
+            assert!(matches!(
+                clone_repo_to_path("file:///unused", None, Some(bad), &target),
+                Err(InstallError::InstallFailed { .. })
+            ));
+            assert!(!target.exists());
+        }
+    }
+
+    #[test]
     fn require_sha_rejects_unpinned_remote_install() {
         with_test_registry(|registry| {
             let err = install_from_remote_url(
@@ -936,10 +983,50 @@ mod tests {
                 true,
             )
             .unwrap_err();
-            assert!(
-                matches!(err, InstallError::UnpinnedRemoteRefused { .. }),
-                "a non-hex 'pin' must be refused up front, got: {err}"
-            );
+            match err {
+                InstallError::InstallFailed { detail } => assert!(
+                    detail.contains("40 or 64 hexadecimal"),
+                    "expected full-SHA validation detail, got: {detail}"
+                ),
+                other => panic!("expected InstallFailed for malformed SHA, got: {other}"),
+            }
+        });
+    }
+
+    #[test]
+    fn already_installed_remote_still_rejects_malformed_operands() {
+        with_test_registry(|registry| {
+            let marketplace = tempfile::tempdir().unwrap();
+            write_plugin(marketplace.path(), "demo", "1.0.0", "old");
+            install_test_plugin(registry, marketplace.path(), "demo");
+            let provenance = provenance(marketplace.path(), "plugins/demo");
+            let registry_len = registry.list().len();
+            let installed_path = registry.list().into_iter().next().unwrap().1.path.clone();
+
+            for (url, git_ref, git_sha) in [
+                ("--upload-pack=cmd", Some("main"), None),
+                (
+                    "https://example.com/plugin.git",
+                    Some("--upload-pack=cmd"),
+                    None,
+                ),
+                ("https://example.com/plugin.git", None, Some("deadbeef")),
+            ] {
+                let err = install_from_remote_url(
+                    url,
+                    git_ref,
+                    git_sha,
+                    None,
+                    "plugins/demo",
+                    provenance.clone(),
+                    registry,
+                    false,
+                )
+                .unwrap_err();
+                assert!(matches!(err, InstallError::InstallFailed { .. }));
+                assert_eq!(registry.list().len(), registry_len);
+                assert!(installed_path.exists());
+            }
         });
     }
 

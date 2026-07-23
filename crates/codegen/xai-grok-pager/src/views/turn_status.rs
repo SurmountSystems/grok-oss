@@ -909,14 +909,14 @@ mod tests {
                 ..Watchers::default()
             },
             Watchers {
-                subagents: 1,
+                commands: 1,
                 ..Watchers::default()
             },
         ] {
             assert!(should_show(&AgentState::Idle, false, None, watchers, false));
         }
         assert!(!should_show(
-            &AgentState::Idle,
+            &AgentState::TurnRunning,
             false,
             None,
             Watchers::default(),
@@ -1137,6 +1137,15 @@ mod tests {
         assert!(text.contains("1 workflow still running"), "got: {text:?}");
     }
     #[test]
+    fn idle_with_one_workflow_counts_run_once() {
+        let text = render_idle_with_watchers(Watchers {
+            workflows: 1,
+            ..Watchers::default()
+        });
+        assert!(text.contains("1 workflow still running"), "got: {text:?}");
+    }
+
+    #[test]
     fn idle_with_monitors_and_loops_lists_both() {
         let text = render_idle_with_watchers(Watchers {
             monitors: 1,
@@ -1253,6 +1262,75 @@ mod tests {
             "queued hint replaces the interrupt copy, got: {text:?}"
         );
     }
+    #[test]
+    fn narrow_area_clips_cue_tail_keeping_counts() {
+        // 40 cols with three kinds: the row tail-clips with no ellipsis, so
+        // the leading counts survive and the trailing suffix is what gets
+        // cut. Pins the narrow-pane tradeoff of leading with the counts; a
+        // smarter compact fallback would be a behavior change.
+        let watchers = Watchers {
+            commands: 1,
+            monitors: 2,
+            loops: 1,
+            ..Watchers::default()
+        };
+        let text = render_idle_with_watchers_in_width(watchers, 0, 40);
+        assert!(
+            text.contains("1 command \u{00b7} 2 monitors \u{00b7} 1 loop"),
+            "the counts must survive the clip, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn idle_with_commands_renders_still_running_cue() {
+        // Plain background commands (non-monitor bg tasks) count as watchers:
+        // they wake the agent with a task-completed turn, so the cue must show.
+        let text = render_idle_with_watchers(Watchers {
+            commands: 2,
+            ..Watchers::default()
+        });
+        assert!(
+            text.contains("2 commands still running"),
+            "idle with bg commands must render the still-running cue, got: {text:?}"
+        );
+        let text = render_idle_with_watchers(Watchers {
+            commands: 1,
+            ..Watchers::default()
+        });
+        assert!(
+            text.contains("1 command still running") && !text.contains("commands"),
+            "single command must use the singular noun, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn parked_with_watchers_renders_cue_not_running_chrome() {
+        // A parked running turn renders the still-running cue — never the busy
+        // spinner/timers/[stop] chrome (the wait aborts as soon as the user
+        // types, so that chrome would lie).
+        let text = render_parked_with_watchers(Watchers {
+            commands: 2,
+            ..Watchers::default()
+        });
+        assert!(
+            text.contains("2 commands still running"),
+            "parked with bg work must render the still-running cue, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Waiting") && !text.contains("[stop]"),
+            "parked must not render the running-turn chrome, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn parked_without_watchers_renders_nothing() {
+        let text = render_parked_with_watchers(Watchers::default());
+        assert!(
+            text.trim().is_empty(),
+            "parked with no watchers must render nothing, got: {text:?}"
+        );
+    }
+
     #[test]
     fn idle_with_no_watchers_renders_nothing() {
         let text = render_idle_with_watchers(Watchers::default());

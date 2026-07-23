@@ -243,6 +243,12 @@ path = "tests/settings_e2e.rs"
 [lints]
 workspace = true
 
+# Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
+# `cargo clippy --workspace -- -D warnings` on this package is stricter than
+# the workspace-default clippy allows used in CI.
+[lints]
+workspace = true
+
 [features]
 default = [
     "jemalloc",

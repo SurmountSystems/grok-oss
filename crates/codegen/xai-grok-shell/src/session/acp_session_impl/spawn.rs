@@ -1268,6 +1268,11 @@ pub(crate) async fn spawn_session_actor(
         blocking_wait_depth: tool_context.blocking_wait_depth.clone(),
         respect_gitignore,
         path_not_found_hints,
+        scheduler_background_loops: crate::util::config::resolve_scheduler_background_loops(
+            remote_settings
+                .as_ref()
+                .and_then(|r| r.scheduler_background_loops),
+        ),
         mcp_state: mcp_state.clone(),
         managed_gateway_tool_client: managed_gateway_tool_client.clone(),
         is_non_interactive: startup_hints.non_interactive,
@@ -2794,6 +2799,7 @@ pub(crate) async fn spawn_session_on_thread(
                         system_prompt_label,
                         compaction_mode,
                         compaction_verbatim_input,
+                        compaction_tool_choice,
                         two_pass_enabled,
                         buffering_settings,
                         origin_client,
@@ -2816,6 +2822,7 @@ pub(crate) async fn spawn_session_on_thread(
                         persisted_signals,
                         persisted_plan_mode,
                         persisted_goal_mode,
+                        persisted_workflow_runs,
                         persisted_announcement_state,
                         memory_config,
                         loc_tracking_enabled,
@@ -2836,6 +2843,7 @@ pub(crate) async fn spawn_session_on_thread(
                         app_builder_deployer_config,
                         write_file_enabled,
                         goal_enabled,
+                        background_workflows_enabled,
                         subagents_enabled,
                         ask_user_question_enabled,
                         client_hooks,

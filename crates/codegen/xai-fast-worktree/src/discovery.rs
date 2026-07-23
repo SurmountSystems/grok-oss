@@ -968,4 +968,45 @@ mod tests {
             PathBuf::from("/private/tmp/nfs-probe")
         );
     }
+
+    #[test]
+    fn rebuild_sets_last_accessed_at() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let grok_home = tmp.path();
+        let wt = grok_home.join("worktrees/repo/sess");
+        make_fake_standalone_worktree(&wt);
+        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
+        rebuild_worktree_db(&db, grok_home).unwrap();
+        let rec = db.get(&wt.to_string_lossy()).unwrap().expect("registered");
+        assert!(
+            rec.last_accessed_at.is_some(),
+            "rebuild must touch last_accessed_at for same-pass age safety"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_skips_symlink_escape_outside_managed_roots() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let grok_home = tmp.path().join("grok");
+        let outside = tmp.path().join("outside-real");
+        make_fake_standalone_worktree(&outside);
+        let link_parent = grok_home.join("worktrees/repo");
+        std::fs::create_dir_all(&link_parent).unwrap();
+        std::os::unix::fs::symlink(&outside, link_parent.join("escaped")).unwrap();
+
+        let db = crate::db::WorktreeDb::open_in_memory().unwrap();
+        let report = rebuild_worktree_db(&db, &grok_home).unwrap();
+        assert_eq!(report.discovered, 1);
+        assert_eq!(report.registered, 0, "symlink escape must not register");
+        assert!(
+            db.list(&crate::db::ListFilter::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!path_under_managed_worktree_roots(
+            &dunce::canonicalize(&outside).unwrap(),
+            &grok_home
+        ));
+    }
 }

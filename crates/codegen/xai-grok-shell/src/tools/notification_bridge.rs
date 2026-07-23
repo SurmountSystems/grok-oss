@@ -294,31 +294,26 @@ async fn handle_notification(
         ToolNotification::BashExecutionComplete(complete) => {
             offsets.remove(&complete.base.tool_call_id);
             tracing::debug!(
-                tool_call_id = %complete.base.tool_call_id,
-                exit_code = ?complete.exit_code,
-                "Bash execution complete notification received"
+                tool_call_id = % complete.base.tool_call_id, exit_code = ? complete
+                .exit_code, "Bash execution complete notification received"
             );
         }
         ToolNotification::BashExecutionTimeout(timeout) => {
             tracing::debug!(
-                tool_call_id = %timeout.base.tool_call_id,
-                elapsed = ?timeout.elapsed,
+                tool_call_id = % timeout.base.tool_call_id, elapsed = ? timeout.elapsed,
                 "Bash execution timeout notification received"
             );
         }
         ToolNotification::BashExecutionFailed(failed) => {
             tracing::warn!(
-                tool_call_id = %failed.tool_call_id,
-                error = %failed.error,
+                tool_call_id = % failed.tool_call_id, error = % failed.error,
                 "Bash execution failed notification received"
             );
         }
         ToolNotification::BashExecutionBackgrounded(bg) => {
             tracing::debug!(
-                tool_call_id = %bg.base.tool_call_id,
-                task_id = %bg.task_id,
-                command = %bg.base.command,
-                output_file = %bg.output_file.display(),
+                tool_call_id = % bg.base.tool_call_id, task_id = % bg.task_id, command =
+                % bg.base.command, output_file = % bg.output_file.display(),
                 "Bash execution backgrounded notification received — forwarding to TUI"
             );
             let mut notification = crate::extensions::notification::SessionNotification {
@@ -372,9 +367,8 @@ async fn handle_notification(
                     .await;
             }
             tracing::debug!(
-                path = %written.absolute_path.display(),
-                is_new_file = written.is_new_file,
-                "FileWritten notification forwarded to hunk tracker"
+                path = % written.absolute_path.display(), is_new_file = written
+                .is_new_file, "FileWritten notification forwarded to hunk tracker"
             );
         }
         ToolNotification::SubagentCompleted(_) => {}
@@ -399,8 +393,7 @@ async fn handle_notification(
                 );
             } else if goal_loop_active {
                 tracing::info!(
-                    task_id = %task_id,
-                    is_monitor,
+                    task_id = % task_id, is_monitor,
                     "auto-wake: suppressed completion (goal loop active)"
                 );
             } else if config.auto_wake_enabled {
@@ -628,8 +621,7 @@ async fn handle_notification(
                 emit_current_mode_update(config, xai_grok_tools::types::SessionMode::Plan).await;
             }
             tracing::info!(
-                tool_call_id = %entered.tool_call_id,
-                activated,
+                tool_call_id = % entered.tool_call_id, activated,
                 "Plan mode entered via EnterPlanMode tool"
             );
         }
@@ -657,38 +649,34 @@ async fn handle_notification(
                 emit_current_mode_update(config, xai_grok_tools::types::SessionMode::Default).await;
             }
             tracing::info!(
-                tool_call_id = %exited.tool_call_id,
-                deactivated,
-                has_plan = exited.plan_content.is_some(),
-                "Plan mode exited via ExitPlanMode tool"
+                tool_call_id = % exited.tool_call_id, deactivated, has_plan = exited
+                .plan_content.is_some(), "Plan mode exited via ExitPlanMode tool"
             );
         }
         ToolNotification::UserQuestionAsked(asked) => {
-            tracing::info!(
-                tool_call_id = %asked.tool_call_id,
-                "User question asked"
-            );
+            tracing::info!(tool_call_id = % asked.tool_call_id, "User question asked");
         }
         ToolNotification::LspServerStarting(s) => {
-            tracing::debug!(server = %s.server_name, command = %s.command, "LSP server starting");
+            tracing::debug!(
+                server = % s.server_name, command = % s.command, "LSP server starting"
+            );
         }
         ToolNotification::LspServerReady(s) => {
-            tracing::info!(server = %s.server_name, "LSP server ready");
+            tracing::info!(server = % s.server_name, "LSP server ready");
         }
         ToolNotification::LspServerCrashed(s) => {
-            tracing::warn!(server = %s.server_name, "LSP server crashed");
+            tracing::warn!(server = % s.server_name, "LSP server crashed");
         }
         ToolNotification::LspServerRetrying(s) => {
             tracing::warn!(
-                server = %s.server_name,
-                attempt = s.attempt,
-                max_restarts = s.max_restarts,
-                backoff_ms = s.backoff_ms,
-                "LSP server retrying"
+                server = % s.server_name, attempt = s.attempt, max_restarts = s
+                .max_restarts, backoff_ms = s.backoff_ms, "LSP server retrying"
             );
         }
         ToolNotification::LspServerFailed(s) => {
-            tracing::error!(server = %s.server_name, error = %s.error, "LSP server failed");
+            tracing::error!(
+                server = % s.server_name, error = % s.error, "LSP server failed"
+            );
         }
         ToolNotification::ScheduledTaskFired(fired) => {
             tracing::info!(
@@ -727,17 +715,14 @@ async fn handle_notification(
                 && owner != my_session
             {
                 tracing::warn!(
-                    task_id = %event.task_id,
-                    description = %event.description,
-                    monitor_owner = %owner,
-                    bridge_session = %my_session,
+                    task_id = % event.task_id, description = % event.description,
+                    monitor_owner = % owner, bridge_session = % my_session,
                     "Dropped cross-session monitor event: owner does not match this bridge's session"
                 );
                 return;
             }
             tracing::debug!(
-                task_id = %event.task_id,
-                description = %event.description,
+                task_id = % event.task_id, description = % event.description,
                 "Monitor event received, injecting into session"
             );
             let notification = crate::extensions::notification::SessionNotification {
@@ -762,7 +747,7 @@ async fn handle_notification(
             }
             if config.task_completion_reservations.contains(&event.task_id) {
                 tracing::debug!(
-                    task_id = %event.task_id,
+                    task_id = % event.task_id,
                     "skipping model inject for monitor event: task already auto-woke via TaskCompleted"
                 );
                 return;

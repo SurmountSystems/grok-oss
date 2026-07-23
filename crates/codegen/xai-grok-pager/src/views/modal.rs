@@ -1422,6 +1422,21 @@ mod palette_sharing_tests {
         assert_eq!(hint(crate::app::ScreenMode::Fullscreen), "/edit-prompt");
     }
     #[test]
+    fn edit_prompt_palette_entry_is_minimal_only() {
+        let minimal = default_palette_entries(true, crate::app::ScreenMode::Minimal);
+        assert!(
+            minimal
+                .iter()
+                .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
+        );
+        let fullscreen = default_palette_entries(true, crate::app::ScreenMode::Fullscreen);
+        assert!(
+            !fullscreen
+                .iter()
+                .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
+        );
+    }
+    #[test]
     fn default_palette_omits_share_when_disabled() {
         let entries = default_palette_entries(false, &slash(crate::app::ScreenMode::Fullscreen));
         assert!(

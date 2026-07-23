@@ -2559,10 +2559,201 @@ mod tests {
             }
             other => panic!("expected Clipboard delivery, got {other:?}"),
         }
-        assert!(
-            ClipboardFeedback::UnverifiedOscRemote
-                .message()
-                .contains("grok wrap")
+        let resolved = default_copy_fallback_path();
+        unsafe {
+            std::env::remove_var(GROK_COPY_FILE_ENV);
+        }
+        assert_eq!(resolved, Some(custom));
+    }
+
+    #[test]
+    #[serial_test::serial(grok_copy_file)]
+    fn write_copy_fallback_uses_env_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let custom = dir.path().join("last.txt");
+        unsafe {
+            std::env::set_var(GROK_COPY_FILE_ENV, &custom);
+        }
+        let written = write_copy_fallback("payload").expect("fallback write");
+        unsafe {
+            std::env::remove_var(GROK_COPY_FILE_ENV);
+        }
+        assert_eq!(written, custom);
+        assert_eq!(std::fs::read_to_string(&custom).expect("read"), "payload");
+    }
+
+    /// Without `GROK_COPY_FILE`, the default is `~/.grok/last-copy.txt`
+    /// (grok home) — short and toast-friendly, unlike macOS's temp dir.
+    #[test]
+    #[serial_test::serial(grok_copy_file)]
+    fn default_copy_fallback_path_is_grok_home() {
+        unsafe {
+            std::env::remove_var(GROK_COPY_FILE_ENV);
+        }
+        let path = default_copy_fallback_path();
+        // Test envs always resolve a home (or set GROK_HOME).
+        let expected = xai_grok_config::user_grok_home()
+            .expect("home resolves in tests")
+            .join("last-copy.txt");
+        assert_eq!(path, Some(expected));
+    }
+
+    /// Toast paths collapse the home prefix to `~` (grok-home paths go
+    /// through the shared `abbreviate_path` convention, covered further by
+    /// the `GROK_HOME`-override integration test in `xai-grok-pager`).
+    #[test]
+    fn display_copy_path_abbreviates_home() {
+        if std::env::var_os("GROK_HOME").is_none() {
+            let home = dirs::home_dir().expect("home resolves in tests");
+            assert_eq!(
+                display_copy_path(&home.join(".grok").join("last-copy.txt")),
+                "~/.grok/last-copy.txt"
+            );
+        }
+        // Non-home paths pass through untouched — including multi-byte
+        // UTF-8 components (must never slice at a non-char boundary).
+        assert_eq!(
+            display_copy_path(std::path::Path::new("/tmp/grok-0/last-copy.txt")),
+            "/tmp/grok-0/last-copy.txt"
         );
+        assert_eq!(
+            display_copy_path(std::path::Path::new("/tmp/日本語/コピー.txt")),
+            "/tmp/日本語/コピー.txt"
+        );
+    }
+
+    // -- resolve_delivery: pure clipboard × file composition matrix ----------
+
+    fn copy_result(success: bool) -> CopyResult {
+        CopyResult {
+            message: "test",
+            message_lead: "test",
+            ticks: 30,
+            delivery: if success {
+                ClipboardDelivery::Confirmed
+            } else {
+                ClipboardDelivery::Failed
+            },
+        }
+    }
+
+    #[test]
+    fn delivery_clipboard_success_carries_backup_file() {
+        let path = std::path::PathBuf::from("/tmp/grok-1/last-copy.txt");
+        match resolve_delivery(copy_result(true), Ok(path.clone())) {
+            CopyDelivery::Clipboard { result, file } => {
+                assert!(result.delivery.reported_success());
+                assert_eq!(file, Some(path));
+            }
+            other => panic!("expected Clipboard delivery, got {other:?}"),
+        }
+    }
+
+    /// A failed backup write never fails a copy whose clipboard succeeded.
+    #[test]
+    fn delivery_clipboard_success_survives_file_write_failure() {
+        let err = std::io::Error::other("disk full");
+        let delivery = resolve_delivery(copy_result(true), Err(err));
+        assert!(delivery.success());
+        match delivery {
+            CopyDelivery::Clipboard { file, .. } => assert!(file.is_none()),
+            other => panic!("expected Clipboard delivery, got {other:?}"),
+        }
+    }
+
+    /// Clipboard `Failed` still yields `File` delivery (the pre-existing
+    /// fallback contract).
+    #[test]
+    fn delivery_clipboard_failure_yields_file() {
+        let path = std::path::PathBuf::from("/tmp/grok-1/last-copy.txt");
+        let delivery = resolve_delivery(copy_result(false), Ok(path.clone()));
+        assert!(delivery.success());
+        match delivery {
+            CopyDelivery::File { path: p } => assert_eq!(p, path),
+            other => panic!("expected File delivery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delivery_both_failed_is_failed() {
+        let err = std::io::Error::other("read-only fs");
+        let delivery = resolve_delivery(copy_result(false), Err(err));
+        assert!(!delivery.success());
+        assert!(matches!(delivery, CopyDelivery::Failed { .. }));
+    }
+
+    // -- CopyDelivery toast composition ---------------------------------------
+
+    #[test]
+    fn toast_message_always_names_backup_file() {
+        let path = std::path::PathBuf::from("/tmp/grok-1/last-copy.txt");
+
+        // Plain success with a backup: names the path.
+        let plain = CopyDelivery::Clipboard {
+            result: ClipboardFeedback::Copied.to_result(),
+            file: Some(path.clone()),
+        };
+        assert_eq!(
+            plain.toast_message(),
+            "Copied! — saved to /tmp/grok-1/last-copy.txt"
+        );
+        assert_eq!(plain.toast_ticks(), 30);
+
+        // Unverified OSC 52 with a backup: compact lead + path, guidance tail
+        // dropped (the file is the recovery path; the full sentence overflows
+        // narrow terminals).
+        let unverified = CopyDelivery::Clipboard {
+            result: ClipboardFeedback::UnverifiedOscRemote.to_result(),
+            file: Some(path.clone()),
+        };
+        assert_eq!(
+            unverified.toast_message(),
+            "Copy sent — saved to /tmp/grok-1/last-copy.txt"
+        );
+        assert_eq!(unverified.toast_ticks(), 120);
+
+        // No backup file (write failed): falls back to the static message.
+        let no_file = CopyDelivery::Clipboard {
+            result: ClipboardFeedback::UnverifiedOscRemote.to_result(),
+            file: None,
+        };
+        assert_eq!(
+            no_file.toast_message(),
+            ClipboardFeedback::UnverifiedOscRemote.message()
+        );
+
+        // File-only delivery keeps the "unreachable" wording.
+        let file_only = CopyDelivery::File { path };
+        assert_eq!(
+            file_only.toast_message(),
+            "Clipboard unreachable — wrote /tmp/grok-1/last-copy.txt"
+        );
+        assert_eq!(file_only.toast_ticks(), 120);
+
+        // Failed delivery surfaces the clipboard failure message.
+        let failed = CopyDelivery::Failed {
+            clipboard: ClipboardFeedback::Failed.to_result(),
+            file_error: std::io::Error::other("nope"),
+        };
+        assert_eq!(failed.toast_message(), ClipboardFeedback::Failed.message());
+        assert_eq!(failed.toast_ticks(), 120);
+    }
+
+    /// An UNVERIFIED clipboard delivery still counts as a clipboard delivery
+    /// (not a file fallback): the toast hedges but the backup path is named.
+    #[test]
+    fn unverified_clipboard_delivery_composes_as_clipboard() {
+        let path = std::path::PathBuf::from("/tmp/grok-1/last-copy.txt");
+        let delivery = resolve_delivery(
+            ClipboardFeedback::UnverifiedOscRemote.to_result(),
+            Ok(path.clone()),
+        );
+        match delivery {
+            CopyDelivery::Clipboard { result, file } => {
+                assert_eq!(result.delivery, ClipboardDelivery::Unverified);
+                assert_eq!(file, Some(path));
+            }
+            other => panic!("expected Clipboard delivery, got {other:?}"),
+        }
     }
 }

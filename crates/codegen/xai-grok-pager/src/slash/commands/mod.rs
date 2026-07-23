@@ -16,6 +16,7 @@ pub mod delete;
 pub mod docs;
 
 pub mod economic_mode;
+pub mod edit_prompt;
 pub mod effort;
 pub mod effort_levels;
 pub mod exit;
@@ -93,6 +94,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(compact::CompactCommand),
 
         Arc::new(economic_mode::EconomicModeCommand),
+        Arc::new(doctor::DoctorCommand),
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),
         Arc::new(history::HistoryCommand),
@@ -235,6 +237,115 @@ mod tests {
             "scheduler_create".to_string()
         ]));
         assert!(reg.get("loop").is_some());
+    }
+    #[test]
+    fn shell_collision_contract_covers_every_pager_command_and_alias() {
+        const SHELL_RESERVED: &[&str] = &[
+            "agents",
+            "agents-dashboard",
+            "always-approve",
+            "announcements",
+            "auto",
+            "btw",
+            "cd",
+            "changelog",
+            "chat",
+            "clear",
+            "cloud",
+            "compact",
+            "compact-mode",
+            "config",
+            "config-agents",
+            "context",
+            "copy",
+            "cost",
+            "dashboard",
+            "debug",
+            "docs",
+            "doctor",
+            "edit-prompt",
+            "econ",
+            "economic",
+            "economic-mode",
+            "effort",
+            "exit",
+            "expand",
+            "export",
+            "feedback",
+            "find",
+            "fork",
+            "full",
+            "fullscreen",
+            "gboom",
+            "guides",
+            "help",
+            "history",
+            "home",
+            "hooks",
+            "howto",
+            "imagine",
+            "imagine-video",
+            "import-claude",
+            "jump",
+            "login",
+            "logout",
+            "log",
+            "loop",
+            "m",
+            "marketplace",
+            "mcps",
+            "minimal",
+            "ml",
+            "model",
+            "multiline",
+            "new",
+            "personas",
+            "plan",
+            "plan-view",
+            "plugins",
+            "preferences",
+            "prefs",
+            "privacy",
+            "queue",
+            "quit",
+            "recap",
+            "release-notes",
+            "remember",
+            "rename",
+            "resume",
+            "rewind",
+            "scroll-debug",
+            "session-info",
+            "sessions",
+            "settings",
+            "share",
+            "show-plan",
+            "skills",
+            "summarize",
+            "tasks",
+            "terminal-check",
+            "terminal-info",
+            "terminal-setup",
+            "theme",
+            "timeline",
+            "timestamps",
+            "title",
+            "toggle-mouse-reporting",
+            "transcript",
+            "t",
+            "usage",
+            "view-plan",
+            "vim-mode",
+            "voice",
+            "welcome",
+            "workflows",
+            "yolo",
+        ];
+        for command in builtin_commands() {
+            for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
+                assert!(SHELL_RESERVED.contains(&key), "unreserved pager key {key}");
+            }
+        }
     }
     #[test]
     fn builtin_registry_lookup_by_alias() {

@@ -204,6 +204,31 @@ pub struct EventTraits {
     pub hub_forward: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateKind {
+    /// Hook output recorded, decisions ignored.
+    Observe,
+    Tool,
+    /// Stop decision control (`block`, `continue: false`, `additionalContext`).
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatcherPolicy {
+    /// Never evaluated: kept for display with a load-time warning, the hook fires on every occurrence.
+    Ignored,
+    /// Tested against the value [`HookPayload::match_value`] extracts from the payload.
+    Tested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventTraits {
+    pub gate: GateKind,
+    pub matcher: MatcherPolicy,
+    /// Whether hub custom hooks receive this event (see `dispatcher::hub_hook_kind`).
+    pub hub_forward: bool,
+}
+
 impl HookEventName {
     pub fn canonical(self) -> Self {
         match self {

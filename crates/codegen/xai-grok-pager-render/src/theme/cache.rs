@@ -523,6 +523,20 @@ mod tests {
     }
 
     #[test]
+    fn terminal_native_lock_enables_polarity_safe_syntax() {
+        with_test_env(|| {
+            assert!(!xai_grok_markdown::polarity_safe_syntax());
+            set_terminal_native_lock(true);
+            assert!(
+                xai_grok_markdown::polarity_safe_syntax(),
+                "minimal must engage polarity-safe syntax remapping"
+            );
+            set_terminal_native_lock(false);
+            assert!(!xai_grok_markdown::polarity_safe_syntax());
+        });
+    }
+
+    #[test]
     fn terminal_native_lock_caps_quantize_at_ansi16() {
         use ratatui::style::Color;
 

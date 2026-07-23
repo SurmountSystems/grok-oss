@@ -17,6 +17,7 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod language;
+pub mod pcm;
 pub mod pipeline;
 pub mod probe;
 pub mod stt;

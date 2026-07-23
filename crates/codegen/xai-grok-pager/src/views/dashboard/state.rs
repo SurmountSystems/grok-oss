@@ -3357,6 +3357,8 @@ impl DashboardState {
             InputOutcome::Changed
         } else if event == PromptEvent::Edited || dropped_highlight {
             InputOutcome::Changed
+        } else if event == crate::views::prompt_widget::PromptEvent::Edited {
+            InputOutcome::Changed
         } else {
             InputOutcome::Unchanged
         }

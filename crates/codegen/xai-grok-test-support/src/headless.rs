@@ -171,6 +171,11 @@ async fn run_headless_with_cmd_and_sandbox(
         program.display()
     );
 
+    let elapsed = started.elapsed();
+    // Timing breadcrumb for tuning CI timeout budgets against observed
+    // durations (visible with --nocapture).
+    eprintln!("[harness-timing] headless grok run: {elapsed:?} (timed_out={timed_out})");
+
     HeadlessResult {
         status,
         stdout,

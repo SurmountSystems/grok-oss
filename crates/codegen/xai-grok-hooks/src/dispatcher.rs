@@ -1178,6 +1178,8 @@ mod tests {
         assert_eq!(notification.match_value(), Some("permission_prompt"));
     }
 
+    /// An empty subagent type (parent-side fire with no spawn record) yields
+    /// `None` so matchers fire-all instead of silently matching nothing.
     #[test]
     fn subagent_match_value_is_none_when_type_empty() {
         let mut envelope = stop_envelope();

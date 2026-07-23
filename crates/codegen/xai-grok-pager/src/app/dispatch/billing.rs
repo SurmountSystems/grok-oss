@@ -10,9 +10,6 @@ use std::time::Duration;
 use xai_grok_telemetry::events::{SuperGrokUpsell, SuperGrokUpsellClicked};
 use xai_grok_telemetry::session_ctx::log_event;
 
-// Free-usage detection lives in shell next to the well-known code + 429 copy.
-pub(crate) use xai_grok_shell::sampling::error::is_free_usage_exhausted_error;
-
 /// How long the pager auto-checks subscription status before stopping.
 /// After this, the user can still manually check via the [Refresh] button.
 pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);

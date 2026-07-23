@@ -1,8 +1,7 @@
 //! Auto permission mode: LLM transcript classifier with safe fast-paths.
 //!
 //! Port of common agent auto-permission classifier semantics adapted to Grok's
-//! `AccessKind` permission gate (classifier blocks prompt the user; upstream
-//! denial-limit tracking is intentionally not ported).
+//! `AccessKind` permission gate.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -24,10 +23,23 @@ use super::types::AccessKind;
 pub enum ClassifierVerdict {
     /// Safe to run without user prompt.
     Allow,
-    /// Blocked by classifier; the user is prompted to decide.
     Block,
-    /// Classifier unavailable (API error / no client); treated as a block (prompt).
     Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifierOutcome {
+    pub verdict: ClassifierVerdict,
+    pub reason: Option<String>,
+}
+
+impl From<ClassifierVerdict> for ClassifierOutcome {
+    fn from(verdict: ClassifierVerdict) -> Self {
+        Self {
+            verdict,
+            reason: None,
+        }
+    }
 }
 
 /// Role of a single classifier request message (transport-agnostic; the shell
@@ -138,7 +150,7 @@ pub trait PermissionClassifier: Send + Sync {
         access: &'a AccessKind,
         access_detail: Option<&'a str>,
         context: ClassifierContext,
-    ) -> Pin<Box<dyn Future<Output = ClassifierVerdict> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = ClassifierOutcome> + Send + 'a>>;
 }
 
 /// Fixed-verdict classifier for tests and headless fallbacks.
@@ -152,16 +164,14 @@ impl PermissionClassifier for FixedClassifier {
         _access: &'a AccessKind,
         _access_detail: Option<&'a str>,
         _context: ClassifierContext,
-    ) -> Pin<Box<dyn Future<Output = ClassifierVerdict> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = ClassifierOutcome> + Send + 'a>> {
         let v = self.0;
-        Box::pin(async move { v })
+        Box::pin(async move { v.into() })
     }
 }
 
 /// Production default classifier: rule-based transcript-style risk assessment
 /// without a network call. Blocks known-dangerous patterns; allows routine
-/// dev commands; **unknown bash defaults to Block** (which prompts the user)
-/// so auto is not silent always-approve. A live LLM can
 /// replace this via `set_classifier` and use full transcript context.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HeuristicPermissionClassifier;
@@ -373,6 +383,28 @@ const ROUTINE_PREFIXES: &[&str] = &[
     "set", // shell options affect only the spawned shell
 ];
 
+/// kubectl flags that select caller-controlled config / endpoint / auth /
+/// identity (including shorthands). Shared with
+/// `manager.rs::kubectl_has_unsafe_flag` so the two classifiers cannot drift.
+pub(crate) const KUBECTL_UNSAFE_FLAGS: &[&str] = &[
+    "--kubeconfig",
+    "--context",
+    "--cluster",
+    "--server",
+    "-s",
+    "--token",
+    "--user",
+    "--as",
+    "--as-group",
+    "--as-uid",
+    "--as-user-extra",
+    "--username",
+    "--password",
+    "--client-certificate",
+    "--client-key",
+    "--certificate-authority",
+];
+
 /// Env var KEYs safe to set for a routine command: cosmetic / logging only, with
 /// no effect on which binary runs or how it resolves code. Anything else
 /// (LD_PRELOAD, DYLD_*, PATH, NODE_OPTIONS, PYTHONPATH, GIT_SSH_COMMAND, FOO, ...)
@@ -410,7 +442,7 @@ fn classify_bash(cmd: &str) -> ClassifierVerdict {
     // (or any `env` option) can change which binary runs / how code resolves.
     // Read from the PARSED, quote-stripped tree so `env "LD_PRELOAD=..."` can't
     // hide the key.
-    if script_sets_unsafe_env(tree.root_node(), cmd, &cmds) {
+    if script_env_risk(tree.root_node(), cmd, &cmds) != EnvRisk::Safe {
         return ClassifierVerdict::Block;
     }
     // A routine command can still write an arbitrary destination via a redirect
@@ -490,6 +522,24 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     {
         return false;
     }
+    // `rg --pre <cmd>` runs <cmd> per searched file; `--pre-glob` only filters.
+    if head == "rg"
+        && inner
+            .iter()
+            .any(|w| w == "--pre" || w.starts_with("--pre="))
+    {
+        return false;
+    }
+    // kubectl with caller-controlled kubeconfig/endpoint/identity can run an
+    // exec credential plugin; mirrors manager.rs::kubectl_has_unsafe_flag.
+    if head == "kubectl"
+        && inner.iter().skip(1).any(|w| {
+            let name = w.split_once('=').map_or(w.as_str(), |(name, _)| name);
+            KUBECTL_UNSAFE_FLAGS.contains(&name)
+        })
+    {
+        return false;
+    }
     // Fail-closed read-only matchers (mutating siblings must not ride a prefix).
     if head == "gh" {
         return gh_subcommand_is_read_only(inner);
@@ -559,7 +609,7 @@ fn package_manager_subcommand_is_routine(prog: &str, inner: &[String]) -> Option
         LaunchTarget::Unresolved => return Some(false),
         LaunchTarget::Inner(launched) => {
             return Some(
-                !command_env_is_unsafe(launched)
+                command_env_risk(launched) == EnvRisk::Safe
                     && !launched_writes_nonsink(launched)
                     && bash_command_is_routine(launched),
             );
@@ -742,17 +792,52 @@ fn explicit_launch_target<'a>(head: &str, inner: &'a [String]) -> LaunchTarget<'
     }
 }
 
-/// Default-deny env guard. True (→ Block) if the command assigns any env var
-/// whose KEY is not in [`SAFE_ENV_KEYS`], or passes an option to `env` (which can
-/// run a string, clear, or unset the environment). Reads the PARSED tree so
-/// quoting (`env "LD_PRELOAD=..."`) can't hide a key from the check.
-pub(crate) fn script_sets_unsafe_env(root: Node<'_>, src: &str, cmds: &[PlainCommand]) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum EnvRisk {
+    Safe,
+    Unvetted,
+    Injection,
+}
+
+const INJECTION_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "PATH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PROXY_COMMAND",
+    "PROMPT_COMMAND",
+];
+
+const INJECTION_ENV_KEY_PREFIXES: &[&str] = &["DYLD_", "GIT_CONFIG"];
+
+fn env_key_risk(key: &str) -> EnvRisk {
+    if is_safe_env_key(key) {
+        EnvRisk::Safe
+    } else if INJECTION_ENV_KEYS.contains(&key)
+        || INJECTION_ENV_KEY_PREFIXES
+            .iter()
+            .any(|p| key.starts_with(p))
+    {
+        EnvRisk::Injection
+    } else {
+        EnvRisk::Unvetted
+    }
+}
+
+/// Highest [`EnvRisk`] across the script's env assignments (inline `KEY=val`
+/// and `env`-form). Reads the PARSED tree so quoting (`env "LD_PRELOAD=..."`)
+/// can't hide a key.
+pub(crate) fn script_env_risk(root: Node<'_>, src: &str, cmds: &[PlainCommand]) -> EnvRisk {
+    let mut risk = EnvRisk::Safe;
     // (a) Inline `KEY=val cmd` assignments are `variable_assignment` nodes
     //     (stripped from PlainCommand words), so walk the tree for them.
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if node.kind() == "variable_assignment" && !is_safe_env_key(assignment_key(node, src)) {
-            return true;
+        if node.kind() == "variable_assignment" {
+            risk = risk.max(env_key_risk(assignment_key(node, src)));
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -761,29 +846,29 @@ pub(crate) fn script_sets_unsafe_env(root: Node<'_>, src: &str, cmds: &[PlainCom
     }
     // (b) `env`-form assignments/options, even behind other wrappers
     //     (e.g. `timeout 5 env LD_PRELOAD=...`).
-    cmds.iter().any(|c| command_env_is_unsafe(c.words()))
+    cmds.iter()
+        .fold(risk, |risk, c| risk.max(command_env_risk(c.words())))
 }
 
 /// Walk a command's wrapper chain; for each `env` invocation treat any option
 /// flag (`-S`/`-i`/`-u`/`-C`/...) or an assignment KEY outside [`SAFE_ENV_KEYS`]
 /// as exec-affecting → unsafe. Covers nested wrappers like `timeout 5 env ...`.
-fn command_env_is_unsafe(words: &[String]) -> bool {
+fn command_env_risk(words: &[String]) -> EnvRisk {
+    let mut risk = EnvRisk::Safe;
     let mut current = words;
     for _ in 0..8 {
         if current.first().and_then(|w| w.rsplit(['/', '\\']).next()) == Some("env") {
+            let mut options_done = false;
             for arg in &current[1..] {
                 if arg == "--" {
-                    break; // end of env options; the rest is the command
+                    options_done = true;
+                    continue;
                 }
-                if arg.starts_with('-') {
-                    return true; // env option alters/clears the exec environment
+                if !options_done && arg.starts_with('-') {
+                    return EnvRisk::Injection;
                 }
                 match arg.split_once('=') {
-                    Some((key, _)) => {
-                        if !is_safe_env_key(key) {
-                            return true;
-                        }
-                    }
+                    Some((key, _)) => risk = risk.max(env_key_risk(key)),
                     None => break, // first plain word is the inner command
                 }
             }
@@ -793,7 +878,7 @@ fn command_env_is_unsafe(words: &[String]) -> bool {
             None => break,
         }
     }
-    false
+    risk
 }
 
 /// The variable name assigned by a `variable_assignment` node — its
@@ -841,9 +926,9 @@ impl PermissionClassifier for HeuristicPermissionClassifier {
         access: &'a AccessKind,
         access_detail: Option<&'a str>,
         context: ClassifierContext,
-    ) -> Pin<Box<dyn Future<Output = ClassifierVerdict> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = ClassifierOutcome> + Send + 'a>> {
         let v = Self::classify_sync(tool_name, access, access_detail, &context);
-        Box::pin(async move { v })
+        Box::pin(async move { v.into() })
     }
 }
 
@@ -1115,26 +1200,39 @@ pub fn build_classifier_messages(
 
 /// Parse model JSON / text into a verdict (`shouldBlock` mapping).
 pub fn parse_classifier_model_text(text: &str) -> ClassifierVerdict {
+    parse_classifier_model_output(text).verdict
+}
+
+pub const CLASSIFIER_REASON_MAX_LEN: usize = 400;
+
+fn classifier_reason(v: &serde_json::Value) -> Option<String> {
+    v.get("reason")
+        .and_then(|r| r.as_str())
+        .map(|r| r.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|r| !r.is_empty())
+        .map(|r| xai_grok_tools::util::truncate_line(&r, CLASSIFIER_REASON_MAX_LEN).into_owned())
+}
+
+pub fn parse_classifier_model_output(text: &str) -> ClassifierOutcome {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return ClassifierVerdict::Unavailable;
+        return ClassifierVerdict::Unavailable.into();
     }
     // Prefer JSON object with shouldBlock
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(b) = v.get("shouldBlock").and_then(|x| x.as_bool()) {
-            return if b {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(b) = v
+            .get("shouldBlock")
+            .or_else(|| v.get("should_block"))
+            .and_then(|x| x.as_bool())
+    {
+        return ClassifierOutcome {
+            verdict: if b {
                 ClassifierVerdict::Block
             } else {
                 ClassifierVerdict::Allow
-            };
-        }
-        if let Some(b) = v.get("should_block").and_then(|x| x.as_bool()) {
-            return if b {
-                ClassifierVerdict::Block
-            } else {
-                ClassifierVerdict::Allow
-            };
-        }
+            },
+            reason: classifier_reason(&v),
+        };
     }
     // Fenced or embedded JSON
     if let Some(start) = trimmed.find('{')
@@ -1146,15 +1244,18 @@ pub fn parse_classifier_model_text(text: &str) -> ClassifierVerdict {
             .or_else(|| v.get("should_block"))
             .and_then(|x| x.as_bool())
     {
-        return if b {
-            ClassifierVerdict::Block
-        } else {
-            ClassifierVerdict::Allow
+        return ClassifierOutcome {
+            verdict: if b {
+                ClassifierVerdict::Block
+            } else {
+                ClassifierVerdict::Allow
+            },
+            reason: classifier_reason(&v),
         };
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower.contains("\"shouldblock\": true") || lower.contains("shouldblock\":true") {
-        return ClassifierVerdict::Block;
+        return ClassifierVerdict::Block.into();
     }
     // Deliberately do NOT infer Allow from a loose `"shouldBlock": false` substring:
     // narrative prose or multiple JSON fragments (from `rfind('}')`) can contain it
@@ -1165,9 +1266,9 @@ pub fn parse_classifier_model_text(text: &str) -> ClassifierVerdict {
     // and flips the verdict, so only honor an unambiguous one-word reply;
     // anything else is Unavailable → conservative heuristic fallback.
     match lower.trim() {
-        "block" | "blocked" | "deny" | "denied" => ClassifierVerdict::Block,
-        "allow" | "allowed" | "approve" | "approved" => ClassifierVerdict::Allow,
-        _ => ClassifierVerdict::Unavailable,
+        "block" | "blocked" | "deny" | "denied" => ClassifierVerdict::Block.into(),
+        "allow" | "allowed" | "approve" | "approved" => ClassifierVerdict::Allow.into(),
+        _ => ClassifierVerdict::Unavailable.into(),
     }
 }
 
@@ -1270,7 +1371,7 @@ impl PermissionClassifier for LlmPermissionClassifier {
         access: &'a AccessKind,
         access_detail: Option<&'a str>,
         context: ClassifierContext,
-    ) -> Pin<Box<dyn Future<Output = ClassifierVerdict> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = ClassifierOutcome> + Send + 'a>> {
         Box::pin(async move {
             // Deterministic pre-pass: a provable heuristic Allow skips the model
             // (no side-query latency, no false block); anything unprovable still
@@ -1282,7 +1383,7 @@ impl PermissionClassifier for LlmPermissionClassifier {
                 &context,
             );
             if heuristic == ClassifierVerdict::Allow {
-                return ClassifierVerdict::Allow;
+                return ClassifierVerdict::Allow.into();
             }
             let messages = build_classifier_messages(
                 tool_name,
@@ -1308,14 +1409,14 @@ impl PermissionClassifier for LlmPermissionClassifier {
                 None
             };
             if let Some(text) = model_text {
-                let v = parse_classifier_model_text(&text);
-                if v != ClassifierVerdict::Unavailable {
-                    return v;
+                let outcome = parse_classifier_model_output(&text);
+                if outcome.verdict != ClassifierVerdict::Unavailable {
+                    return outcome;
                 }
             }
             // Model unavailable / unparseable: fall back to the heuristic verdict
             // computed above (non-Allow here — Allow already short-circuited).
-            heuristic
+            heuristic.into()
         })
     }
 }
@@ -1415,7 +1516,8 @@ mod tests {
                     Some("ls"),
                     ClassifierContext::default(),
                 )
-                .await,
+                .await
+                .verdict,
             ClassifierVerdict::Allow
         );
         let block = FixedClassifier(ClassifierVerdict::Block);
@@ -1427,7 +1529,8 @@ mod tests {
                     Some("rm -rf /"),
                     ClassifierContext::default(),
                 )
-                .await,
+                .await
+                .verdict,
             ClassifierVerdict::Block
         );
     }
@@ -1582,6 +1685,55 @@ mod tests {
         assert_eq!(v("find . -type f"), ClassifierVerdict::Allow);
     }
 
+    /// `rg --pre <cmd>` executes <cmd> per searched file → must not auto-allow,
+    /// mirroring `manager.rs::rg_has_pre_flag`. `--pre-glob` only filters and
+    /// stays routine.
+    #[test]
+    fn heuristic_guards_rg_pre() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        assert_eq!(v("rg --pre ./pre.sh TODO ."), ClassifierVerdict::Block);
+        assert_eq!(v("rg --pre=./pre.sh TODO ."), ClassifierVerdict::Block);
+        assert_eq!(v("rg --pre-glob '*.pdf' TODO ."), ClassifierVerdict::Allow);
+        assert_eq!(v("rg TODO ."), ClassifierVerdict::Allow);
+    }
+
+    /// `kubectl` with a caller-controlled kubeconfig/endpoint/identity flag must
+    /// not be routine, mirroring `manager.rs::kubectl_has_unsafe_flag`. Plain
+    /// read verbs with trusted default kubeconfig stay Allow.
+    #[test]
+    fn heuristic_guards_kubectl_unsafe_flags() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        assert_eq!(
+            v("kubectl get pods --kubeconfig=/tmp/evil.yaml"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("kubectl get pods --kubeconfig /tmp/evil.yaml"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("kubectl get pods -s https://evil"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(v("kubectl get pods -n prod"), ClassifierVerdict::Allow);
+    }
+
     /// Output redirection to a real file is dropped from the parsed word list, so
     /// the AST redirect scan must Block a Write to anything but a safe sink.
     #[test]
@@ -1653,6 +1805,60 @@ mod tests {
         );
         assert_eq!(v("RUST_LOG=debug cargo test"), ClassifierVerdict::Allow);
         assert_eq!(v("cargo test"), ClassifierVerdict::Allow);
+    }
+
+    #[test]
+    fn env_risk_tiers() {
+        let risk = |cmd: &str| {
+            let tree = try_parse_shell(cmd).expect(cmd);
+            let cmds = try_parse_word_only_commands_sequence(&tree, cmd).unwrap_or_default();
+            script_env_risk(tree.root_node(), cmd, &cmds)
+        };
+        assert_eq!(risk("RUST_LOG=debug cargo test"), EnvRisk::Safe);
+        assert_eq!(risk("cargo test"), EnvRisk::Safe);
+
+        for cmd in [
+            "GH_HOST=github.example.com gh pr view 3135",
+            "FOO=bar make test",
+            "out=$(gh pr view 3135); echo \"$out\"",
+            "env FOO=1 cargo test",
+            "GIT_SSH_COMMAND=/x git fetch",
+            "SSH_ASKPASS=/x ssh host",
+            "PYTHONPATH=/x python s.py",
+            "NODE_OPTIONS=--require=/x npm test",
+            "KUBECONFIG=/x kubectl get pods",
+            "XDG_CONFIG_HOME=/x git status",
+            "LD_LIBRARY_PATH=/x ./app",
+        ] {
+            assert_eq!(risk(cmd), EnvRisk::Unvetted, "{cmd}");
+        }
+
+        assert_eq!(
+            risk("bash -c 'GIT_CONFIG_COUNT=1 git status'"),
+            EnvRisk::Safe
+        );
+        assert_eq!(risk("sh -c 'echo hi'"), EnvRisk::Safe);
+
+        assert_eq!(
+            risk("GH_HOST=x LD_PRELOAD=/x gh pr view 1"),
+            EnvRisk::Injection
+        );
+        for cmd in [
+            "LD_PRELOAD=/x cargo test",
+            "env \"DYLD_INSERT_LIBRARIES=/x\" cargo test",
+            "GIT_CONFIG_COUNT=1 git status",
+            "PATH=/tmp cargo test",
+            "BASH_ENV=/x bash -c true",
+            "IFS=x sh -c cmd",
+            "env -i cargo test",
+            "env -S 'rm -rf ~' ls",
+            "env -- LD_PRELOAD=/x cargo test",
+            "GIT_EXTERNAL_DIFF=/x git diff",
+            "GIT_PROXY_COMMAND=/x git fetch",
+            "PROMPT_COMMAND=/x bash",
+        ] {
+            assert_eq!(risk(cmd), EnvRisk::Injection, "{cmd}");
+        }
     }
 
     /// `cp`/`mv` write/replace arbitrary destinations the redirect guard can't
@@ -2187,7 +2393,8 @@ mod tests {
                     Some("cargo test"),
                     ClassifierContext::default(),
                 )
-                .await,
+                .await
+                .verdict,
             ClassifierVerdict::Allow
         );
         // dangerous stays blocked via heuristic
@@ -2199,7 +2406,8 @@ mod tests {
                     Some("rm -rf /"),
                     ClassifierContext::default(),
                 )
-                .await,
+                .await
+                .verdict,
             ClassifierVerdict::Block
         );
 
@@ -2212,7 +2420,8 @@ mod tests {
                     Some("cargo test"),
                     ClassifierContext::default(),
                 )
-                .await,
+                .await
+                .verdict,
             ClassifierVerdict::Allow,
             "unparseable model text → heuristic allow for cargo"
         );
@@ -2236,7 +2445,8 @@ mod tests {
                 Some("cargo test"),
                 ClassifierContext::default(),
             )
-            .await,
+            .await
+            .verdict,
             ClassifierVerdict::Allow
         );
     }
@@ -2259,6 +2469,7 @@ mod tests {
                 ClassifierContext::default(),
             )
             .await
+            .verdict
         };
         // Provably routine chains (incl. the reported `find; grep` repro) must
         // allow despite the model saying block.
@@ -2312,10 +2523,41 @@ mod tests {
                     Some("cargo test"),
                     ctx,
                 )
-                .await,
+                .await
+                .verdict,
             ClassifierVerdict::Block,
             "hostile transcript must reach the model, whose block stands"
         );
+    }
+
+    #[tokio::test]
+    async fn classifier_outcome_threads_model_reason() {
+        let block = LlmPermissionClassifier::with_fixed_model_text(
+            r#"{"thinking":"t","shouldBlock":true,"reason":"pushes to a remote"}"#,
+        );
+        let outcome = block
+            .classify(
+                "run_terminal_command",
+                &AccessKind::Bash("git push origin main".into()),
+                Some("git push origin main"),
+                ClassifierContext::default(),
+            )
+            .await;
+        assert_eq!(outcome.verdict, ClassifierVerdict::Block);
+        assert_eq!(outcome.reason.as_deref(), Some("pushes to a remote"));
+
+        let blank =
+            parse_classifier_model_output(r#"{"thinking":"t","shouldBlock":true,"reason":"  "}"#);
+        assert_eq!(blank.verdict, ClassifierVerdict::Block);
+        assert_eq!(blank.reason, None);
+        let terse = parse_classifier_model_output("block");
+        assert_eq!(terse.verdict, ClassifierVerdict::Block);
+        assert_eq!(terse.reason, None);
+        let fenced = parse_classifier_model_output(
+            "```json\n{\"thinking\":\"t\",\"shouldBlock\":true,\"reason\":\"exfil\"}\n```",
+        );
+        assert_eq!(fenced.verdict, ClassifierVerdict::Block);
+        assert_eq!(fenced.reason.as_deref(), Some("exfil"));
     }
 
     /// The routine-prefix additions cover everyday read-only / navigation

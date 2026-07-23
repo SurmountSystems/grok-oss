@@ -413,7 +413,12 @@ pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
             Some(reason) => format!("exit: killed ({}){}", reason, annotations(bash)),
             None => format!("exit: {}{}", bash.exit_code, annotations(bash)),
         };
-        format!("{}\n{}", header, output_str)
+        let prompt = format!("{}\n{}", header, output_str);
+        if bash.signal.is_none() && is_noop_command(&bash.command) {
+            format!("{}\n\n{}", prompt.trim_end(), NOOP_END_TURN_REMINDER)
+        } else {
+            prompt
+        }
     }
 }
 
@@ -3795,6 +3800,68 @@ mod tests {
         );
     }
 
+    fn bash_output_with_command(command: &str, output: &str) -> BashOutput {
+        BashOutput {
+            output: output.as_bytes().to_vec(),
+            output_for_prompt: BashOutput::make_output_for_prompt(output),
+            exit_code: 0,
+            command: command.to_string(),
+            truncated: false,
+            signal: None,
+            timed_out: false,
+            description: None,
+            current_dir: "/tmp".to_string(),
+            output_file: String::new(),
+            total_bytes: output.len(),
+            output_delta: None,
+            was_bare_echo: false,
+        }
+    }
+
+    #[test]
+    fn default_prompt_noop_command_appends_end_turn_reminder() {
+        for cmd in [
+            "true",
+            ":",
+            "",
+            "   ",
+            "\t\n",
+            "echo ok",
+            "echo \"Healthy.\"",
+            "echo \"s14=198; s11 full. Healthy.\"",
+            "printf hi",
+            "printf 'done\\n'",
+        ] {
+            let prompt = format_default_prompt(&bash_output_with_command(cmd, ""));
+            assert!(
+                prompt.contains(NOOP_END_TURN_REMINDER),
+                "no-op command {cmd:?} should append the end-turn reminder, got: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_prompt_normal_command_has_no_end_turn_reminder() {
+        for cmd in [
+            "true && echo hi",
+            "run-true",
+            "grep : file",
+            "cat file",
+            "echo $VAR",
+            "echo x > f",
+            "echo a | cat",
+            "echo $(date)",
+            "echo hi; ls",
+            "printf '%s' \"$x\"",
+        ] {
+            let prompt = format_default_prompt(&bash_output_with_command(cmd, "hi\n"));
+            assert!(
+                !prompt.contains("<system-reminder>"),
+                "normal command {cmd:?} must not append the end-turn reminder, got: {prompt:?}"
+            );
+        }
+    }
+
     // ─── contains_background_operator unit tests ───
 
     mod background_operator_tests {
@@ -4565,6 +4632,78 @@ mod tests {
             assert!(
                 auto_desc.contains("after about 2s"),
                 "auto-bg copy must advertise the FG wait in seconds: {auto_desc}"
+            );
+        }
+
+        /// Property description must track rename after `remap_schema_properties`
+        /// (regression: stale `` `timeout: 0` `` under `properties.<alias>`).
+        #[test]
+        fn schema_property_description_tracks_renamed_timeout() {
+            let param_map =
+                std::collections::HashMap::from([("timeout".to_string(), "max_wait".to_string())]);
+            let exported =
+                BashTool::exported_input_schema(&base_schema(), &BashParams::default(), "max_wait");
+            let remapped = crate::util::remap::remap_schema_properties(&exported, &param_map);
+            let desc = remapped["properties"]["max_wait"]["description"]
+                .as_str()
+                .expect("max_wait description");
+            assert!(
+                desc.contains("Optional max_wait in milliseconds")
+                    && desc.contains("`max_wait: 0`"),
+                "renamed timeout must appear in property description:\n{desc}"
+            );
+            assert!(
+                !desc.contains("`timeout: 0`")
+                    && !desc.contains("Optional timeout in milliseconds"),
+                "canonical timeout must not remain in property description:\n{desc}"
+            );
+        }
+
+        /// Kind-wide renderer aliases must not rewrite this tool's property
+        /// description when this tool's own param_map did not rename timeout —
+        /// schema keys only follow param_map.
+        #[test]
+        fn schema_property_description_ignores_kind_wide_timeout_alias() {
+            use crate::types::tool_metadata::ToolMetadata;
+
+            let renderer = TemplateRenderer::new(
+                HashMap::from([(ToolKind::Execute, "run_terminal_cmd".to_string())]),
+                HashMap::from([(
+                    ToolKind::Execute,
+                    // Another Execute tool (or identity-seed collision) renamed
+                    // timeout kind-wide; this bash tool's param_map is empty.
+                    HashMap::from([("timeout".to_string(), "max_wait".to_string())]),
+                )]),
+            );
+            let def = ToolMetadata::versioned_definition(
+                &BashTool,
+                None,
+                "run_terminal_cmd",
+                None,
+                &renderer,
+                &HashMap::new(),
+                &base_schema(),
+                &serde_json::json!({}),
+            );
+            let props = def
+                .function
+                .parameters
+                .get("properties")
+                .expect("properties");
+            assert!(
+                props.get("timeout").is_some() && props.get("max_wait").is_none(),
+                "empty param_map must keep schema key timeout, got: {props}"
+            );
+            let desc = props["timeout"]["description"]
+                .as_str()
+                .expect("timeout description");
+            assert!(
+                desc.contains("Optional timeout in milliseconds") && desc.contains("`timeout: 0`"),
+                "property description must match schema key, not kind-wide alias:\n{desc}"
+            );
+            assert!(
+                !desc.contains("max_wait"),
+                "kind-wide alias must not leak into property description:\n{desc}"
             );
         }
 

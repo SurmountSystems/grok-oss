@@ -1043,7 +1043,6 @@ mod tests {
                 ..
             }
         ));
-    }
 
     #[test]
     fn unknown_decision_with_exit_2_still_denies() {
@@ -1078,6 +1077,10 @@ mod tests {
             ),
             other => panic!("expected Deny, got {other:?}"),
         }
+
+        let (unknown, _) =
+            parse_blocking_result(r#"{"decision":"maybe"}"#, 0, "test", Duration::ZERO);
+        assert!(matches!(unknown, HookRunnerResult::Failed(_)));
     }
 
     #[test]

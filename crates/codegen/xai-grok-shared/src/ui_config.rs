@@ -448,6 +448,16 @@ mod tests {
     }
 
     #[test]
+    fn page_flip_on_send_defaults_on() {
+        assert!(UiConfig::default().page_flip_on_send_enabled());
+        let off = UiConfig {
+            page_flip_on_send: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.page_flip_on_send_enabled());
+    }
+
+    #[test]
     fn keep_text_selection_enabled_precedence() {
         let mut ui = UiConfig::default();
         assert!(!ui.keep_text_selection_enabled());

@@ -210,6 +210,8 @@ pub struct ScheduledTask {
     pub recurring: bool,
     #[serde(default)]
     pub durable: bool,
+    #[serde(default)]
+    pub foreground: bool,
     pub created_at: DateTime<Utc>,
     pub last_fired_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
@@ -265,6 +267,7 @@ impl ScheduledTask {
             prompt,
             recurring,
             durable,
+            foreground: false,
             created_at,
             last_fired_at: None,
             expires_at: if recurring {

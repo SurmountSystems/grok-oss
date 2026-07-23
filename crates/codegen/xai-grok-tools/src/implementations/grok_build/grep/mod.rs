@@ -920,6 +920,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn description_template_tracks_renamed_search_params() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool::ToolKind;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let tools = HashMap::from([(ToolKind::Search, "grep".to_string())]);
+        let params = HashMap::from([(
+            ToolKind::Search,
+            HashMap::from([
+                ("pattern".to_string(), "query".to_string()),
+                ("type".to_string(), "filetype".to_string()),
+                ("glob".to_string(), "include".to_string()),
+            ]),
+        )]);
+        let rendered = TemplateRenderer::new(tools, params)
+            .render(ToolMetadata::description_template(&GrepTool))
+            .unwrap();
+        assert!(
+            rendered.contains("Pass query as a raw regex")
+                && rendered.contains("'filetype'")
+                && rendered.contains("'include'"),
+            "renamed search params must appear:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Pass pattern as")
+                && !rendered.contains("'type'")
+                && !rendered.contains("'glob'"),
+            "canonical search param names must not remain after rename:\n{rendered}"
+        );
+    }
+
     #[tokio::test]
     async fn tool_grep_no_matches() {
         let tmp = TempDir::new().unwrap();

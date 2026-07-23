@@ -2967,6 +2967,74 @@ pub fn render_extensions_modal(
                     entry_badge_text.push(String::new());
                     entry_badge_color.push(None);
                 }
+                match state.workflows_data {
+                    TabDataState::Loaded(ref workflows) => {
+                        let query_lower = state.picker_state.query().to_lowercase();
+                        let visible: Vec<&WorkflowInfo> = workflows
+                            .iter()
+                            .filter(|workflow| workflow.has_usable_command_name())
+                            .filter(|w| {
+                                query_lower.is_empty()
+                                    || w.name.to_lowercase().contains(&query_lower)
+                                    || w.description.to_lowercase().contains(&query_lower)
+                            })
+                            .collect();
+                        if !visible.is_empty() {
+                            entry_labels.push("Workflows".to_string());
+                            entry_right_labels.push(String::new());
+                            entry_desc_lines.push(vec![]);
+                            entry_summary_lines.push(vec![]);
+                            entry_fields.push(vec![]);
+                            entry_is_header.push(true);
+                            entry_dimmed.push(false);
+                            entry_indent.push(0);
+                            entry_data_indices.push(None);
+                            entry_group_keys.push(None);
+                            entry_badge_text.push(String::new());
+                            entry_badge_color.push(None);
+                            for wf in visible {
+                                entry_labels.push(wf.name.clone());
+                                entry_right_labels.push(format!("({})", wf.source));
+                                if wf.description.is_empty() {
+                                    entry_desc_lines.push(vec![]);
+                                } else {
+                                    entry_desc_lines.push(vec![wf.description.clone()]);
+                                }
+                                entry_summary_lines.push(vec![]);
+                                let mut fields = Vec::new();
+                                if let Some(ref p) = wf.path {
+                                    fields.push(("path".to_string(), p.clone()));
+                                }
+                                if let Some(ref w) = wf.when_to_use {
+                                    fields.push(("when to use".to_string(), w.clone()));
+                                }
+                                entry_fields.push(fields);
+                                entry_is_header.push(false);
+                                entry_dimmed.push(false);
+                                entry_indent.push(0);
+                                entry_data_indices.push(None);
+                                entry_group_keys.push(None);
+                                entry_badge_text.push(String::new());
+                                entry_badge_color.push(None);
+                            }
+                        }
+                    }
+                    TabDataState::Error(ref msg) => {
+                        entry_labels.push(format!("workflows: {}", msg));
+                        entry_right_labels.push(String::new());
+                        entry_desc_lines.push(vec![]);
+                        entry_summary_lines.push(vec![]);
+                        entry_fields.push(vec![]);
+                        entry_is_header.push(false);
+                        entry_dimmed.push(true);
+                        entry_indent.push(0);
+                        entry_data_indices.push(None);
+                        entry_group_keys.push(None);
+                        entry_badge_text.push(String::new());
+                        entry_badge_color.push(None);
+                    }
+                    TabDataState::Loading => {}
+                }
             }
             ExtensionsTab::Workflows => {
                 // The builder owns all data states (loaded/empty/error).

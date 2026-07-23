@@ -3033,6 +3033,44 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchWorkflowsList { agent_id, session_id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({ "sessionId" : session_id });
+                    let req = acp::ExtRequest::new(
+                        "x.ai/workflows/list",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize workflows/list params")
+                            .into(),
+                    );
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => {
+                            let wrapper: serde_json::Value = serde_json::from_str(
+                                    resp.0.get(),
+                                )
+                                .unwrap_or_default();
+                            let inner = wrapper.get("result").unwrap_or(&wrapper);
+                            serde_json::from_value::<
+                                Vec<crate::views::extensions_modal::WorkflowInfo>,
+                            >(inner.get("workflows").cloned().unwrap_or_default())
+                                .map_err(|_| "couldn't load workflows".to_string())
+                        }
+                        Err(e) => {
+                            Err(
+                                sanitize_user_error(
+                                    &format!("couldn't load workflows: {e}"),
+                                ),
+                            )
+                        }
+                    };
+                    TaskResult::WorkflowsListLoaded {
+                        agent_id,
+                        session_id,
+                        result,
+                    }
+                });
+        }
         Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled } => {
             let tx = acp_tx.clone();
             tasks

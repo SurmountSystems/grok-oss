@@ -564,6 +564,74 @@ mod tests {
         .to_string()
     }
 
+    /// Drift guard for the hand-maintained `ALL_EVENTS`: a new `HookEventName`
+    /// variant breaks the exhaustive match below, then fails the assertion until
+    /// it is added to `ALL_EVENTS`, so no event vanishes from the flat listing.
+    #[test]
+    fn all_events_lists_every_variant() {
+        let every_variant = [
+            HookEventName::SessionStart,
+            HookEventName::UserPromptSubmit,
+            HookEventName::PreToolUse,
+            HookEventName::PostToolUse,
+            HookEventName::PostToolUseFailure,
+            HookEventName::PermissionDenied,
+            HookEventName::Stop,
+            HookEventName::StopFailure,
+            HookEventName::Notification,
+            HookEventName::SubagentStart,
+            HookEventName::SubagentStop,
+            HookEventName::SubagentEnd,
+            HookEventName::PreCompact,
+            HookEventName::PostCompact,
+            HookEventName::SessionEnd,
+        ];
+        for event in every_variant {
+            match event {
+                HookEventName::SessionStart
+                | HookEventName::UserPromptSubmit
+                | HookEventName::PreToolUse
+                | HookEventName::PostToolUse
+                | HookEventName::PostToolUseFailure
+                | HookEventName::PermissionDenied
+                | HookEventName::Stop
+                | HookEventName::StopFailure
+                | HookEventName::Notification
+                | HookEventName::SubagentStart
+                | HookEventName::SubagentStop
+                | HookEventName::SubagentEnd
+                | HookEventName::PreCompact
+                | HookEventName::PostCompact
+                | HookEventName::SessionEnd => {}
+            }
+            assert!(
+                HookRegistry::ALL_EVENTS.contains(&event),
+                "{event} is missing from ALL_EVENTS"
+            );
+        }
+    }
+
+    /// Drift guard: gate events must match the `blockingEvents` the agent
+    /// advertises (extensions/hooks.rs). A new gate event fails here.
+    #[test]
+    fn gate_events_are_the_known_set() {
+        use crate::event::GateKind;
+        // Canonicalize first: `traits()` is unreachable on alias variants.
+        let gates: std::collections::HashSet<_> = HookRegistry::ALL_EVENTS
+            .iter()
+            .map(|e| e.canonical())
+            .filter(|e| e.traits().gate != GateKind::Observe)
+            .collect();
+        let expected: std::collections::HashSet<_> = [
+            HookEventName::PreToolUse,
+            HookEventName::Stop,
+            HookEventName::SubagentStop,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(gates, expected, "gate events changed");
+    }
+
     #[test]
     fn gate_events_are_the_known_set() {
         use crate::event::GateKind;
@@ -1132,6 +1200,33 @@ mod tests {
     }
 
     /// A hook registered under both `SubagentStop` and `SubagentEnd` dedups on the canonical event, so it runs once.
+    #[test]
+    fn deduplicates_hooks_across_alias_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"hooks":{
+                "SubagentStop":[{"hooks":[{"type":"command","command":"notify.sh"}]}],
+                "SubagentEnd":[{"hooks":[{"type":"command","command":"notify.sh"}]}]
+            }}"#,
+        )
+        .unwrap();
+
+        let (registry, errors) =
+            load_hooks_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
+        assert!(errors.is_empty());
+        assert_eq!(
+            registry
+                .hooks_for_canonical(HookEventName::SubagentStop)
+                .len(),
+            1,
+            "alias spelling must not double-register the same hook"
+        );
+    }
+
+    /// A hook registered under both `SubagentStop` and `SubagentEnd` dedups on
+    /// the canonical event, so it runs once.
     #[test]
     fn deduplicates_hooks_across_alias_spellings() {
         let dir = tempfile::tempdir().unwrap();

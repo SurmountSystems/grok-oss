@@ -606,6 +606,59 @@ impl SettingsModalState {
         };
     }
 
+    pub fn focus_filter(&mut self) {
+        self.state.mode = SettingsMode::FilterFocused;
+    }
+
+    pub(super) fn transition_to_picking_enum(
+        &mut self,
+        key: SettingKey,
+        choices_idx: usize,
+        original_value: SettingValue,
+        supports_preview: bool,
+    ) {
+        self.state.mode = SettingsMode::PickingEnum {
+            key,
+            choices_idx,
+            original_value,
+            supports_preview,
+        };
+    }
+
+    pub(super) fn transition_to_picking_group(&mut self, key: SettingKey, child_idx: usize) {
+        self.state.mode = SettingsMode::PickingGroup { key, child_idx };
+    }
+
+    pub(super) fn transition_to_editing_string(
+        &mut self,
+        key: SettingKey,
+        editor: LineEditor,
+        validator: StringValidator,
+        validation_error: Option<String>,
+    ) {
+        self.state.mode = SettingsMode::EditingString {
+            key,
+            editor,
+            validator,
+            validation_error,
+        };
+    }
+
+    pub(super) fn transition_to_editing_int(
+        &mut self,
+        key: SettingKey,
+        buffer: String,
+        min: i64,
+        max: i64,
+    ) {
+        self.state.mode = SettingsMode::EditingInt {
+            key,
+            buffer,
+            min,
+            max,
+        };
+    }
+
     /// Transition to `PickingEnum` if the focused row is Enum/DynamicEnum.
     /// Returns `false` if the focused row is another kind.
     pub fn try_enter_picking_enum(&mut self) -> bool {

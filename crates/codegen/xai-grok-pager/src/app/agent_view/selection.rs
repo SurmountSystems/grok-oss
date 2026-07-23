@@ -1084,8 +1084,7 @@ impl AgentView {
         now: Instant,
         idx: usize,
         header_row_click: bool,
-    ) -> (Option<(Instant, usize, u8)>, bool, bool) {
-        // (last_click, show_word_select_tip, open_block_viewer)
+    ) -> (Option<(Instant, usize, u8)>, bool) {
         let click_count = if let Some((last_time, last_idx, prev_count)) = self.last_click
             && last_idx == idx
             && now.duration_since(last_time).as_millis() < MULTI_CLICK_TIMEOUT_MS
@@ -1094,15 +1093,6 @@ impl AgentView {
         } else {
             1
         };
-
-        // Capture before set_selected — a later single-click on the same row
-        // (after the multi-click window) should open the block viewer (parity
-        // with Enter:open). Require a prior click on this idx via last_click so
-        // follow-mode auto-selection does not make the first click open.
-        let already_selected = self.scrollback.selected() == Some(idx);
-        let prior_click_same_row = self
-            .last_click
-            .is_some_and(|(_, last_idx, _)| last_idx == idx);
 
         let entry_block = self.scrollback.entry(idx).map(|e| &e.block);
         let is_bg_task = entry_block
@@ -1133,10 +1123,10 @@ impl AgentView {
         if header_row_click {
             if click_count == 2 {
                 self.scrollback.collapse_group_if_expanded();
-                return (None, show_word_select_tip, false);
+                return (None, show_word_select_tip);
             }
             if click_count >= 3 {
-                return (None, false, false);
+                return (None, false);
             }
         }
 
@@ -1146,10 +1136,10 @@ impl AgentView {
         if is_group_header {
             if click_count == 2 {
                 self.scrollback.toggle_group_expansion();
-                return (None, show_word_select_tip, false);
+                return (None, show_word_select_tip);
             }
             if click_count >= 3 {
-                return (None, false, false);
+                return (None, false);
             }
         }
 
@@ -1173,15 +1163,6 @@ impl AgentView {
             1 if is_plan_tool => {
                 self.show_plan_preview();
             }
-            1 if already_selected
-                && prior_click_same_row
-                && supports_fullscreen
-                && !is_group_header
-                && !header_row_click
-                && !is_plan_tool =>
-            {
-                open_block_viewer = true;
-            }
             2 if is_bg_task => {
                 // Double-click bg task: open block viewer (same as Enter).
                 if let Some(entry) = self.scrollback.entry(idx)
@@ -1203,6 +1184,14 @@ impl AgentView {
                 // Same as Enter; a message row whose child view is gone folds like any other tool row
                 if !self.try_open_child_from_selected_row() && foldable {
                     self.scrollback.toggle_fold_selected();
+                }
+            }
+            2 if is_workflow => {
+                if let Some(entry) = self.scrollback.entry(idx)
+                    && let crate::scrollback::block::RenderBlock::Workflow(ref wf) = entry.block
+                {
+                    let run_id = wf.run_id.clone();
+                    self.open_workflow_detail_by_run_id(&run_id);
                 }
             }
             2 if is_workflow => {
@@ -1238,7 +1227,7 @@ impl AgentView {
         } else {
             Some((now, idx, click_count))
         };
-        (last_click, show_word_select_tip, open_block_viewer)
+        (last_click, show_word_select_tip)
     }
 
     /// Return the correct selection model for a hit, accounting for the /btw overlay panel which has its own model.
@@ -2103,12 +2092,10 @@ mod tests {
     /// Run one double-click gesture (two clicks 100ms apart) at `t` on `idx`, threading `last_click` the way the mouse caller does.
     /// Returns the tip flag of the second click.
     fn double_click_gesture(agent: &mut AgentView, t: Instant, idx: usize) -> bool {
-        let (last, tip1, _open1) = agent.handle_scrollback_click(t, idx, false);
+        let (last, tip1) = agent.handle_scrollback_click(t, idx, false);
         assert!(!tip1, "a single click must never tip");
-        // open1 may be true when the row was already selected (Enter:open parity);
-        // that is fine — double-click counting still proceeds via last_click.
         agent.last_click = last;
-        let (last, tip2, _open2) =
+        let (last, tip2) =
             agent.handle_scrollback_click(t + Duration::from_millis(100), idx, false);
         agent.last_click = last;
         tip2

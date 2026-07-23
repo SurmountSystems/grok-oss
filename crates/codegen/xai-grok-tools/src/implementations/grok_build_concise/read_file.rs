@@ -156,6 +156,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn description_template_tracks_renamed_offset_limit() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let tools = HashMap::from([(ToolKind::Read, "read_file".to_string())]);
+        let params = HashMap::from([(
+            ToolKind::Read,
+            HashMap::from([
+                ("offset".to_string(), "start_line".to_string()),
+                ("limit".to_string(), "num_lines".to_string()),
+            ]),
+        )]);
+        let rendered = TemplateRenderer::new(tools, params)
+            .render(ToolMetadata::description_template(&ReadFileConciseTool))
+            .unwrap();
+        assert!(
+            rendered.contains("start_line and num_lines"),
+            "renamed offset/limit must appear:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("a line offset and limit"),
+            "canonical offset/limit must not remain after rename:\n{rendered}"
+        );
+    }
+
     #[tokio::test]
     async fn concise_mode_uses_concise_content() {
         let tmp = TempDir::new().unwrap();

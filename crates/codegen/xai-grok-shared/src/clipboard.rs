@@ -2495,6 +2495,24 @@ mod platform {
         }
 
         #[test]
+        fn repeated_probe_errors_reach_permanent_false() {
+            let mut cache = ProbeCache::new();
+            for seen in 1..PROBE_INDEFINITE_MAX {
+                assert!(!apply_probe_outcome(
+                    &mut cache,
+                    &WaylandDataControlProbe::Error("worker died".to_owned())
+                ));
+                assert_eq!(cache.decided, None);
+                assert_eq!(cache.indefinite_seen, seen);
+            }
+            assert!(!apply_probe_outcome(
+                &mut cache,
+                &WaylandDataControlProbe::Error("worker died".to_owned())
+            ));
+            assert_eq!(cache.decided, Some(false));
+        }
+
+        #[test]
         fn probe_cache_definitive_after_indefinite_decides_truth() {
             let mut cache = ProbeCache::new();
             assert!(!apply_probe_outcome(

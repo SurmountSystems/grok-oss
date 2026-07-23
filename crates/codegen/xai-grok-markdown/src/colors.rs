@@ -412,4 +412,41 @@ mod tests {
         assert_eq!(magenta, Some(Color::Ansi(AnsiColor::Magenta)));
         set_polarity_safe_syntax(false);
     }
+
+    #[test]
+    fn polarity_safe_grays_inherit_default() {
+        assert_eq!(polarity_safe_syntax_ansi(0xc8, 0xc8, 0xc8), None);
+        assert_eq!(polarity_safe_syntax_ansi(0x6c, 0x6c, 0x6c), None);
+    }
+
+    #[test]
+    fn polarity_safe_never_white() {
+        for (r, g, b) in [
+            (0xbb, 0x9a, 0xf7),
+            (0x7d, 0xcf, 0xff),
+            (0x7a, 0xa2, 0xf7),
+            (0xff, 0x9e, 0x64),
+            (0xf7, 0x76, 0x8e),
+            (0xc8, 0xc8, 0xc8),
+        ] {
+            let mapped = polarity_safe_syntax_ansi(r, g, b);
+            assert!(
+                !matches!(
+                    mapped,
+                    Some(AnsiColor::White | AnsiColor::BrightWhite | AnsiColor::Black)
+                ),
+                "#{r:02x}{g:02x}{b:02x} -> {mapped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adapt_color_polarity_safe_flag_drops_gray_rgb() {
+        set_polarity_safe_syntax(true);
+        let out = adapt_color(Color::Rgb(RgbColor(0xc8, 0xc8, 0xc8)));
+        assert_eq!(out, None, "gray body must inherit default fg");
+        let magenta = adapt_color(Color::Rgb(RgbColor(0xbb, 0x9a, 0xf7)));
+        assert_eq!(magenta, Some(Color::Ansi(AnsiColor::Magenta)));
+        set_polarity_safe_syntax(false);
+    }
 }

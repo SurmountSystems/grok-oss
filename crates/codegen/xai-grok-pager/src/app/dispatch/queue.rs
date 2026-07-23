@@ -2132,6 +2132,54 @@ mod tests {
     }
 
     #[test]
+    fn drain_scroll_honors_page_flip_setting() {
+        fn app_at_bottom() -> AppView {
+            let mut app = test_app_with_agent();
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            for i in 0..40 {
+                agent
+                    .scrollback
+                    .push_block(RenderBlock::agent_message(format!("filler {i}")));
+            }
+            agent.scrollback.prepare_layout(80, 8);
+            agent.scrollback.goto_bottom();
+            app
+        }
+
+        crate::appearance::cache::set_page_flip_on_send(false);
+        let mut app = app_at_bottom();
+        let bottom = app.agents[&AgentId(0)].scrollback.scroll_offset();
+        dispatch(Action::SendPrompt("go".into()), &mut app);
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        assert!(sb.is_follow_mode());
+        assert!(!sb.is_follow_preserve_scroll());
+        assert_eq!(sb.scroll_offset(), bottom);
+        assert_eq!(sb.selected(), Some(sb.len() - 1));
+
+        let mut app = app_at_bottom();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.scrollback.scroll_up(10);
+        let reading = agent.scrollback.scroll_offset();
+        dispatch(Action::SendPrompt("go".into()), &mut app);
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        assert!(!sb.is_follow_mode());
+        assert_eq!(sb.scroll_offset(), reading);
+        assert_eq!(sb.selected(), Some(sb.len() - 1));
+
+        crate::appearance::cache::set_page_flip_on_send(true);
+        let mut app = app_at_bottom();
+        dispatch(Action::SendPrompt("go".into()), &mut app);
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        assert!(sb.is_follow_mode());
+        assert!(sb.is_follow_preserve_scroll());
+        assert_eq!(sb.selected(), Some(sb.len() - 1));
+
+        crate::appearance::cache::set_page_flip_on_send(
+            xai_grok_shell::agent::config::UiConfig::PAGE_FLIP_ON_SEND_DEFAULT,
+        );
+    }
+
+    #[test]
     fn drain_queue_when_empty_does_nothing() {
         let mut app = test_app_with_agent();
         let effects = dispatch(Action::DrainQueue, &mut app);
@@ -2704,6 +2752,73 @@ mod tests {
             RenderBlock::UserPrompt(ub) => assert_eq!(ub.text, "/deslop"),
             other => panic!("expected user prompt, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shim_paints_one_bubble_per_combined_segment() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_self_originated_prompt("p-combo");
+        let before = agent.scrollback.len();
+        apply_turn_start_shim(
+            agent,
+            "p-combo".into(),
+            Some("first\n\nsecond".into()),
+            "prompt",
+            Some(vec!["first".into(), "second".into()]),
+        );
+        assert_eq!(agent.scrollback.len(), before + 2);
+        assert_eq!(user_prompt_count(agent, "first"), 1);
+        assert_eq!(user_prompt_count(agent, "second"), 1);
+        assert_eq!(user_prompt_count(agent, "first\n\nsecond"), 0);
+        assert_eq!(
+            agent.session.in_flight_prompt.as_ref().unwrap().text,
+            "first\n\nsecond"
+        );
+    }
+
+    #[test]
+    fn shim_replaces_joined_echo_with_multi_bubbles() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_self_originated_prompt("p-combo");
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("first\n\nsecond"));
+        apply_turn_start_shim(
+            agent,
+            "p-combo".into(),
+            Some("first\n\nsecond".into()),
+            "prompt",
+            Some(vec!["first".into(), "second".into()]),
+        );
+        assert_eq!(user_prompt_count(agent, "first"), 1);
+        assert_eq!(user_prompt_count(agent, "second"), 1);
+        assert_eq!(user_prompt_count(agent, "first\n\nsecond"), 0);
+    }
+
+    #[test]
+    fn shim_reuses_already_painted_combined_segments() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_self_originated_prompt("p-combo");
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("first"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("second"));
+        let before = agent.scrollback.len();
+        apply_turn_start_shim(
+            agent,
+            "p-combo".into(),
+            Some("first\n\nsecond".into()),
+            "prompt",
+            Some(vec!["first".into(), "second".into()]),
+        );
+        assert_eq!(agent.scrollback.len(), before);
+        assert_eq!(user_prompt_count(agent, "first"), 1);
+        assert_eq!(user_prompt_count(agent, "second"), 1);
     }
 
     #[test]

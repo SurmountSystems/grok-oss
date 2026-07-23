@@ -231,4 +231,20 @@ mod tests {
         let round: QueueChanged = serde_json::from_value(json).unwrap();
         assert_eq!(round, original);
     }
+
+    #[test]
+    fn running_combined_texts_round_trip() {
+        let original = QueueChanged {
+            session_id: "s1".into(),
+            entries: vec![],
+            running_prompt_id: Some("p0".into()),
+            running_text: Some("a\n\nb".into()),
+            running_kind: Some("prompt".into()),
+            running_combined_texts: Some(vec!["a".into(), "b".into()]),
+        };
+        let json = serde_json::to_value(&original).unwrap();
+        assert_eq!(json["runningCombinedTexts"], serde_json::json!(["a", "b"]));
+        let round: QueueChanged = serde_json::from_value(json).unwrap();
+        assert_eq!(round, original);
+    }
 }

@@ -1162,7 +1162,9 @@ async fn dashboard_change_location_valid_updates_cwd_and_closes_modal() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::SetWorkingDir { path } if path == &target))
+            .any(|e| matches!(e, Effect::SetWorkingDir { path }
+if path == &
+        target))
     );
     assert!(
         app.dashboard.as_ref().unwrap().location_picker.is_none(),
@@ -1888,11 +1890,11 @@ fn dashboard_second_stash_does_not_overwrite_first() {
     );
     let reply_sent = effects.iter().any(|e| {
         matches!(
-            e,
-            Effect::SendPromptBlocks { agent_id, blocks, .. }
-                if *agent_id == AgentId(0)
-                    && blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
-        )
+                    e, Effect::SendPromptBlocks { agent_id, blocks, .. }
+        if * agent_id ==
+                    AgentId(0) && blocks.iter().any(| b | matches!(b,
+                    acp::ContentBlock::Image(_)))
+                )
     });
     assert!(
         reply_sent,
@@ -2176,6 +2178,10 @@ fn workspace_dashboard_open_loads_one_snapshot_and_skips_rosters() {
         [Effect::LoadWorkspaceSnapshot { .. }]
     ));
     assert!(app.dashboard_sessions_loading);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::FetchRoster)),
+        "leader dashboard open must fetch the live roster immediately",
+    );
     assert!(
         !effects
             .iter()
@@ -4090,7 +4096,8 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::SetSessionMode { session_id: s, .. } if *s == session_id)),
+            .any(|e| matches!(e, Effect::SetSessionMode { session_id : s, ..
+        } if * s == session_id)),
         "SessionCreated must emit SetSessionMode for the deferred plan mode"
     );
 }

@@ -457,6 +457,7 @@ impl SchedulerActor {
         tracing::info!(
             task_id = %task_id,
             schedule = %human_schedule,
+            background = spawn_deps.is_some(),
             "Firing scheduled task"
         );
 

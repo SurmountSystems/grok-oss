@@ -51,6 +51,17 @@ pub struct SchedulerCreateInput {
     )]
     pub durable: Option<bool>,
 
+    #[serde(
+        default,
+        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
+    )]
+    #[schemars(
+        description = "Run each fire as a main-conversation turn instead of a background \
+                       subagent; set true only when runs need the conversation's context. \
+                       Default: false. Create-only: ignored with task_id"
+    )]
+    pub foreground: Option<bool>,
+
     /// Whether to fire immediately on creation. Default false (wait for the
     /// first interval — a "scheduled" task should not run on creation unless
     /// explicitly asked to).
@@ -246,13 +257,14 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
         })?;
 
         let durable = input.durable.unwrap_or(false);
-        let task = ScheduledTask::with_fire_immediately(
+        let mut task = ScheduledTask::with_fire_immediately(
             interval_secs,
             prompt,
             true,
             durable,
             input.fire_immediately,
         );
+        task.foreground = input.foreground.unwrap_or(false);
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let created = send_and_wait(

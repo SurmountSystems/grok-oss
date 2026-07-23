@@ -728,6 +728,7 @@ fn personal_account_sees_the_banner_without_a_capability() {
             .any(|e| matches!(e, Effect::SetCodingDataSharing { .. })),
         "no team: the choice must still write: {effects:?}"
     );
+    assert_eq!(agent_scrollback_len(&app), before);
 }
 
 /// A personal account carries a `team_id` yet gets `null` from `/user` forever, so only the principal type decides; without an email there is no identity to bind the answer to.

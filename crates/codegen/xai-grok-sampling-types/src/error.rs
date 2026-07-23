@@ -367,13 +367,14 @@ impl SamplingError {
     /// Never retryable: the user must start a new session.
     pub fn is_encrypted_content_error(&self) -> bool {
         matches!(
-            self,
-            SamplingError::Api {
-                status: StatusCode::BAD_REQUEST,
-                message,
-                ..
-            } if message.contains("encrypted_content")
-        )
+                    self,
+                    SamplingError::Api {
+                        status: StatusCode::BAD_REQUEST,
+                        message,
+                        ..
+                    }
+        if message.contains("encrypted_content")
+                )
     }
 
     /// The server rejected the request because an image could not be processed. [`INVALID_IMAGE_ERROR_CODE`] is the signal.

@@ -1300,6 +1300,18 @@ mod tests {
     }
 
     #[test]
+    fn paste_routes_to_active_list_input() {
+        let mut pane = QueuePane::new();
+        let mut local = std::collections::VecDeque::new();
+        local.push_back(local_prompt(1, "first"));
+        pane.sync_from_merged(&local, &[], None, None, &Default::default());
+        pane.list_state.open_comment_input("");
+
+        assert!(pane.handle_paste("queued text"));
+        assert_eq!(pane.list_state.input_text(), "queued text");
+    }
+
+    #[test]
     fn reset_auto_show_edge_allows_requeue_after_external_hide() {
         let mut pane = QueuePane::new();
         let mut local = std::collections::VecDeque::new();

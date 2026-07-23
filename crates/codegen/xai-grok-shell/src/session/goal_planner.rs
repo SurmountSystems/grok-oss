@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+#![allow(dead_code)]
+
 use crate::session::events::{Event, GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};
 use crate::session::goal_role_tools::RoleToolNames;
 use std::path::{Path, PathBuf};

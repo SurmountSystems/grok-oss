@@ -1,8 +1,14 @@
 # Grok OSS local recipes.
 # GitHub Actions runs the same `just ci` entrypoint -- keep this file the source of truth.
 # Requires: just, nix (with flakes). No bash scripts -- just recipes + nix.
+#
+# Bare `just` lists recipes (same idea as `just -l` / `just --list`).
+# Full quality gate matching GHA: `just ci`  (or `just test` for fmt/clippy/tests only).
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# `just` with no recipe → list (just 1.x+; same as CLI `just --default-list` / `JUST_DEFAULT_LIST=1`).
+set default-list
 
 # Host system for flake check attributes (e.g. x86_64-linux).
 # Prefer CI_SYSTEM on GHA so a transient `nix eval` at just parse time cannot
@@ -105,30 +111,33 @@ nix_retry +cmd:
       n=$((n + 1))
     done
 
-default:
-    @just --list
-
 # ---------------------------------------------------------------------------
 # CI vs release vs local quality
 #
-# CI never builds a release package (`nix build .#grok-oss`). That is optional
-# packaging for humans (`just build` / `just smoke` / `just install-nix`).
+# CI is for checks only — never a release package (`nix build .#grok-oss`).
+# Shipping from CI would blur the trust boundary (supply chain). Optional
+# packaging is for humans: `just build` / `just smoke` / `just install-nix`.
 #
-# GHA (see .github/workflows/ci.yml): single `quality` job → just ci-prep && just test.
+# GHA (see .github/workflows/ci.yml): quality job runs flake-meta, ci-prep,
+# and `just test` — not a release build.
 #
-# `just test` = quality gate (fmt, clippy -D warnings, workspace unit/integration
-# tests including offline openrouter_credentials via cargo-nextest, mem-guard).
-# No separate OpenRouter GHA job — a second Nix cold-start for one cargo test
-# target was redundant with `cargo nextest run --workspace`.
-#
+# `just check` / `just ci` = full local gate (same idea as GHA quality).
+#   Run before you push. No pre-commit hook required for this.
+# `just test` = fmt, clippy (-D warnings), workspace nextest, doctests,
+#   mem-guard (includes offline OpenRouter credential tests via nextest).
 # `just test-extra` = local-only extras CI does not run (cross-target clippy,
-# nix_retry smoke).
+#   nix_retry smoke).
+#
+# There is no `ci-quick` or `ci-host` recipe — use `check`/`ci` or `test`.
 #
 # Free GHA: CI_LOW_MEM=1 so cargo runs under cargo-mem-guard + mold (no pure
-# nix monorepo release build -- that OOMs on ~16GB runners).
+# nix monorepo release build — that OOMs on ~16GB runners).
 # ---------------------------------------------------------------------------
 
-# Optional single-shot local gate (matches GHA quality job).
+# Alias: same full gate as `ci` (preferred short name before push).
+check: ci
+
+# Full local gate matching GHA quality (flake + prep + all tests/lints).
 ci: require_system
     just flake-meta
     just ci-prep
@@ -346,6 +355,14 @@ upstream-detect:
 
 upstream-import *ARGS:
     ./scripts/import-upstream-export.sh {{ ARGS }}
+
+# Cherry-pick Surmount product onto current xAI tip → onto-xai/<short>
+upstream-put-history *ARGS:
+    ./scripts/put-history-on-xai.sh {{ ARGS }}
+
+# Join Surmount main into current onto tip (-s ours; stages merge for signed commit)
+upstream-join-main *ARGS:
+    ./scripts/join-main-into-onto.sh {{ ARGS }}
 
 upstream-sync *ARGS:
     ./scripts/sync-upstream.sh {{ ARGS }}

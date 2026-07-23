@@ -957,6 +957,12 @@ impl AgentView {
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
+            && registry.matches_id(ActionId::SendToBackground, key)
+        {
+            return self.handle_agent_action_with_registry(ActionId::SendToBackground, registry);
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
             && key!('y', CONTROL).matches(key)
             && self.ephemeral_tip.current_key()
                 == Some(crate::tips::word_select::WORD_SELECT_TIP_KEY)
@@ -1853,6 +1859,103 @@ mod btw_focus_tests {
         agent.handle_input(&key(KeyCode::Esc), &reg);
         assert!(agent.btw_state.is_none(), "Esc dismisses the /btw panel");
         assert!(!agent.btw_focused, "dismissing the panel clears its focus");
+    }
+    #[test]
+    fn minimal_permission_owns_esc_over_hidden_btw() {
+        let mut agent = minimal_btw_agent();
+        let reg = ActionRegistry::defaults();
+        agent
+            .permission_queue
+            .push_back(super::paste_key_tests::make_followup_permission_state());
+        agent.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        assert_minimal_btw_active(&agent, "permission");
+        assert_eq!(
+            agent.permission_queue.len(),
+            1,
+            "Esc preserves the pending permission"
+        );
+        assert_eq!(
+            agent
+                .permission_queue
+                .front()
+                .map(|permission| permission.focus),
+            Some(crate::views::permission_view::PermissionFocus::Options),
+            "permission handled Esc by returning focus to options"
+        );
+    }
+    #[test]
+    fn minimal_modal_and_viewers_own_esc_over_hidden_btw() {
+        let reg = ActionRegistry::defaults();
+        let mut agents = minimal_btw_agent();
+        agents.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new(
+            std::path::Path::new("/nonexistent"),
+            &std::collections::HashMap::new(),
+            &crate::app::bundle::BundleState::default(),
+            None,
+            None,
+        ));
+        agents.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        assert!(agents.agents_modal.is_none(), "agents modal handled Esc");
+        assert_minimal_btw_active(&agents, "agents modal");
+        let mut block = minimal_btw_agent();
+        block.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
+            "t", "content",
+        ));
+        block.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        assert!(block.block_viewer.is_none(), "block viewer handled Esc");
+        assert_minimal_btw_active(&block, "block viewer");
+        let mut video = minimal_btw_agent();
+        video.video_viewer = Some(crate::prompt_images::VideoViewerState::test_stub());
+        video.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        assert!(video.video_viewer.is_none(), "video viewer handled Esc");
+        assert_minimal_btw_active(&video, "video viewer");
+        let mut goal = minimal_btw_agent();
+        goal.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        goal.show_goal_detail = true;
+        goal.handle_minimal_input(&key(KeyCode::Esc), &reg);
+        assert!(!goal.show_goal_detail, "goal detail handled Esc");
+        assert_minimal_btw_active(&goal, "goal detail");
+    }
+    #[test]
+    fn minimal_btw_surface_owner_covers_shared_modal_cascade() {
+        let mut agent = minimal_btw_agent();
+        assert!(crate::minimal_api::minimal_btw_surface_available(&agent));
+        agent.image_viewer = Some(
+            crate::prompt_images::ImageViewerState::open_from_path_deferred(std::path::Path::new(
+                "x.png",
+            )),
+        );
+        assert!(!crate::minimal_api::minimal_btw_surface_available(&agent));
+        agent.image_viewer = None;
+        agent.gboom = Some(crate::gboom::GboomState::new());
+        assert!(!crate::minimal_api::minimal_btw_surface_available(&agent));
+        agent.gboom = None;
+        agent.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
+            "t", "content",
+        ));
+        assert!(!crate::minimal_api::minimal_btw_surface_available(&agent));
+    }
+    #[test]
+    fn fullscreen_keeps_btw_first_esc_precedence() {
+        let mut agent = prompt_focused_agent();
+        let reg = ActionRegistry::defaults();
+        agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
+        agent
+            .permission_queue
+            .push_back(super::paste_key_tests::make_followup_permission_state());
+        agent.handle_input(&key(KeyCode::Esc), &reg);
+        assert!(agent.btw_state.is_none());
+        assert!(!agent.permission_queue.is_empty());
+    }
+    #[test]
+    fn minimal_does_not_scroll_unpainted_btw_geometry() {
+        let mut agent = prompt_focused_agent();
+        let reg = ActionRegistry::defaults();
+        agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
+        agent.btw_focused = true;
+        agent.last_btw_area = Rect::default();
+        agent.handle_minimal_input(&key(KeyCode::Down), &reg);
+        assert_eq!(done_scroll_offset(&agent), 0);
     }
     /// A hidden `/jump` picker shadowed by the `/btw` panel must not let one Esc
     /// close both: the first Esc drops the shadowed picker (and is spent there),

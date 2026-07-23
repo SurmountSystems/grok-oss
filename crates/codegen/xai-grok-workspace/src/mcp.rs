@@ -1827,3 +1827,60 @@ for line in sys.stdin:
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_computer_hub_mcp_adapter::{McpBridge, McpError};
+    use xai_tool_protocol::SessionId;
+
+    struct TestTransport;
+
+    #[async_trait]
+    impl McpTransport for TestTransport {
+        async fn initialize(&self) -> Result<McpServerInfo, McpError> {
+            Ok(McpServerInfo {
+                name: "test".to_owned(),
+                version: "1".to_owned(),
+                capabilities: Value::Null,
+            })
+        }
+
+        async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
+            Ok(vec![McpToolDefinition {
+                name: "tool".to_owned(),
+                description: None,
+                input_schema: None,
+            }])
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: Value,
+        ) -> Result<McpCallResult, McpError> {
+            unreachable!("constructor test does not call the tool")
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn qualified_handler_rejects_ambiguous_name() {
+        let bridge = McpBridge::connect(
+            Arc::new(TestTransport),
+            &make_bridge_config(SessionId::new("session").unwrap(), "test"),
+        )
+        .await
+        .unwrap()
+        .bridge;
+        let inner = bridge.handlers()[0].clone();
+
+        let valid = QualifiedMcpToolHandler::try_new("123__lookup".to_owned(), inner.clone())
+            .expect("valid qualified ToolId");
+        assert_eq!(valid.tool_id().as_str(), "123__lookup");
+        assert!(QualifiedMcpToolHandler::try_new("foo___bar".to_owned(), inner).is_none());
+    }
+}

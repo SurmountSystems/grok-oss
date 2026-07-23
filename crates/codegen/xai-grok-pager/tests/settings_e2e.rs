@@ -7242,7 +7242,7 @@ fn enter_on_auto_compact_threshold_row_enters_picking_enum() {
         matches!(outcome, SettingsKeyOutcome::Changed),
         "Enter on auto_compact_threshold_percent row must transition to PickingEnum, got {outcome:?}"
     );
-    match &s.mode {
+    match &s.mode() {
         SettingsModalMode::PickingEnum {
             key,
             original_value,
@@ -7271,7 +7271,7 @@ fn auto_compact_threshold_picker_nav_does_not_dispatch_preview() {
         let mut s = make_state();
         navigate_to(&mut s, "auto_compact_threshold_percent");
         let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-        assert!(matches!(s.mode, SettingsModalMode::PickingEnum { .. }));
+        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
 
         if matches!(nav_key, KeyCode::Up | KeyCode::Char('k')) {
             let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
@@ -7282,7 +7282,7 @@ fn auto_compact_threshold_picker_nav_does_not_dispatch_preview() {
             matches!(outcome, SettingsKeyOutcome::Changed),
             "Nav key {nav_key:?} in auto_compact_threshold picker MUST NOT dispatch a preview              Action. Got {outcome:?}",
         );
-        assert!(matches!(s.mode, SettingsModalMode::PickingEnum { .. }));
+        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
     }
 }
 
@@ -7308,7 +7308,7 @@ fn auto_compact_threshold_picker_enter_dispatches_set_commit() {
         other => panic!("expected Action::SetAutoCompactThreshold commit, got {other:?}"),
     }
     assert!(
-        matches!(s.mode, SettingsModalMode::Browse),
+        matches!(s.mode(), SettingsModalMode::Browse),
         "Enter commit must return to Browse"
     );
 }
@@ -7346,7 +7346,7 @@ fn mouse_click_on_auto_compact_threshold_indicator_opens_picker_in_one_click() {
         matches!(outcome, SettingsKeyOutcome::Changed),
         "value click must open picker in one click, got: {outcome:?}",
     );
-    match &s.mode {
+    match &s.mode() {
         SettingsModalMode::PickingEnum { key, .. } => {
             assert_eq!(*key, "auto_compact_threshold_percent")
         }

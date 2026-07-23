@@ -4661,3 +4661,75 @@ mod extensions_modal_confirmation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod editor_paste_routing_tests {
+    use std::collections::HashMap;
+
+    use super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::views::agents_modal::{AgentsModalState, AgentsTab};
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, FieldSpec, ModalInput,
+    };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn persona_and_extensions_paste_only_into_active_forms() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.prompt.set_text("hidden prompt");
+
+        let cwd = tempfile::tempdir().expect("temp cwd");
+        let mut agents = AgentsModalState::new(
+            cwd.path(),
+            &HashMap::new(),
+            &BundleState::default(),
+            None,
+            None,
+        );
+        agents.active_tab = AgentsTab::Personas;
+        agent.agents_modal = Some(agents);
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+            &registry,
+        );
+        let _ = agent.handle_input(&Event::Paste("na\r\nme".to_owned()), &registry);
+        assert_eq!(
+            agent
+                .agents_modal
+                .as_ref()
+                .and_then(|state| state.persona_input.as_ref())
+                .map(|input| input.name()),
+            Some("name")
+        );
+        assert_eq!(agent.prompt.text(), "hidden prompt");
+
+        agent.agents_modal = None;
+        let mut extensions = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        extensions.input = Some(ModalInput::from_specs(
+            "mcp add".to_owned(),
+            vec![FieldSpec {
+                label: "URL".to_owned(),
+                required: true,
+                placeholder: None,
+            }],
+        ));
+        agent.extensions_modal = Some(extensions);
+        let _ = agent.handle_input(
+            &Event::Paste("https://example.test\r\n".to_owned()),
+            &registry,
+        );
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|state| state.input.as_ref())
+                .and_then(|input| input.field(0))
+                .map(|field| field.text()),
+            Some("https://example.test")
+        );
+        assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}

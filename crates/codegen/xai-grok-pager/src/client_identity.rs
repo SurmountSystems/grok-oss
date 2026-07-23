@@ -3,7 +3,15 @@ pub const HEADLESS_CLIENT_TYPE: &str = "grok-shell";
 
 pub const PAGER_CLIENT_VERSION: &str = xai_grok_version::VERSION;
 
-/// `User-Agent` for the pager's own HTTP clients that call `api.x.ai` directly (voice STT).
+/// User-facing product binary name for Surmount **Grok OSS**.
+///
+/// Shown in terminal/tab titles, resume hints, and CLI branding. Upstream xAI
+/// uses bare `grok`; this fork's install artifact is `grok-oss`. Config keys
+/// that refer to the brand slot (e.g. title item `"grok"`) may keep the short
+/// name for compatibility ,  the **display** string is always this constant.
+pub const PRODUCT_CLI_NAME: &str = "grok-oss";
+
+/// `User-Agent` for pager-owned direct-to-`api.x.ai` clients (voice STT).
 ///
 /// Matches the sampler's `grok-shell/<version> (os; arch)` shape so server-side dashboards bucket voice traffic alongside chat / imagine requests.
 pub fn client_user_agent() -> String {
@@ -34,5 +42,12 @@ mod tests {
                 std::env::consts::ARCH
             )
         );
+    }
+
+    #[test]
+    fn product_cli_name_is_grok_oss() {
+        assert_eq!(PRODUCT_CLI_NAME, "grok-oss");
+        // Must not regress to bare upstream brand in product-facing surfaces.
+        assert_ne!(PRODUCT_CLI_NAME, "grok");
     }
 }

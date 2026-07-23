@@ -496,6 +496,19 @@ impl Drop for CancelResultReceiverOnDrop {
     }
 }
 
+struct CancelResultReceiverOnDrop {
+    cancel_token: tokio_util::sync::CancellationToken,
+    armed: bool,
+}
+
+impl Drop for CancelResultReceiverOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel_token.cancel();
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl SubagentBackend for ChannelBackend {
     async fn spawn(

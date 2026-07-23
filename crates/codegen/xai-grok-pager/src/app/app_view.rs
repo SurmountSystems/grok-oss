@@ -1338,6 +1338,25 @@ impl AppView {
                 .set_usage_command_visible(usage_cmd);
         }
     }
+    /// Mirror [`Self::usage_visible`] onto every slash surface that can run
+    /// `/usage` (agents, welcome, dashboard dispatch / peek-reply).
+    pub(crate) fn sync_billing_surface_to_agents(&mut self) {
+        let visible = self.usage_visible;
+        for agent in self.agents.values_mut() {
+            agent.set_billing_surface_visible(visible);
+        }
+        self.welcome_prompt
+            .slash_controller
+            .set_billing_surface_visible(visible);
+        if let Some(dash) = self.dashboard.as_mut() {
+            dash.dispatch
+                .slash_controller
+                .set_billing_surface_visible(visible);
+            dash.peek_reply
+                .slash_controller
+                .set_billing_surface_visible(visible);
+        }
+    }
     /// Force voice on for API-key sessions when only a remote rule left it off.
     /// Requirement / env / config pins still win.
     pub(crate) fn ensure_voice_for_api_key(&mut self) {

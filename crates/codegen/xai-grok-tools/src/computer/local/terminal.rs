@@ -842,7 +842,36 @@ impl LocalTerminalActor {
     /// Spawn a command with persistent shell state: restore the prior snapshot
     /// via fd 3, run the user command, dump the new state to fd 4.
     #[cfg(unix)]
-    async fn spawn_persistent_command(
+    async fn ensure_static_shell_initialized(&mut self, cwd: &std::path::Path) {
+        if self.static_shell.is_some() && self.login_env.is_some() {
+            return;
+        }
+        let (snapshot, login_env) = tokio::join!(
+            async {
+                if self.static_shell.is_none() {
+                    Some(super::static_shell::StaticShellSnapshot::init(cwd).await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if self.login_env.is_none() {
+                    Some(capture_login_env().await)
+                } else {
+                    None
+                }
+            }
+        );
+        if let Some(snapshot) = snapshot {
+            self.static_shell = Some(snapshot);
+        }
+        if let Some(env) = login_env {
+            self.login_env = Some(env);
+        }
+    }
+
+    #[cfg(unix)]
+    async fn spawn_static_command(
         &mut self,
         command: &str,
         cwd: &std::path::Path,
@@ -851,17 +880,23 @@ impl LocalTerminalActor {
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
-        if self.shell_state.is_none() {
-            let shell = shell_state::ShellKind::detect();
-            match shell_state::ShellState::init(shell, cwd).await {
-                Ok(state) => self.shell_state = Some(state),
-                Err(e) => {
-                    tracing::warn!("persistent shell init failed, using empty state: {e}");
-                    self.shell_state = Some(shell_state::ShellState {
-                        cwd: cwd.to_path_buf(),
-                        snapshot: String::new(),
-                        shell,
-                    });
+        let static_shell = self.static_shell.as_ref().unwrap();
+        let prep = static_shell
+            .prepare_command(command, self.search_shadows)
+            .map_err(|e| ComputerError::io(format!("prepare static command: {e}")))?;
+
+        let mut cmd = tokio::process::Command::new(&prep.binary);
+        cmd.args(&prep.args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Some(login) = self.login_env.as_ref() {
+            for (key, value) in login {
+                if key != "PATH" && std::env::var_os(key).is_none() {
+                    cmd.env(key, value);
                 }
             }
         }
@@ -3356,9 +3391,8 @@ fn spawn_shell_command(
     // Keep unix-only args live on Windows to avoid unused-arg warnings.
     #[cfg(not(unix))]
     let _ = (&login_env, &search_shadows);
-
     #[cfg(unix)]
-    {
+    let mut cmd = {
         let shell = shell_state::ShellKind::detect();
         let wrapped_command = {
             let inject = super::embedded_search_tools::search_injection(search_shadows);
@@ -3465,13 +3499,10 @@ fn spawn_shell_command(
         }
     };
 
-    #[cfg(not(unix))]
-    {
-        if let Err(e) = group.attach(&child) {
-            tracing::debug!("Failed to attach child to ProcessGroup: {e}");
-        }
-        Ok((child, group))
+    if let Err(e) = group.attach(&child) {
+        tracing::debug!("Failed to attach child to ProcessGroup: {e}");
     }
+    Ok((child, group))
 }
 
 fn extract_exit_status(status: std::process::ExitStatus) -> ExitStatus {

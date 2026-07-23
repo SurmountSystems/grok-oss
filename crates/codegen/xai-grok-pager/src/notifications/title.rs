@@ -4,6 +4,7 @@ use crossterm::terminal::SetTitle;
 
 use super::config::{TitleConfig, TitleItem};
 use crate::acp::tracker::TurnActivity;
+use crate::client_identity::PRODUCT_CLI_NAME;
 
 const TITLE_SPINNER: &[char] = &[
     '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
@@ -75,7 +76,7 @@ impl TitleManager {
 
         if !has_parts {
             self.composed.clear();
-            self.composed.push_str("grok");
+            self.composed.push_str(PRODUCT_CLI_NAME);
         }
 
         let result = if self.composed != self.last_title {
@@ -97,9 +98,9 @@ impl TitleManager {
     }
 
     pub fn reset(&mut self) -> String {
-        let esc = build_title_escape("grok");
+        let esc = build_title_escape(PRODUCT_CLI_NAME);
         self.last_title.clear();
-        self.last_title.push_str("grok");
+        self.last_title.push_str(PRODUCT_CLI_NAME);
         self.spinner_frame = 0;
         self.tick_count = 0;
         esc
@@ -116,9 +117,10 @@ fn write_item(
     tick_count: u64,
 ) -> bool {
     match item {
+        // Config key stays `"grok"` (upstream-compatible); display is product binary.
         TitleItem::Grok => {
             push_separator(buf, has_parts);
-            buf.push_str("grok");
+            buf.push_str(PRODUCT_CLI_NAME);
         }
         TitleItem::Spinner => {
             if !state.is_busy && state.activity.is_none() {
@@ -294,12 +296,12 @@ mod tests {
     }
 
     #[test]
-    fn grok_only_produces_just_grok() {
+    fn grok_only_produces_product_cli_name() {
         let cfg = config_with_items(vec![TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         let state = idle_state();
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -311,7 +313,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "my project - grok");
+        assert_eq!(mgr.last_title, "my project - grok-oss");
     }
 
     #[test]
@@ -320,7 +322,7 @@ mod tests {
         let mut mgr = TitleManager::new(&cfg);
         let state = idle_state();
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -332,7 +334,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -341,7 +343,7 @@ mod tests {
         let mut mgr = TitleManager::new(&cfg);
 
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
 
         let activity = TurnActivity::Thinking;
         let state = TitleState {
@@ -349,7 +351,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert!(mgr.last_title.contains(" - grok"));
+        assert!(mgr.last_title.ends_with(" - grok-oss"));
         let spinner_part: String = mgr.last_title.chars().take(1).collect();
         assert!(
             TITLE_SPINNER.contains(&spinner_part.chars().next().unwrap()),
@@ -511,7 +513,7 @@ mod tests {
         let cfg = config_with_items(vec![TitleItem::Activity, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -523,7 +525,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert!(mgr.last_title.contains(" - grok"));
+        assert!(mgr.last_title.ends_with(" - grok-oss"));
         let spinner_part: String = mgr.last_title.chars().take(1).collect();
         assert!(
             TITLE_SPINNER.contains(&spinner_part.chars().next().unwrap()),
@@ -541,7 +543,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "Waiting - grok");
+        assert_eq!(mgr.last_title, "Waiting - grok-oss");
     }
 
     #[test]
@@ -555,7 +557,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "Thinking - grok");
+        assert_eq!(mgr.last_title, "Thinking - grok-oss");
     }
 
     #[test]
@@ -617,9 +619,9 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -628,20 +630,19 @@ mod tests {
         let mut mgr = TitleManager::new(&cfg);
         let state = idle_state();
 
-        let first = mgr.update(&state);
-        assert!(first.is_some());
-        assert_eq!(mgr.last_title, "grok");
+        mgr.update(&state);
+        assert_eq!(mgr.last_title, "grok-oss");
 
         assert_eq!(mgr.update(&state), None);
         assert_eq!(mgr.last_title, "grok");
     }
 
     #[test]
-    fn empty_items_produces_grok_fallback() {
+    fn empty_items_produces_product_cli_fallback() {
         let cfg = config_with_items(vec![]);
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -653,7 +654,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-3 - grok");
+        assert_eq!(mgr.last_title, "grok-3 - grok-oss");
     }
 
     #[test]
@@ -661,7 +662,7 @@ mod tests {
         let cfg = config_with_items(vec![TitleItem::Model, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -673,7 +674,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "my-project - grok");
+        assert_eq!(mgr.last_title, "my-project - grok-oss");
     }
 
     #[test]
@@ -685,7 +686,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "42s - grok");
+        assert_eq!(mgr.last_title, "42s - grok-oss");
     }
 
     #[test]
@@ -697,7 +698,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -728,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_state_and_emits_grok() {
+    fn reset_clears_state_and_emits_product_cli_name() {
         let cfg = config_with_items(vec![TitleItem::SessionName, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         let activity = TurnActivity::Thinking;
@@ -738,10 +739,10 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_ne!(mgr.last_title, "grok");
+        assert_ne!(mgr.last_title, "grok-oss");
 
         mgr.reset();
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
         assert_eq!(mgr.spinner_frame, 0);
         assert_eq!(mgr.tick_count, 0);
     }
@@ -772,7 +773,7 @@ mod tests {
 
         // Both should contain the persistent parts.
         for t in [&t1, &t2] {
-            assert!(t.contains("grok"), "title missing 'grok': {t}");
+            assert!(t.contains("grok-oss"), "title missing product brand: {t}");
             assert!(t.contains("Responding"), "title missing 'Responding': {t}");
             assert!(t.contains("my-session"), "title missing session name: {t}");
         }
@@ -787,7 +788,7 @@ mod tests {
         let cfg = default_config();
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, "grok-oss");
     }
 
     #[test]
@@ -811,7 +812,7 @@ mod tests {
         mgr.update(&state);
         assert_eq!(
             mgr.last_title,
-            "Thinking - proj - grok-3 - workspace - grok"
+            "Thinking - proj - grok-3 - workspace - grok-oss"
         );
     }
 

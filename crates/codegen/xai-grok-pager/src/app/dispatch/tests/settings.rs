@@ -3348,21 +3348,12 @@ fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
         crate::theme::system_appearance::set_mock(Some(
             crate::theme::system_appearance::SystemAppearance::Dark,
         ));
-        // Re-seed under the held test lock so resolve_auto cannot
-        // observe another test's AUTO_THEME_CONFIG between setup and
-        // SetTheme("auto").
-        crate::theme::cache::seed_auto_theme_defaults_for_test();
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetTheme("auto".into()), &mut app);
-        assert!(
-            crate::theme::cache::is_auto_mode(),
-            "SetTheme(auto) must enable auto mode before auto_dark_theme commit",
-        );
-        let before = crate::theme::cache::current_kind();
-        assert_ne!(
-            before,
-            crate::theme::ThemeKind::GrokDay,
-            "pre-commit kind must differ from the grokday value we are about to apply",
+        assert!(crate::theme::cache::is_auto_mode());
+        assert_eq!(
+            crate::theme::cache::current_kind(),
+            crate::theme::ThemeKind::GrokNight,
         );
         let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
         assert_eq!(

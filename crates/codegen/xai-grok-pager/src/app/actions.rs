@@ -1902,6 +1902,10 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    FetchWorkflowsList {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+    },
     /// Toggle a skill via x.ai/skills/toggle (enable/disable without restart).
     ToggleSkill {
         agent_id: AgentId,
@@ -2826,6 +2830,11 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         result: Result<Vec<crate::views::extensions_modal::WorkflowInfo>, String>,
     },
+    WorkflowsListLoaded {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        result: Result<Vec<crate::views::extensions_modal::WorkflowInfo>, String>,
+    },
     /// Skill toggle completed (enable/disable).
     SkillsToggleDone {
         agent_id: AgentId,
@@ -2969,6 +2978,18 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         error: String,
         nonce: u64,
+    },
+    /// `/usage` session ledger fetched. Drop if `session_id` no longer matches.
+    SessionUsageComplete {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        usage: Box<xai_grok_shell::extensions::notification::PromptUsage>,
+    },
+    /// `/usage` session ledger fetch failed. Drop if `session_id` no longer matches.
+    SessionUsageFailed {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        error: String,
     },
     /// Feedback submitted successfully (fire-and-forget).
     /// A modal-origin completion only takes the consent parked for its exact submission; anything else is stale and a no-op.

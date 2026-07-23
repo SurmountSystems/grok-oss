@@ -562,6 +562,19 @@ impl Default for RespectGitignore {
 /// settings.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PathNotFoundHints(pub bool);
+/// Whether scheduled task fires execute in background loop subagents.
+///
+/// `false` forces every fire onto the legacy main-conversation path.
+/// Configured via `[scheduler] background_loops` in `config.toml`, the
+/// `GROK_SCHEDULER_BACKGROUND_LOOPS` env var, or the
+/// `scheduler_background_loops` remote setting.
+#[derive(Debug, Clone, Copy)]
+pub struct SchedulerBackgroundLoops(pub bool);
+impl Default for SchedulerBackgroundLoops {
+    fn default() -> Self {
+        Self(true)
+    }
+}
 /// Map of canonical tool names → model-facing tool names.
 #[derive(Debug, Clone, Default)]
 pub struct ToolNameMapping(pub HashMap<String, String>);

@@ -352,6 +352,26 @@ fn render_detail_editor(
     }
 }
 
+fn render_detail_editor(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: usize,
+    editor: &LineEditor,
+    style: Style,
+    theme: &Theme,
+) {
+    let viewport = editor.viewport(width);
+    let visible = &editor.text()[viewport.visible_byte_range];
+    buf.set_string(x, y, visible, style);
+    if width > 0 {
+        let cursor_x = x + viewport.cursor_display_column as u16;
+        if let Some(cell) = buf.cell_mut((cursor_x, y)) {
+            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+        }
+    }
+}
+
 /// Render the persona detail modal.
 pub fn render_persona_detail(
     buf: &mut Buffer,
