@@ -1118,8 +1118,16 @@ pub(super) fn apply_session_event(
     is_api_key_auth: bool,
 ) -> bool {
     match update {
-        XaiSessionUpdate::AutoCompactStarted { percentage, .. } => {
-            tracing::info!("Auto-compact started: {percentage}% context used");
+        XaiSessionUpdate::AutoCompactStarted {
+            percentage,
+            threshold_percent,
+            threshold_tokens,
+            ..
+        } => {
+            tracing::info!(
+                "Auto-compact started: {percentage}% context used (threshold {threshold_percent:?}/{threshold_tokens:?})"
+            );
+            // Tip: hold in-flight prompt across auto-compact so the turn can resume.
             if session.compact_held_prompt.is_none() {
                 session.compact_held_prompt = session.in_flight_prompt.clone();
             }
@@ -1128,6 +1136,8 @@ pub(super) fn apply_session_event(
             scrollback.push_block(RenderBlock::session_event(
                 SessionEvent::CompactionStarted {
                     percentage: *percentage,
+                    threshold_percent: *threshold_percent,
+                    threshold_tokens: *threshold_tokens,
                 },
             ));
             true

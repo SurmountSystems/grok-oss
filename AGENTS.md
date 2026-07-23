@@ -33,6 +33,14 @@ apply (`~/.grok/AGENTS.md`).
 - Full rule: `~/.grok/AGENTS.md` § *Regressions and deep diagnosis — never in
   the parent thread*.
 
+## Regressions and deep diagnosis
+
+- Do **not** investigate regressions or multi-file diagnosis in the parent
+  thread (no parent-marathon of greps, logs, or long code walks). Spawn tightly
+  scoped subagents; join on short on-disk summaries only.
+- Full rule: `~/.grok/AGENTS.md` § *Regressions and deep diagnosis — never in
+  the parent thread*.
+
 ## When you ship product work
 
 - Update **[`FORK.md`](FORK.md)** with a short hierarchical note (what changed
@@ -73,7 +81,8 @@ and **`docs/upstream-onto-log.md`**.
 |------|--------|
 | Branch | `onto-xai/6e386420825b` |
 | HEAD | `8f2f7f2` impl (#7) |
-| Mid-pick | `b53f141` #12 mega — **resolved+staged**; human `git cherry-pick --continue` |
+| Mid-pick | `8b933eb` #13 — conflict resolved+staged; human `git cherry-pick --continue` |
+| HEAD | `f8e9eab` merge xai 2 (#12) |
 | After | #13 `8b933eb`, join, PR; if continue says “no pick” → already landed, use CONTINUE=1 |
 | Issues | close #11 + #14 when PR lands (tips superseded by `6e38642`) |
 

@@ -18,7 +18,7 @@ There is **no** `MODE=overlay` / commit-tree mode in the current scripts.
 |------------|---------|----------|----------------------|----------|-------|
 | 2026-07-18 | `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` | `b40a1962cb8061b85c2354850ab4d5707f48414b` | (older) | (local) | Historical only (pre cherry-pick script) |
 | 2026-07-22 | `3af4d5d39897855bdcc74f23e690024a5dc05573` | `e595174931be9bfb490aacf149e2c9cc0ca0ebba` | product via cherry-pick | landed as PR #12 (`f8126f9` tip family) | First full HITL land: put-history → join → PR #12 |
-| 2026-07-24 *(in progress)* | `6e386420825bd44ae648c63e7c8cba12fcec9401` | `3db5a3bd92232bb54581fb8701c6ec79ba48293d` | `origin/main` @ `8b933eb` | branch `onto-xai/6e386420825b` **HEAD=`8f2f7f2`** mid-pick **`b53f141`** | #7 landed. **#12 mega (~199 UU) resolved+staged** via 3 subagents (shell/pager/rest). Human: `git cherry-pick --continue` then CONTINUE put-history for #13 → join → PR → close #11+#14. Stash living docs if dirty before mega picks. |
+| 2026-07-24 *(in progress)* | `6e386420825bd44ae648c63e7c8cba12fcec9401` | `3db5a3bd92232bb54581fb8701c6ec79ba48293d` | `origin/main` @ `8b933eb` | branch `onto-xai/6e386420825b` **HEAD=`f8e9eab`** mid-pick **`8b933eb`** (#13) | #7 landed. **#12 mega (~199 UU) resolved+staged** via 3 subagents (shell/pager/rest). Human: `git cherry-pick --continue` then CONTINUE put-history for #13 → join → PR → close #11+#14. Stash living docs if dirty before mega picks. |
 
 ## How to append (after stack lands)
 
