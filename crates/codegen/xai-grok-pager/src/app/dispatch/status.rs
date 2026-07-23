@@ -1,5 +1,7 @@
 //! Session status, sharing, privacy, usage, and info dispatchers.
 
+use agent_client_protocol as acp;
+
 use super::ctx::get_active_agent;
 use super::settings::ui::refresh_open_settings_modals;
 use crate::app::actions::Effect;
@@ -71,6 +73,9 @@ pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
 /// Three-state display: Enterprise ZDR, coding data sharing opted out,
 /// or opted in. Labels align with `CODING_DATA_SHARING_CHOICES` in
 /// `settings/defs.rs` and the `coding_data_sharing_toast` format.
+///
+/// Also lists config knobs that `/privacy` does not change (technical
+/// pointers only; no policy claims).
 pub(super) fn dispatch_show_privacy_info(app: &mut AppView) -> Vec<Effect> {
     let mut lines = Vec::new();
 
@@ -92,6 +97,12 @@ pub(super) fn dispatch_show_privacy_info(app: &mut AppView) -> Vec<Effect> {
         lines.push("  Use /privacy opt-out to enable privacy mode.");
     }
 
+    // Config keys only; do not describe retention/training/analytics policy here.
+    lines.push("");
+    lines.push("  Other settings (not changed by /privacy):");
+    lines.push("  - [features] telemetry / GROK_TELEMETRY_ENABLED");
+    lines.push("  - [telemetry] trace_upload / GROK_TELEMETRY_TRACE_UPLOAD");
+    lines.push("  - GROK_EXTERNAL_OTEL / OTEL_*");
     lines.push("");
     lines.push("  Learn more: https://x.ai/legal");
     let text = lines.join("\n");
@@ -244,18 +255,60 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// Show credit usage: fetch billing data and display inline.
-///
-/// When the remote settings `grok_build_usage_redirect_url` flag is set (delivered via
-/// RemoteSettings, targeted at personal-team users), skip the backend fetch and
-/// just point the user at that URL instead. This is a kill switch for the
-/// personal-team billing path while it is unreliable.
+/// `/usage` — session token/cost, then consumer credits when visible.
+/// Credits are chained after the session block so layout stays ordered.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let session_id = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        agent.session.session_id.clone()
+    };
+    match session_id {
+        Some(session_id) => vec![Effect::FetchSessionUsage {
+            agent_id: id,
+            session_id,
+        }],
+        None => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.scrollback.push_block(RenderBlock::system(
+                    "Session usage is unavailable until the session starts.".to_string(),
+                ));
+            }
+            append_consumer_billing_surface(app, id)
+        }
+    }
+}
+
+/// Commit a session-usage block if still on `session_id`, then consumer credits.
+pub(super) fn commit_session_usage_block(
+    app: &mut AppView,
+    agent_id: AgentId,
+    session_id: &acp::SessionId,
+    text: String,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if agent.session.session_id.as_ref() != Some(session_id) {
+        return vec![];
+    }
+    agent.scrollback.push_block(RenderBlock::system(text));
+    append_consumer_billing_surface(app, agent_id)
+}
+
+/// Consumer credit follow-up for `/usage` (redirect or non-silent billing fetch).
+pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    if !app.usage_visible {
+        return vec![];
+    }
+    // Remote-settings kill switch (`grok_build_usage_redirect_url`): link out
+    // instead of fetching billing from the backend.
     if let Some(url) = app.usage_billing_redirect_url.clone() {
-        if let Some(agent) = app.agents.get_mut(&id) {
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
             agent.scrollback.push_block(RenderBlock::System(
                 crate::scrollback::blocks::SystemMessageBlock::new(format!(
                     "Please check your usage on {url}"
@@ -264,12 +317,26 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         }
         return vec![];
     }
-    // Non-silent fetch: the effect also pulls the auto top-up rule so the
-    // summary can render usage, prepaid credits, and auto top-up together.
+    if !app.agents.contains_key(&agent_id) {
+        return vec![];
+    }
+    // Non-silent: the effect also pulls the auto top-up rule so the summary
+    // renders usage, prepaid credits, and auto top-up together.
     vec![Effect::FetchBilling {
-        agent_id: id,
+        agent_id,
         silent: false,
     }]
+}
+
+/// `/usage manage` — open consumer billing. No-op when the surface is hidden.
+pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
+    if !app.usage_visible {
+        return vec![];
+    }
+    super::router::dispatch(
+        crate::app::actions::Action::OpenUrl("https://grok.com/?_s=usage".to_string()),
+        app,
+    )
 }
 
 /// Commit a one-line "update available" notice into the active agent's
@@ -466,8 +533,8 @@ pub(super) fn dispatch_copy_session_id(app: &mut AppView, index: usize) -> Vec<E
                 .map(|e| e.id.clone())
         });
     if let Some(id) = id {
-        let r = crate::clipboard::copy_text(&id);
-        app.show_toast(r.message);
+        let delivery = crate::clipboard::copy_text_or_file(&id);
+        app.show_toast(delivery.toast_message().as_ref());
     }
     vec![]
 }

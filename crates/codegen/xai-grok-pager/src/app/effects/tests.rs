@@ -22,26 +22,37 @@ fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
         FREE_USAGE_USER_MESSAGE, RATE_LIMITED_ERROR_CODE,
         RATE_LIMITED_USER_MESSAGE_API_KEY, RATE_LIMITED_USER_MESSAGE_OAUTH,
     };
+    let cap_body = "The service is temporarily at capacity. Please retry your request shortly.";
     let capacity = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
-        .data(
-            "The service is temporarily at capacity. Please retry your request shortly.",
-        );
-    let cap = "The service is temporarily at capacity. Please retry your request shortly.";
-    assert_eq!(format_acp_error(& capacity, false), cap);
-    assert_eq!(format_acp_error(& capacity, true), cap);
+        .data(format!("API error (status 429 Too Many Requests): {cap_body}"));
+    assert_eq!(format_acp_error(& capacity, false), cap_body);
+    assert_eq!(format_acp_error(& capacity, true), cap_body);
+    let rpm_body = "You are sending requests too quickly. Please slow down, or upgrade to a Grok subscription for higher limits: https://grok.com/supergrok";
     let rpm = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
-        .data(
-            "You are sending requests too quickly. Please slow down, or upgrade to a Grok subscription for higher limits: https://grok.com/supergrok",
-        );
+        .data(format!("API error (status 429 Too Many Requests): {rpm_body}"));
     assert!(format_acp_error(& rpm, false).contains("grok.com/supergrok"));
     assert_eq!(format_acp_error(& rpm, true), RATE_LIMITED_USER_MESSAGE_API_KEY);
     let empty = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited");
     assert_eq!(format_acp_error(& empty, false), RATE_LIMITED_USER_MESSAGE_OAUTH);
     assert_eq!(format_acp_error(& empty, true), RATE_LIMITED_USER_MESSAGE_API_KEY);
     let free = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
-        .data("subscription:free-usage-exhausted: You have used all your free usage.");
+        .data(
+            "API error (status 429 Too Many Requests): \
+             subscription:free-usage-exhausted: You have used all your free usage.",
+        );
     assert_eq!(format_acp_error(& free, false), FREE_USAGE_USER_MESSAGE);
     assert_eq!(format_acp_error(& free, true), FREE_USAGE_USER_MESSAGE);
+    let free_wrapped = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
+        .data(
+            serde_json::json!(
+                { "message" :
+                "API error (status 429 Too Many Requests): \
+                    subscription:free-usage-exhausted: You have used all your free usage.",
+                "promptUsage" : { "inputTokens" : 12, "outputTokens" : 0, "numTurns" : 1
+                } }
+            ),
+        );
+    assert_eq!(format_acp_error(& free_wrapped, false), FREE_USAGE_USER_MESSAGE);
 }
 /// Non-empty token ranges ride the wire block meta as `skillTokenRanges`
 /// byte pairs; the text itself is untouched.
@@ -701,6 +712,30 @@ async fn persist_setting_type_mismatch_errors_show_timeline() {
         "error message must mention key + expected kind, got: {err}",
     );
 }
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("page_flip_on_send", SettingValue::String("nope".into()))
+        .await;
+    let err = r.expect_err("page_flip_on_send with String payload must return Err");
+    assert!(
+        err.contains("persist_setting(page_flip_on_send) expected Bool"), "got: {err}",
+    );
+}
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
+    use crate::settings::SettingValue;
+    let r = persist_setting(
+            "combine_queued_prompts",
+            SettingValue::String("nope".into()),
+        )
+        .await;
+    let err = r.expect_err("combine_queued_prompts with String payload must return Err");
+    assert!(
+        err.contains("persist_setting(combine_queued_prompts) expected Bool"),
+        "got: {err}",
+    );
+}
 /// Type-mismatch for `simple_mode`.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_simple_mode() {
@@ -1179,7 +1214,8 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
                             MarketplaceAction::Update {
                                 source_url_or_path,
                                 plugin_relative_path,
-                            } if source_url_or_path == "https://example.com/plugins.git"
+                            }
+if source_url_or_path == "https://example.com/plugins.git"
                                 && plugin_relative_path == "plugins/test-plugin" => {
                                 saw_update_for_task.store(true, Ordering::SeqCst);
                             }
@@ -1338,10 +1374,9 @@ async fn foreign_resume_detection_runs_as_task_result() {
         other => panic!("expected ForeignResumeHintDetected, got {other:?}"),
     }
 }
-/// `Effect::FetchSessionList` wire shape + echoes: a search fetch puts
-/// `query` into the outgoing params, a plain fetch keeps the key ABSENT,
-/// and every outcome echoes `seq`/`query` (the stale-drop guard and the
-/// fetch-query stamp depend on the echoes).
+/// `FetchSessionList` wire shape: search sends `query` (no `allowRelax`);
+/// browse opts into `allowRelax` and parses `x.ai/listScope`; all
+/// outcomes echo `seq`/`query`.
 #[tokio::test]
 async fn fetch_session_list_pushes_query_and_echoes_seq() {
     use std::sync::{Arc, Mutex};
@@ -1359,9 +1394,15 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
                     .expect("params JSON");
                 let fail = params.get("query").and_then(|q| q.as_str())
                     == Some("fail-me");
+                let browse = params.get("query").is_none();
                 captured_for_task.lock().unwrap().push(params);
                 let body = if fail {
                     serde_json::json!({ "error" : "boom" })
+                } else if browse {
+                    serde_json::json!(
+                        { "result" : { "sessions" : [], "_meta" : { "x.ai/listScope" :
+                        "repo" }, } }
+                    )
                 } else {
                     serde_json::json!({ "result" : { "sessions" : [] } })
                 };
@@ -1389,10 +1430,11 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         seq: 7,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::SessionListLoaded { sessions, seq, query, .. } => {
+        TaskResult::SessionListLoaded { sessions, scope, seq, query, .. } => {
             assert!(sessions.is_empty());
             assert_eq!(seq, 7, "seq must be echoed, not reconstructed");
             assert_eq!(query.as_deref(), Some("hit"), "query must be echoed");
+            assert!(! scope.is_relaxed(), "search responses carry no relaxed scope");
         }
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
@@ -1401,9 +1443,13 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         seq: 8,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::SessionListLoaded { seq, query, .. } => {
+        TaskResult::SessionListLoaded { scope, seq, query, .. } => {
             assert_eq!(seq, 8);
             assert_eq!(query, None);
+            assert!(
+                scope.is_relaxed(),
+                "_meta[\"x.ai/listScope\"] must parse into the task result"
+            );
         }
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
@@ -1428,10 +1474,69 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     assert_eq!(captured[0] ["limit"], 30);
     assert!(captured[0] ["cwd"].is_string());
     assert!(
+        captured[0].get("allowRelax").is_none(),
+        "search fetches must not opt into relaxing: {:?}", captured[0]
+    );
+    assert!(
         captured[1].get("query").is_none(),
         "plain fetch must not send a query key: {:?}", captured[1]
     );
+    assert_eq!(captured[1] ["allowRelax"], true, "browse fetches opt into relaxing");
     assert_eq!(captured[2] ["query"], "fail-me");
+}
+#[tokio::test]
+async fn fetch_workflows_list_sends_session_id() {
+    use std::sync::{Arc, Mutex};
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                assert_eq!(args.request.method.as_ref(), "x.ai/workflows/list");
+                let params: serde_json::Value = serde_json::from_str(
+                        args.request.params.get(),
+                    )
+                    .expect("params JSON");
+                captured_for_task.lock().unwrap().push(params);
+                let body = serde_json::json!({ "result" : { "workflows" : [] } });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("serialize workflows response");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+            }
+        }
+    });
+    let session_id = acp::SessionId::new(Arc::from("test-session"));
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        Effect::FetchWorkflowsList {
+            agent_id: AgentId(3),
+            session_id: session_id.clone(),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    match tasks.join_next().await.expect("task").expect("no panic") {
+        TaskResult::WorkflowsListLoaded {
+            agent_id,
+            session_id: result_session_id,
+            result,
+        } => {
+            assert_eq!(agent_id, AgentId(3));
+            assert_eq!(result_session_id, session_id);
+            assert!(result.expect("workflows load").is_empty());
+        }
+        other => panic!("expected WorkflowsListLoaded, got {other:?}"),
+    }
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0] ["sessionId"], "test-session");
+    assert!(captured[0].get("cwd").is_none());
 }
 /// The debounce arm must echo `query` and `seq` exactly. Awaits the real
 /// 250 ms debounce (tokio's paused clock needs `test-util`, not enabled

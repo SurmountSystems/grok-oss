@@ -66,11 +66,13 @@ pub(crate) fn execute(
                 tracing::warn!(error = % e, "project picker: failed to set_current_dir");
             }
         }
-        Effect::ScheduleClearAuthCopied => {
+        Effect::ScheduleClearAuthCopyFeedback { generation } => {
             tasks
-                .spawn(async {
+                .spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    TaskResult::AuthCopiedTimeout
+                    TaskResult::AuthCopyFeedbackTimeout {
+                        generation,
+                    }
                 });
         }
         Effect::Logout => {
@@ -700,6 +702,8 @@ pub(crate) fn execute(
                     );
                     if let Some(q) = &query {
                         params["query"] = serde_json::Value::String(q.clone());
+                    } else {
+                        params["allowRelax"] = serde_json::Value::Bool(true);
                     }
                     let request = acp::ExtRequest::new(
                         "x.ai/session/list",
@@ -724,9 +728,11 @@ pub(crate) fn execute(
                             let payload = wrapper.get("result").unwrap_or(&wrapper);
                             let sessions = parse_session_picker_entries(payload);
                             let partial = parse_session_list_partial(payload);
+                            let scope = parse_session_list_scope(payload);
                             TaskResult::SessionListLoaded {
                                 sessions,
                                 partial,
+                                scope,
                                 seq,
                                 query,
                             }
@@ -1343,6 +1349,48 @@ pub(crate) fn execute(
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
                         tracing::warn!("Failed to send queue/edit notification: {e}");
+                    }
+                    TaskResult::CancelComplete
+                });
+        }
+        Effect::QueueHoldEdit { session_id, id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!(
+                        { "sessionId" : session_id.0.to_string(), "id" : id, }
+                    );
+                    let notification = acp::ExtNotification::new(
+                        "x.ai/queue/hold_edit",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize queue/hold_edit params")
+                            .into(),
+                    );
+                    if let Err(e) = acp_send(notification, &tx).await {
+                        tracing::warn!(
+                            "Failed to send queue/hold_edit notification: {e}"
+                        );
+                    }
+                    TaskResult::CancelComplete
+                });
+        }
+        Effect::QueueReleaseEdit { session_id, id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!(
+                        { "sessionId" : session_id.0.to_string(), "id" : id, }
+                    );
+                    let notification = acp::ExtNotification::new(
+                        "x.ai/queue/release_edit",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize queue/release_edit params")
+                            .into(),
+                    );
+                    if let Err(e) = acp_send(notification, &tx).await {
+                        tracing::warn!(
+                            "Failed to send queue/release_edit notification: {e}"
+                        );
                     }
                     TaskResult::CancelComplete
                 });
@@ -2402,6 +2450,44 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchWorkflowsList { agent_id, session_id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({ "sessionId" : session_id });
+                    let req = acp::ExtRequest::new(
+                        "x.ai/workflows/list",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize workflows/list params")
+                            .into(),
+                    );
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => {
+                            let wrapper: serde_json::Value = serde_json::from_str(
+                                    resp.0.get(),
+                                )
+                                .unwrap_or_default();
+                            let inner = wrapper.get("result").unwrap_or(&wrapper);
+                            serde_json::from_value::<
+                                Vec<crate::views::extensions_modal::WorkflowInfo>,
+                            >(inner.get("workflows").cloned().unwrap_or_default())
+                                .map_err(|_| "couldn't load workflows".to_string())
+                        }
+                        Err(e) => {
+                            Err(
+                                sanitize_user_error(
+                                    &format!("couldn't load workflows: {e}"),
+                                ),
+                            )
+                        }
+                    };
+                    TaskResult::WorkflowsListLoaded {
+                        agent_id,
+                        session_id,
+                        result,
+                    }
+                });
+        }
         Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled } => {
             let tx = acp_tx.clone();
             tasks
@@ -3174,6 +3260,28 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchSessionUsage { agent_id, session_id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    match fetch_session_usage(&session_id, &tx).await {
+                        Ok(usage) => {
+                            TaskResult::SessionUsageComplete {
+                                agent_id,
+                                session_id,
+                                usage: Box::new(usage),
+                            }
+                        }
+                        Err(error) => {
+                            TaskResult::SessionUsageFailed {
+                                agent_id,
+                                session_id,
+                                error,
+                            }
+                        }
+                    }
+                });
+        }
         Effect::SendFeedback { agent_id, session_id, feedback_text } => {
             use xai_grok_shell::session::ClientType;
             use xai_grok_shell::session::acp_types::ClientFeedbackInput;
@@ -3302,7 +3410,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendBtw { agent_id, session_id, question } => {
+        Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3332,6 +3440,7 @@ pub(crate) fn execute(
                             TaskResult::BtwResponse {
                                 agent_id,
                                 result: Ok(answer),
+                                minimal_request_id,
                             }
                         }
                         Err(e) => {
@@ -3340,6 +3449,7 @@ pub(crate) fn execute(
                                 result: Err(
                                     sanitize_user_error(&format!("side question failed: {e}")),
                                 ),
+                                minimal_request_id,
                             }
                         }
                     }
@@ -3533,11 +3643,11 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RefreshAvailableCommands { agent_id, cwd } => {
+        Effect::RefreshAvailableCommands { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({ "cwd" : cwd });
+                    let params = serde_json::json!({ "sessionId" : session_id });
                     let req = acp::ExtRequest::new(
                         "x.ai/commands/list",
                         serde_json::value::to_raw_value(&params)
@@ -4227,6 +4337,37 @@ async fn fetch_session_info(
         return Err(msg);
     }
     envelope.result.ok_or_else(|| "session info response missing result".to_string())
+}
+/// `x.ai/session/usage` → [`PromptUsage`] (bare response, no envelope).
+async fn fetch_session_usage(
+    session_id: &acp::SessionId,
+    tx: &AcpAgentTx,
+) -> Result<xai_grok_shell::extensions::notification::PromptUsage, String> {
+    let request = acp::ExtRequest::new(
+        "x.ai/session/usage",
+        serde_json::value::to_raw_value(
+                &serde_json::json!({ "sessionId" : session_id.0.to_string() }),
+            )
+            .expect("serialize session/usage params")
+            .into(),
+    );
+    let resp = acp_send(request, tx)
+        .await
+        .map_err(|e| {
+            if i32::from(e.code) == i32::from(acp::Error::method_not_found().code) {
+                "not supported by this agent version".to_string()
+            } else {
+                sanitize_user_error(&e.to_string())
+            }
+        })?;
+    let parsed: xai_grok_shell::extensions::usage::SessionUsageResponse = serde_json::from_str(
+            resp.0.get(),
+        )
+        .map_err(|e| {
+            tracing::debug!("session usage deser failed: {e}");
+            "invalid session usage response".to_string()
+        })?;
+    Ok(parsed.usage)
 }
 /// Look up the session title/summary from local persistence.
 async fn lookup_session_title(session_id: &acp::SessionId) -> Option<String> {

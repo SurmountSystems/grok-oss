@@ -1,4 +1,5 @@
 use super::*;
+use xai_grok_shell::session::unified_list::ListScope;
 
 use crate::views::modal::ActiveModal;
 use crate::views::session_picker::{PickerItem, SourceFilter, build_entry_map};
@@ -221,6 +222,7 @@ fn native_empty_waits_for_foreign_and_foreign_only_rows_survive() {
 
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
             sessions: vec![],
             partial: None,
             seq: 1,
@@ -268,6 +270,7 @@ fn foreign_empty_then_native_empty_finishes_once_without_resurrecting() {
 
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
             sessions: vec![],
             partial: None,
             seq: 3,
@@ -332,6 +335,7 @@ fn modal_empty_notice_waits_until_both_lanes_are_empty() {
     }
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
             sessions: vec![],
             partial: None,
             seq: 9,
@@ -433,6 +437,7 @@ fn modal_selection_survives_native_and_foreign_completion_races() {
 
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
             sessions: vec![
                 at(make_picker_entry("a", "/repo"), 20),
                 at(make_picker_entry("b", "/repo"), 10),
@@ -571,7 +576,7 @@ fn modal_external_filter_clears_native_content_and_blocks_forced_search() {
         *source_filter = SourceFilter::Remote;
         *content_results = Some(vec![content_hit("native-hit")]);
         *content_loading = true;
-        state.query = "native".into();
+        state.set_query("native");
         state.expanded.insert(0);
     }
 

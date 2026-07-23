@@ -17,16 +17,35 @@ pub struct HeadlessResult {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    /// Wall time of the grok invocation; logged so CI timeout budgets can be
+    /// tuned against observed durations.
+    pub elapsed: Duration,
 }
 
-const HEADLESS_TIMEOUT_SECS: u64 = 60;
+/// Timeout for one headless grok invocation: 60 seconds, multiplied by
+/// [`crate::scaled`]'s `GROK_TEST_TIMEOUT_SCALE`.
+fn headless_timeout() -> Duration {
+    crate::scaled(Duration::from_secs(60))
+}
 
-/// Run `grok` with the given args against the mock server, with a 60s timeout.
-/// Uses an isolated HOME and disables telemetry.
+/// Run `grok` with the given args against the mock server, bounded by
+/// [`headless_timeout_secs`]. Uses an isolated HOME and disables telemetry.
 pub async fn run_headless(
     server: &MockInferenceServer,
     args: &[&str],
     cwd: &Path,
+) -> HeadlessResult {
+    run_headless_with_env(server, args, cwd, &[]).await
+}
+
+/// Like [`run_headless`], but with extra environment variables applied after the
+/// shared defaults so they take precedence — e.g. to re-enable a feature the
+/// defaults turn off.
+pub async fn run_headless_with_env(
+    server: &MockInferenceServer,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
 ) -> HeadlessResult {
     let home = TempDir::new().expect("create temp home");
     let mut cmd = tokio::process::Command::new(grok_binary());
@@ -37,11 +56,13 @@ pub async fn run_headless(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     test_env_cmd_tokio(&mut cmd, &server.url(), home.path());
+    cmd.envs(env.iter().copied());
     run_headless_with_cmd(cmd).await
 }
 
 pub async fn run_headless_with_cmd(mut cmd: tokio::process::Command) -> HeadlessResult {
     let binary = grok_binary();
+    let started = std::time::Instant::now();
     let mut child = cmd
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn grok binary at {}: {e}", binary.display()));
@@ -62,12 +83,7 @@ pub async fn run_headless_with_cmd(mut cmd: tokio::process::Command) -> Headless
         Ok::<Vec<u8>, std::io::Error>(stderr_buf)
     });
 
-    let (status, timed_out) = match tokio::time::timeout(
-        Duration::from_secs(HEADLESS_TIMEOUT_SECS),
-        child.wait(),
-    )
-    .await
-    {
+    let (status, timed_out) = match tokio::time::timeout(headless_timeout(), child.wait()).await {
         Ok(result) => (
             result.unwrap_or_else(|e| {
                 panic!("failed to wait for grok binary {}: {e}", binary.display())
@@ -97,11 +113,17 @@ pub async fn run_headless_with_cmd(mut cmd: tokio::process::Command) -> Headless
         Err(err) => panic!("stderr task join failed for {}: {err}", binary.display()),
     };
 
+    let elapsed = started.elapsed();
+    // Timing breadcrumb for tuning CI timeout budgets against observed
+    // durations (visible with --nocapture).
+    eprintln!("[harness-timing] headless grok run: {elapsed:?} (timed_out={timed_out})");
+
     HeadlessResult {
         status,
         stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
         stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
         timed_out,
+        elapsed,
     }
 }
 
@@ -127,7 +149,8 @@ pub fn assert_headless_success(
 ) {
     assert!(
         !result.timed_out,
-        "{label}: timed out after {HEADLESS_TIMEOUT_SECS}s\nstderr tail:\n{}",
+        "{label}: timed out after {:?}\nstderr tail:\n{}",
+        headless_timeout(),
         stderr_tail(&result.stderr, 500)
     );
     assert!(

@@ -1,4 +1,5 @@
 pub(crate) mod attribution;
+mod auth_provider;
 mod config;
 pub mod credential_provider;
 pub mod credentials_store;
@@ -18,7 +19,14 @@ pub(crate) mod recovery;
 pub(crate) mod refresh;
 pub(crate) mod single_flight;
 mod storage;
+mod token_output;
 pub(crate) mod token_type;
+pub use auth_provider::{AuthProviderConfig, AuthProviderRef};
+pub(crate) use auth_provider::{
+    PROVIDER_TIMEOUT_CEILING_SECS, PROVIDER_TOKEN_EXPIRY_SKEW_SECS, ProviderRefreshOutcome,
+};
+#[cfg(test)]
+pub(crate) use auth_provider::{test_backdate_provider_mint, test_counting_provider};
 pub(crate) use config::LEGACY_AUTH_SCOPE;
 pub use config::{
     ForceLoginTeam, GrokComConfig, OAuth2ProviderConfig, OidcAuthConfig, PreferredAuthMethod,
@@ -44,7 +52,9 @@ pub use harness_secrets::{
 pub use manager::{AuthManager, shared_api_key_provider};
 pub use meta::{AuthMeta, GateInfo};
 pub use model::{AuthMode, GrokAuth, lookup_auth};
-pub(crate) use model::{TOKEN_TTL, UserInfo, is_expired, token_suffix};
+pub(crate) use model::{
+    TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired, token_suffix,
+};
 pub use openrouter::{
     OPENROUTER_API_KEY_ENV, OPENROUTER_API_KEYS_ENV, OPENROUTER_API_URL,
     OPENROUTER_GROK_45_CATALOG_ID, OpenRouterAuthError, OpenRouterCreditsData,

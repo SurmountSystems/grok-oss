@@ -672,6 +672,7 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::KillTerminalCommandTool>();
         b.register::<grok_build::TodoWriteTool>();
         b.register::<grok_build::UpdateGoalTool>();
+        b.register::<grok_build::WorkflowTool>();
         b.register::<grok_build::TaskOutputTool>();
         b.register::<grok_build::GetTerminalCommandOutputTool>();
         b.register::<grok_build::WaitTasksTool>();
@@ -1185,9 +1186,12 @@ impl ToolRegistryBuilder {
         if let (Some(cmd_rx), Some(cancel_token)) = (scheduler_cmd_rx, &scheduler_cancel_token) {
             let actor = crate::implementations::grok_build::scheduler::actor::SchedulerActor {
                 resources: shared_resources.clone(),
+                resources_persistence: persistence.clone(),
                 notification_handle: scheduler_notification_handle,
                 cmd_rx,
                 cancel_token: cancel_token.clone(),
+                clock: Default::default(),
+                pending_removal: None,
             };
             tokio::spawn(actor.run());
         }
@@ -1414,6 +1418,9 @@ impl FinalizedToolset {
         let mut ctx = xai_tool_runtime::ToolCallContext::new(parent_ctx.call_id.clone());
         ctx.extensions.insert(self.resources.clone());
         ctx.extensions.insert_arc(Arc::clone(&self.renderer));
+        ctx.extensions.insert(
+            crate::types::resources::InvokingToolParamNames::from_reverse_params(&reverse_params),
+        );
         if let Some(cwd) = parent_ctx.extensions.get::<xai_tool_runtime::Cwd>() {
             ctx.extensions.insert((*cwd).clone());
         }
@@ -1542,6 +1549,9 @@ impl FinalizedToolset {
         let mut ctx = xai_tool_runtime::ToolCallContext::new(rt_call_id);
         ctx.extensions.insert(self.resources.clone());
         ctx.extensions.insert_arc(Arc::clone(&self.renderer));
+        ctx.extensions.insert(
+            crate::types::resources::InvokingToolParamNames::from_reverse_params(&reverse_params),
+        );
         if let Some(cwd) = cwd_override {
             ctx.extensions.insert(xai_tool_runtime::Cwd(cwd));
         }

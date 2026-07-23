@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "0.2.102"
+version = "0.2.109"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -54,6 +54,7 @@ portable-pty = "0.9"
 # Utilities
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 anyhow = { workspace = true }
+shlex = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
 rand = { workspace = true }
@@ -198,6 +199,11 @@ harness = false
 # PTY integration tests are split into coherent scheduling families. The test
 # modules remain under tests/pty_e2e/; these roots only define which cases share
 # one Cargo/Bazel process. All cases stay #[ignore]d for ordinary Cargo runs.
+# Selected Cargo runs must provide PAGER_BINARY; Bazel wires the sibling binary.
+[[test]]
+name = "doctor_early_dispatch"
+path = "tests/doctor_early_dispatch.rs"
+
 [[test]]
 name = "pty_e2e_smoke"
 path = "tests/pty_e2e_smoke.rs"
@@ -268,15 +274,19 @@ path = "src/bin/question_view_playground.rs"
 name = "todo-pane-playground"
 path = "src/bin/todo_pane_playground.rs"
 
+# Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
+# `cargo clippy --workspace -- -D warnings` on this package is stricter than
+# the workspace-default clippy allows used in CI.
+[lints]
+workspace = true
+
 [features]
-# Cross-crate test seams (minimal_api helpers, pager-render probes).
-test-support = ["xai-grok-pager-render/test-support"]
 default = ["jemalloc", "sandbox-enforce"]
 default-bazel = [
     "jemalloc",
     "sandbox-enforce",
     "test-support",
-    ]
+]
 # No-op on this crate: the actual `#[global_allocator]` (and the
 # `tikv-jemallocator` dep) live on the composition-root binary
 # `xai-grok-pager-bin`, which owns `main.rs`. Kept as an empty feature so the
@@ -285,4 +295,7 @@ default-bazel = [
 jemalloc = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 release-dist = []
-
+# Cross-crate test seams (minimal_api helpers, pager-render probes) plus
+# test-only view-model constructors/setters for sibling crates' tests
+# (e.g. xai-grok-pager-minimal). Never enabled in production builds.
+test-support = ["xai-grok-pager-render/test-support"]

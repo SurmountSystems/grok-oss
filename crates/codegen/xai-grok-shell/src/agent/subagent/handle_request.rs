@@ -16,7 +16,7 @@ use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
 use crate::upload::trace::{
     GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_config, upload_metadata, upload_session_state,
+    local_sandbox_telemetry, upload_metadata, upload_session_state,
     upload_subagent_metadata, upload_turn_result,
 };
 use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
@@ -25,6 +25,35 @@ use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
 use super::*;
+/// Remove the task tool (and orphaned background-task actions) from a child
+/// toolset at or beyond `MAX_SUBAGENT_DEPTH`. Returns whether the task tool
+/// was removed.
+pub(super) fn strip_task_tools_at_max_depth(
+    tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+    child_depth: u32,
+) -> bool {
+    use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+    use xai_grok_tools::types::tool::ToolKind;
+    if child_depth < MAX_SUBAGENT_DEPTH {
+        return false;
+    }
+    let before = tool_config.tools.len();
+    tool_config.tools.retain(|tc| tc.kind != Some(ToolKind::Task));
+    let stripped = tool_config.tools.len() < before;
+    prune_orphaned_background_task_tools(tool_config);
+    stripped
+}
+pub(super) fn canonical_total_tokens(totals: &xai_chat_state::UsageTotals) -> u64 {
+    totals.total_tokens()
+}
+pub(super) fn usage_is_incomplete(
+    ledger_incomplete: bool,
+    cancellation_may_hide_usage: bool,
+    _known_total_tokens: u64,
+    _has_usage_entries: bool,
+) -> bool {
+    ledger_incomplete || cancellation_may_hide_usage
+}
 pub(super) fn task_model_override_error(
     requested: Option<&str>,
     provenance: ModelOverrideProvenance,
@@ -63,10 +92,15 @@ pub(crate) async fn handle_subagent_request(
     gateway: &GatewaySender,
 ) {
     let start = std::time::Instant::now();
-    let mut parent_wait_guard = (!request.run_in_background)
+    let mut parent_wait_guard = subagent_blocks_parent_turn(&request)
         .then(|| crate::tools::tool_context::BlockingWaitGuard::enter(
             ctx.parent_blocking_wait_depth.clone(),
         ));
+    if request.owner.is_workflow() && request.cancel_token.is_cancelled() {
+        parent_wait_guard.take();
+        send_pre_spawn_cancelled(request, "Subagent was cancelled");
+        return;
+    }
     let Some(mut definition) = resolve_agent_definition(&request.subagent_type, &ctx)
     else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
@@ -94,7 +128,7 @@ pub(crate) async fn handle_subagent_request(
     }
     let run_in_background = request.run_in_background
         || definition.background.unwrap_or(false);
-    let cancel_token = CancellationToken::new();
+    let cancel_token = request.cancel_token.clone();
     coordinator
         .borrow_mut()
         .insert_pending(PendingSubagent {
@@ -104,6 +138,7 @@ pub(crate) async fn handle_subagent_request(
             persona: request.runtime_overrides.persona.clone(),
             parent_prompt_id: request.parent_prompt_id.clone(),
             parent_session_id: ctx.parent_session_id.clone(),
+            owner: request.owner.clone(),
             started_at: start,
             run_in_background,
             surface_completion: request.surface_completion,
@@ -393,6 +428,10 @@ pub(crate) async fn handle_subagent_request(
             "Resolved runtime overrides for subagent"
         );
     }
+    effective_runtime.capability_mode = xai_grok_subagent_resolution::intersect_capability_modes(
+        effective_runtime.capability_mode,
+        definition.capability_mode,
+    );
     if let Some(mode) = effective_runtime.capability_mode {
         mode.filter_tool_config(&mut definition.tool_config);
         tracing::info!(
@@ -401,21 +440,26 @@ pub(crate) async fn handle_subagent_request(
             "Applied capability mode filter to agent tool config"
         );
     }
-    {
-        use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
-        use xai_grok_tools::types::tool::ToolKind;
-        let child_depth = ctx.parent_depth + 1;
-        if child_depth >= MAX_SUBAGENT_DEPTH {
-            let before = definition.tool_config.tools.len();
-            definition.tool_config.tools.retain(|tc| tc.kind != Some(ToolKind::Task));
-            if definition.tool_config.tools.len() < before {
-                tracing::info!(
-                    subagent_id = % request.id, child_depth, max_depth =
-                    MAX_SUBAGENT_DEPTH, "Stripped task tool from child at max depth"
-                );
-            }
-            prune_orphaned_background_task_tools(&mut definition.tool_config);
-        }
+    let child_depth = request
+        .runtime_overrides
+        .spawn_depth
+        .unwrap_or(ctx.parent_depth + 1);
+    if strip_task_tools_at_max_depth(&mut definition.tool_config, child_depth) {
+        tracing::info!(
+            subagent_id = % request.id, child_depth,
+            "Stripped task tool from child at max depth"
+        );
+    }
+    if request.owner.is_workflow() {
+        definition
+            .tool_config
+            .tools
+            .retain(|tool| {
+                !matches!(
+                    tool.id.rsplit(':').next(), Some("scheduler_create" |
+                    "scheduler_list" | "scheduler_delete")
+                )
+            });
     }
     if request.fork_context {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
@@ -544,9 +588,7 @@ pub(crate) async fn handle_subagent_request(
         forked_conversation,
         inherited_prefix_len.unwrap_or(0),
     );
-    if !crate::session::is_cursor_user_template(&definition.user_message_template)
-        && context_source != InitialContextSource::Resumed
-        && !verbatim_mirror_fork
+    if context_source != InitialContextSource::Resumed && !verbatim_mirror_fork
         && let Some(ref pi) = effective_runtime.persona_instructions
     {
         let reminder = xai_grok_sampling_types::conversation::ConversationItem::system_reminder(
@@ -626,7 +668,7 @@ pub(crate) async fn handle_subagent_request(
             .capability_mode
             .as_ref()
             .map(|m| format!("{m:?}")),
-        depth: ctx.parent_depth + 1,
+        depth: child_depth,
     };
     emit_subagent_notification(
         gateway,
@@ -651,6 +693,7 @@ pub(crate) async fn handle_subagent_request(
             role: effective_runtime.role_name.clone(),
             model: Some(effective_model_id.0.to_string()),
             resumed_from: request.resume_from.clone(),
+            workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
         },
         ctx.parent_cmd_tx.as_ref(),
     );
@@ -749,8 +792,14 @@ pub(crate) async fn handle_subagent_request(
         )
         .with_hunk_tracking_enabled(ctx.hunk_tracking_enabled);
     tool_ctx.subagent_event_tx = Some(ctx.subagent_event_tx.clone());
+    let task_output_budget = request
+        .runtime_overrides
+        .output_token_budget
+        .map(crate::tools::tool_context::TaskOutputTokenBudget::limited);
+    tool_ctx.task_output_token_budget = task_output_budget.clone();
+    tool_ctx.sampler_retry_only_before_output = task_output_budget.is_some();
     tool_ctx.monitor_event_buffer = Some(MonitorEventBuffer::default());
-    tool_ctx.subagent_depth = ctx.parent_depth + 1;
+    tool_ctx.subagent_depth = child_depth;
     tool_ctx.lsp = ctx.lsp.clone();
     let parent_traceparent = xai_file_utils::trace_context::current_traceparent();
     let tracker_child_cwd = child_session_info.cwd.clone();
@@ -850,7 +899,7 @@ pub(crate) async fn handle_subagent_request(
                     memory_dir.display()
                 );
                 definition.prompt_body = Some(
-                    definition.prompt_body.unwrap_or_default() + &injection,
+                    definition.prompt_body.unwrap_or_default() + injection.as_str(),
                 );
             }
         }
@@ -1042,7 +1091,7 @@ pub(crate) async fn handle_subagent_request(
             agent_name: Some(definition.name.clone()),
             reasoning_effort: Some(effective_sampling_config.reasoning_effort),
         });
-    let forked_tool_override = if verbatim_mirror_fork {
+    let forked_tool_override = if verbatim_mirror_fork && !request.owner.is_workflow() {
         ctx.parent_tool_snapshot.clone()
     } else {
         None
@@ -1086,6 +1135,7 @@ pub(crate) async fn handle_subagent_request(
             xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
             xai_chat_state::CompactionMode::Summary,
             ctx.resolve_compaction_verbatim_input(),
+            ctx.resolve_compaction_tool_choice(),
             false,
             None,
             None,
@@ -1116,6 +1166,7 @@ pub(crate) async fn handle_subagent_request(
             None,
             None,
             None,
+            Vec::new(),
             None,
             if verbatim_mirror_fork {
                 None
@@ -1156,12 +1207,13 @@ pub(crate) async fn handle_subagent_request(
             ctx.app_builder_deployer_config.clone(),
             ctx.write_file_enabled,
             ctx.goal_enabled,
+            ctx.background_workflows_enabled,
             true,
             ctx.ask_user_question_enabled,
             ctx.client_hooks.clone(),
             None,
             std::collections::HashMap::new(),
-            ctx.persona_io_summaries.clone(),
+            Vec::new(),
             xai_grok_agent::prompt::context::PromptAudience::Subagent,
             effective_runtime.role_prompt.clone(),
             None,
@@ -1184,7 +1236,11 @@ pub(crate) async fn handle_subagent_request(
             std::mem::take(&mut ctx.remote_settings),
             std::mem::take(&mut ctx.laziness_debug_log),
             ctx.parent_terminal_backend.clone(),
-            ctx.parent_scheduler_handle.clone(),
+            if request.owner.is_workflow() {
+                None
+            } else {
+                ctx.parent_scheduler_handle.clone()
+            },
             subagent_max_turns,
             forked_tool_override,
         )
@@ -1237,6 +1293,7 @@ pub(crate) async fn handle_subagent_request(
             subagent_id: request.id.clone(),
             parent_session_id: ctx.parent_session_id.clone(),
             parent_prompt_id: request.parent_prompt_id.clone(),
+            owner: request.owner.clone(),
             child_session_id: child_session_id.clone(),
             subagent_type: request.subagent_type.clone(),
             persona: effective_runtime.persona.clone(),
@@ -1251,6 +1308,7 @@ pub(crate) async fn handle_subagent_request(
             effective_model_id: tracker_model_id,
             run_in_background,
             surface_completion: request.surface_completion,
+            completion_output_cap: request.runtime_overrides.completion_output_cap,
             color: tracker_color,
             block_waited: false,
             explicitly_killed: false,
@@ -1307,8 +1365,9 @@ pub(crate) async fn handle_subagent_request(
             screen_mode: None,
             verbatim: true,
             traceparent: xai_file_utils::trace_context::current_traceparent(),
-            json_schema: None,
+            json_schema: request.runtime_overrides.output_schema.clone(),
             send_now: false,
+            admission: None,
             respond_to: prompt_tx,
             persist_ack: None,
             parsed_prompt_tx: None,
@@ -1337,10 +1396,16 @@ pub(crate) async fn handle_subagent_request(
                         None => std::future::pending::<()>().await,
                     }
                 };
+                let budget = async {
+                    if request.await_to_completion {
+                        std::future::pending::<()>().await
+                    } else {
+                        tokio::time::sleep(subagent_await_budget()).await
+                    }
+                };
                 tokio::select! {
                     biased; outcome = & mut fut => ForegroundWait::Done(outcome), _ =
-                    parent_await_dropped => ForegroundWait::ParentGone, _ =
-                    tokio::time::sleep(subagent_await_budget()) =>
+                    parent_await_dropped => ForegroundWait::ParentGone, _ = budget =>
                     ForegroundWait::Budget,
                 }
             };
@@ -1353,13 +1418,22 @@ pub(crate) async fn handle_subagent_request(
                 }
                 ForegroundWait::ParentGone => {
                     parent_wait_guard.take();
-                    tracing::info!(
-                        subagent_id = % request.id,
-                        "foreground subagent await abandoned by its parent turn; detaching child to background (child keeps running)",
-                    );
-                    if !cancel_token.is_cancelled() {
-                        request.run_in_background = true;
-                        coordinator.borrow_mut().mark_backgrounded(&request.id);
+                    if request.owner.is_workflow() {
+                        tracing::info!(
+                            subagent_id = % request.id, workflow_run_id = ? request.owner
+                            .workflow_run_id(),
+                            "workflow subagent result receiver dropped; cancelling child",
+                        );
+                        cancel_token.cancel();
+                    } else {
+                        tracing::info!(
+                            subagent_id = % request.id,
+                            "foreground subagent await abandoned by its parent turn; detaching child to background (child keeps running)",
+                        );
+                        if !cancel_token.is_cancelled() {
+                            request.run_in_background = true;
+                            coordinator.borrow_mut().mark_backgrounded(&request.id);
+                        }
                     }
                     fut.await
                 }
@@ -1390,9 +1464,11 @@ pub(crate) async fn handle_subagent_request(
     };
     let duration_ms = start.elapsed().as_millis() as u64;
     let mut turn_token_totals: Option<(u64, u64, u64)> = None;
+    let mut cancellation_may_hide_usage = false;
     let mut result = match wait_outcome {
         SubagentWaitOutcome::Cancelled => {
             let (tool_calls, turns) = signals_snapshot_counts(&child_handle).await;
+            cancellation_may_hide_usage = turns > 0 || tool_calls > 0;
             SubagentResult {
                 success: false,
                 cancelled: true,
@@ -1446,6 +1522,7 @@ pub(crate) async fn handle_subagent_request(
                         },
                     ),
                 ) => {
+                    cancellation_may_hide_usage = true;
                     let reason = cancellation_error_message(category, context.as_ref());
                     SubagentResult {
                         success: false,
@@ -1468,6 +1545,9 @@ pub(crate) async fn handle_subagent_request(
                         turns,
                         duration_ms,
                         tokens_used: result_tokens,
+                        output_tokens_used: 0,
+                        output_usage_incomplete: true,
+                        total_tokens_used: 0,
                         worktree_path: worktree_path
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
@@ -1505,32 +1585,76 @@ pub(crate) async fn handle_subagent_request(
                         turns,
                         duration_ms,
                         tokens_used: result_tokens,
+                        output_tokens_used: 0,
+                        output_usage_incomplete: true,
+                        total_tokens_used: 0,
                         worktree_path: worktree_path
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
                         backgrounded: false,
                     }
                 }
-                Ok(Ok(_)) => {
-                    SubagentResult {
-                        success: true,
-                        output: if final_text.is_empty() {
-                            std::sync::Arc::from(
-                                format!(
-                                    "Subagent '{}' ({}) completed successfully. {} tool calls, {} turns.",
-                                    request.description, request.subagent_type, tool_calls,
-                                    turns
-                                ),
+                Ok(
+                    Ok(crate::session::commands::PromptTurnOk { structured_output, .. }),
+                ) => {
+                    let wanted_schema = request
+                        .runtime_overrides
+                        .output_schema
+                        .is_some();
+                    let (success, error, output) = match (
+                        wanted_schema,
+                        structured_output,
+                    ) {
+                        (true, Some(Ok(value))) => {
+                            (true, None, std::sync::Arc::from(value.to_string()))
+                        }
+                        (true, Some(Err(e))) => {
+                            (
+                                false,
+                                Some(format!("structured output validation failed: {e}")),
+                                std::sync::Arc::from(final_text),
                             )
-                        } else {
-                            std::sync::Arc::from(final_text)
-                        },
+                        }
+                        (true, None) => {
+                            (
+                                false,
+                                Some(
+                                    "structured output requested but none produced".to_string(),
+                                ),
+                                std::sync::Arc::from(final_text),
+                            )
+                        }
+                        (false, _) => {
+                            (
+                                true,
+                                None,
+                                if final_text.is_empty() {
+                                    std::sync::Arc::from(
+                                        format!(
+                                            "Subagent '{}' ({}) completed successfully. {} tool calls, {} turns.",
+                                            request.description, request.subagent_type, tool_calls,
+                                            turns
+                                        ),
+                                    )
+                                } else {
+                                    std::sync::Arc::from(final_text)
+                                },
+                            )
+                        }
+                    };
+                    SubagentResult {
+                        success,
+                        error,
+                        output,
                         subagent_id: request.id.clone(),
                         child_session_id: child_session_id.0.to_string(),
                         tool_calls,
                         turns,
                         duration_ms,
                         tokens_used: result_tokens,
+                        output_tokens_used: 0,
+                        output_usage_incomplete: true,
+                        total_tokens_used: 0,
                         worktree_path: worktree_path
                             .as_ref()
                             .map(|p| p.to_string_lossy().to_string()),
@@ -1538,6 +1662,7 @@ pub(crate) async fn handle_subagent_request(
                     }
                 }
                 Ok(Err(e)) => {
+                    cancellation_may_hide_usage = was_cancelled;
                     SubagentResult {
                         success: false,
                         cancelled: was_cancelled,
@@ -1560,6 +1685,7 @@ pub(crate) async fn handle_subagent_request(
                     }
                 }
                 Err(_) => {
+                    cancellation_may_hide_usage = was_cancelled;
                     SubagentResult {
                         success: false,
                         cancelled: was_cancelled,
@@ -1709,10 +1835,6 @@ pub(crate) async fn handle_subagent_request(
             sandbox: local_sandbox_telemetry(),
         };
         upload_metadata(&trace_ctx, metadata).await;
-        if let Some(ref agent_config) = ctx.agent_config {
-            upload_config(&trace_ctx, agent_config).await;
-        }
-        crate::upload::config_files::upload_config_files(&trace_ctx).await;
         let resolved_model = child_handle
             .get_model_metadata()
             .await
@@ -1779,14 +1901,42 @@ pub(crate) async fn handle_subagent_request(
     } else {
         0
     };
-    let (subagent_usage_by_model, subagent_usage_incomplete) = match child_handle
-        .chat_state_handle
-        .try_get_session_usage()
-        .await
-    {
-        Ok(u) => (Some(u.by_model.into_iter().collect::<Vec<_>>()), u.incomplete),
-        Err(()) => (None, true),
+    let task_budget_usage = task_output_budget.as_ref().map(|budget| budget.usage());
+    let (
+        subagent_usage_by_model,
+        subagent_usage_incomplete,
+        output_tokens_used,
+        total_tokens_used,
+    ) = match child_handle.chat_state_handle.try_get_session_usage().await {
+        Ok(u) => {
+            let output_tokens = u.totals.output_tokens;
+            let total_tokens = canonical_total_tokens(&u.totals);
+            let has_usage_entries = !u.by_model.is_empty();
+            let usage_incomplete = usage_is_incomplete(
+                u.incomplete,
+                cancellation_may_hide_usage,
+                total_tokens,
+                has_usage_entries,
+            );
+            (
+                Some(u.by_model.into_iter().collect::<Vec<_>>()),
+                usage_incomplete,
+                (!usage_incomplete).then_some(output_tokens),
+                Some(total_tokens),
+            )
+        }
+        Err(()) => (None, true, None, None),
     };
+    result.total_tokens_used = total_tokens_used.unwrap_or(0);
+    if let Some((task_spent, task_incomplete)) = task_budget_usage {
+        result.output_tokens_used = output_tokens_used.unwrap_or(task_spent);
+        result.output_usage_incomplete = task_incomplete || subagent_usage_incomplete
+            || output_tokens_used.is_none();
+    } else {
+        result.output_tokens_used = output_tokens_used.unwrap_or(0);
+        result.output_usage_incomplete = subagent_usage_incomplete
+            || output_tokens_used.is_none();
+    }
     let fold_acked = match subagent_usage_by_model {
         None => false,
         Some(ref by_model) if by_model.is_empty() && !subagent_usage_incomplete => true,
@@ -2010,7 +2160,7 @@ pub(crate) async fn handle_subagent_request(
             &request.id,
             &result,
             &request,
-            &ctx.auto_wake_delivered,
+            &ctx.task_completion_reservations,
             ctx.parent_cmd_tx.as_ref(),
             &ctx.task_output_tool_name,
             &ctx.synthetic_trace_tx,

@@ -92,7 +92,7 @@ impl SessionActor {
                 alpha_test_key: existing.alpha_test_key,
                 client_version: sampling_config.client_version.clone(),
             });
-        self.model_auth_facts.replace(None);
+        self.invalidate_model_auth_memo();
         self.signals_handle()
             .record_model_usage(&sampling_config.model);
         if apply_prompt_override && !skip_prompt_rewrite {
@@ -229,11 +229,26 @@ impl SessionActor {
             }
             bridge
                 .update_resource(
-                    xai_grok_tools::implementations::grok_build::update_goal::GoalUpdateHandle(
-                        self.goal_update_tx.clone(),
+                    xai_grok_tools::implementations::grok_build::workflow::WorkflowLaunchHandle(
+                        self.workflow_launch_tx.clone(),
                     ),
                 )
                 .await;
+            if !self.goal_runs_on_workflow_engine() {
+                bridge
+                    .update_resource(
+                        xai_grok_tools::implementations::grok_build::update_goal::GoalUpdateHandle(
+                            self.goal_update_tx.clone(),
+                        ),
+                    )
+                    .await;
+            }
+            if let Some(reservations) = self.tool_context.task_completion_reservations.clone() {
+                bridge.update_resource(reservations).await;
+            }
+            if let Some(gate) = self.tool_context.task_wake_suppressed.clone() {
+                bridge.update_resource(gate).await;
+            }
             self.inject_deny_read_globs().await;
         }
         {

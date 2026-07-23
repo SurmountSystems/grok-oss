@@ -10,6 +10,138 @@
 - **Zed-compatible credential discovery**: when no local key is set, Grok OSS read-only probes Zed’s `development_credentials` file and Zed’s OS keychain layouts. Grok OSS never writes Zed’s stores.
 
 
+# 0.2.109 — 2026-07-21
+
+## Features
+
+- **/usage** now shows token counts and cost for the current session.
+- **grok doctor fix terminal.ssh-wrap** can install the recommended SSH wrapper alias.
+- **[model_providers.<id>]** lets operators share gateway settings across custom models.
+- **Reasoning effort** now accepts `max` as its own tier (above `xhigh`) when the model advertises it.
+- **Queued follow-ups** can now be batched into a single model turn with the new combine_queued_prompts setting.
+- **/doctor** is now the main slash command for terminal, tmux, clipboard and keyboard diagnostics.
+- **read_file** now returns full Markdown files inside skills/ directories without truncation.
+
+## Bug Fixes
+
+- **Voice dictation** now explains when the microphone delivered only silence (macOS permission) versus no speech detected.
+- **Duplicate 'Worked for' markers** no longer stack in the transcript when background tasks defer during a parked turn.
+- The idle status row now clearly says '1 subagent still running' instead of 'watching · 1 subagent' when background work remains.
+- **Background /loop** iterations no longer overlap when descendant subagents are still running.
+
+
+# 0.2.108 — 2026-07-21
+
+## Features
+
+- **Sessions** can now be resumed after moving the working directory or switching machines.
+- **Ctrl+G** in minimal mode opens the current prompt draft in an external editor without sending it; fullscreen keeps the tasks pane.
+- **grok doctor** now shows standalone terminal, tmux, clipboard, and keyboard diagnostics without starting the TUI.
+
+## Bug Fixes
+
+- **Image paste** over grok wrap now works on headless remotes.
+
+# 0.2.107 — 2026-07-20
+
+## Features
+
+- **Stop hooks** can now keep the agent running by feeding feedback back to the model instead of ending the turn.
+- **Custom models** can now authenticate using rotating tokens fetched from a command, similar to credential helpers.
+- **Feedback** now includes author details when provided, helping with follow-up.
+- **Sessions** can now resume across hosts by mirroring transcripts to external storage like S3.
+- **Sessions** can now be imported and resumed from mirrored state across hosts.
+- **Auto mode** now continues after classifier blocks by telling the agent the reason, escalating only after repeated denials.
+- **Session storage** can now flush after every frame (eager mode) instead of only at turn end.
+
+## Bug Fixes
+
+- **Ctrl+B** now backgrounds running commands; **Ctrl+G** toggles the tasks pane.
+- **OAuth popups** in live preview now redirect correctly after login.
+- **Git status** shown to the model at startup now includes unstaged and untracked files.
+- **Tool descriptions** now stay correct when parameter names are randomized.
+- **Minimal mode** now shows full reasoning in scrollback and collapses successful lookup results to one-line headers.
+- **Empty commands** like `true` or bare `echo` now remind the model to stop and wait for background work instead of spinning.
+
+## Performance
+
+- **Recap summaries** after idle now load much faster by reusing the previous turn's cached context.
+
+
+# 0.2.106 — 2026-07-18
+
+## Features
+
+- **Added GROK_CLIPBOARD_NO_OSC52** env var to stop clipboard sequences from appearing as garbage in unsupported terminals.
+- **Scheduled tasks** can now be updated in place; one-time tasks are retired in favor of background commands.
+
+## Bug Fixes
+
+- **Copies** now always write a backup file so text remains recoverable when the terminal clipboard fails.
+- **Syntax highlighting** in --minimal mode is now visible on light terminals.
+
+
+# 0.2.105 — 2026-07-18
+
+## Features
+
+- **/btw** now works inside `grok --minimal`, showing answers in the live area and committing them to scrollback on Esc.
+- **New Appearance setting** "Snap prompt to top on send" lets you keep the viewport where it is instead of jumping to the new prompt.
+- **Default model** is now Grok 4.5 with high/medium/low reasoning effort and improved compaction settings.
+- **New `/summarize` slash command** is now available as an alias for `/recap` to request an on-demand session summary.
+
+## Bug Fixes
+
+- **Local shell tools** now see the same environment variables, aliases, and functions as your login shell.
+- **Syntax highlighting** in diffs and the file viewer no longer miscolors strings or comments that span multiple lines.
+- **Global rules** from ~/.grok/rules and compatible vendor homes are now discovered correctly.
+- **Background tasks** that finish after you press Ctrl+C no longer automatically resume the model.
+- **Ctrl+\** out of the dashboard now returns you to the agent you came from.
+- **MCP OAuth logins** now succeed against servers that require the RFC 9207 issuer parameter in the callback.
+- **Agent dashboard** now shows fleet roster entries even when the local agent list is empty.
+- **Long-session compaction** no longer fails on servers that reject tool_choice none when tools are attached.
+
+## Performance
+
+- **Scrolling** feels smoother and less jagged under load or over slow connections.
+
+
+# 0.2.104 — 2026-07-17
+
+## Features
+
+- **Background work counts** now appear in a persistent status line instead of repeated transcript messages.
+
+## Bug Fixes
+
+- **Fixed authentication recovery** for idle sessions after token timeouts.
+- **Retry failed** messages no longer contain raw HTML error pages.
+- **Rate limit messages** now show the server detail without the wire prefix.
+- **In-place prompt editing** is temporarily disabled due to scroll behavior issues.
+
+
+# 0.2.103 — 2026-07-17
+
+## Features
+
+- **New require_sha option** prevents remote plugins from tracking mutable branches or tags.
+- **Local sessions now inherit full rc environment, cwd, and exports** across tool calls (configurable).
+- **MCP servers** from plugins can now require setup choices such as a regional site before connecting.
+- Quitting a fullscreen session now shows the session title and last exchange above the resume command.
+- **SSH sessions** now show a one-time tip recommending `grok wrap ssh <host>` for clipboard and terminal restore.
+
+## Bug Fixes
+
+- **Fixed GitHub PR status detection** when the gh CLI inherits forcing color environment variables.
+- **Fixed a race** where an early cancel could permanently wedge a session's turn slot.
+- **grok** and the agent binary now stay in sync even when no update is installed.
+- **Copying** a multiline queued prompt now copies the complete text instead of a collapsed summary.
+- **grok wrap** now restores the terminal after SSH disconnects or other abrupt child exits.
+- **Voice speech-to-text** now works with per-model API keys in config.toml without requiring `grok login`.
+- **Copy over SSH** or in containers now shows clearer feedback when delivery cannot be confirmed.
+- **Local Bash sessions** no longer keep a persistent shell across calls, avoiding failures after directory deletion.
+
+
 # 0.2.102 — 2026-07-16
 
 ## Breaking Changes

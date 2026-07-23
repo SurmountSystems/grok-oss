@@ -883,8 +883,7 @@ impl AgentView {
         now: Instant,
         idx: usize,
         header_row_click: bool,
-    ) -> (Option<(Instant, usize, u8)>, bool, bool) {
-        // (last_click, show_word_select_tip, open_block_viewer)
+    ) -> (Option<(Instant, usize, u8)>, bool) {
         let click_count = if let Some((last_time, last_idx, prev_count)) = self.last_click
             && last_idx == idx
             && now.duration_since(last_time).as_millis() < MULTI_CLICK_TIMEOUT_MS
@@ -894,21 +893,13 @@ impl AgentView {
             1
         };
 
-        // Capture before set_selected — a later single-click on the same row
-        // (after the multi-click window) should open the block viewer (parity
-        // with Enter:open). Require a prior click on this idx via last_click so
-        // follow-mode auto-selection does not make the first click open.
-        let already_selected = self.scrollback.selected() == Some(idx);
-        let prior_click_same_row = self
-            .last_click
-            .is_some_and(|(_, last_idx, _)| last_idx == idx);
-
         let entry_block = self.scrollback.entry(idx).map(|e| &e.block);
         let is_bg_task = entry_block
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::BgTask(_)));
         let is_subagent = entry_block
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Subagent(_)));
-        let supports_fullscreen = entry_block.is_some_and(|b| b.supports_fullscreen());
+        let is_workflow = entry_block
+            .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Workflow(_)));
 
         // Word-select tip probe (see WORD_SELECT_REPEAT_WINDOW): assistant
         // messages only — headers / prompts / tool rows are fold-nav surfaces
@@ -935,10 +926,10 @@ impl AgentView {
         if header_row_click {
             if click_count == 2 {
                 self.scrollback.collapse_group_if_expanded();
-                return (None, show_word_select_tip, false);
+                return (None, show_word_select_tip);
             }
             if click_count >= 3 {
-                return (None, false, false);
+                return (None, false);
             }
         }
 
@@ -949,10 +940,10 @@ impl AgentView {
         if is_group_header {
             if click_count == 2 {
                 self.scrollback.toggle_group_expansion();
-                return (None, show_word_select_tip, false);
+                return (None, show_word_select_tip);
             }
             if click_count >= 3 {
-                return (None, false, false);
+                return (None, false);
             }
         }
 
@@ -974,22 +965,9 @@ impl AgentView {
 
         // Double-click on bg-task / subagent blocks (matched above) opens a
         // viewer instead of folding.
-        // Single-click on an already-selected openable block opens the viewer
-        // (same as Enter:open) only after a prior click on this row — so the
-        // first click (or follow-mode auto-select) only selects.
-        let mut open_block_viewer = false;
         match click_count {
             1 if is_plan_tool => {
                 self.show_plan_preview();
-            }
-            1 if already_selected
-                && prior_click_same_row
-                && supports_fullscreen
-                && !is_group_header
-                && !header_row_click
-                && !is_plan_tool =>
-            {
-                open_block_viewer = true;
             }
             2 if is_bg_task => {
                 // Double-click bg task: open block viewer (same as Enter).
@@ -1021,9 +999,23 @@ impl AgentView {
                     }
                 }
             }
+            2 if is_workflow => {
+                if let Some(entry) = self.scrollback.entry(idx)
+                    && let crate::scrollback::block::RenderBlock::Workflow(ref wf) = entry.block
+                {
+                    let run_id = wf.run_id.clone();
+                    self.open_workflow_detail_by_run_id(&run_id);
+                }
+            }
             2 if is_prompt => {
                 // Edit in place; bash/cron keep the old fold behavior.
-                if !self.enter_inline_edit(idx) {
+                //
+                // Gated OFF for now (unsolved scroll jump on enter — see
+                // inline_edit::INLINE_EDIT_ENABLED). When disabled this is a
+                // no-op, so the block below runs and restores the EXACT
+                // pre-feature double-click behavior for a prompt: fold (if
+                // foldable) + scroll the entry to the top.
+                if !(crate::app::inline_edit::INLINE_EDIT_ENABLED && self.enter_inline_edit(idx)) {
                     if foldable {
                         self.scrollback.toggle_fold_selected();
                     }
@@ -1049,7 +1041,7 @@ impl AgentView {
         } else {
             Some((now, idx, click_count))
         };
-        (last_click, show_word_select_tip, open_block_viewer)
+        (last_click, show_word_select_tip)
     }
 
     /// Return the correct selection model for a hit, accounting for the
@@ -1633,73 +1625,62 @@ mod tests {
     /// `idx`, threading `last_click` the way the mouse caller does. Returns
     /// the tip flag of the second click.
     fn double_click_gesture(agent: &mut AgentView, t: Instant, idx: usize) -> bool {
-        let (last, tip1, _open1) = agent.handle_scrollback_click(t, idx, false);
+        let (last, tip1) = agent.handle_scrollback_click(t, idx, false);
         assert!(!tip1, "a single click must never tip");
-        // open1 may be true when the row was already selected (Enter:open parity);
-        // that is fine — double-click counting still proceeds via last_click.
         agent.last_click = last;
-        let (last, tip2, _open2) =
+        let (last, tip2) =
             agent.handle_scrollback_click(t + Duration::from_millis(100), idx, false);
         agent.last_click = last;
         tip2
     }
 
-    /// Clicking an already-selected tool row should request OpenBlockViewer
-    /// (parity with the footer Enter:open hint). First click only selects.
     #[test]
-    fn click_already_selected_tool_requests_open_viewer() {
+    fn workflow_double_click_opens_matching_run_id_and_closes_goal_detail() {
+        use crate::scrollback::blocks::WorkflowBlock;
+        use crate::views::workflows::WorkflowRunSnapshot;
+
+        let run = |run_id: &str| WorkflowRunSnapshot {
+            run_id: run_id.to_owned(),
+            name: "same-display-name".to_owned(),
+            objective: "objective".to_owned(),
+            status: "active".to_owned(),
+            management_available: true,
+            builtin: false,
+            phases: Vec::new(),
+            current_phase: None,
+            agents: Vec::new(),
+            agent_budget: None,
+            agents_used: 0,
+            agents_reserved: 0,
+            agents_remaining: None,
+            agent_usage_incomplete: false,
+            active_agents: 0,
+            elapsed_ms: 0,
+            received_at: Instant::now(),
+            pause_message: None,
+            result_summary: None,
+        };
         let mut agent = make_agent();
-        // Execute blocks support fullscreen (Enter:open); generic tool_call is Other.
+        agent.workflow_runs = vec![run("wf_other"), run("wf_target")];
+        agent.show_goal_detail = true;
         agent
             .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::execute(
-                "wait for SCORE then run status/parity",
+            .push_block(crate::scrollback::block::RenderBlock::Workflow(
+                WorkflowBlock::started("wf_target", "same-display-name", "objective"),
             ));
-        agent.scrollback.prepare_layout(80, 40);
-        assert!(
-            agent
-                .scrollback
-                .entry(0)
-                .unwrap()
-                .block
-                .supports_fullscreen(),
-            "fixture must be openable"
+
+        assert!(!double_click_gesture(&mut agent, Instant::now(), 0));
+
+        assert!(agent.show_workflows);
+        assert!(!agent.show_goal_detail);
+        assert_eq!(
+            agent.workflows_view.selected_run_id.as_deref(),
+            Some("wf_target")
         );
-        // Ensure first click is a select, not an open (push may auto-select).
-        agent.scrollback.set_selected(None);
-        let t = Instant::now();
-
-        let (last, tip, open) = agent.handle_scrollback_click(t, 0, false);
-        assert_eq!(agent.scrollback.selected(), Some(0));
-        assert!(!tip);
-        assert!(!open, "first click selects only");
-        agent.last_click = last;
-
-        // After multi-click window, second click is a new gesture on the
-        // already-selected row → open.
-        let t2 = t + Duration::from_millis(MULTI_CLICK_TIMEOUT_MS as u64 + 50);
-        let (_last, tip2, open2) = agent.handle_scrollback_click(t2, 0, false);
-        assert!(!tip2);
-        assert!(
-            open2,
-            "click on already-selected openable row must open viewer"
+        assert_eq!(
+            agent.workflows_view.detail_run_id.as_deref(),
+            Some("wf_target")
         );
-    }
-
-    #[test]
-    fn first_click_on_unselected_tool_does_not_open() {
-        let mut agent = make_agent();
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::execute("cmd a"));
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::execute("cmd b"));
-        agent.scrollback.prepare_layout(80, 40);
-        agent.scrollback.set_selected(Some(0));
-        let (_last, _tip, open) = agent.handle_scrollback_click(Instant::now(), 1, false);
-        assert_eq!(agent.scrollback.selected(), Some(1));
-        assert!(!open, "selecting a different row must not open");
     }
 
     /// The word-select tip needs a REPEATED double-click on assistant text:

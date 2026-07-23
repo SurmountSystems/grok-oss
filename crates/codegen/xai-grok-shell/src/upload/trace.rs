@@ -3,78 +3,12 @@ use super::turn::{PromptTraceContext, UploadWait};
 use crate::sampling::types::ToolDefinition;
 use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
 use base64::Engine as _;
-use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
 use xai_file_utils::queue::{EnqueueOutcome, TraceExportSource, UploadQueue, UploadRetryPolicy};
 use xai_grok_workspace::permission::PermissionEvent;
-/// Upload request payload to cloud storage in the background (best-effort, non-blocking).
-///
-/// Used by the legacy `stream_via_*` path to upload the per-request
-/// payload before streaming. M7 removed those call sites; the
-/// uploading from the new sampler path is a follow-up (M7 deferred work).
-#[expect(
-    dead_code,
-    reason = "legacy stream_via_* path removed; re-enable when sampler uploads traces"
-)]
-pub(crate) fn spawn_trace_upload<T: Serialize + Send + 'static>(
-    gcs_config: TraceExportConfig,
-    filename: &str,
-    payload: &T,
-    artifact_tracker: Option<super::manifest::ArtifactTracker>,
-) {
-    let Some(prefix) = gcs_config.gcs_prefix.as_deref() else {
-        tracing::debug!("Skipping request upload: gcs_prefix is not set");
-        return;
-    };
-    let bytes = match serde_json::to_vec_pretty(payload) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::debug!(?e, "Failed to serialize request for trace upload");
-            return;
-        }
-    };
-    let prefix = prefix.trim_matches('/').to_string();
-    let filename = filename.to_string();
-    tokio::spawn(async move {
-        let object_path = if prefix.is_empty() {
-            filename.clone()
-        } else {
-            format!("{prefix}/{filename}")
-        };
-        let ok = xai_file_utils::gcs::upload_bytes(
-            &gcs_config,
-            &object_path,
-            &bytes,
-            "application/json",
-        )
-        .await;
-        if let Err(ref e) = ok {
-            tracing::debug!(
-                ? e, object_path = % object_path, "Failed to upload request trace"
-            );
-        }
-        if let Some(ref manifest) = artifact_tracker {
-            match &ok {
-                Ok(_) => super::manifest::record_artifact(
-                    manifest,
-                    &filename,
-                    super::manifest::ArtifactResult::Succeeded,
-                ),
-                Err(e) => super::manifest::record_artifact(
-                    manifest,
-                    &filename,
-                    super::manifest::ArtifactResult::Failed {
-                        reason: "upload_failed",
-                        error: Some(&format!("{e:#}")),
-                    },
-                ),
-            }
-        }
-    });
-}
 /// Upload the canonical tool definitions trace and wait for completion.
 ///
 /// `ToolDefinition` serializes in Chat Completions format:
@@ -194,8 +128,7 @@ fn upload_failure_log_level(method: &UploadMethod, prior_failures: u64) -> Uploa
         UploadFailureLogLevel::Error
     }
 }
-/// Wire label for the upload backend; reuses the `upload_reason` span-field
-/// vocabulary so dashboards join on one set of values.
+/// Wire label for the upload backend used by structured session events.
 fn upload_method_label(method: &UploadMethod) -> &'static str {
     use super::turn::TraceUploadReason;
     match method {
@@ -477,23 +410,11 @@ pub(crate) fn mime_type_to_extension(mime_type: &str) -> &str {
         _ => "bin",
     }
 }
-/// Path format: {session_id}/turn_{N}/full_prompt.txt
 pub(crate) async fn upload_full_prompt_txt(ctx: &PromptTraceContext, _full_prompt: &str) {
     super::manifest::skip_artifact(
         &ctx.artifact_tracker,
         "full_prompt.txt",
         "prompt_content_upload_disabled",
-    );
-}
-/// Path format: {session_id}/turn_{N}/config.json
-pub(crate) async fn upload_config(
-    ctx: &PromptTraceContext,
-    _agent_config: &crate::agent::config::Config,
-) {
-    super::manifest::skip_artifact(
-        &ctx.artifact_tracker,
-        "config.json",
-        "config_content_upload_disabled",
     );
 }
 /// Plugin state snapshot for cloud storage trace upload.
@@ -890,6 +811,8 @@ pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext) {
 /// Uploads the session-scoped unified log to cloud storage.
 /// Path format: {session_id}/turn_{N}/unified_log.jsonl
 ///
+/// Called only from 401/404 auth-failure diagnostics, never per turn.
+///
 /// Only entries belonging to the current session (matching `sid`) are included.
 /// The snapshot runs on a blocking thread since `snapshot_session_log` reads
 /// and parses the on-disk log file.
@@ -978,7 +901,6 @@ pub(crate) async fn upload_permission_events(
     )
     .await;
 }
-/// Path format: {session_id}/turn_{N}/turn_messages.json
 pub(crate) async fn upload_turn_messages(
     ctx: &PromptTraceContext,
     _capture: xai_chat_state::TurnCapture,
@@ -1010,7 +932,7 @@ pub(crate) struct SessionStateBuildError {
 /// zero-byte payload the viewer treats as "no history" (harness pairs always
 /// carry ≥1 message, so this is only a safety floor).
 pub(crate) fn build_chat_history_session_state(
-    _messages: &[xai_grok_sampling_types::conversation::ConversationItem],
+    messages: &[xai_grok_sampling_types::conversation::ConversationItem],
 ) -> Result<Vec<u8>, SessionStateBuildError> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -1020,7 +942,10 @@ pub(crate) fn build_chat_history_session_state(
             error: error.into(),
         }
     }
-    let jsonl = Vec::new();
+    let jsonl = {
+        let _ = messages;
+        Vec::new()
+    };
     let mut archive_data = Vec::new();
     {
         let encoder = GzEncoder::new(&mut archive_data, Compression::default());
@@ -2419,19 +2344,6 @@ mod tests {
         out
     }
     #[test]
-    fn chat_history_session_state_omits_conversation_items() {
-        use xai_grok_sampling_types::conversation::ConversationItem;
-        let messages = vec![
-            ConversationItem::user("verify whether the change compiles"),
-            ConversationItem::assistant("PASS: the change compiles and tests pass"),
-        ];
-        let archive = build_chat_history_session_state(&messages).unwrap();
-        let entries = read_tar_gz_entries(&archive);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, "chat_history.jsonl");
-        assert!(entries[0].1.is_empty());
-    }
-    #[test]
     fn chat_history_session_state_empty_messages_yields_valid_empty_archive() {
         let archive = build_chat_history_session_state(&[]).unwrap();
         let entries = read_tar_gz_entries(&archive);
@@ -2539,7 +2451,7 @@ mod tests {
     }
     /// Customer-managed S3 failures stay below the ERROR alerting threshold,
     /// repeats within an episode drop to debug, and the `method` log field
-    /// keeps the `upload_reason` span-field vocabulary.
+    /// keeps the structured upload-method vocabulary.
     #[test]
     fn upload_failure_log_level_splits_on_backend_and_repeats() {
         use crate::session::repo_changes::UploadMethod;

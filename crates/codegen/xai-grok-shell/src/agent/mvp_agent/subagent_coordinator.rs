@@ -25,12 +25,62 @@ impl MvpAgent {
                 while let Some(event) = rx.recv().await {
                     match event {
                         SubagentEvent::Spawn(boxed) => {
-                            let request = *boxed;
+                            let mut request = *boxed;
+                            {
+                                let this = agent_ref.get();
+                                let parent_is_session = this.sessions.borrow().contains_key(
+                                    &acp::SessionId::new(request.parent_session_id.clone()),
+                                );
+                                if !parent_is_session {
+                                    let child_sess = request.parent_session_id.clone();
+                                    let reparent = {
+                                        let coord = this.subagent_coordinator.borrow();
+                                        coord.parent_of_child_session(&child_sess).map(|root| {
+                                            (root, coord.loop_task_id_of_child_session(&child_sess))
+                                        })
+                                    };
+                                    if let Some((root, inherited_loop)) = reparent {
+                                        tracing::info!(
+                                            child_session_id = % child_sess, root_session_id = % root,
+                                            subagent_id = % request.id,
+                                            "Re-parenting child-session spawn to root session"
+                                        );
+                                        request.parent_session_id = root;
+                                        request.surface_completion = false;
+                                        if request.runtime_overrides.loop_task_id.is_none() {
+                                            request.runtime_overrides.loop_task_id = inherited_loop;
+                                        }
+                                    }
+                                }
+                                if let Some(task_id) =
+                                    request.runtime_overrides.loop_task_id.clone()
+                                {
+                                    this.subagent_coordinator
+                                        .borrow_mut()
+                                        .record_loop_owner(&request.id, &task_id);
+                                }
+                            }
                             let agent_ref = agent_ref.clone();
                             tokio::task::spawn_local(async move {
                                 let this = agent_ref.get();
                                 let parent_sid = request.parent_session_id.clone();
-                                let mut ctx = this.build_subagent_spawn_context(&parent_sid);
+                                let Some(mut ctx) =
+                                    this.try_build_subagent_spawn_context(&parent_sid)
+                                else {
+                                    tracing::warn!(
+                                        parent_session_id = % parent_sid, subagent_id = % request
+                                        .id,
+                                        "Spawn for unknown/evicted parent session, failing request"
+                                    );
+                                    this.subagent_coordinator
+                                        .borrow_mut()
+                                        .remove_loop_owner(&request.id);
+                                    crate::agent::subagent::send_failure(
+                                        request,
+                                        "Parent session not found (evicted or torn down); cannot spawn subagent.",
+                                    );
+                                    return;
+                                };
                                 let parent_handle = {
                                     let parent_sid_acp = acp::SessionId::new(parent_sid.clone());
                                     this.sessions.borrow().get(&parent_sid_acp).cloned()
@@ -134,23 +184,57 @@ impl MvpAgent {
                                 }
                             });
                         }
-                        SubagentEvent::Cancel(request) => {
-                            let this = agent_ref.get();
-                            let outcome = {
-                                let mut coord = this.subagent_coordinator.borrow_mut();
-                                match request.target {
-                                    SubagentCancelTarget::SubagentId(ref subagent_id) => {
-                                        coord.mark_explicitly_killed(subagent_id);
-                                        coord.cancel_with_outcome(subagent_id)
+                        SubagentEvent::Cancel(request) => match request.target {
+                            SubagentCancelTarget::WorkflowRunId(run_id) => {
+                                let agent_ref = agent_ref.clone();
+                                tokio::task::spawn_local(async move {
+                                    let notify = {
+                                        let this = agent_ref.get();
+                                        let mut coord = this.subagent_coordinator.borrow_mut();
+                                        coord.cancel_workflow_children(&run_id);
+                                        coord.completion_notify()
+                                    };
+                                    loop {
+                                        let notified = notify.notified();
+                                        let outstanding = {
+                                            let this = agent_ref.get();
+                                            this.subagent_coordinator
+                                                .borrow()
+                                                .outstanding_for_workflow(&run_id)
+                                        };
+                                        if outstanding == 0 {
+                                            let _ = request
+                                                .respond_to
+                                                .send(SubagentCancelOutcome::Cancelled);
+                                            break;
+                                        }
+                                        notified.await;
                                     }
-                                    SubagentCancelTarget::ParentPromptId(ref parent_prompt_id) => {
-                                        coord.cancel_by_parent_prompt_id(parent_prompt_id);
-                                        SubagentCancelOutcome::Cancelled
+                                });
+                            }
+                            target => {
+                                let this = agent_ref.get();
+                                let outcome = {
+                                    let mut coord = this.subagent_coordinator.borrow_mut();
+                                    match target {
+                                        SubagentCancelTarget::SubagentId(ref subagent_id) => {
+                                            coord.mark_explicitly_killed(subagent_id);
+                                            coord.cancel_with_outcome(subagent_id)
+                                        }
+                                        SubagentCancelTarget::ParentPromptId(
+                                            ref parent_prompt_id,
+                                        ) => {
+                                            coord.cancel_by_parent_prompt_id(parent_prompt_id);
+                                            SubagentCancelOutcome::Cancelled
+                                        }
+                                        SubagentCancelTarget::WorkflowRunId(_) => {
+                                            unreachable!("handled above")
+                                        }
                                     }
-                                }
-                            };
-                            let _ = request.respond_to.send(outcome);
-                        }
+                                };
+                                let _ = request.respond_to.send(outcome);
+                            }
+                        },
                         SubagentEvent::ListActive(request) => {
                             let this = agent_ref.get();
                             let summaries = this
@@ -227,6 +311,14 @@ impl MvpAgent {
                                 let _ = request.respond_to.send(outcome);
                             });
                         }
+                        SubagentEvent::LoopUnitActive(request) => {
+                            let this = agent_ref.get();
+                            let active = this
+                                .subagent_coordinator
+                                .borrow()
+                                .loop_unit_active(&request.task_id);
+                            let _ = request.respond_to.send(active);
+                        }
                     }
                 }
             }
@@ -268,28 +360,27 @@ impl MvpAgent {
                 ps.and_then(|h| h.allowed_subagent_types.clone()),
             )
         };
-        let cli_agent_names: Vec<String> = {
+        let (cli_agent_names, subagent_toggle) = {
             let cfg = self.cfg.borrow();
-            cfg.cli_agents.iter().map(|d| d.name.clone()).collect()
+            (
+                cfg.cli_agents.iter().map(|d| d.name.clone()).collect(),
+                cfg.subagent_toggle.clone(),
+            )
         };
         crate::agent::subagent::SubagentValidationContext {
             parent_cwd,
             plugin_registry: self.plugin_registry_handle.snapshot(),
-            subagent_toggle: self.subagent_toggle.clone(),
+            subagent_toggle,
             allowed_subagent_types,
             cli_agent_names,
         }
     }
-    /// Build a `SubagentSpawnContext` from the current agent state and the
-    /// parent session's shared resources.
-    ///
-    /// This is the ONLY subagent-related method on MvpAgent besides the
-    /// coordinator startup.
-    /// Build a spawn context for a real subagent spawn. The parent session is
-    /// guaranteed present here because the parent just issued the spawn request,
-    /// so a missing parent is a real invariant violation and panics. Read-only
-    /// callers that can race a parent teardown (e.g. `DescribeType`) must use
-    /// [`Self::try_build_subagent_spawn_context`] instead.
+    /// Test-only infallible wrapper around
+    /// [`Self::try_build_subagent_spawn_context`]. Production spawn paths use
+    /// the fallible variant and fail the request when the parent session is
+    /// absent (evicted, or a child-session spawn whose re-parent lookup
+    /// missed).
+    #[cfg(test)]
     pub(super) fn build_subagent_spawn_context(
         &self,
         parent_session_id: &str,
@@ -297,10 +388,13 @@ impl MvpAgent {
         self.try_build_subagent_spawn_context(parent_session_id)
             .expect("parent session must exist when spawning subagents")
     }
-    /// Fallible variant of [`Self::build_subagent_spawn_context`]: returns
-    /// `None` when the parent `SessionHandle` is absent (evicted / torn down)
-    /// instead of panicking, so read-only paths that can race a teardown can
-    /// fail open.
+    /// Build a `SubagentSpawnContext` from the current agent state and the
+    /// parent session's shared resources. Returns `None` when the parent
+    /// `SessionHandle` is absent (evicted / torn down) so callers can fail
+    /// the request instead of panicking.
+    ///
+    /// This is the ONLY subagent-related method on MvpAgent besides the
+    /// coordinator startup.
     pub(super) fn try_build_subagent_spawn_context(
         &self,
         parent_session_id: &str,
@@ -432,6 +526,23 @@ impl MvpAgent {
             }
             None => (None, None),
         };
+        let project_trusted = crate::agent::folder_trust::project_scope_allowed(&parent_cwd);
+        let (base_roles, base_personas, subagent_model_overrides, subagent_toggle) = {
+            let cfg = self.cfg.borrow();
+            (
+                cfg.subagent_roles.clone(),
+                cfg.subagent_personas.clone(),
+                cfg.subagent_model_overrides.clone(),
+                cfg.subagent_toggle.clone(),
+            )
+        };
+        let (subagent_roles, subagent_personas) =
+            crate::config::SubagentsConfig::effective_definition_maps(
+                &base_roles,
+                &base_personas,
+                &parent_cwd,
+                project_trusted,
+            );
         Some(crate::agent::subagent::SubagentSpawnContext {
             lsp: parent_lsp,
             gateway: self.gateway.clone(),
@@ -470,6 +581,7 @@ impl MvpAgent {
             app_builder_deployer_config: self.prepare_app_builder_deployer_config(),
             write_file_enabled: self.cfg.borrow().resolve_write_file().value,
             goal_enabled: self.cfg.borrow().resolve_goal().value,
+            background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
             ask_user_question_enabled,
             parent_cmd_tx: parent_cmd_tx.clone(),
             parent_session_info: {
@@ -484,11 +596,10 @@ impl MvpAgent {
             parent_chat_state,
             parent_max_turns,
             available_models,
-            subagent_model_overrides: self.subagent_model_overrides.clone(),
-            subagent_toggle: self.subagent_toggle.clone(),
-            subagent_roles: self.subagent_roles.clone(),
-            subagent_personas: self.subagent_personas.clone(),
-            persona_io_summaries: self.persona_io_summaries.clone(),
+            subagent_model_overrides,
+            subagent_toggle,
+            subagent_roles,
+            subagent_personas,
             disable_web_search: self.cfg.borrow().disable_web_search,
             todo_gate: self.cfg.borrow().todo_gate,
             remote_settings: self.cfg.borrow().remote_settings.clone(),
@@ -549,11 +660,11 @@ impl MvpAgent {
             parent_skills: None,
             parent_skills_config: self.cfg.borrow().skills.clone(),
             parent_compat: self.cfg.borrow().compat_resolved,
-            auto_wake_delivered: {
+            task_completion_reservations: {
                 let sessions = self.sessions.borrow();
                 sessions
                     .get(&parent_sid)
-                    .and_then(|h| h.tool_context.auto_wake_delivered.clone())
+                    .and_then(|h| h.tool_context.task_completion_reservations.clone())
             },
             synthetic_trace_tx: {
                 let sessions = self.sessions.borrow();
@@ -586,7 +697,9 @@ impl MvpAgent {
                 sessions
                     .get(&parent_sid)
                     .map(|h| h.tool_context.blocking_wait_depth.clone())
-                    .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+                    .unwrap_or_else(|| {
+                        std::sync::Arc::new(crate::tools::tool_context::BlockingWaitState::new())
+                    })
             },
             parent_terminal_backend: parent_terminal_backend.clone(),
             parent_notification_handle: parent_notification_handle.clone(),

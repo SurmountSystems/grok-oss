@@ -11,6 +11,7 @@
             text: "hi".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
         let update = XaiSessionUpdate::AutoCompactStarted {
@@ -100,6 +101,7 @@
             text: "retry me".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(2),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
         let retry = RetryState::Retrying {
@@ -155,10 +157,12 @@
         }
     }
 
+    /// Production `RetryState::Exhausted.reason` is `SamplingError::Api`'s
+    /// Display: `API error (status 429 Too Many Requests): …`.
     #[test]
     fn retry_exhausted_rate_limited_surfaces_server_detail() {
-        let reason =
-            "The model is currently at capacity due to high demand. Please try again.".to_string();
+        let body = "The model is currently at capacity due to high demand. Please try again.";
+        let reason = format!("API error (status 429 Too Many Requests): {body}");
         let exhausted = RetryState::Exhausted {
             attempts: 3,
             reason: reason.clone(),
@@ -170,7 +174,8 @@
         apply_retry_state(&exhausted, &mut session, &mut scrollback, false);
         match last_session_event(&scrollback) {
             Some(SessionEvent::RetryFailed { error, .. }) => {
-                assert_eq!(error, reason);
+                assert_eq!(error, body);
+                assert!(!error.contains("API error (status"));
             }
             other => panic!("expected detail RetryFailed, got {other:?}"),
         }
@@ -182,7 +187,8 @@
 
         let rpm = RetryState::Exhausted {
             attempts: 2,
-            reason: "Some resource has been exhausted: You are sending requests too quickly. \
+            reason: "API error (status 429 Too Many Requests): \
+                     Some resource has been exhausted: You are sending requests too quickly. \
                      Please slow down, or upgrade to a Grok subscription for higher limits: \
                      https://grok.com/supergrok"
                 .into(),
@@ -232,6 +238,7 @@
             text: "try me again".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(2),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
 
@@ -269,6 +276,7 @@
             text: "stash me".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(2),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
         apply_retry_state(
@@ -298,6 +306,7 @@
             text: "stash me too".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(3),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
         apply_retry_state(
@@ -326,6 +335,7 @@
             text: "pool blocked".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(5),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
         apply_retry_state(
@@ -352,6 +362,7 @@
             text: "gone".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(4),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
         apply_retry_state(
@@ -427,6 +438,7 @@
             text: "retry after login".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(5),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
         apply_retry_state(

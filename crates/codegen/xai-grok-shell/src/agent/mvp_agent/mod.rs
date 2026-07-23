@@ -84,10 +84,9 @@ use crate::tools::ToolContext;
 use crate::upload::manifest::write_error_manifest;
 use crate::upload::trace::{
     GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata,
-    build_chat_history_session_state, local_sandbox_telemetry, upload_config,
-    upload_full_prompt_txt, upload_harness_session_archive, upload_images,
-    upload_metadata, upload_plugin_state, upload_session_state, upload_turn_messages,
-    upload_turn_result, upload_unified_log,
+    build_chat_history_session_state, local_sandbox_telemetry, upload_full_prompt_txt,
+    upload_harness_session_archive, upload_images, upload_metadata, upload_plugin_state,
+    upload_session_state, upload_turn_messages, upload_turn_result, upload_unified_log,
 };
 use crate::upload::turn::{
     PromptTraceContext, UploadWait, complete_prompt_trace, spawn_upload_task,
@@ -204,6 +203,9 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
     pub persisted_plan_mode: Option<crate::session::plan_mode::PlanModeSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
+    pub persisted_workflow_runs: Vec<
+        crate::session::workflow::store::RestoredWorkflowRun,
+    >,
     pub persisted_announcement_state: Option<
         crate::session::announcement_state::AnnouncementState,
     >,
@@ -342,6 +344,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         persisted_signals: None,
         persisted_plan_mode: None,
         persisted_goal_mode: None,
+        persisted_workflow_runs: Vec::new(),
         persisted_announcement_state: None,
         session_meta,
         managed_mcp_expires_at: None,
@@ -753,7 +756,8 @@ pub struct MvpAgent {
     pub(crate) worktree_type: crate::util::config::WorktreeType,
     /// Restore codebase state on worktree resume (resolved: local config > remote > default false).
     pub(crate) restore_code: bool,
-    /// Local config.toml override for session registry (`[cli] session_registry`).
+    /// Local session-registry override: `GROK_SESSION_REGISTRY` env, else
+    /// `[cli] session_registry`.
     /// `Some(true)` enables, `Some(false)` disables, `None` defers to remote settings.
     session_registry_local: Option<bool>,
     /// Managed MCP configs and gateway tool catalog; lazily fetched.
@@ -794,20 +798,6 @@ pub struct MvpAgent {
     /// notification has `Next` priority. Drained by the session turn loop
     /// (`inject_pending_monitor_events`) into a hidden synthetic user message.
     monitor_event_buffer: xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer,
-    /// Per-subagent model ID overrides from config.toml `[subagents.models]`.
-    /// Populated from `SubagentsConfig.models` during `with_models()`.
-    subagent_model_overrides: std::collections::HashMap<String, String>,
-    /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
-    /// Populated from `SubagentsConfig.toggle` during `with_models()`.
-    subagent_toggle: std::collections::HashMap<String, bool>,
-    subagent_roles: std::collections::HashMap<
-        String,
-        xai_grok_subagent_resolution::config::SubagentRole,
-    >,
-    subagent_personas: std::collections::HashMap<
-        String,
-        xai_grok_subagent_resolution::config::SubagentPersona,
-    >,
     /// The process launch directory, captured once at construction so the
     /// deferred launch-dir init paths share one source of truth instead of each
     /// re-calling `std::env::current_dir()` (which could drift if the process
@@ -827,7 +817,6 @@ pub struct MvpAgent {
     /// the first session-creating call via [`Self::ensure_plugin_registry`];
     /// this flag keeps that to a single discovery walk.
     plugin_registry_initialized: std::cell::Cell<bool>,
-    persona_io_summaries: Vec<String>,
     /// Single-flight guard for the proactive bundle sync background task.
     ///
     /// `maybe_sync_bundle_in_background` is invoked from each post-auth path
@@ -1176,6 +1165,9 @@ fn inject_proxy_headers(
                 .map(String::from)
                 .unwrap_or_else(|| xai_grok_version::VERSION.to_string())
         });
+    headers
+        .entry("x-grok-client-identifier".to_string())
+        .or_insert_with(crate::http::process_client_identifier);
     if crate::util::is_cli_chat_proxy_url(base_url) {
         headers
             .entry("X-XAI-Token-Auth".to_string())
@@ -1264,6 +1256,7 @@ mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;
+pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
 /// Emit the `auth.lifecycle` login span with optional user id and error
 /// category. Named `auth.lifecycle` (not `auth`) to avoid colliding with the
@@ -1824,6 +1817,7 @@ impl MvpAgent {
                 ),
             );
             if let Some(settings) = unblocked.settings {
+                let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
                 {
                     let mut cfg = self.cfg.borrow_mut();
                     cfg.remote_settings = Some(settings);
@@ -1834,6 +1828,9 @@ impl MvpAgent {
                 self.sync_collection_config_gate();
                 self.emit_announcements(AnnouncementsPushMode::IfChanged);
                 self.reconfigure_heap_profile_monitor();
+                if remote_was_absent {
+                    self.spawn_auto_worktree_gc();
+                }
             }
             if crate::util::config::resolve_remote_fetch_enabled()
                 && !settings_allow_access(self.cfg.borrow().remote_settings.as_ref())
@@ -2046,6 +2043,19 @@ impl MvpAgent {
         self.emit_settings_update_notification();
         self.emit_announcements(AnnouncementsPushMode::IfChanged);
         self.reconfigure_heap_profile_monitor();
+        self.spawn_auto_worktree_gc();
+    }
+    /// Resolve current auto-GC policy and run it on the blocking pool.
+    pub(super) fn spawn_auto_worktree_gc(&self) {
+        let auto_gc_policy = self.cfg.borrow().resolve_worktree_auto_gc();
+        tokio::task::spawn_blocking(move || {
+            let opts = xai_fast_worktree::AutoGcOptions::from_resolved(auto_gc_policy);
+            if let Err(e) = xai_fast_worktree::WorktreeDb::open_default()
+                .and_then(|db| xai_fast_worktree::maybe_auto_gc(&db, &opts))
+            {
+                tracing::warn!(error = % e, "auto worktree gc failed");
+            }
+        });
     }
     /// Fire-and-forget `x.ai/settings/update` from the current remote snapshot.
     pub(super) fn emit_settings_update_notification(&self) {
@@ -2228,16 +2238,7 @@ async fn handle_synthetic_turn_trace(
     use crate::session::SessionCommand;
     use crate::upload::turn::{UploadWait, complete_prompt_trace, spawn_upload_task};
     let turn_started_at = chrono::Utc::now().to_rfc3339();
-    let (
-        info,
-        turn_number,
-        agent_config,
-        user_id,
-        user_email,
-        client_source,
-        client_version,
-        model,
-    ) = {
+    let (info, turn_number, user_id, user_email, client_source, client_version, model) = {
         let this = agent_ref.get();
         let session_info = {
             let sessions = this.sessions.borrow();
@@ -2276,17 +2277,7 @@ async fn handle_synthetic_turn_trace(
                 .map(|h| h.model_id.0.to_string())
                 .unwrap_or_else(|| this.models_manager.current_model_id().0.to_string())
         };
-        let agent_config = this.cfg.borrow().clone();
-        (
-            info,
-            turn_number,
-            agent_config,
-            user_id,
-            user_email,
-            client_source,
-            client_version,
-            model,
-        )
+        (info, turn_number, user_id, user_email, client_source, client_version, model)
     };
     let this = agent_ref.get();
     let trace_context = this.get_trace_context(&info, turn_number).await;
@@ -2334,8 +2325,7 @@ async fn handle_synthetic_turn_trace(
             futures::join!(
                 upload_session_state(& before_ctx, "before", request
                 .before_session_copy_rx, UploadWait::Confirm,), upload_metadata(&
-                before_ctx, metadata), upload_config(& before_ctx, & agent_config), crate
-                ::upload::config_files::upload_config_files(& before_ctx),
+                before_ctx, metadata),
             );
         },
     );

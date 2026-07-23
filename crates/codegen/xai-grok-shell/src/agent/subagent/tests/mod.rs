@@ -1,8 +1,26 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+use super::handle_request::{canonical_total_tokens, usage_is_incomplete};
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
 };
+#[test]
+fn canonical_total_tokens_does_not_double_count_reasoning() {
+    let totals = xai_chat_state::UsageTotals {
+        input_tokens: 100,
+        output_tokens: 40,
+        reasoning_tokens: 25,
+        ..Default::default()
+    };
+    assert_eq!(canonical_total_tokens(& totals), 140);
+}
+#[test]
+fn cancellation_makes_an_otherwise_complete_usage_snapshot_incomplete() {
+    assert!(usage_is_incomplete(false, true, 0, false));
+    assert!(usage_is_incomplete(false, true, 10, false));
+    assert!(! usage_is_incomplete(false, false, 0, false));
+    assert!(usage_is_incomplete(true, false, 0, false));
+}
 /// Invariant: resolving a subagent applies the parent session's
 /// `--tools`/`--disallowed-tools`/`--permission-mode` — driven through
 /// `resolve_agent_definition` so the spawn path can't skip them.
@@ -336,6 +354,7 @@ fn lookup_returns_initializing_for_pending_subagent() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: false,
             surface_completion: true,
@@ -367,6 +386,7 @@ async fn running_gauge_tracks_pending_and_active() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -396,6 +416,7 @@ async fn running_gauge_tracks_pending_and_active() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -414,6 +435,7 @@ async fn running_gauge_tracks_pending_and_active() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -556,7 +578,7 @@ fn should_auto_wake_subagent_suppressed_by_block_waited_or_killed() {
 }
 /// A goal loop active in the parent suppresses the subagent
 /// auto-wake synthetic prompt — the structural sibling of the bash gate.
-/// Skipping the inject here also skips `auto_wake_delivered.insert`, so the
+/// Skipping the inject here also skips its completion reservation, so the
 /// per-tool-call / between-turn surfaces stay free to drain the completion.
 #[test]
 fn should_auto_wake_subagent_suppressed_by_goal_loop() {
@@ -581,13 +603,16 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         runtime_overrides: Default::default(),
         run_in_background: true,
         surface_completion: true,
+        await_to_completion: false,
         fork_context: false,
+        owner: SubagentOwner::Task,
+        cancel_token: CancellationToken::new(),
         result_tx,
     }
 }
 /// Behavior-level: the action half of the subagent auto-wake.
 /// When the gate lets it run, `inject_subagent_completed_prompt` sends the
-/// synthetic `Prompt` to the parent AND marks the id auto-wake-delivered.
+/// synthetic `Prompt` to the parent and reserves its completion ID.
 /// Paired with `should_auto_wake_subagent_suppressed_by_goal_loop`, this
 /// proves the full Gap-1 contract on the subagent surface: goal active →
 /// gate false → this never runs (no prompt, not marked, so surfaces 2/3
@@ -595,7 +620,7 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
 #[test]
 fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
-    let auto_wake = xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds::default();
+    let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
     let request = auto_wake_test_request("sa-1");
     let result = SubagentResult {
         success: true,
@@ -607,7 +632,7 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         "sa-1",
         &result,
         &request,
-        &Some(auto_wake.clone()),
+        &Some(reservations.clone()),
         Some(&cmd_tx),
         "get_command_or_subagent_output",
         &None,
@@ -619,7 +644,36 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         }
         _ => panic!("expected SessionCommand::Prompt"),
     }
-    assert_eq!(auto_wake.snapshot(), vec!["sa-1".to_string()]);
+    assert_eq!(reservations.snapshot(), vec!["sa-1".to_string()]);
+}
+#[test]
+fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    drop(cmd_rx);
+    let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
+    reservations.reserve("sa-closed".into());
+    let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
+    inject_subagent_completed_prompt(
+        "sa-closed",
+        &SubagentResult {
+            success: true,
+            subagent_id: "sa-closed".into(),
+            child_session_id: "sa-closed".into(),
+            ..Default::default()
+        },
+        &auto_wake_test_request("sa-closed"),
+        &Some(reservations.clone()),
+        Some(&cmd_tx),
+        "get_command_or_subagent_output",
+        &Some(trace_tx),
+    );
+    assert!(
+        reservations.contains("sa-closed"),
+        "send failure must release only the reservation acquired by this attempt"
+    );
+    reservations.release("sa-closed");
+    assert!(! reservations.contains("sa-closed"));
+    assert!(trace_rx.try_recv().is_err());
 }
 #[test]
 fn mark_explicitly_killed_sets_flag_on_completed() {
@@ -709,6 +763,7 @@ fn fail_pending(coordinator: &mut SubagentCoordinator, id: &str, surface: bool) 
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: false,
             surface_completion: surface,
@@ -757,6 +812,7 @@ fn remove_pending_clears_entry() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: false,
             surface_completion: true,
@@ -781,6 +837,7 @@ fn move_pending_to_failed_creates_completed_entry() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -819,6 +876,7 @@ fn move_pending_to_failed_fires_completion_notify() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -848,6 +906,7 @@ fn move_pending_to_cancelled_creates_cancelled_entry() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -876,6 +935,7 @@ fn completed_with_output(
     CompletedSubagent {
         subagent_id: id.into(),
         parent_session_id: String::new(),
+        owner: SubagentOwner::Task,
         parent_prompt_id: None,
         child_session_id: String::new(),
         description: "task".into(),
@@ -895,6 +955,7 @@ fn completed_with_output(
         effective_model_id: String::new(),
         block_waited: false,
         explicitly_killed: false,
+        completion_output_cap: None,
         persisted_output_dir,
     }
 }
@@ -1046,6 +1107,7 @@ fn cancel_with_outcome_fires_pending_token() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: false,
             surface_completion: true,
@@ -1105,6 +1167,7 @@ fn cancel_by_parent_prompt_id_fires_matching_pending_token() {
             persona: None,
             parent_prompt_id: Some("prompt-A".to_string()),
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: false,
             surface_completion: true,
@@ -1119,6 +1182,7 @@ fn cancel_by_parent_prompt_id_fires_matching_pending_token() {
             persona: None,
             parent_prompt_id: Some("prompt-B".to_string()),
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: false,
             surface_completion: true,
@@ -1145,6 +1209,7 @@ fn completed_takes_precedence_over_pending_in_lookup() {
             persona: None,
             parent_prompt_id: None,
             parent_session_id: String::new(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: false,
             surface_completion: true,
@@ -1263,6 +1328,7 @@ fn dummy_tracker(
     SubagentTracker {
         subagent_id: subagent_id.into(),
         parent_session_id: parent_session_id.into(),
+        owner: SubagentOwner::Task,
         parent_prompt_id: None,
         child_session_id: acp::SessionId::new(subagent_id),
         subagent_type: subagent_type.into(),
@@ -1280,6 +1346,7 @@ fn dummy_tracker(
         effective_model_id: String::new(),
         run_in_background: false,
         surface_completion: true,
+        completion_output_cap: None,
         color: None,
         block_waited: false,
         explicitly_killed: false,
@@ -1311,6 +1378,26 @@ async fn active_summaries_returns_all_regardless_of_parent() {
     coordinator.insert(dummy_tracker("sub-2", "session-B", "plan", "task 2"));
     let all = coordinator.active_summaries();
     assert_eq!(all.len(), 2);
+}
+/// Spawns issued from inside a child session (loop iterations) re-parent
+/// to the root session via the running tracker's child→parent mapping.
+#[tokio::test]
+async fn parent_of_child_session_maps_to_root() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .insert(
+            dummy_tracker(
+                "iter-child-sess",
+                "root-session",
+                "general-purpose",
+                "loop iteration",
+            ),
+        );
+    assert_eq!(
+        coordinator.parent_of_child_session("iter-child-sess").as_deref(),
+        Some("root-session")
+    );
+    assert_eq!(coordinator.parent_of_child_session("unknown-sess"), None);
 }
 #[tokio::test]
 async fn resolve_running_list_returns_empty_for_empty_seeds() {
@@ -1367,7 +1454,7 @@ fn explicit_override_takes_precedence_over_role() {
     );
     assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
     assert_eq!(
-        resolved.capability_mode, Some(xai_tool_types::SubagentCapabilityMode::All)
+        resolved.capability_mode, Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
     );
 }
 #[test]
@@ -1799,7 +1886,8 @@ fn resume_vs_fork_helper_shapes_differ() {
     assert!(
         ! matches!(resumed.conversation.get(1), Some(ConversationItem::User(u)) if u
         .content.iter().any(| p | matches!(p,
-        xai_grok_sampling_types::conversation::ContentPart::Text { text } if text
+        xai_grok_sampling_types::conversation::ContentPart::Text { text }
+if text
         .contains("<background_context>"))))
     );
 }
@@ -1903,7 +1991,8 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
     assert_eq!(ctx.prefix_len, Some(2));
     assert!(
         ctx.conversation.iter().any(| i | { matches!(i, ConversationItem::User(u) if u
-        .content.iter().any(| p | matches!(p, ContentPart::Text { text } if text
+        .content.iter().any(| p | matches!(p, ContentPart::Text { text }
+if text
         .contains("<background_context>")))) }),
         "summarized fallback must produce a background_context blob"
     );
@@ -2023,7 +2112,10 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         runtime_overrides: Default::default(),
         run_in_background: false,
         surface_completion: false,
+        await_to_completion: false,
         fork_context,
+        owner: SubagentOwner::Task,
+        cancel_token: CancellationToken::new(),
         result_tx,
     }
 }
@@ -2884,6 +2976,7 @@ async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish()
             persona: None,
             parent_prompt_id: None,
             parent_session_id: ctx.parent_session_id.clone(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -2985,6 +3078,7 @@ async fn run_promote_cancel_with_worktree(
             persona: None,
             parent_prompt_id: None,
             parent_session_id: ctx.parent_session_id.clone(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -3100,6 +3194,7 @@ fn record_pre_spawn_failure_populates_completed_and_summary() {
             "bg job".to_string(),
             Some("prompt-1".to_string()),
             "parent-1".to_string(),
+            SubagentOwner::Task,
             "Unknown subagent type: invented",
             true,
         );
@@ -3133,6 +3228,7 @@ fn record_pre_spawn_failure_skips_buffer_when_flag_false() {
             "bg job".to_string(),
             None,
             "parent-1".to_string(),
+            SubagentOwner::Task,
             "Unknown subagent type: invented",
             false,
         );
@@ -3151,6 +3247,7 @@ async fn record_pre_spawn_failure_notifies_waiters() {
             "bg job".to_string(),
             None,
             "parent-1".to_string(),
+            SubagentOwner::Task,
             "error",
             true,
         );
@@ -3171,6 +3268,7 @@ async fn record_pre_spawn_failure_notifies_all_waiters() {
             "bg job".to_string(),
             None,
             "parent-1".to_string(),
+            SubagentOwner::Task,
             "error",
             true,
         );
@@ -3189,6 +3287,7 @@ fn record_pre_spawn_failure_clears_stale_pending_entry() {
             persona: None,
             parent_prompt_id: Some("prompt-X".to_string()),
             parent_session_id: "parent-1".to_string(),
+            owner: SubagentOwner::Task,
             started_at: std::time::Instant::now(),
             run_in_background: true,
             surface_completion: true,
@@ -3203,6 +3302,7 @@ fn record_pre_spawn_failure_clears_stale_pending_entry() {
             "bg job".to_string(),
             Some("prompt-X".to_string()),
             "parent-1".to_string(),
+            SubagentOwner::Task,
             "Unknown subagent type: invented",
             true,
         );
@@ -3254,6 +3354,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
         },
         api_key: None,
         env_key: None,
+        auth_provider: None,
         api_base_url: None,
     }
 }

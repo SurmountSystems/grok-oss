@@ -358,20 +358,13 @@ fn compaction_request_tools(
 /// user message — use [`build_compaction_chat_history`] to construct it. The
 /// split lets callers persist the exact request payload before issuing it.
 ///
-/// Client `tools` are the SAME effective definitions the turn loop attaches
-/// to normal requests. Tool definitions are serialized into the prompt prefix
-/// by every backend, so omitting them would shift the entire prefix and force
-/// a full prefill on the summarizer call — attaching them keeps the request
-/// prefix byte-identical to the turn requests so the engine reuses the
-/// session's KV cache (the whole point of the verbatim input path). Tool
-/// *use* is forbidden via `tool_choice: none` where the backend can express
-/// it (ChatCompletions, Responses); the Messages wire enum has no `none`, so
-/// that path relies on the prompt instruction alone.
-///
-/// Hosted/server-side tools (`web_search`, `x_search`, …) are **not** attached
-/// on the compact path. Responses rejects `tool_choice: 'none'` combined with
-/// server-side tools, and compact must not invoke tools on any backend —
-/// see [`compaction_request_tools`].
+/// `tools` / `hosted_tools` are the SAME effective definitions the turn loop
+/// attaches to normal requests. Tool definitions are serialized into the
+/// prompt prefix by every backend, so omitting them would shift the entire
+/// prefix and force a full prefill on the summarizer call — attaching them
+/// keeps the request prefix byte-identical to the turn requests so the
+/// engine reuses the session's KV cache (the whole point of the verbatim
+/// input path).
 ///
 /// Errors carry a [`CompactFailure`] classification so the caller can
 /// short-circuit retries on deterministic failures (4xx schema violations,
@@ -386,10 +379,17 @@ pub(crate) async fn generate_session_compact(
     sampling_config: &SamplingConfig,
     idle_timeout: std::time::Duration,
     wall_clock_budget_secs: u64,
+    tool_choice: crate::util::config::CompactionToolChoice,
 ) -> Result<CompactOutput, CompactFailure> {
     let num_messages = chat_history.len();
-    let (tools, hosted_tools, responses_tool_choice) =
-        compaction_request_tools(tools, hosted_tools);
+    let wire_tool_choice = match tool_choice {
+        crate::util::config::CompactionToolChoice::Auto => ToolChoice::auto(),
+        crate::util::config::CompactionToolChoice::None => ToolChoice::none(),
+    };
+    let conversation_tool_choice = match tool_choice {
+        crate::util::config::CompactionToolChoice::Auto => ConversationToolChoice::Auto,
+        crate::util::config::CompactionToolChoice::None => ConversationToolChoice::None,
+    };
     let output = match sampling_config.api_backend {
         ApiBackend::ChatCompletions => {
             let chat_messages: Vec<ChatRequestMessage> =
@@ -405,7 +405,7 @@ pub(crate) async fn generate_session_compact(
                             .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
                             .collect(),
                     )
-                    .with_tool_choice(ToolChoice::none());
+                    .with_tool_choice(wire_tool_choice);
             }
             let sid = session_id.to_string();
             message.x_grok_conv_id = Some(sid.clone());
@@ -499,7 +499,7 @@ pub(crate) async fn generate_session_compact(
         ApiBackend::Responses => {
             let request = ConversationRequest {
                 items: chat_history,
-                tool_choice: responses_tool_choice,
+                tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
                 tools,
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
@@ -1333,6 +1333,8 @@ mod compacted_history_shape_tests {
     fn fallback_minimal_history_has_no_tool_results() {
         use xai_chat_state::compaction_utils::validate_compacted_history;
         let state_context = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             recent_messages: vec![],
             last_user_query: Some("fix the bug".to_string()),
             agent_edited_paths: vec!["src/main.rs".to_string()],
@@ -1543,6 +1545,8 @@ mod compacted_history_shape_tests {
     #[test]
     fn fallback_preserves_subagents() {
         let original = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             recent_messages: vec![ConversationItem::assistant("working")],
             last_user_query: Some("fix the bug".to_string()),
             agent_edited_paths: vec!["src/main.rs".to_string()],
@@ -1570,6 +1574,8 @@ mod compacted_history_shape_tests {
             todos: vec![],
         };
         let fallback = CompactionStateContext {
+            cwd_generation: original.cwd_generation,
+            destination_project_instructions: original.destination_project_instructions.clone(),
             recent_messages: vec![],
             last_user_query: original.last_user_query.clone(),
             agent_edited_paths: original.agent_edited_paths.clone(),
@@ -1677,6 +1683,7 @@ mod reasoning_compaction_regression_tests {
             &config,
             std::time::Duration::from_secs(30),
             0,
+            crate::util::config::CompactionToolChoice::Auto,
         )
         .await
         .unwrap_or_else(|_| panic!("compaction must succeed"));
@@ -1766,6 +1773,7 @@ mod reasoning_compaction_regression_tests {
             &config,
             std::time::Duration::from_secs(30),
             0,
+            crate::util::config::CompactionToolChoice::Auto,
         )
         .await;
         let output = result
@@ -1773,12 +1781,8 @@ mod reasoning_compaction_regression_tests {
         assert_eq!(output.content, "<summary>ok</summary>");
         let _ = shutdown_tx.send(());
     }
-    /// The compaction request must carry the turn loop's tool definitions
-    /// (prompt-prefix/KV-cache alignment) with `tool_choice: "none"`, and
-    /// must omit both keys when no tools are passed (Chat Completions rejects a bare
-    /// `tool_choice`).
     #[tokio::test]
-    async fn chat_completions_compaction_attaches_tools_with_tool_choice_none() {
+    async fn chat_completions_compaction_attaches_tools_with_tool_choice_auto() {
         use std::sync::{Arc, Mutex};
         let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let cap = captured.clone();
@@ -1831,6 +1835,7 @@ mod reasoning_compaction_regression_tests {
             &config,
             std::time::Duration::from_secs(30),
             0,
+            crate::util::config::CompactionToolChoice::Auto,
         )
         .await
         .unwrap_or_else(|_| panic!("compaction with tools must succeed"));
@@ -1844,6 +1849,7 @@ mod reasoning_compaction_regression_tests {
             &config,
             std::time::Duration::from_secs(30),
             0,
+            crate::util::config::CompactionToolChoice::Auto,
         )
         .await
         .unwrap_or_else(|_| panic!("compaction without tools must succeed"));
@@ -1852,8 +1858,8 @@ mod reasoning_compaction_regression_tests {
         let with_tools = &bodies[0];
         assert_eq!(
             with_tools["tool_choice"],
-            json!("none"),
-            "tool use must be disabled at decode time"
+            json!("auto"),
+            "default compaction tool_choice is auto"
         );
         let sent_tools = with_tools["tools"]
             .as_array()
@@ -1868,6 +1874,149 @@ mod reasoning_compaction_regression_tests {
         assert!(
             without_tools.get("tool_choice").is_none(),
             "tool_choice without tools is rejected by OpenAI-compat backends"
+        );
+        let _ = shutdown_tx.send(());
+    }
+    fn responses_summary_stream() -> Vec<Event> {
+        vec![
+            Event::default().data(
+                json!({ "type" : "response.created", "sequence_number"
+                : 0, "response" : { "id" : "resp_test", "object" : "response", "created_at" :
+                1234567890, "model" : "test-model", "status" : "in_progress", "output" : [] }
+                })
+                .to_string(),
+            ),
+            Event::default().data(
+                json!({ "type" :
+            "response.output_text.delta", "sequence_number" : 1, "item_id" : "msg_test",
+            "output_index" : 0, "content_index" : 0, "delta" : "<summary>ok</summary>" })
+                .to_string(),
+            ),
+            Event::default().data(
+                json!({ "type" : "response.completed",
+            "sequence_number" : 2, "response" : { "id" : "resp_test", "object" :
+            "response", "created_at" : 1234567890, "model" : "test-model", "status" :
+            "completed", "output" : [] } })
+                .to_string(),
+            ),
+        ]
+    }
+    fn test_config_responses(base_url: &str) -> SamplerConfig {
+        let mut config = test_config(base_url);
+        config.api_backend = ApiBackend::Responses;
+        config
+    }
+    #[tokio::test]
+    async fn responses_compaction_attaches_tools_with_tool_choice_auto() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        responses_summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let config = test_config_responses(&base_url);
+        let chat_history = vec![
+            ConversationItem::system("You are a helpful assistant."),
+            ConversationItem::user("<user_query>\nfix the bug\n</user_query>"),
+            ConversationItem::assistant("I fixed it."),
+            ConversationItem::user("Summarize the conversation so far."),
+        ];
+        let tools = vec![ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("Reads a file".to_string()),
+            parameters: json!({ "type" : "object", "properties" : {} }),
+        }];
+        let hosted = vec![HostedTool::WebSearch {
+            allowed_domains: None,
+        }];
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            chat_history.clone(),
+            tools,
+            hosted,
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::Auto,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("Responses compaction with tools must succeed"));
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            chat_history,
+            vec![],
+            vec![],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::Auto,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("Responses compaction without tools must succeed"));
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "mock must have served both requests");
+        let with_tools = &bodies[0];
+        assert_eq!(
+            with_tools["tool_choice"],
+            json!("auto"),
+            "default Responses compaction tool_choice is auto"
+        );
+        let sent_tools = with_tools["tools"]
+            .as_array()
+            .expect("tools must be attached for prefix-cache alignment");
+        let has_read_file = sent_tools.iter().any(|t| {
+            t.get("name") == Some(&json!("read_file"))
+                || t.pointer("/name") == Some(&json!("read_file"))
+        });
+        assert!(
+            has_read_file,
+            "client function tool must be present: {sent_tools:?}"
+        );
+        assert!(
+            sent_tools
+                .iter()
+                .any(|t| t.get("type") == Some(&json!("web_search"))),
+            "hosted web_search must be present for prefix alignment: {sent_tools:?}"
+        );
+        let without_tools = &bodies[1];
+        assert!(
+            without_tools
+                .get("tools")
+                .map(|t| t.as_array().is_none_or(|a| a.is_empty()))
+                .unwrap_or(true),
+            "no tools when none are passed"
+        );
+        assert!(
+            without_tools.get("tool_choice").is_none(),
+            "tool_choice without tools should be omitted"
         );
         let _ = shutdown_tx.send(());
     }
@@ -1907,6 +2056,7 @@ mod reasoning_compaction_regression_tests {
             &config,
             std::time::Duration::from_millis(150),
             0,
+            crate::util::config::CompactionToolChoice::Auto,
         )
         .await;
         match result {
@@ -1974,6 +2124,7 @@ mod reasoning_compaction_regression_tests {
             &config,
             std::time::Duration::from_millis(150),
             0,
+            crate::util::config::CompactionToolChoice::Auto,
         )
         .await;
         match result {
@@ -2045,6 +2196,7 @@ mod reasoning_compaction_regression_tests {
             &config,
             std::time::Duration::from_millis(150),
             0,
+            crate::util::config::CompactionToolChoice::Auto,
         )
         .await;
         match result {
@@ -2113,6 +2265,7 @@ mod reasoning_compaction_regression_tests {
             &config,
             std::time::Duration::from_millis(150),
             0,
+            crate::util::config::CompactionToolChoice::Auto,
         )
         .await;
         match result {

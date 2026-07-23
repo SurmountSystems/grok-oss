@@ -11,6 +11,38 @@ pub use xai_grok_compaction::{
     GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompactionToolChoice {
+    #[default]
+    Auto,
+    None,
+}
+
+impl std::str::FromStr for CompactionToolChoice {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "none" => Ok(Self::None),
+            _ => Err(()),
+        }
+    }
+}
+
+pub(crate) const ENV_COMPACTION_TOOL_CHOICE: &str = "GROK_COMPACTION_TOOL_CHOICE";
+
+pub fn resolve_compaction_tool_choice_from(
+    env: Option<&str>,
+    config: Option<&str>,
+    remote: Option<&str>,
+) -> CompactionToolChoice {
+    env.and_then(|s| s.parse().ok())
+        .or_else(|| config.and_then(|s| s.parse().ok()))
+        .or_else(|| remote.and_then(|s| s.parse().ok()))
+        .unwrap_or_default()
+}
+
 /// Env-var override for `auto_compact_threshold_percent`. Parsed as `u8`;
 /// out-of-range or unparseable values are ignored.
 pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROK_AUTO_COMPACT_THRESHOLD_PERCENT";

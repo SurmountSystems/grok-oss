@@ -282,7 +282,7 @@ impl AgentView {
             self.prompt_mode = PromptMode::EditingQueued {
                 id,
                 original: text,
-                server_id,
+                server_id: server_id.clone(),
                 kind,
             };
             self.prompt_input_mode = if kind == QueueEntryKind::BashCommand {
@@ -291,6 +291,13 @@ impl AgentView {
                 PromptInputMode::Normal
             };
             self.set_active_pane(AgentPane::Prompt, false);
+            if let (Some(sid), Some(session_id)) = (server_id, self.session.session_id.clone()) {
+                self.pending_effects
+                    .push(crate::app::actions::Effect::QueueHoldEdit {
+                        session_id,
+                        id: sid,
+                    });
+            }
         }
     }
 
@@ -499,6 +506,18 @@ impl AgentView {
         if !matches!(self.prompt_mode, PromptMode::EditingQueued { .. }) {
             return;
         }
+        if let PromptMode::EditingQueued {
+            server_id: Some(sid),
+            ..
+        } = &self.prompt_mode
+            && let Some(session_id) = self.session.session_id.clone()
+        {
+            self.pending_effects
+                .push(crate::app::actions::Effect::QueueReleaseEdit {
+                    session_id,
+                    id: sid.clone(),
+                });
+        }
         let stash = self.stashed_prompt.take().unwrap_or_default();
         self.prompt.restore(stash);
         self.finish_editing_exit();
@@ -537,7 +556,6 @@ mod tests {
     };
     use crate::app::agent_view::{AgentPane, AgentView, PromptMode};
     use crate::app::app_view::InputOutcome;
-    use crate::app::dispatch::maybe_drain_queue;
     use crate::scrollback::block::RenderBlock;
     use crate::views::modal::{ActiveModal, ModalConfirmation};
 
@@ -746,7 +764,11 @@ mod tests {
         let outcome = agent.handle_prompt_key_for_test(&enter_key());
         assert!(matches!(outcome, InputOutcome::Action(Action::DrainQueue)));
 
-        let effects = maybe_drain_queue(&mut agent);
+        let mut app = crate::app::app_view::tests::test_app();
+        let id = agent.session.id;
+        app.agents.insert(id, agent);
+        let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek(&mut app, id);
+        let agent = app.agents.get(&id).unwrap();
         match &agent.scrollback.get(0).unwrap().block {
             RenderBlock::UserPrompt(b) => {
                 assert_eq!(b.text, "great /pr-workflow go");
@@ -984,11 +1006,15 @@ mod tests {
         // Running server turn completed: its shared-queue row is gone, so the
         // local edited row is the next turn (server-owns-next-turn gate clears).
         agent.shared_queue.clear();
-        let effects = maybe_drain_queue(&mut agent);
+        let mut app = crate::app::app_view::tests::test_app();
+        let id = agent.session.id;
+        app.agents.insert(id, agent);
+        let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek(&mut app, id);
         assert!(matches!(
             effects.as_slice(),
             [Effect::SendPromptBlocks { .. }]
         ));
+        let agent = app.agents.get(&id).unwrap();
         let in_flight = agent.session.in_flight_prompt.as_ref().unwrap();
         assert_eq!(in_flight.images.len(), 2);
         assert_eq!(in_flight.chip_elements.len(), 2);
@@ -1149,7 +1175,10 @@ mod tests {
         // early-return) is what leaves the palette alone.
         agent.prompt_mode = editing_lone_local();
         agent.active_modal = Some(ActiveModal::CommandPalette {
-            entries: crate::views::modal::default_palette_entries(agent.sharing_enabled),
+            entries: crate::views::modal::default_palette_entries(
+                agent.sharing_enabled,
+                agent.prompt.slash_controller.screen_mode(),
+            ),
             state: crate::views::picker::PickerState::input_active(),
             window: crate::views::modal_window::ModalWindowState::new(),
         });

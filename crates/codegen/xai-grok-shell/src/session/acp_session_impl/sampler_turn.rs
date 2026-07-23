@@ -150,34 +150,129 @@ impl SessionActor {
         let plan_active = self.plan_mode.lock().is_active();
         filter_cursor_tools_by_plan_mode(defs, plan_active)
     }
-    /// Memoized per-model [`ModelAuthFacts`](crate::agent::config::ModelAuthFacts),
-    /// keyed by `model_id`.
-    ///
-    /// A fresh `Unknown` (config currently unparseable) falls back to the last
-    /// definite value for the same `model_id` rather than demoting a live session
-    /// to non-refreshable api-key mode. Because a config edit can turn the
-    /// currently-selected model into a per-model BYOK model without changing
-    /// `model_id`, keying on `model_id` alone is insufficient — each
-    /// model/credential chokepoint must clear this memo (`replace(None)`).
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
+        self.model_auth_state(model_id).0
+    }
+    pub(super) fn model_auth_provider(
+        &self,
+        model_id: &str,
+    ) -> Option<crate::auth::AuthProviderRef> {
+        self.model_auth_state(model_id).1
+    }
+    /// Drop the memoized per-model auth state; see [`Self::model_auth_memo`]
+    /// for why each model/credential chokepoint must call this.
+    pub(crate) fn invalidate_model_auth_memo(&self) {
+        self.model_auth_memo.replace(None);
+    }
+    /// Reads and populates [`Self::model_auth_memo`]; a fresh `Unknown`
+    /// falls back to the last definite entry (see the field's contract).
+    fn model_auth_state(
+        &self,
+        model_id: &str,
+    ) -> (
+        crate::agent::config::ModelAuthFacts,
+        Option<crate::auth::AuthProviderRef>,
+    ) {
         use crate::agent::auth_method::ModelByok;
-        if let Some((cached_id, facts)) = self.model_auth_facts.borrow().as_ref()
-            && cached_id == model_id
-            && facts.byok != ModelByok::Unknown
+        use crate::session::acp_session::ModelAuthMemo;
+        if let Some(memo) = self.model_auth_memo.borrow().as_ref()
+            && memo.model_id == model_id
+            && memo.facts.byok != ModelByok::Unknown
         {
-            return *facts;
+            return (memo.facts, memo.provider.clone());
         }
-        let fresh = crate::agent::config::resolve_model_auth_facts(model_id);
+        let (fresh, provider) =
+            crate::agent::config::resolve_model_auth_facts_and_provider(model_id);
         if fresh.byok == ModelByok::Unknown {
-            if let Some((cached_id, facts)) = self.model_auth_facts.borrow().as_ref()
-                && cached_id == model_id
+            if let Some(memo) = self.model_auth_memo.borrow().as_ref()
+                && memo.model_id == model_id
             {
-                return *facts;
+                return (memo.facts, memo.provider.clone());
             }
-            return fresh;
+            return (fresh, provider);
         }
-        *self.model_auth_facts.borrow_mut() = Some((model_id.to_string(), fresh));
-        fresh
+        *self.model_auth_memo.borrow_mut() = Some(ModelAuthMemo {
+            model_id: model_id.to_string(),
+            facts: fresh,
+            provider: provider.clone(),
+        });
+        (fresh, provider)
+    }
+    /// The single writer of a provider mint/rotation into chat-state credentials.
+    async fn set_chat_api_key(&self, new_key: String) {
+        let mut creds = self.chat_state_handle.get_credentials().await;
+        creds.api_key = Some(new_key);
+        self.chat_state_handle.update_credentials(creds);
+    }
+    /// Pre-turn arm for a provider-backed model: mint on a cold cache,
+    /// re-mint near expiry, and adopt a rotation chat-state missed. No-op
+    /// when `current_key` is already the fresh cached token.
+    async fn refresh_provider_token_pre_turn(
+        &self,
+        provider: &crate::auth::AuthProviderRef,
+        current_key: Option<&str>,
+        model_id: &str,
+    ) {
+        match provider.ensure_fresh_token(current_key).await {
+            crate::auth::ProviderRefreshOutcome::Rotated(new_key) => {
+                tracing::info!(
+                    model = % model_id, provider = % provider.name, cold = current_key
+                    .is_none(), "auth provider token rotated pre-turn"
+                );
+                self.set_chat_api_key(new_key).await;
+            }
+            crate::auth::ProviderRefreshOutcome::Unchanged => {}
+            crate::auth::ProviderRefreshOutcome::MintFailed => {
+                tracing::warn!(
+                    session_id = % self.session_info.id.0, provider = % provider.name,
+                    model = % model_id, "auth provider pre-turn refresh failed"
+                );
+                xai_grok_telemetry::unified_log::warn(
+                    "auth provider pre-turn refresh failed",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!(
+                        { "provider" : provider.name, "model" : model_id, "cold" :
+                        current_key.is_none(), }
+                    )),
+                );
+            }
+            crate::auth::ProviderRefreshOutcome::Unusable => {}
+        }
+    }
+    /// 401 arm for a provider-backed model: re-run the helper once and
+    /// resubmit. A missing key means the cold mint failed and the request
+    /// went out unauthenticated, so mint instead. Returns `false` when the
+    /// fresh-mint guard blocked the re-run or the helper failed; the 401
+    /// then surfaces as a terminal error.
+    async fn try_provider_401_recovery(&self, provider: &crate::auth::AuthProviderRef) -> bool {
+        let rejected_key = self.chat_state_handle.get_credentials().await.api_key;
+        let recovered = match rejected_key {
+            Some(ref rejected_key) => provider.recover_rejected_token(rejected_key).await,
+            None => provider.ensure_fresh_token(None).await.rotated(),
+        };
+        let Some(new_key) = recovered else {
+            tracing::warn!(
+                session_id = % self.session_info.id.0, provider = % provider.name,
+                "auth recovery: sampler 401, provider re-mint declined or failed"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth recovery: sampler 401, provider re-mint declined or failed",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({ "provider" : provider.name })),
+            );
+            return false;
+        };
+        tracing::info!(
+            session_id = % self.session_info.id.0, provider = % provider.name,
+            "auth recovery: sampler 401, auth provider re-mint, retrying"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "auth recovery: sampler 401, auth provider re-mint, retrying",
+            Some(self.session_info.id.0.as_ref()),
+            None,
+        );
+        self.set_chat_api_key(new_key).await;
+        true
     }
     /// Gate inputs for `model_id` routed to `base_url`. See
     /// [`crate::agent::auth_method::session_token_auth_gate`] for the rationale
@@ -435,7 +530,7 @@ impl SessionActor {
                             xai_grok_workspace::permission::classifier_output_json_schema(),
                         ),
                         reasoning_effort: classifier_reasoning_effort,
-                        x_grok_conv_id: Some(session_id.clone()),
+                        x_grok_conv_id: Some(format!("perm-classifier-{}", uuid::Uuid::new_v4())),
                         x_grok_req_id: Some(format!("xai-perm-auto-{}", uuid::Uuid::new_v4())),
                         x_grok_session_id: Some(session_id),
                         x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
@@ -554,6 +649,11 @@ impl SessionActor {
     pub(crate) async fn prepare_sampler_for_turn(&self) {
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
+        if self.tool_context.task_output_token_budget.is_some()
+            || self.tool_context.sampler_retry_only_before_output
+        {
+            sampler_config.doom_loop_recovery = None;
+        }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
         self.sampler_handle.update_config(sampler_config);
     }
@@ -581,6 +681,31 @@ impl SessionActor {
         error: xai_grok_sampler::SamplingErrorInfo,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use xai_grok_sampler::SamplingErrorKind;
+        if self.tool_context.task_output_token_budget.is_some() {
+            self.tool_context.fail_task_output_usage_closed();
+            let message = format!(
+                "budgeted workflow child model request failed; output grant exhausted: {}",
+                error.message
+            );
+            self.log_terminal_failure("output_budget_usage_unknown", error.status_code, &message);
+            return Err(acp::Error::internal_error().data(message));
+        }
+        if self.tool_context.sampler_retry_only_before_output {
+            let handle = self.chat_state_handle.clone();
+            tokio::spawn(async move {
+                let _ = handle.mark_usage_incomplete(true, true).await;
+            });
+            let message = format!(
+                "workflow child model request failed; usage may understate real spend: {}",
+                error.message
+            );
+            self.log_terminal_failure(
+                "workflow_child_sampling_failed",
+                error.status_code,
+                &message,
+            );
+            return Err(acp::Error::internal_error().data(message));
+        }
         if self.should_compact_on_error(&error).await {
             let cw = error
                 .model_metadata
@@ -650,17 +775,23 @@ impl SessionActor {
             .data(detailed_message);
             return Err(acp_err);
         }
+        let (failed_model_id, failed_base_url) = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| (c.model, c.base_url))
+            .unwrap_or_default();
+        let auth_provider =
+            if matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401) {
+                self.model_auth_provider(&failed_model_id)
+            } else {
+                None
+            };
         let auth_recovery_eligible = matches!(error.kind, SamplingErrorKind::Auth) && {
-            let (model_id, base_url) = self
-                .chat_state_handle
-                .get_sampling_config()
-                .await
-                .map(|c| (c.model, c.base_url))
-                .unwrap_or_default();
-            let gate = self.auth_gate(&model_id, &base_url);
+            let gate = self.auth_gate(&failed_model_id, &failed_base_url);
             let eligible = gate.active();
-            self.log_auth_gate_unknown("handle_sampling_failure", gate, &base_url);
-            if !eligible {
+            self.log_auth_gate_unknown("handle_sampling_failure", gate, &failed_base_url);
+            if !eligible && auth_provider.is_none() {
                 tracing::warn!(
                     session_id = % self.session_info.id.0, is_session_based = gate
                     .is_session_based, model_byok = gate.model_byok.as_str(),
@@ -680,7 +811,14 @@ impl SessionActor {
             }
             eligible
         };
-        if !matches!(error.kind, SamplingErrorKind::Auth) && error.status_code == Some(401) {
+        debug_assert!(
+            !(auth_recovery_eligible && auth_provider.is_some()),
+            "a provider-backed model must not be session-recovery-eligible"
+        );
+        if !matches!(error.kind, SamplingErrorKind::Auth)
+            && error.status_code == Some(401)
+            && auth_provider.is_none()
+        {
             xai_grok_telemetry::unified_log::warn(
                 "auth recovery: sampler 401 not eligible (non-auth error kind)",
                 Some(self.session_info.id.0.as_ref()),
@@ -742,6 +880,12 @@ impl SessionActor {
                 Some(self.session_info.id.0.as_ref()),
                 None,
             );
+        }
+        if let Some(ref provider) = auth_provider
+            && self.try_provider_401_recovery(provider).await
+        {
+            self.prepare_sampler_for_turn().await;
+            return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
         }
         if matches!(error.kind, SamplingErrorKind::IdleTimeout) {
             self.signals_handle().record_idle_timeout();
@@ -815,6 +959,14 @@ impl SessionActor {
             let mut msg = format!("{detailed_message}\n");
             msg.push_str(&format!("\n  Model:     {current_model}"));
             msg.push_str(&format!("\n  Auth:      {auth_mode_str}"));
+            if let Some(ref provider) = auth_provider {
+                msg.push_str(
+                    &format!(
+                        "\n  Provider:  [auth_provider.{}] (check the provider command and the debug log)",
+                        provider.name
+                    ),
+                );
+            }
             msg.push_str(&format!("\n  Version:   {client_version}"));
             if available.is_empty() {
                 msg.push_str("\n  Available: (none)");
@@ -921,6 +1073,14 @@ impl SessionActor {
         }
     }
     /// Proactively refresh the auth token if near expiry.
+    ///
+    /// Session-token path is best-effort: on success, update credentials and
+    /// return. On failure, do **not** fall through to the JWT/config.toml
+    /// branch when the session gate was active — that path is for BYOK JWTs
+    /// only. Falling through after a failed session refresh left hard-expired
+    /// opaque tokens (External/OIDC) on the wire and guaranteed a 401.
+    /// Soft failures with a still-usable access token still return here
+    /// (grace / optimistic send); 401 recovery remains the safety net.
     pub(super) async fn refresh_token_if_expired(&self) {
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
@@ -930,15 +1090,33 @@ impl SessionActor {
                 .await
                 .map(|c| (c.model, c.base_url))
                 .unwrap_or_default();
-            if self.auth_gate(&model_id, &base_url).active()
-                && let Ok(key) = am.get_valid_token().await
-            {
-                if creds.api_key.as_deref() != Some(&key) {
-                    let mut creds = creds;
-                    creds.api_key = Some(key);
-                    self.chat_state_handle.update_credentials(creds);
+            if self.auth_gate(&model_id, &base_url).active() {
+                match am.get_valid_token().await {
+                    Ok(key) => {
+                        if creds.api_key.as_deref() != Some(&key) {
+                            let mut creds = creds;
+                            creds.api_key = Some(key);
+                            self.chat_state_handle.update_credentials(creds);
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        let hard_expired = !am.has_usable_token();
+                        tracing::warn!(
+                            error = % e, hard_expired, model = % model_id,
+                            "auth: preflight get_valid_token failed"
+                        );
+                        xai_grok_telemetry::unified_log::warn(
+                            "auth.preflight.refresh_failed",
+                            Some(self.session_info.id.0.as_ref()),
+                            Some(serde_json::json!(
+                                { "error" : format!("{e}"), "hard_expired" : hard_expired,
+                                "model" : model_id, }
+                            )),
+                        );
+                        return;
+                    }
                 }
-                return;
             }
         } else {
             xai_grok_telemetry::unified_log::debug(
@@ -957,6 +1135,15 @@ impl SessionActor {
             .await
             .map(|c| c.model)
             .unwrap_or_default();
+        if let Some(provider) = self.model_auth_provider(&current_model_id) {
+            self.refresh_provider_token_pre_turn(
+                &provider,
+                current_key.as_deref(),
+                &current_model_id,
+            )
+            .await;
+            return;
+        }
         let Some(ref key) = current_key else { return };
         if !is_jwt_expired_or_near(key, REFRESH_THRESHOLD) {
             if let Some(exp) = parse_jwt_expiration(key) {
@@ -1047,6 +1234,8 @@ impl SessionActor {
         api_duration_ms: Option<u64>,
     ) {
         if let Some(ref u) = response.usage {
+            self.tool_context
+                .record_task_model_output(u64::from(u.completion_tokens));
             self.chat_state_handle
                 .record_token_usage(u64::from(u.total_tokens));
             self.chat_state_handle.record_last_turn_usage(u.clone());
@@ -1058,6 +1247,17 @@ impl SessionActor {
             );
             self.signals_handle()
                 .record_token_usage(u.completion_tokens, u.reasoning_tokens);
+        } else if self.tool_context.task_output_token_budget.is_some() {
+            self.tool_context.fail_task_output_usage_closed();
+            let handle = self.chat_state_handle.clone();
+            tokio::spawn(async move {
+                let _ = handle.mark_usage_incomplete(true, true).await;
+            });
+        } else if self.tool_context.sampler_retry_only_before_output {
+            let handle = self.chat_state_handle.clone();
+            tokio::spawn(async move {
+                let _ = handle.mark_usage_incomplete(true, true).await;
+            });
         }
     }
     pub(super) async fn record_assistant_response(&self, assistant_item: ConversationItem) {
