@@ -1216,7 +1216,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 header_injector: None,
             };
             let _ = actor
-                .handle_set_session_model(cfg, false, false, true, 85)
+                .handle_set_session_model(cfg, false, false, true, 85, None)
                 .await;
 
             let creds = actor.chat_state_handle.get_credentials().await;

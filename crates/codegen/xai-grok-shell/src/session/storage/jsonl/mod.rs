@@ -664,21 +664,16 @@ impl JsonlStorageAdapter {
             }
             Err(error) => return Err(error),
         };
+        // Collect then sort so the cap is stable across readdir order. Skip
+        // symlinks / non-dirs before applying the restore limit so a hostile
+        // or leftover symlink cannot consume a slot. Cap is on successful
+        // restores (MAX_RESTORED_WORKFLOW_RUNS), not raw directory entries.
         let mut entries: Vec<_> = std::fs::read_dir(&workflows_dir)?
             .filter_map(Result::ok)
-            .take(MAX_RESTORED_WORKFLOW_RUNS.saturating_add(1))
             .collect();
-        let mut entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
-        entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
         entries.sort_by_key(|entry| entry.file_name());
-        if entries_truncated {
-            tracing::warn!(
-                path = %workflows_dir.display(),
-                limit = MAX_RESTORED_WORKFLOW_RUNS,
-                "workflow restore run-count cap reached; ignoring remaining entries"
-            );
-        }
         let mut restored = Vec::new();
+        let mut entries_truncated = false;
         for entry in entries {
             let run_dir = entry.path();
             let Ok(run_meta) = std::fs::symlink_metadata(&run_dir) else {

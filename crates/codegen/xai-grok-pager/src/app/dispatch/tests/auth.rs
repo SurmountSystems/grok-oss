@@ -334,6 +334,8 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
                 tokens_used: 180_000,
                 context_window: 200_000,
                 percentage: 90,
+                threshold_percent: Some(95),
+                threshold_tokens: None,
                 reason: "threshold".into(),
             },
             &mut agent.session,

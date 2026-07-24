@@ -801,30 +801,6 @@ async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
             "got: {err}",
         );
 }
-#[tokio::test]
-async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
-    use crate::settings::SettingValue;
-    let r = persist_setting("page_flip_on_send", SettingValue::String("nope".into()))
-        .await;
-    let err = r.expect_err("page_flip_on_send with String payload must return Err");
-    assert!(
-        err.contains("persist_setting(page_flip_on_send) expected Bool"), "got: {err}",
-    );
-}
-#[tokio::test]
-async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
-    use crate::settings::SettingValue;
-    let r = persist_setting(
-            "combine_queued_prompts",
-            SettingValue::String("nope".into()),
-        )
-        .await;
-    let err = r.expect_err("combine_queued_prompts with String payload must return Err");
-    assert!(
-        err.contains("persist_setting(combine_queued_prompts) expected Bool"),
-        "got: {err}",
-    );
-}
 /// Type-mismatch for `simple_mode`.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_simple_mode() {
@@ -1665,60 +1641,6 @@ async fn fetch_workflows_list_sends_session_id() {
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0]["sessionId"], "test-session");
-    assert!(captured[0].get("cwd").is_none());
-}
-#[tokio::test]
-async fn fetch_workflows_list_sends_session_id() {
-    use std::sync::{Arc, Mutex};
-    use xai_acp_lib::AcpAgentMessage;
-    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
-    let captured_for_task = captured.clone();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if let AcpAgentMessage::ExtMethod(args) = msg {
-                assert_eq!(args.request.method.as_ref(), "x.ai/workflows/list");
-                let params: serde_json::Value = serde_json::from_str(
-                        args.request.params.get(),
-                    )
-                    .expect("params JSON");
-                captured_for_task.lock().unwrap().push(params);
-                let body = serde_json::json!({ "result" : { "workflows" : [] } });
-                let raw = serde_json::value::RawValue::from_string(body.to_string())
-                    .expect("serialize workflows response");
-                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
-            }
-        }
-    });
-    let session_id = acp::SessionId::new(Arc::from("test-session"));
-    let mut tasks = JoinSet::new();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    execute(
-        Effect::FetchWorkflowsList {
-            agent_id: AgentId(3),
-            session_id: session_id.clone(),
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-    match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::WorkflowsListLoaded {
-            agent_id,
-            session_id: result_session_id,
-            result,
-        } => {
-            assert_eq!(agent_id, AgentId(3));
-            assert_eq!(result_session_id, session_id);
-            assert!(result.expect("workflows load").is_empty());
-        }
-        other => panic!("expected WorkflowsListLoaded, got {other:?}"),
-    }
-    let captured = captured.lock().unwrap();
-    assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0] ["sessionId"], "test-session");
     assert!(captured[0].get("cwd").is_none());
 }
 /// The debounce arm must echo `query` and `seq` exactly. Awaits the real

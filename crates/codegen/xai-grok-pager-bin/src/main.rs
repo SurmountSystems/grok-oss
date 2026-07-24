@@ -1621,7 +1621,8 @@ fn install_heap_profile_hooks() {
 }
 fn version_text(channel_label: &str) -> String {
     format!(
-        "grok-oss {}\n",
+        "{} {}\n",
+        xai_grok_pager::client_identity::PRODUCT_CLI_NAME,
         xai_grok_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), channel_label,)
     )
 }
@@ -2377,6 +2378,7 @@ mod tests {
     use super::*;
     #[test]
     fn version_output_writer_preserves_channel_aware_contract() {
+        let brand = xai_grok_pager::client_identity::PRODUCT_CLI_NAME;
         for (label, expected_suffix) in [
             (" [alpha]", " [alpha]\n"),
             (" [stable]", " [stable]\n"),
@@ -2385,7 +2387,14 @@ mod tests {
             let mut output = Vec::new();
             write_version(&mut output, label).unwrap();
             let output = String::from_utf8(output).unwrap();
-            assert!(output.starts_with("grok "));
+            assert!(
+                output.starts_with(&format!("{brand} ")),
+                "expected product brand {brand:?}, got {output:?}"
+            );
+            assert!(
+                !output.starts_with("grok "),
+                "must not use bare upstream brand: {output:?}"
+            );
             assert!(output.contains(env!("VERSION_WITH_COMMIT")));
             assert!(output.ends_with(expected_suffix), "{output:?}");
         }

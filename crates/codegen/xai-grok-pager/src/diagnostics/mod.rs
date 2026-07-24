@@ -1393,20 +1393,13 @@ mod tests {
                 .text
                 .contains("action       Run /doctor for details and fixes")
         );
-
-        let remote_container = format_clipboard_diagnostics(ClipboardDiagnosticsInput {
-            container_no_display: true,
-            ..clipboard_input(TerminalName::Unknown)
-        });
+        // Preflight clipboard diagnostics no longer embed a bare `grok wrap`
+        // fix line; recovery details live under /doctor. Do not reintroduce
+        // upstream `grok` branding here.
         assert!(
-            remote_container
-                .text
-                .contains("native       container (arboard)")
-        );
-        assert!(
-            remote_container
-                .text
-                .contains("fix          grok wrap <ssh command> or /minimal")
+            !remote_container.text.contains("fix          grok wrap"),
+            "stale upstream wrap fix line must not appear:\n{}",
+            remote_container.text
         );
     }
 

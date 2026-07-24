@@ -1980,17 +1980,18 @@ mod tests {
         };
         let mut buf = Vec::new();
         print_exit_resume_hint(&info, 80, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
+        let out = String::from_utf8(buf).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            concat!(
-                "\n",
-                "Fix flaky CI test\n",
-                "> make the suite deterministic\n",
-                "  Pinned the seed; 200 consecutive green runs.\n",
-                "\n",
-                "Resume this session with:\n",
-                "  grok --resume sess-abc\n",
+            out,
+            format!(
+                "\nFix flaky CI test\n> make the suite deterministic\n  Pinned the seed; 200 consecutive green runs.\n\nResume this session with:\n  {cli} --resume sess-abc\n"
             )
+        );
+        assert_eq!(cli, "grok-oss");
+        assert!(
+            !out.contains("  grok --resume"),
+            "must not recommend upstream `grok` binary:\n{out}"
         );
     }
     #[test]
@@ -2006,11 +2007,16 @@ mod tests {
         };
         let mut buf = Vec::new();
         print_exit_resume_hint(&info, 20, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains(&format!("\n{}…\n", "t".repeat(19))));
         assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));
         assert!(out.contains(&format!("\n  {}…\n", "r".repeat(17))));
-        assert!(out.contains("  grok --resume sess-abc\n"));
+        assert!(out.contains(&format!("  {cli} --resume sess-abc\n")));
+        assert!(
+            !out.contains("  grok --resume"),
+            "must not recommend upstream `grok`:\n{out}"
+        );
     }
     #[test]
     fn print_relaunch_failure_hint_writes_expected_lines() {

@@ -782,10 +782,8 @@ mod compaction_request_tools_tests {
     fn strips_hosted_tools_when_client_tools_and_tool_choice_none() {
         let tools = vec![client_tool("read_file")];
         let hosted = vec![
-            HostedTool::WebSearch {
-                allowed_domains: None,
-            },
-            HostedTool::XSearch,
+            HostedTool::WebSearch { options: None },
+            HostedTool::XSearch { options: None },
         ];
         let (out_tools, out_hosted, choice) = compaction_request_tools(tools, hosted);
         assert_eq!(out_tools.len(), 1);
@@ -804,9 +802,11 @@ mod compaction_request_tools_tests {
     fn strips_hosted_tools_even_when_no_client_tools() {
         let hosted = vec![
             HostedTool::WebSearch {
-                allowed_domains: Some(vec!["example.com".into()]),
+                options: Some(xai_grok_sampling_types::WebSearchOptions {
+                    allowed_domains: Some(vec!["example.com".into()]),
+                }),
             },
-            HostedTool::XSearch,
+            HostedTool::XSearch { options: None },
         ];
         let (out_tools, out_hosted, choice) = compaction_request_tools(vec![], hosted);
         assert!(out_tools.is_empty());

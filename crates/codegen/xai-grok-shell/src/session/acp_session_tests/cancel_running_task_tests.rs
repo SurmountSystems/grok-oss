@@ -338,7 +338,11 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     .any(|item| item.text_content().contains("hello persist")),
                 "loaded chat history should contain the just-persisted prompt"
             );
-            let _ = prompt_task.await.expect("prompt task should complete");
+            // Ack + disk check is the contract under test. Abort the remainder
+            // of the turn (model auth / sampling) so debug Config deserialization
+            // cannot overflow the test thread stack — same pattern as
+            // `handle_prompt_injects_interrupt_reminder_before_user_message`.
+            prompt_task.abort();
         })
         .await;
 }

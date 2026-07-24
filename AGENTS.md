@@ -80,10 +80,9 @@ and **`docs/upstream-onto-log.md`**.
 | Item | Value |
 |------|--------|
 | Branch | `onto-xai/6e386420825b` |
-| HEAD | `8f2f7f2` impl (#7) |
-| Mid-pick | `8b933eb` #13 — conflict resolved+staged; human `git cherry-pick --continue` |
-| HEAD | `f8e9eab` merge xai 2 (#12) |
-| After | #13 `8b933eb`, join, PR; if continue says “no pick” → already landed, use CONTINUE=1 |
+| Product tip | `56d1fc2` #13 (stack complete) |
+| Join | staged (`MERGE_HEAD` = `origin/main` `8b933eb`); tree `2cbad23…` |
+| Human next | signed join commit → `just check` → push → PR → close #11+#14 |
 | Issues | close #11 + #14 when PR lands (tips superseded by `6e38642`) |
 
 **Do not invent** `MODE=overlay` / commit-tree modes — cherry-pick only.

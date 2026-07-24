@@ -219,33 +219,39 @@ buckets — never tree-wide bulk checkout, never 18 parallel one-file agents.
 Detail also in project [`AGENTS.md`](../AGENTS.md) § *Onto / put-history*.
 ### Live stack (update when tip moves)
 
-**Snapshot: 2026-07-24 — #12 mega resolved; await human continue.**
+**Snapshot: 2026-07-24 — product stack complete; join merge staged.**
 
 | Field | Value |
 |-------|--------|
 | Branch | `onto-xai/6e386420825b` |
 | xAI tip | `6e386420825bd44ae648c63e7c8cba12fcec9401` (tree `3db5a3bd…`) |
-| Stack HEAD (last finished) | `8f2f7f2` — **impl (#7)** |
-| Active pick | `b53f141` **merge xai 2 (#12)** — **all ~199 UU resolved+staged**, 0 markers |
-| After this continue | `8b933eb` (#13), then join `-s ours` |
-| Supersedes issues | #11, #14 (tips under `6e38642`) |
-| Living-docs stash | `stash@{0}` was used mid-stack; HITL content re-applied into this pick index |
+| Product tip (pre-join) | `56d1fc2` — **Fixes compaction setting (#13)** |
+| Onto tree (must keep) | `2cbad23add473ad095a7a622fcd172d466543bdf` |
+| Join | `join-main-into-onto.sh` done (`-s ours`); **MERGE_HEAD=`8b933eb`**, await human **signed** merge commit |
+| Supersedes issues | #11, #14 |
+| Cherry-picks | **Done** — no active pick |
 
-**Confusion trap:** if `git cherry-pick --continue` says *no cherry-pick in progress*, the pick **already committed** (`git log -1`). Do not re-continue — use `CONTINUE=1 put-history` instead.
+**Finished on tip:** OpenRouter → Branding (#2) → Rate limits (#3) → Merge 2 (#4) → impl (#7) → merge xai 2 (#12) → compaction (#13).
 
-**Dirty living docs blocked #12 start once** — stash them (`git stash push -u -m …`) before mega picks, or they abort the pick.
-
-**Finished on tip:** OpenRouter → Branding → #3 → #4 → #7 (`8f2f7f2`).
-
-**Human now:**
+**Human now (join already staged — do not re-run join):**
 
 ```bash
-git cherry-pick --continue    # signed TTY — lands #12
-CONTINUE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh   # #13 next
-# then join-main-into-onto.sh (now present after #12 lands) → just check → PR
+git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
+  -m "Join Surmount archive history so main is an ancestor of this tip." \
+  -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
+
+git merge-base --is-ancestor 8b933ebdc8d7 HEAD
+test "$(git rev-parse 'HEAD^{tree}')" = "2cbad23add473ad095a7a622fcd172d466543bdf"
+
+just check
+git push -u origin HEAD
+# PR base=main head=onto-xai/6e386420825b ; close #11 #14
+# finalize docs/upstream-onto-log.md with post-join SHA
 ```
 
-**#12 resolve notes:** 3 strategic subagents (shell 75 / pager 77 / rest 47). Summaries under `/tmp/onto-resolve-12/{shell,pager,rest}.md`. Prefer HEAD tip APIs; product seams kept (economic, openrouter, failover+cancel, scripts/join).#### #7 — 18 unmerged paths (resolve carefully)
+**Historical notes:** #12 mega resolved via 3 strategic subagents; MSRV lock regenerate with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`.
+
+#### #7 — 18 unmerged paths (resolve carefully)
 
 | Path | Intent (summary) |
 |------|------------------|
