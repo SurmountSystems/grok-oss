@@ -27,6 +27,8 @@ use xai_tool_types::{
     HandedOffSubagentState, SubagentCapabilityMode, SubagentIsolationMode, WaitMode,
 };
 
+use crate::register_resource;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SubagentOwner {
     #[default]

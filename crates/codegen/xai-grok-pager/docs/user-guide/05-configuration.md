@@ -121,6 +121,7 @@ auto_compact_threshold_percent = 95    # auto-compact at this % of the *effectiv
 #                                         # above 200k when the window is uncapped.
 # auto_compact_threshold_tokens = 475000  # 95% of Grok 4.5's 500k catalog window; prefer when
 #                                         # economic mode is off
+
 load_envrc = true                      # load .envrc environment variables
 
 [tools]
@@ -388,6 +389,13 @@ plan = false
 [subagents.models]
 explore = "grok-4.6"               # route to different models
 ```
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `enabled` | `true` | Master switch for subagent spawning (`GROK_SUBAGENTS=0` also disables). |
+| `allow_worktree` | `false` | When `false` (default), spawn forces `isolation = none` even if the tool or a role/persona asked for `worktree`. Set `true` to restore opt-in worktree isolation. |
+
+**Migration:** earlier releases defaulted `allow_worktree` to `true`. Empty config now means force-none. If you rely on worktree isolation, set `allow_worktree = true` under `[subagents]` in `~/.grok/config.toml`.
 
 To pin the model a subagent uses, set its entry under `[subagents.models]`.
 

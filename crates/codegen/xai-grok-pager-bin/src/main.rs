@@ -1990,25 +1990,13 @@ fn install_heap_profile_hooks() {
 }
 fn version_text(channel_label: &str) -> String {
     format!(
-        "grok {}\n",
-        xai_grok_version::display_version_with_commit(
-            xai_grok_version::full_version(),
-            channel_label,
-        )
+        "{} {}\n",
+        xai_grok_pager::client_identity::PRODUCT_CLI_NAME,
+        xai_grok_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), channel_label,)
     )
 }
 fn write_version(writer: &mut impl std::io::Write, channel_label: &str) -> std::io::Result<()> {
     writer.write_all(version_text(channel_label).as_bytes())
-}
-/// The leader gets its own crash directory: `install()` opens `last-crash.bin` with `O_TRUNC`, so a pager and a
-/// leader sharing one directory would each wipe the other's pending crash blob on start.
-fn crash_dir_for(args: &PagerArgs) -> std::path::PathBuf {
-    let base = xai_grok_shell::util::grok_home::grok_home().join("crash");
-    let is_leader = matches!(
-        &args.command,
-        Some(Command::Agent(agent)) if matches!(agent.mode, Some(AgentCmd::Leader(_)))
-    );
-    if is_leader { base.join("leader") } else { base }
 }
 fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
     if !args.version {
@@ -2218,10 +2206,8 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                     });
                     println!("{}", serde_json::to_string(&payload)?);
                 } else {
-                    write_version(
-                        &mut std::io::stdout().lock(),
-                        xai_grok_update::channel_label(),
-                    )?;
+                    // Identity: upstream package version + short SHA (no release channel).
+                    println!("grok-oss {}", env!("VERSION_WITH_COMMIT"));
                 }
                 return Ok(());
             }
@@ -2622,19 +2608,14 @@ fn build_update_config() -> UpdateConfig {
     }
     config
 }
-/// Ctrl+U quit-for-update: the user asked for this install. `run_update_if_available` reports its
-/// own failures to stderr; only a hard Err counts as "did not complete".
-async fn run_update_blocking(update_config: &UpdateConfig) -> bool {
-    auto_update::run_update_if_available(
-        auto_update::UpdateRunMode::Blocking,
-        false,
-        auto_update::CliUpdateTrigger::UserCommand,
-        update_config,
-    )
-    .await
-    .is_ok()
-}
-/// Central gate for auto-update checks; add new suppression rules here, not at call sites.
+/// Centralized gate for all auto-update checks. Add new suppression
+/// rules here ,  not at each call site.
+///
+/// Grok OSS does **not** use xAI's GCS/npm update channel (`x.ai/cli`,
+/// `@xai-official/grok`). Those advertise official SpaceXAI builds (e.g.
+/// v0.2.x) which would overwrite or confuse this fork. Install/update via
+/// git + `cargo install`, Nix, or AUR instead. Opt in later with
+/// `GROK_OSS_ENABLE_XAI_UPDATER=1` only for debugging against upstream.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     // Grok OSS does not use the xAI release updater unless this process opts in.
     if std::env::var_os("GROK_OSS_ENABLE_XAI_UPDATER").is_none() {
@@ -2689,23 +2670,11 @@ fn get_channel_switch(alpha: bool, stable: bool, enterprise: bool) -> Option<&'s
         None
     }
 }
-/// Handle `grok-pager update [--check] [--json] [--force-reinstall] [--version X] [--alpha|--stable|--enterprise]`.
-/// --trigger is the one representation; --auto is the compat alias from older parents.
-/// Unknown values fall back to user_command (a human is the only caller that can produce them).
-fn resolve_update_trigger(flag: Option<&str>, auto: bool) -> auto_update::CliUpdateTrigger {
-    if let Some(flag) = flag {
-        match flag.parse() {
-            Ok(t) => return t,
-            Err(e) => tracing::warn!("{e}; recording user_command"),
-        }
-    }
-    if auto {
-        auto_update::CliUpdateTrigger::AutoBackground
-    } else {
-        auto_update::CliUpdateTrigger::UserCommand
-    }
-}
-#[tracing::instrument(level = "debug", skip_all)]
+/// Handle `grok-oss update [--check] [--json] ...`.
+///
+/// Grok OSS does not install SpaceXAI release binaries. `--check` compares the
+/// embedded git SHA to Surmount `main` on GitHub. Other flags either require
+/// `GROK_OSS_ENABLE_XAI_UPDATER=1` (debug) or print how to rebuild.
 async fn run_update_command(
     check: bool,
     json: bool,
@@ -2718,50 +2687,61 @@ async fn run_update_command(
     if json && !check {
         anyhow::bail!("--json requires --check");
     }
-    let mut update_config = base_update_config.clone();
+
+    // Default path: git-based freshness vs Surmount main (no binary download).
     if check {
         if version.is_some() {
             anyhow::bail!("--version cannot be used with --check");
         }
-        auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
-        let status = auto_update::check_update_status(&update_config).await;
-        auto_update::print_update_status(&status, json)?;
+        if channel_switch.is_some() {
+            anyhow::bail!(
+                "Grok OSS has no alpha/stable/enterprise channels. \
+                 Use `grok-oss update --check` without channel flags."
+            );
+        }
+        let status =
+            xai_grok_update::check_against_main(env!("CARGO_PKG_VERSION"), env!("GROK_GIT_SHA"))
+                .await;
+        xai_grok_update::print_oss_update_status(&status, json)?;
         return Ok(());
     }
-    if let Some(ref v) = version
-        && semver::Version::parse(v).is_err()
-    {
-        anyhow::bail!(
-            "'{}' is not a valid version. Expected semver like 0.1.150",
-            v
-        );
+
+    // Explicit opt-in only: upstream xAI installer path (wrong product for most users).
+    if std::env::var_os("GROK_OSS_ENABLE_XAI_UPDATER").is_some() {
+        let mut update_config = base_update_config.clone();
+        if let Some(ref v) = version
+            && semver::Version::parse(v).is_err()
+        {
+            anyhow::bail!(
+                "'{}' is not a valid version. Expected semver like 0.1.150",
+                v
+            );
+        }
+        let installed = auto_update::run_update(
+            force_reinstall,
+            version.as_deref(),
+            channel_switch,
+            &mut update_config,
+        )
+        .await?;
+        if let Some(installed_version) = installed {
+            signal_leaders_to_relaunch(&installed_version).await;
+        }
+        return Ok(());
     }
-    let telemetry_cfg = xai_grok_shell::config::load_agent_config_disk_only()
-        .map_err(|e| tracing::warn!("grok update: telemetry init skipped (agent config: {e})"))
-        .ok();
-    if let Some(agent_cfg) = telemetry_cfg {
-        let auth_manager =
-            std::sync::Arc::new(xai_grok_login::AuthManager::new_with_proxy_base_url(
-                &xai_grok_shell::util::grok_home::grok_home(),
-                agent_cfg.grok_com_config.clone(),
-                agent_cfg.endpoints.proxy_url(),
-            ));
-        xai_grok_shell::agent::init::update_telemetry_config(&agent_cfg, &auth_manager);
-    }
-    let result = auto_update::run_update(
-        force_reinstall,
-        version.as_deref(),
-        channel_switch,
-        &mut update_config,
-        trigger,
-    )
-    .await;
-    if let Ok(Some(installed_version)) = &result {
-        signal_leaders_to_relaunch(installed_version).await;
-    }
-    xai_grok_telemetry::session_ctx::drain_pending(xai_grok_telemetry::session_ctx::CLI_DRAIN)
-        .await;
-    result?;
+
+    let _ = (force_reinstall, version, channel_switch, base_update_config);
+    println!(
+        "Grok OSS  {}",
+        xai_grok_update::format_build_id(env!("CARGO_PKG_VERSION"), env!("GROK_GIT_SHA"))
+    );
+    println!();
+    println!("This fork does not auto-install updates (no SpaceXAI release channel).");
+    println!("Check whether you're behind Surmount main:");
+    println!();
+    println!("  grok-oss update --check");
+    println!();
+    println!("{}", xai_grok_update::how_to_update_message());
     Ok(())
 }
 /// After a successful `grok update`, ask any running leader on this machine that is older than `installed_version`
@@ -2833,119 +2813,8 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 mod tests {
     use super::*;
     #[test]
-    fn embedded_agent_commands_heal_managed_policy_before_sandboxing() {
-        for args in [
-            vec!["grok"],
-            vec!["grok", "agent", "stdio"],
-            vec!["grok", "dashboard"],
-            vec!["grok", "models"],
-            vec!["grok", "worktree", "list"],
-        ] {
-            let args = PagerArgs::try_parse_from(args).unwrap();
-            assert!(
-                command_needs_pre_sandbox_policy_heal(args.command.as_ref()),
-                "{args:?}"
-            );
-        }
-    }
-    #[test]
-    fn utility_commands_skip_managed_policy_heal() {
-        for args in [
-            vec!["grok", "inspect"],
-            vec!["grok", "mcp", "list"],
-            vec!["grok", "sessions", "list"],
-            vec!["grok", "version"],
-        ] {
-            let args = PagerArgs::try_parse_from(args).unwrap();
-            assert!(
-                !command_needs_pre_sandbox_policy_heal(args.command.as_ref()),
-                "{args:?}"
-            );
-        }
-    }
-    #[test]
-    fn default_caps_the_core_count() {
-        let nz = |n| NonZeroUsize::new(n).unwrap();
-        assert_eq!(default_worker_threads(nz(360)), DEFAULT_MAX_WORKER_THREADS);
-        assert_eq!(default_worker_threads(nz(4)), nz(4));
-    }
-    #[test]
-    fn worker_threads_from_selects_default_or_override() {
-        let nz = |n| NonZeroUsize::new(n).unwrap();
-        let cores = nz(360);
-        assert_eq!(
-            worker_threads_from(None, cores),
-            WorkerCount::Accepted(default_worker_threads(cores))
-        );
-        assert_eq!(
-            worker_threads_from(Some("16"), cores),
-            WorkerCount::Accepted(nz(16))
-        );
-    }
-    #[test]
-    fn override_in_range_is_used_without_a_notice() {
-        let nz = |n| NonZeroUsize::new(n).unwrap();
-        let cores = nz(360);
-        assert_eq!(
-            resolve_worker_override("16", cores),
-            WorkerCount::Accepted(nz(16))
-        );
-        assert_eq!(resolve_worker_override("16", cores).notice(), None);
-        assert_eq!(resolve_worker_override(" 8 ", cores).used().get(), 8);
-        assert_eq!(
-            resolve_worker_override("360", cores),
-            WorkerCount::Accepted(cores)
-        );
-    }
-    #[test]
-    fn override_out_of_range_is_clamped_with_a_notice() {
-        let nz = |n| NonZeroUsize::new(n).unwrap();
-        let cores = nz(360);
-        assert_eq!(
-            resolve_worker_override("100000", cores),
-            WorkerCount::Clamped {
-                requested: 100000,
-                used: cores,
-                cores
-            }
-        );
-        assert_eq!(
-            resolve_worker_override("0", cores),
-            WorkerCount::Clamped {
-                requested: 0,
-                used: nz(1),
-                cores
-            }
-        );
-        assert_eq!(
-            resolve_worker_override("-1", cores),
-            WorkerCount::Clamped {
-                requested: -1,
-                used: nz(1),
-                cores
-            }
-        );
-        assert_eq!(
-            resolve_worker_override("100000", cores).notice().unwrap(),
-            "grok: clamped GROK_WORKER_THREADS=100000 to 360 (valid range is 1..=360)"
-        );
-    }
-    #[test]
-    fn override_unparseable_is_ignored_with_a_notice() {
-        let cores = NonZeroUsize::new(360).unwrap();
-        for value in ["abc", "", "99999999999999999999999999999999999999999"] {
-            let ignored = resolve_worker_override(value, cores);
-            assert!(matches!(ignored, WorkerCount::Ignored { .. }), "{value}");
-            assert_eq!(ignored.used(), default_worker_threads(cores), "{value}");
-        }
-        assert_eq!(
-            resolve_worker_override("abc", cores).notice().unwrap(),
-            "grok: ignoring GROK_WORKER_THREADS=\"abc\" (not a valid integer)"
-        );
-    }
-    #[test]
     fn version_output_writer_preserves_channel_aware_contract() {
-        xai_grok_version::set_full_version(env!("VERSION_WITH_COMMIT"));
+        let brand = xai_grok_pager::client_identity::PRODUCT_CLI_NAME;
         for (label, expected_suffix) in [
             (" [alpha]", " [alpha]\n"),
             (" [stable]", " [stable]\n"),
@@ -2954,7 +2823,14 @@ mod tests {
             let mut output = Vec::new();
             write_version(&mut output, label).unwrap();
             let output = String::from_utf8(output).unwrap();
-            assert!(output.starts_with("grok "));
+            assert!(
+                output.starts_with(&format!("{brand} ")),
+                "expected product brand {brand:?}, got {output:?}"
+            );
+            assert!(
+                !output.starts_with("grok "),
+                "must not use bare upstream brand: {output:?}"
+            );
             assert!(output.contains(env!("VERSION_WITH_COMMIT")));
             assert!(output.ends_with(expected_suffix), "{output:?}");
         }

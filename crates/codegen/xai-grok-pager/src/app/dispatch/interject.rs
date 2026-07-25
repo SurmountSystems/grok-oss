@@ -15,6 +15,8 @@ pub(super) fn dispatch_interject(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
+    // Hard-reset only — `text` may not be from the composer.
+    let _ = voice_stop_on_submit(app);
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };

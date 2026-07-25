@@ -330,6 +330,16 @@ impl ImageGenConfig {
         matches!(self, Self::Enabled { .. })
     }
 
+    /// Stamp [`SESSION_ID_HEADER`] onto `extra_headers`. A caller-provided
+    /// value is never overwritten. No-op when `Disabled`.
+    pub fn stamp_session_id_header(&mut self, session_id: &str) {
+        if let Self::Enabled { extra_headers, .. } = self {
+            extra_headers
+                .entry(SESSION_ID_HEADER.to_string())
+                .or_insert_with(|| session_id.to_string());
+        }
+    }
+
     pub fn image_gen_enabled(&self) -> bool {
         matches!(
             self,

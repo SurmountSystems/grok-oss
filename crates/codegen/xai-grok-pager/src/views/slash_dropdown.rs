@@ -962,4 +962,125 @@ mod tests {
         assert_eq!(desc_col(0, "cache help"), desc_x, "{}", row_text(0));
         assert_eq!(desc_col(1, "long name"), desc_x, "{}", row_text(1));
     }
+
+    /// A tagged row renders "[tag]" (system-accent) between the command name and
+    /// the description; untagged rows and arg rows render no bracket.
+    #[test]
+    fn tagged_command_row_renders_bracketed_tag() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::default();
+        let mut tagged = row("/tagged", "does work");
+        tagged.tag = Some("new".to_string());
+        let untagged = row("/plain", "no tag here");
+        let arg = row("argrow", "an argument"); // arg rows always have tag = None
+
+        let width: u16 = 60;
+        let snap = SlashSnapshot {
+            open: true,
+            // Select row 1 so the tagged + arg rows stay unselected.
+            matches: vec![tagged, untagged, arg],
+            selected: 1,
+            ..Default::default()
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 3));
+        let area = Rect::new(0, 0, width, 3);
+        render_dropdown(&mut buf, area, &snap, None, &theme);
+
+        let row_text = |y: u16| -> String {
+            (0..width)
+                .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect()
+        };
+
+        // True buffer column of `needle`'s first cell. Do not use `str::find` on
+        // `row_text`: the selected-row prefix is multi-byte (`❯`), so byte
+        // offsets drift from display columns and falsely report misalignment.
+        let desc_col = |y: u16, needle: &str| -> u16 {
+            let needle_chars: Vec<char> = needle.chars().collect();
+            (0..width)
+                .find(|&start| {
+                    needle_chars.iter().enumerate().all(|(i, ch)| {
+                        let x = start + i as u16;
+                        x < width
+                            && buf
+                                .cell((x, y))
+                                .is_some_and(|c| c.symbol() == ch.to_string())
+                    })
+                })
+                .unwrap_or_else(|| panic!("row {y} missing {needle:?}: {}", row_text(y)))
+        };
+
+        // Row 0 (tagged): "[new]" present, and the open-bracket cell uses accent.
+        assert!(
+            row_text(0).contains("[new]"),
+            "tagged row shows [new]: {}",
+            row_text(0)
+        );
+        let bracket_x = (0..width)
+            .find(|&x| buf.cell((x, 0)).map(|c| c.symbol()) == Some("["))
+            .expect("open bracket in tagged row");
+        assert_eq!(
+            buf.cell((bracket_x, 0)).unwrap().fg,
+            theme.accent_system,
+            "tag renders in the system accent"
+        );
+
+        // Row 1 (untagged) and row 2 (arg): no bracket at all.
+        assert!(
+            !row_text(1).contains('['),
+            "untagged row has no bracket: {}",
+            row_text(1)
+        );
+        assert!(
+            !row_text(2).contains('['),
+            "arg row has no bracket: {}",
+            row_text(2)
+        );
+
+        // Shared-column invariant: the description starts at the same buffer
+        // column on the tagged row and the untagged row (the tag folds into
+        // the label column, so it never shifts the description).
+        let desc0_x = desc_col(0, "does work");
+        let desc1_x = desc_col(1, "no tag here");
+        assert_eq!(
+            desc0_x,
+            desc1_x,
+            "tagged and untagged descriptions must share the same column (row0={}, row1={})",
+            row_text(0),
+            row_text(1)
+        );
+
+        // Tag is right-aligned: closing `]` sits at the label-column right edge,
+        // immediately before the first-line gap space and then the description.
+        // First-line gap is one space (see build_item_lines), so `]` column ==
+        // desc_col - 1 - 1. (Do not use str::find — multi-byte selected prefix.)
+        let close_bracket_x = (0..width)
+            .rev()
+            .find(|&x| buf.cell((x, 0)).map(|c| c.symbol()) == Some("]"))
+            .expect("closing ] on tagged row");
+        assert_eq!(
+            close_bracket_x,
+            desc0_x - 1 - 1,
+            "tag right-aligned: ] should sit just left of the desc gap (row0={})",
+            row_text(0)
+        );
+
+        // A long tag at narrow widths must truncate without panicking (zero-width
+        // / non-char-boundary math), including the width < 4 early-return path.
+        let mut long_tagged = row("/x", "d");
+        long_tagged.tag = Some("superlongtagname".to_string());
+        let narrow = SlashSnapshot {
+            open: true,
+            matches: vec![long_tagged],
+            selected: 0,
+            ..Default::default()
+        };
+        for w in 0..=12u16 {
+            let mut nb = Buffer::empty(Rect::new(0, 0, w.max(1), 1));
+            let na = Rect::new(0, 0, w, 1);
+            let _ = render_dropdown(&mut nb, na, &narrow, None, &theme);
+        }
+    }
 }

@@ -399,6 +399,20 @@ impl AgentView {
             self.show_toast("Can't send this now: it runs when the current turn ends");
             return InputOutcome::Changed;
         }
+        // Deferred `/plan <desc>` rows must not force-interject as a normal
+        // agent-mode prompt — that would drop `enter_plan_mode`. Same class as
+        // client-expanded skill rows: refuse and keep the row queued.
+        if self
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.id == id && p.enter_plan_mode)
+        {
+            self.show_toast(
+                "Can't send this now — it runs as a plan turn when the current work ends",
+            );
+            return InputOutcome::Changed;
+        }
         if let Some(prompt) = self.remove_local_queue_row(id) {
             return InputOutcome::Action(Action::SendPromptNow {
                 text: prompt.text,

@@ -311,8 +311,10 @@ While the agent is generating:
 - The **send now** chord is **cancel-and-send**: it stops the current turn (background tasks, subagents, and the rest of the queue keep running) and sends your message as the next turn, so it always appears at the bottom of the transcript:
   - **Non-empty composer** → cancel and send that text now.
   - **Empty composer** + a queued follow-up → send the **top** queued follow-up now (no need to focus the queue pane). On the queue pane, the same chord (or the **[Send now]** button) sends the **selected** row.
-  - **Idle**, or **empty composer with nothing queued** → no-op for that key.
-- While the agent is **blocked waiting** (on task output or a subagent), plain `Enter` with text also delivers immediately — the shell cancels the blocked turn and runs your message next.
+  - **Idle with live background subagents** + held queue (or typed text) → force-start the next turn without waiting for children.
+  - **Idle** with nothing held / nothing to force → toast (never a silent no-op).
+- While the agent is **blocked waiting** (on task output or a subagent), plain `Enter` with text also delivers immediately when nothing else is already queued — the shell cancels the blocked turn and runs your message next.
+- While the parent is **idle with live background subagents**, plain `Enter` with text **queues and holds** (does not start a conflicting main turn). Use **send now** to force, or wait for children to finish.
 
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|

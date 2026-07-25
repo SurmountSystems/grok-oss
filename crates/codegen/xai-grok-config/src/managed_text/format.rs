@@ -119,6 +119,27 @@ pub(super) fn item_state(
     })
 }
 
+pub(super) fn item_state(
+    original: &str,
+    namespace: &str,
+    owned_item_prefix: &str,
+    item: &ManagedItem,
+    comments: &CommentSyntax,
+    path: &Path,
+) -> Result<ManagedItemState, ManagedConfigError> {
+    let parsed = parse_block(original, namespace, owned_item_prefix, comments, path)?;
+    let Some(range) = parsed.items.get(&item.name) else {
+        return Ok(ManagedItemState::Absent);
+    };
+    let expected = item_section(item, comments, parsed.newline);
+    let actual = original[range.start..range.end].trim_end_matches(['\r', '\n']);
+    Ok(if actual == expected {
+        ManagedItemState::Exact
+    } else {
+        ManagedItemState::NeedsUpdate
+    })
+}
+
 pub(super) fn render_update(
     original: &str,
     namespace: &str,

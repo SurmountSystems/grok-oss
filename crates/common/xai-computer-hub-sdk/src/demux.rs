@@ -228,6 +228,32 @@ impl Demux {
         self.unregister_session_inbox_if(session_id, &expected_strong)
     }
 
+    /// Remove the inbox only if it is still the same channel as `expected`.
+    ///
+    /// Prevents a late untrack→unregister from clobbering a peer harness that
+    /// rebound the same session in between (identity, not key-only).
+    pub fn unregister_session_inbox_if(
+        &self,
+        session_id: &SessionId,
+        expected: &tokio::sync::mpsc::Sender<InboundFrame>,
+    ) -> Option<tokio::sync::mpsc::Sender<InboundFrame>> {
+        self.sessions
+            .remove_if(session_id, |_, sender| sender.same_channel(expected))
+            .map(|(_, sender)| sender)
+    }
+
+    /// Like [`Self::unregister_session_inbox_if`], but compares via a
+    /// [`tokio::sync::mpsc::WeakSender`] so callers need not hold a strong
+    /// sender (which would pin the channel open after demux replacement).
+    pub fn unregister_session_inbox_if_weak(
+        &self,
+        session_id: &SessionId,
+        expected: &tokio::sync::mpsc::WeakSender<InboundFrame>,
+    ) -> Option<tokio::sync::mpsc::Sender<InboundFrame>> {
+        let expected_strong = expected.upgrade()?;
+        self.unregister_session_inbox_if(session_id, &expected_strong)
+    }
+
     /// Park a oneshot waiter for `request_id`. Crate-internal: only
     /// the connection actor allocates request ids.
     pub(crate) fn register_response_waiter(

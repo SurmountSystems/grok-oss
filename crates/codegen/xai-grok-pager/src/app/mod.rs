@@ -1290,6 +1290,7 @@ fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write)
     use crate::render::line_utils::truncate_str;
     let cli = screen_mode_relaunch::cli_hint_name();
     use crate::render::line_utils::truncate_str;
+    let cli = screen_mode_relaunch::cli_hint_name();
     let _ = writeln!(w);
     if let Some(summary) = &info.summary {
         let _ = writeln!(w, "{}", truncate_str(&summary.title, max_width));
@@ -2380,8 +2381,15 @@ mod tests {
         let cli = screen_mode_relaunch::cli_hint_name();
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok-oss --resume sess-abc\n"
+            out,
+            format!("\nResume this session with:\n  {cli} --resume sess-abc\n")
+        );
+        // Cargo-test binaries are not product-named → Surmount default.
+        assert_eq!(cli, screen_mode_relaunch::DEFAULT_CLI_HINT_NAME);
+        assert_eq!(cli, "grok-oss");
+        assert!(
+            !out.contains("  grok --resume"),
+            "must not recommend upstream `grok` binary:\n{out}"
         );
     }
     #[test]
@@ -2402,6 +2410,7 @@ mod tests {
                 "  grok-oss --resume sess-abc\n",
             )
         );
+        assert!(!out.contains("  grok --minimal"), "{out}");
     }
     #[test]
     fn print_exit_resume_hint_truncates_summary_to_width() {
@@ -2435,6 +2444,8 @@ mod tests {
         };
         let mut buf = Vec::new();
         print_exit_resume_hint(&info, 80, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
+        let out = String::from_utf8(buf).unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             concat!(
@@ -2446,6 +2457,11 @@ mod tests {
                 "Resume this session with:\n",
                 "  grok --resume sess-abc\n",
             )
+        );
+        assert_eq!(cli, "grok-oss");
+        assert!(
+            !out.contains("  grok --resume"),
+            "must not recommend upstream `grok` binary:\n{out}"
         );
     }
     #[test]
@@ -2461,6 +2477,7 @@ mod tests {
         };
         let mut buf = Vec::new();
         print_exit_resume_hint(&info, 20, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains(&format!("\n{}…\n", "t".repeat(19))));
         assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));

@@ -687,7 +687,7 @@ impl acp::Agent for MvpAgent {
                             xai_grok_telemetry::unified_log::warn(
                                 "failed to persist API key to auth.json",
                                 None,
-                                Some(serde_json::json!({ "error" : e.to_string() })),
+                                Some(serde_json::json!({ "error": e.to_string() })),
                             );
                         }
                     } else if !self

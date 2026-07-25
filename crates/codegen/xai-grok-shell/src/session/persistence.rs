@@ -3224,8 +3224,17 @@ pub(crate) async fn load_light(
 
 /// List session summaries, optionally filtered by cwd (absolute path string).
 /// Returns summaries sorted by `last_active_at` (else `updated_at`) descending.
+fn recover_session_relocations_in(root: &Path) -> crate::session::storage::relocation::Result<()> {
+    crate::session::storage::relocation::RelocationStorage::new(root.into()).recover_all()
+}
+
 pub async fn list_summaries(cwd: Option<&str>) -> io::Result<Vec<Summary>> {
     let root_dir = crate::util::grok_home::grok_home();
+    let recovery_root = root_dir.clone();
+    tokio::task::spawn_blocking(move || recover_session_relocations_in(&recovery_root))
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
     let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
     storage.list_sessions(cwd).await
 }
@@ -3365,6 +3374,11 @@ mod worktree_stamp_tests;
 /// Uses stat-based mtime sorting to avoid reading every summary file on disk; final order uses `last_active_at` else `updated_at`.
 pub async fn list_recent_summaries(limit: usize) -> io::Result<Vec<Summary>> {
     let root_dir = crate::util::grok_home::grok_home();
+    let recovery_root = root_dir.clone();
+    tokio::task::spawn_blocking(move || recover_session_relocations_in(&recovery_root))
+        .await
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
     let storage = JsonlStorageAdapter::with_root(root_dir);
     storage.list_sessions_recent(limit).await
 }

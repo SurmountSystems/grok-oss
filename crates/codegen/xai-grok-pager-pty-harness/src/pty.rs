@@ -63,6 +63,31 @@ impl<'a> EnvOp<'a> {
     }
 }
 
+/// One explicit environment mutation applied after the TestSandbox baseline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvOp<'a> {
+    Set(&'a OsStr, &'a OsStr),
+    Remove(&'a OsStr),
+}
+
+impl<'a> EnvOp<'a> {
+    pub fn set(key: &'a str, value: &'a str) -> Self {
+        Self::Set(OsStr::new(key), OsStr::new(value))
+    }
+
+    pub const fn set_os(key: &'a OsStr, value: &'a OsStr) -> Self {
+        Self::Set(key, value)
+    }
+
+    pub fn remove(key: &'a str) -> Self {
+        Self::Remove(OsStr::new(key))
+    }
+
+    pub const fn remove_os(key: &'a OsStr) -> Self {
+        Self::Remove(key)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum PtyRead {
     Chunk(Vec<u8>),

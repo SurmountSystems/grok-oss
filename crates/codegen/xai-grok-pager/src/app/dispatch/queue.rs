@@ -499,7 +499,31 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
             agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
 
             let combined_segs = queued.combined_texts.clone();
-            let effects = if let Some(mut blocks) = queued.wire_blocks {
+            // Deferred enter-plan is checked first so wire/images/combined arms
+            // cannot drop the mode switch. Slash `/plan <desc>` only stamps
+            // plain text today; non-plain enter-plan rows fail closed to
+            // `SetModeThenPrompt` (display text + skill ranges) rather than
+            // sending agent-mode blocks.
+            let effects = if queued.enter_plan_mode {
+                if queued.wire_blocks.is_some() || !queued.images.is_empty() || multi {
+                    tracing::warn!(
+                        target: "qtrace",
+                        has_wire = queued.wire_blocks.is_some(),
+                        image_count = queued.images.len(),
+                        multi,
+                        "enter_plan_mode row had non-plain payload; draining as plain SetModeThenPrompt"
+                    );
+                }
+                agent.plan_mode_pending = Some(true);
+                vec![Effect::SetModeThenPrompt {
+                    session_id,
+                    mode_id: acp::SessionModeId::new("plan"),
+                    agent_id,
+                    text: queued.text,
+                    prompt_id,
+                    skill_token_ranges: queued.skill_token_ranges,
+                }]
+            } else if let Some(mut blocks) = queued.wire_blocks {
                 // Skill injection: send structured blocks.
                 // Annotate the first text block's meta with the display text
                 // Without the annotation, replay shows the raw skill instructions instead of the user-facing display text
@@ -1102,6 +1126,21 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
             return vec![];
         };
         maybe_drain_queue(agent, &mut app.pending_image_notices)
+    };
+    note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+    drain.effects
+}
+
+/// Force-drain past background-subagent hold; same page-flip bookkeeping.
+pub(crate) fn force_drain_queue_past_background_and_note_peek(
+    app: &mut AppView,
+    agent_id: AgentId,
+) -> Vec<Effect> {
+    let drain = {
+        let Some(agent) = app.agents.get_mut(&agent_id) else {
+            return vec![];
+        };
+        force_drain_queue_past_background(agent)
     };
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects
@@ -3873,6 +3912,17 @@ mod tests {
         agent.session.pending_prompts.clear();
         agent.session.enqueue_prompt("plain follow-up".into());
         assert!(agent.held_queue_top_sendable());
+
+        // Deferred enter-plan is prompt-like for display but refuses force —
+        // do not advertise "Enter to send now".
+        agent.session.pending_prompts.clear();
+        agent
+            .session
+            .enqueue_enter_plan_prompt("plan follow-up".into(), Vec::new());
+        assert!(
+            !agent.held_queue_top_sendable(),
+            "enter-plan top row must not advertise send-now"
+        );
 
         // A server row (renders first in the merge) is always sendable.
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {

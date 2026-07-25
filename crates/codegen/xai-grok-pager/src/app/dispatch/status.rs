@@ -604,6 +604,8 @@ pub(super) fn handle_coding_data_sharing_failed(
         %error,
         "ACP update failed",
     );
+    // Accept failure: no ack; clear inflight so the banner stays.
+    app.privacy_banner_accept_inflight = false;
     vec![]
 }
 

@@ -2439,6 +2439,7 @@ pub(crate) mod test_fixtures {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         };
         session.enqueue_prompt("local one".to_string());
         let mut agent = AgentView::new(session, ScrollbackState::new());
@@ -2504,6 +2505,7 @@ pub(crate) mod test_fixtures {
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
+                session_notes: crate::app::agent::SessionNotes::default(),
             },
             ScrollbackState::new(),
         )
@@ -3339,6 +3341,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         crate::scrollback::state::ScrollbackState::new(),
     );

@@ -42,6 +42,7 @@ pub mod memory_ops;
 pub mod model;
 pub mod multiline;
 pub mod new;
+pub mod note;
 pub mod personas;
 pub mod plan;
 pub mod plugin;
@@ -94,7 +95,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(compact::CompactCommand),
 
         Arc::new(economic_mode::EconomicModeCommand),
-        Arc::new(doctor::DoctorCommand),
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),
         Arc::new(history::HistoryCommand),
@@ -299,6 +299,9 @@ mod tests {
             "model",
             "multiline",
             "new",
+            "note",
+            "notes",
+            "onboarding",
             "personas",
             "plan",
             "plan-view",
@@ -331,7 +334,9 @@ mod tests {
             "timestamps",
             "title",
             "toggle-mouse-reporting",
+            "tour",
             "transcript",
+            "tutorial",
             "t",
             "usage",
             "view-plan",
@@ -743,6 +748,19 @@ mod tests {
         assert!(
             reg.get("tasks").is_some(),
             "/tasks should be registered in builtins"
+        );
+    }
+    #[test]
+    fn note_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("note").is_some(),
+            "/note should be registered in builtins"
+        );
+        assert_eq!(
+            reg.get("notes").expect("/notes alias").name(),
+            "note",
+            "/notes should alias /note"
         );
     }
     #[test]

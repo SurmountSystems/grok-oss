@@ -117,6 +117,7 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     if is_trusted_cli_chat_proxy_url(url) {
         return true;
     }
+    // Loopback is always accepted (unit tests and local mock servers).
     if let Ok(u) = reqwest::Url::parse(url)
         && let Some(h) = u.host_str()
         && (h == "localhost" || h == "127.0.0.1" || h == "::1")

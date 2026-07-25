@@ -745,6 +745,37 @@ mod tests {
     }
 
     #[test]
+    fn resume_panel_pins_hidden_external_hint_above_scrolling_list() {
+        // More native rows than the panel fits: the hint must stay pinned
+        // above the list instead of scrolling away with it.
+        let mut entries: Vec<_> = (0..20)
+            .map(|i| session_entry(&format!("native-{i}")))
+            .collect();
+        let mut foreign = session_entry("claude-session");
+        foreign.source = "claude".into();
+        entries.push(foreign);
+        let mut a = with_resume(entries);
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut a, ListPanel::Resume, &theme);
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("1 external session hidden \u{b7} f to show"),
+            "hidden foreign rows must stay explained while the list scrolls:\n{text}"
+        );
+        assert!(
+            text.find("external session hidden") < text.find("native-"),
+            "the hint must be pinned above the first list row:\n{text}"
+        );
+        assert!(
+            !text.contains("claude-session"),
+            "foreign row stays hidden under the default filter:\n{text}"
+        );
+    }
+
+    #[test]
     fn resume_search_uses_picker_grapheme_viewport_at_narrow_width() {
         let grapheme = "👩🏽\u{200d}💻";
         let combining = "e\u{301}";

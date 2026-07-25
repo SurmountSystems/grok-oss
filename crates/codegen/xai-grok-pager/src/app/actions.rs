@@ -700,6 +700,15 @@ pub enum Action {
     /// Commit a read-only list of background tasks, subagents, and scheduled tasks as a system block (`/tasks`).
     /// This is what minimal mode uses in place of the `TasksPane`.
     ShowTasks,
+    /// Store an operator mid-session note (`/note <text>`). Does **not**
+    /// enqueue a user turn or touch the pending-prompt queue.
+    AddSessionNote {
+        text: String,
+        tags: Vec<String>,
+    },
+    /// Commit a read-only list of session notes as a system block (`/note`
+    /// with no args, or `/notes`).
+    ShowNotes,
     /// Show the current plan: preview popover if exists, toast if not.
     ShowPlan,
     /// Enter plan mode. If a description is provided, also start a turn with that text as the prompt.

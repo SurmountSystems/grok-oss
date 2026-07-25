@@ -500,6 +500,9 @@ impl AgentView {
                 images: vec![],
             });
         }
+        // Approve continues implement shell-side (mid-turn or resume). Local
+        // pending stays held until that turn ends and the normal turn-end
+        // drain runs — do not race DrainQueue against the implement turn.
         InputOutcome::Changed
     }
     /// Fold freeform-only images into the session draft.
@@ -1119,6 +1122,11 @@ impl AgentView {
         }
     }
     pub(super) fn send_casual_plan_comments(&mut self) -> InputOutcome {
+        // Flush in-progress casual line comment before send (same swallow bug
+        // as plan approve: mouse/`s` previously only sent already-saved list).
+        if self.casual_commenting_range.is_some() && !self.prompt.text().trim().is_empty() {
+            let _ = self.save_casual_plan_comment();
+        }
         if self.plan_comments.is_empty() {
             self.show_toast("No comments to send.");
             return InputOutcome::Changed;
@@ -1186,6 +1194,7 @@ mod plan_chip_tests {
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
+                session_notes: crate::app::agent::SessionNotes::default(),
             },
             ScrollbackState::new(),
         );

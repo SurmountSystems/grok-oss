@@ -2117,6 +2117,8 @@ async fn permanent_failure_reads_absent_after_clear_so_auth_reports_not_logged_i
         crate::error::RefreshTokenFailedReason::RefreshTokenRejected,
     );
     mgr.clear_in_memory();
+    // clear_in_memory drops the credential but keeps a sticky permanent
+    // verdict so a just-revoked RT is not re-tried until login.
     let err = mgr.auth().await.unwrap_err();
     assert!(
         matches!(

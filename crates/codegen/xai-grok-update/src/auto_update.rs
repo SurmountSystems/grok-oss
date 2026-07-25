@@ -2633,6 +2633,7 @@ pub async fn run_update(
     heal_managed_install(installer).await;
 
     let current_version = get_installed_grok_version();
+    let policy = config::VersionPolicy::resolve();
 
     // When --version is given, skip the latest-version check and install directly
     if let Some(version) = pinned_version {

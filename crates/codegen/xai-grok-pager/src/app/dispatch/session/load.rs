@@ -220,6 +220,7 @@ fn dispatch_load_session_ungated(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         scrollback,
     );
@@ -294,6 +295,7 @@ fn dispatch_load_session_ungated(
         agent_id,
         session_id,
         session_cwd,
+        // Conversation-entry bit; effects OR SessionFlags.chat_mode for meta.
         chat_kind,
     });
     effects
@@ -1148,6 +1150,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         scrollback,
     );
@@ -1672,6 +1675,9 @@ fn invalidate_picker_fetch_on_dismiss(app: &mut AppView) {
     next_picker_list_generation(app);
     let is_welcome_dismissal = matches!(app.active_view, crate::app::app_view::ActiveView::Welcome);
     if is_welcome_dismissal {
+        app.session_picker_loading = false;
+    }
+    if welcome_dismissal {
         app.session_picker_loading = false;
     }
     app.session_picker_deep_search_seq += 1;

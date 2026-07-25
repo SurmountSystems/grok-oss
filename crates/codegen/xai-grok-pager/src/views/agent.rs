@@ -702,6 +702,7 @@ pub(crate) fn build_hints(
     vim_mode: bool,
     surface: ViewSurface,
     is_turn_running: bool,
+    esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     queue_mutation: QueueMutation,
     selected_is_user_prompt: bool,
@@ -993,7 +994,11 @@ pub(crate) fn build_hints(
         }
     };
     if is_turn_running && let Some(def) = registry.find(ActionId::CancelTurn) {
-        hints.push(def.hint());
+        let mut hint = def.hint();
+        if esc_would_cancel_turn {
+            hint.keys = vec![crate::key!(Esc)];
+        }
+        hints.push(hint);
     }
     let has_composer_payload = !prompt.text().trim().is_empty() || is_editing_queued;
     if matches!(active_pane, ActivePane::Prompt)
@@ -1100,6 +1105,7 @@ mod tests {
             false,
             false,
             QueueMutation::PerRowKind,
+            false,
             false,
             false,
             false,
@@ -1265,6 +1271,7 @@ mod tests {
             false,
             false,
             QueueMutation::PerRowKind,
+            false,
             false,
             false,
             false,
@@ -1437,6 +1444,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(&search),
         )
     }
@@ -1539,6 +1547,7 @@ mod tests {
             false,
             false,
             QueueMutation::PerRowKind,
+            false,
             false,
             false,
             false,
@@ -1645,6 +1654,7 @@ mod tests {
                 true,
                 ViewSurface::Root,
                 true,
+                false,
                 true,
                 QueueMutation::PerRowKind,
                 false,

@@ -2507,11 +2507,44 @@ pub(crate) async fn spawn_session_actor(
         scheduler_handle: scheduler_handle_for_handle,
     };
     Ok((
-        SessionInitResult {
-            handle,
-            permission_events_rx,
-            system_prompt,
-            toolset,
+        SessionHandle {
+            cmd_tx,
+            persistence_tx: persistence.tx.clone(),
+            current_prompt_id,
+            pending_interactions,
+            info: session_info,
+            max_turns,
+            resolved_tool_overrides,
+            hunk_tracker_handle,
+            chat_state_handle: chat_state_handle_for_handle,
+            signals_handle,
+            gateway_enabled,
+            mcp_servers,
+            initial_client_mcp_servers,
+            display_cwd: None,
+            feedback_manager: feedback_manager.clone(),
+            upload_queue: upload_queue.clone(),
+            upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tool_context: tool_context_for_handle,
+            model_id: session_model_id,
+            reasoning_effort: sampling_config.reasoning_effort,
+            yolo_mode: session_yolo_mode,
+            origin_client: origin_client.clone(),
+            code_nav_enabled,
+            ask_user_question_enabled,
+            plan_mode: plan_mode.clone(),
+            force_compact,
+            permission_handle: permissions_for_handle,
+            attribution_callback: attribution_callback_for_handle,
+            agent_name: agent_name_for_handle,
+            managed_mcp_proxy_base_url,
+            session_default_agent_profile,
+            allowed_subagent_types: allowed_subagent_types_for_handle,
+            hook_registry: hook_registry_for_handle,
+            workspace_ops: workspace_ops_for_handle,
+            terminal_backend: Some(terminal_backend.clone()),
+            tools_notification_handle: Some(tools_notification_handle.clone()),
+            scheduler_handle: scheduler_handle_for_handle,
         },
         session_done_rx,
     ))
@@ -2760,7 +2793,7 @@ pub(crate) async fn spawn_session_on_thread(
 
             local.block_on(&rt, async move {
                 let _trace_span = parent_traceparent.as_ref().map(|tp| {
-                    let meta = serde_json::json!({ "traceparent" : tp })
+                    let meta = serde_json::json!({ "traceparent": tp })
                         .as_object()
                         .cloned()
                         .unwrap_or_default();

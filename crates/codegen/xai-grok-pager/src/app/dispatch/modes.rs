@@ -38,12 +38,16 @@ pub(super) fn dispatch_enter_plan_mode(
     };
 
     let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
-    if in_plan {
+    let plan_approval_open = agent.plan_approval_view.is_some();
+    let busy = !agent.session.state.is_idle() || plan_approval_open;
+
+    // Bare `/plan` while already planning: show the current plan; do not
+    // re-toggle. Descriptions fall through to deferred queue below.
+    if in_plan && description.is_none() {
         app.show_toast("Already in plan mode. Use /view-plan to view the current plan.");
         return vec![];
     }
 
-    let agent = app.agents.get_mut(&id).unwrap();
     let Some(session_id) = agent.session.session_id.clone() else {
         agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
@@ -87,7 +91,8 @@ pub(super) fn dispatch_enter_plan_mode(
                         skill_token_ranges,
                     });
                 }
-                other => effects.push(other),
+                let held = drain.effects.is_empty();
+                (drain.effects, drain.page_flip_entry, held)
             }
         }
         // If drain was empty (not idle), emit only the mode switch; the prompt stays queued and will drain naturally when the agent idles
@@ -99,6 +104,10 @@ pub(super) fn dispatch_enter_plan_mode(
         }
         effects
     } else {
+        // Bare `/plan`, not in plan: enter plan mode without a prompt.
+        let agent = app.agents.get_mut(&id).expect("agent checked above");
+        agent.plan_mode_pending = Some(true);
+        tracing::info!("Plan mode entered via /plan slash command");
         vec![Effect::SetSessionMode {
             session_id,
             mode_id,

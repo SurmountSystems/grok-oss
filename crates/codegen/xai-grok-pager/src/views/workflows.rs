@@ -1087,6 +1087,21 @@ fn render_detail(
                 Style::default().fg(theme.gray_dim),
                 meta_x,
             );
+            trail_x += unicode_width::UnicodeWidthStr::width(model_txt.as_str()) as u16 + 2;
+        }
+        if let Some(activity) = live_status.and_then(|l| l.activity.as_deref()) {
+            let activity_txt = truncate_to_width(
+                &format!("— {}", strip_control(activity)),
+                tokens_x.saturating_sub(trail_x + 1) as usize,
+            );
+            span_at(
+                buf,
+                trail_x,
+                y,
+                &activity_txt,
+                Style::default().fg(theme.gray_dim),
+                tokens_x,
+            );
         }
         span_at(
             buf,

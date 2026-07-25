@@ -3314,23 +3314,3 @@ async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
         })
         .await;
 }
-/// A harness-pinned `spawn_depth` of 0 (scheduler loop iterations) keeps
-/// the task tool in the child toolset; a natural depth-1 child loses it.
-#[test]
-fn strip_task_tools_honors_spawn_depth() {
-    use xai_grok_agent::config::AgentDefinition;
-    use xai_grok_tools::registry::types::ToolServerConfig;
-    use xai_grok_tools::types::tool::ToolKind;
-    use super::super::handle_request::strip_task_tools_at_max_depth;
-    let has_task = |cfg: &ToolServerConfig| {
-        cfg.tools.iter().any(|tc| tc.kind == Some(ToolKind::Task))
-    };
-    let base = AgentDefinition::general_purpose().tool_config;
-    assert!(has_task(& base));
-    let mut natural_child = base.clone();
-    assert!(strip_task_tools_at_max_depth(& mut natural_child, 1));
-    assert!(! has_task(& natural_child));
-    let mut loop_iteration = base.clone();
-    assert!(! strip_task_tools_at_max_depth(& mut loop_iteration, 0));
-    assert!(has_task(& loop_iteration));
-}

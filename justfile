@@ -1,9 +1,14 @@
 # Grok OSS local recipes.
-# GitHub Actions runs the same `just ci` entrypoint -- keep this file the source of truth.
+# GHA quality uses the same recipe chain as `just ci` (flake-meta → ci-prep → test),
+# not the `just ci` entrypoint itself -- keep this file the source of truth for those recipes.
 # Requires: just, nix (with flakes). No bash scripts -- just recipes + nix.
 #
 # Bare `just` lists recipes (same idea as `just -l` / `just --list`).
-# Full quality gate matching GHA: `just ci`  (or `just test` for fmt/clippy/tests only).
+# Full local gate (same recipe chain as GHA quality): `just ci`
+#   (or `just test` for fmt/clippy/tests only).
+# Closest GHA repro on Linux: CI_LOW_MEM=1 CI_SYSTEM=x86_64-linux just ci
+# Under CI_LOW_MEM, cargo-ci scrubs PATH to nix-store bins only (no host
+# pw-record/parec/arecord). Interactive `just dev` keeps impure host PATH.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -119,9 +124,10 @@ nix_retry +cmd:
 # packaging is for humans: `just build` / `just smoke` / `just install-nix`.
 #
 # GHA (see .github/workflows/ci.yml): quality job runs flake-meta, ci-prep,
-# and `just test` — not a release build.
+# and `just test` (same chain as `just ci`, not the `just ci` entrypoint) —
+# not a release build. GHA always sets CI_LOW_MEM=1 and CI_SYSTEM=x86_64-linux.
 #
-# `just check` / `just ci` = full local gate (same idea as GHA quality).
+# `just check` / `just ci` = full local gate (same recipe chain as GHA quality).
 #   Run before you push. No pre-commit hook required for this.
 # `just test` = fmt, clippy (-D warnings), workspace nextest, doctests,
 #   mem-guard (includes offline OpenRouter credential tests via nextest).
@@ -131,13 +137,14 @@ nix_retry +cmd:
 # There is no `ci-quick` or `ci-host` recipe — use `check`/`ci` or `test`.
 #
 # Free GHA: CI_LOW_MEM=1 so cargo runs under cargo-mem-guard + mold (no pure
-# nix monorepo release build — that OOMs on ~16GB runners).
+# nix monorepo release build — that OOMs on ~16GB runners). Same flag also
+# enables store-only PATH scrub in cargo-ci (see recipe comment).
 # ---------------------------------------------------------------------------
 
 # Alias: same full gate as `ci` (preferred short name before push).
 check: ci
 
-# Full local gate matching GHA quality (flake + prep + all tests/lints).
+# Full local gate — same recipe chain as GHA quality (flake + prep + all tests/lints).
 ci: require_system
     just flake-meta
     just ci-prep
@@ -191,6 +198,18 @@ mem-guard: require_system
 # via devShells.ci (mold + pressure defaults). Cargo payloads are never
 # nix_retry'd (permanent compile fails once).
 #
+# Env hygiene (always):
+#   - unset NO_COLOR, CARGO_TERM_COLOR, OPENROUTER_API_KEY
+#   - set harness secret disables + loopback proxy trust + runfiles dummy
+#
+# PATH hygiene (CI_LOW_MEM=1 only — GHA + local closest-CI repro):
+#   nix develop .#ci prepends ci-tools/stdenv store bins but keeps host PATH
+#   after. scripts/with-ci-hermetic-path.sh rebuilds PATH as a /nix/store
+#   allowlist so optional desktop tools (pw-record, parec, arecord, …) cannot
+#   flip unit tests. Not a recorder denylist. git is in ci-tools for the same
+#   reason. Interactive `just dev` / bare cargo keep impure host PATH.
+#   Escape hatch: GROK_CI_ALLOW_HOST_PATH=1.
+#
 # RULES_RUST_RUNFILES_WORKSPACE_NAME: --all-features enables xai-test-utils'
 # optional `bazel`/`runfiles` dep (Bazel-only). That crate needs this env at
 # compile time; set a dummy so cargo/host gates are not blocked.
@@ -217,7 +236,10 @@ cargo-ci +cmd:
     # Idle-resume e2e tests bind a loopback axum mock as cli-chat-proxy.
     export GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY="${GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY:-1}"
     if [[ "${CI_LOW_MEM:-}" == "1" ]]; then
-      exec nix develop {{ nix_low_mem_opts }} .#ci -c cargo-mem-guard -- {{ cmd }}
+      # ci-tools + stdenv first (develop), then store-only PATH scrub, then mem-guard.
+      exec nix develop {{ nix_low_mem_opts }} .#ci -c \
+        ./scripts/with-ci-hermetic-path.sh \
+        cargo-mem-guard -- {{ cmd }}
     fi
     exec {{ cmd }}
 
@@ -363,6 +385,14 @@ upstream-put-history *ARGS:
 # Join Surmount main into current onto tip (-s ours; stages merge for signed commit)
 upstream-join-main *ARGS:
     ./scripts/join-main-into-onto.sh {{ ARGS }}
+
+# Fail if AGENTS/FORK/RESIDUAL/join script/… missing after recon
+upstream-assert-process-pins *ARGS:
+    ./scripts/assert-process-pins.sh {{ ARGS }}
+
+# Read-only recon probe: branch, CHERRY_PICK/MERGE, UU count, onto-ish, next human action
+recon-status:
+    ./scripts/recon-status.sh
 
 upstream-sync *ARGS:
     ./scripts/sync-upstream.sh {{ ARGS }}

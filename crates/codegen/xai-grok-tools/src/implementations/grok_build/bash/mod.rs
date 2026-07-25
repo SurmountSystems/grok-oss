@@ -414,7 +414,7 @@ pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
             None => format!("exit: {}{}", bash.exit_code, annotations(bash)),
         };
         let prompt = format!("{}\n{}", header, output_str);
-        if bash.signal.is_none() && is_noop_command(&bash.command) {
+        if append_noop_reminder && bash.signal.is_none() && is_noop_command(&bash.command) {
             format!("{}\n\n{}", prompt.trim_end(), NOOP_END_TURN_REMINDER)
         } else {
             prompt
@@ -2248,7 +2248,16 @@ impl xai_tool_runtime::Tool for BashTool {
                 output_delta: None,
                 was_bare_echo: false,
             };
-            bash.output_for_prompt = format_default_prompt(&bash);
+            // Gate the no-op end-turn reminder on the same switch as every other
+            // system reminder (absent resource => enabled, mirroring
+            // `finalize_output`), so toolsets with `system_reminders_enabled=false`
+            // don't receive it.
+            let append_noop_reminder = resources
+                .lock()
+                .await
+                .get::<crate::types::resources::SystemRemindersEnabled>()
+                .is_none_or(|e| e.0);
+            bash.output_for_prompt = format_default_prompt(&bash, append_noop_reminder);
 
             // Bare `echo "<msg>"` usage (common model anti-pattern for "just output something").
             // We tag it for statistics (grok_build backend) and can surface an educational
@@ -3661,7 +3670,7 @@ mod tests {
             output_delta: None,
             was_bare_echo: false,
         };
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
         bash
     }
 
@@ -3714,7 +3723,7 @@ mod tests {
         let mut bash = make_bash_output(-1, "partial\n");
         bash.signal = Some("timeout".to_string());
         bash.timed_out = true;
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
         // Synthetic kill reasons render as `exit: killed (reason)` — no
         // redundant `[signal=…]` / `[timeout]` annotation.
         assert!(
@@ -3759,7 +3768,8 @@ mod tests {
         for reason in ["timeout", "max_runtime", "cancelled", "killed", "signal 15"] {
             let mut bash = make_bash_output(-1, "partial\n");
             bash.signal = Some(reason.to_string());
-            bash.output_for_prompt = format_default_prompt(&bash);
+            bash.output_for_prompt =
+                format_default_prompt(&bash, /* append_noop_reminder */ true);
             let expected = format!("exit: killed ({})", reason);
             assert!(
                 bash.output_for_prompt.starts_with(&expected),
@@ -3779,7 +3789,7 @@ mod tests {
 
         let mut oom = make_bash_output(137, "killed\n");
         oom.signal = Some("oom".to_string());
-        oom.output_for_prompt = format_default_prompt(&oom);
+        oom.output_for_prompt = format_default_prompt(&oom, /* append_noop_reminder */ true);
         assert!(oom.output_for_prompt.starts_with("exit: 137 [signal=oom]"));
     }
 
@@ -3789,7 +3799,7 @@ mod tests {
         bash.signal = Some("backgrounded".to_string());
         bash.output_file = "/tmp/bg.log".to_string();
         bash.total_bytes = 10000;
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
         assert!(
             bash.output_for_prompt
                 .starts_with("[Command moved to background]")
@@ -3832,10 +3842,30 @@ mod tests {
             "printf hi",
             "printf 'done\\n'",
         ] {
-            let prompt = format_default_prompt(&bash_output_with_command(cmd, ""));
+            let prompt = format_default_prompt(
+                &bash_output_with_command(cmd, ""),
+                /* append_noop_reminder */ true,
+            );
             assert!(
                 prompt.contains(NOOP_END_TURN_REMINDER),
                 "no-op command {cmd:?} should append the end-turn reminder, got: {prompt:?}"
+            );
+        }
+    }
+
+    /// With `append_noop_reminder = false` (session `system_reminders_enabled=false`),
+    /// the no-op end-turn reminder is suppressed even for no-op commands. Mirrors
+    /// gating the reminder on the shared `SystemRemindersEnabled` switch.
+    #[test]
+    fn default_prompt_noop_reminder_suppressed_when_disabled() {
+        for cmd in ["true", ":", "", "echo ok", "printf hi"] {
+            let prompt = format_default_prompt(
+                &bash_output_with_command(cmd, ""),
+                /* append_noop_reminder */ false,
+            );
+            assert!(
+                !prompt.contains("<system-reminder>"),
+                "no-op command {cmd:?} must not append the reminder when disabled, got: {prompt:?}"
             );
         }
     }
@@ -3854,7 +3884,10 @@ mod tests {
             "echo hi; ls",
             "printf '%s' \"$x\"",
         ] {
-            let prompt = format_default_prompt(&bash_output_with_command(cmd, "hi\n"));
+            let prompt = format_default_prompt(
+                &bash_output_with_command(cmd, "hi\n"),
+                /* append_noop_reminder */ true,
+            );
             assert!(
                 !prompt.contains("<system-reminder>"),
                 "normal command {cmd:?} must not append the end-turn reminder, got: {prompt:?}"

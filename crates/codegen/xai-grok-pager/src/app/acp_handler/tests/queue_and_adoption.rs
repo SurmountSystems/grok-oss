@@ -2053,6 +2053,18 @@
     }
 
     #[test]
+    fn session_binding_epoch_counts_bind_and_unbind_transitions() {
+        let mut agent = make_agent(None);
+        assert_eq!(agent.session_binding_epoch, 0);
+        agent.bind_session_id(acp::SessionId::new("a"));
+        assert_eq!(agent.session_binding_epoch, 1);
+        agent.unbind_session_id();
+        assert_eq!(agent.session_binding_epoch, 2);
+        agent.bind_session_id(acp::SessionId::new("a"));
+        assert_eq!(agent.session_binding_epoch, 3);
+    }
+
+    #[test]
     fn viewer_adopting_live_delta_enters_turn_running_and_timer_is_monotonic() {
         // A viewer (attached_as_viewer) watching the driver's turn starts Idle.
         // Adopting the first live delta must flip it to TurnRunning and stamp `turn_started_at`

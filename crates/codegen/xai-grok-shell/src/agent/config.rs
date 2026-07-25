@@ -963,6 +963,12 @@ pub struct Config {
     /// Keys are agent names, values are booleans. Omitted agents default to enabled.
     #[serde(skip)]
     pub subagent_toggle: std::collections::HashMap<String, bool>,
+    /// Whether subagent spawns may use `isolation = worktree`. From
+    /// `[subagents] allow_worktree` (default `false`). When `false`, spawn
+    /// forces shared workspace (`isolation = none`). Opt in with
+    /// `allow_worktree = true`.
+    #[serde(skip)]
+    pub subagent_allow_worktree: bool,
     /// Trust-independent roles from inline, user, and bundled sources.
     #[serde(skip)]
     pub subagent_roles:
@@ -1248,6 +1254,7 @@ impl Default for Config {
             ),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
+            subagent_allow_worktree: false,
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
             disable_web_search: false,
@@ -1674,6 +1681,7 @@ impl Config {
         let remote_settings = self.remote_settings.clone();
         self.resolve_subagent_limits(&sa, remote_settings.as_ref());
         self.subagents_enabled = sa.enabled;
+        self.subagent_allow_worktree = sa.allow_worktree;
         self.subagent_model_overrides = sa.models;
         self.subagent_toggle = sa.toggle;
         self.subagent_roles = sa.roles;

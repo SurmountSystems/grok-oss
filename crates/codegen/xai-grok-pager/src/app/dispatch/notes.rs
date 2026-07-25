@@ -1,4 +1,4 @@
-//! Feedback, remember-note, btw, and recap dispatchers.
+//! Feedback, remember-note, session-note, btw, and recap dispatchers.
 
 use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
 use agent_client_protocol as acp;

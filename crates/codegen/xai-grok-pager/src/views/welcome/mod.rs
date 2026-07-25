@@ -3134,6 +3134,83 @@ mod tests {
         );
     }
 
+    /// The hidden-external hint stays pinned on the welcome picker's default
+    /// Grok view when scanned foreign rows exist — even when the native list
+    /// overflows the viewport — and never renders under `--chat` (foreign
+    /// scanning is disabled there, so the hint is dead weight).
+    #[test]
+    fn hidden_external_hint_renders_outside_chat_mode() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = crate::theme::Theme::default();
+        let area = Rect::new(0, 0, 80, 20);
+        // More native rows than the viewport fits: a trailing list row would
+        // scroll out of view, a pinned row must not.
+        let mut entries: Vec<SessionPickerEntry> = (0..30)
+            .map(|i| make_entry(&format!("s{i}"), &format!("native session {i}"), "repo"))
+            .collect();
+        let mut foreign = make_entry("f1", "Claude work", "repo");
+        foreign.source = "claude".into();
+        entries.push(foreign);
+
+        let render = |chat_mode: bool| -> String {
+            let mut buf = Buffer::empty(area);
+            let mut state = PickerState::default();
+            render_session_picker(
+                area,
+                &mut buf,
+                &theme,
+                &mut SessionPickerRenderCtx {
+                    state: &mut state,
+                    sessions: Some(&entries),
+                    cwd: std::path::Path::new("/repo"),
+                    loading: false,
+                    pending_hint: None,
+                    shortcuts_area: None,
+                    content_results: None,
+                    content_loading: false,
+                    entries_query: None,
+                    tick: 0,
+                    grouped: false,
+                    source_filter: crate::views::session_picker::SourceFilter::default(),
+                    chat_mode,
+                },
+            );
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| {
+                            buf.cell((x, y))
+                                .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let build_mode = render(false);
+        assert!(
+            build_mode.contains("1 external session hidden \u{b7} f to show"),
+            "default Grok filter must pin the hidden-external hint:\n{build_mode}"
+        );
+        assert!(
+            build_mode.find("external session hidden") < build_mode.find("native session 0"),
+            "the hint must be pinned above the first list row:\n{build_mode}"
+        );
+        assert!(
+            !build_mode.contains("Claude work"),
+            "the foreign row itself stays hidden under the default filter:\n{build_mode}"
+        );
+
+        let chat = render(true);
+        assert!(
+            !chat.contains("external session"),
+            "chat mode must not render the hidden-external hint:\n{chat}"
+        );
+    }
+
     #[test]
     fn headless_hidden_external_hint_pins_above_list() {
         use ratatui::buffer::Buffer;

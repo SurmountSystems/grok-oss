@@ -482,7 +482,9 @@ pub(crate) fn execute(
                             TaskResult::WorktreeSessionFailed {
                                 agent_id,
                                 error: sanitize_user_error(
-                                    &format!("couldn't create session in worktree: {e}"),
+                                    &format!(
+                            "couldn't create session in worktree: {e}"
+                        ),
                                 ),
                                 orphaned_worktree_root: Some(worktree_root),
                                 timed_out: e.timed_out(),
@@ -3037,7 +3039,9 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({ "sessionId" : session_id });
+                    let params = serde_json::json!({
+                    "sessionId": session_id
+                });
                     let req = acp::ExtRequest::new(
                         "x.ai/workflows/list",
                         serde_json::value::to_raw_value(&params)
@@ -3059,7 +3063,9 @@ pub(crate) fn execute(
                         Err(e) => {
                             Err(
                                 sanitize_user_error(
-                                    &format!("couldn't load workflows: {e}"),
+                                    &format!(
+                        "couldn't load workflows: {e}"
+                    ),
                                 ),
                             )
                         }

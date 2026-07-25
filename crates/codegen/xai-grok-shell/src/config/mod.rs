@@ -82,6 +82,9 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub personas: std::collections::HashMap<String, SubagentPersona>,
 }
+fn default_allow_worktree() -> bool {
+    false
+}
 use xai_grok_subagent_resolution::config::{SubagentPersona, SubagentRole};
 impl Default for SubagentsConfig {
     fn default() -> Self {

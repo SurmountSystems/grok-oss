@@ -1,4 +1,4 @@
-//! Read-only system-block text for `/queue`, `/tasks`, and `/usage`.
+//! Read-only system-block text for `/queue`, `/tasks`, `/note`, and `/usage`.
 //!
 //! Plain text committed into scrollback; minimal mode has no interactive panes, so these blocks are its main way to inspect that state.
 //! The formatting lives outside `dispatch` so it is easy to unit test.
@@ -400,5 +400,43 @@ mod tests {
             format_queue_row(3, "first\nsecond\nthird"),
             "  #3  first  (+2 more lines)"
         );
+    }
+
+    #[test]
+    fn notes_block_empty() {
+        let agent = crate::test_util::make_agent_view(Some("s1"), "/tmp");
+        assert_eq!(
+            notes_block_text(&agent),
+            "No session notes. Add one with /note <text>."
+        );
+    }
+
+    #[test]
+    fn notes_block_lists_with_tags() {
+        let mut agent = crate::test_util::make_agent_view(Some("s1"), "/tmp");
+        agent
+            .session
+            .session_notes
+            .add("hold the queue", vec!["queue".into()])
+            .unwrap();
+        agent
+            .session
+            .session_notes
+            .add("line1\nline2", vec![])
+            .unwrap();
+        let text = notes_block_text(&agent);
+        assert!(text.contains("Session notes (2):"), "{text}");
+        assert!(text.contains("#1  hold the queue  #queue"), "{text}");
+        assert!(text.contains("#2  line1  (+1 more line)"), "{text}");
+    }
+
+    #[test]
+    fn tasks_block_mentions_notes_count() {
+        let mut agent = crate::test_util::make_agent_view(Some("s1"), "/tmp");
+        agent.session.session_notes.add("alone", vec![]).unwrap();
+        let text = tasks_block_text(&agent);
+        assert!(text.contains("notes"), "{text}");
+        assert!(text.contains("1 operator note"), "{text}");
+        assert!(text.contains("/note"), "{text}");
     }
 }

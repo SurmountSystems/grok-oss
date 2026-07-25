@@ -729,6 +729,8 @@ pub async fn run_leader(
             debug!("Acquired leader lock, proceeding as leader");
         }
         Ok(false) => {
+            // Fast path: a fully-running leader (flock held AND socket bound) →
+            // exit so the client adopts it.
             if crate::leader::listener_is_ready(&socket_path) {
                 info!(
                     "Another process holds the leader lock with a bound socket ({}). \

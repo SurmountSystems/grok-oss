@@ -10,8 +10,6 @@
 
 #[cfg(feature = "audio")]
 use std::collections::VecDeque;
-#[cfg(feature = "audio")]
-use std::sync::atomic::Ordering;
 
 use std::future::Future;
 

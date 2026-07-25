@@ -581,6 +581,22 @@ mod workflows_overlay_key_tests {
             .unwrap_or_else(|| panic!("missing index"))
             .status = "complete".to_string();
         let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
+        assert!(
+            matches!(
+                out,
+                InputOutcome::Action(Action::SendSlashCommandPreservingDraft(ref command))
+                    if command == "/workflow resume deep-research"
+            ),
+            "failed runs resume via journal replay"
+        );
+        assert!(
+            !agent.show_workflows,
+            "failed r dispatches a resume and closes the overlay"
+        );
+
+        agent.show_workflows = true;
+        agent.workflow_runs[0].status = "complete".to_string();
+        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
         assert!(matches!(out, InputOutcome::Changed));
         assert!(agent.show_workflows, "completed runs must not be resumed");
 

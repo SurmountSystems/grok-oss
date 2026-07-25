@@ -528,6 +528,18 @@ impl AgentView {
                             self.enter_queue_edit(id, is_server, row);
                             return InputOutcome::Changed;
                         }
+                        if let Some(id) = self.queue.edit_click(mouse.column, mouse.row)
+                            && (!matches!(self.prompt_mode, PromptMode::EditingQueued { .. })
+                                || self.set_active_pane(AgentPane::Queue, false))
+                        {
+                            let row = self.queue.row_ref(id);
+                            let is_server = matches!(
+                                row.as_ref().map(|r| r.origin),
+                                Some(crate::views::queue_pane::QueueRowOrigin::Server)
+                            );
+                            self.enter_queue_edit(id, is_server, row);
+                            return InputOutcome::Changed;
+                        }
                         self.set_active_pane(AgentPane::Queue, false);
                         self.queue.handle_mouse(
                             mouse.kind,

@@ -13,7 +13,7 @@
 //! The fallback covers self-exec being unavailable (e.g. the on-disk binary was replaced by an update).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::TrySendError;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -29,15 +29,9 @@ pub struct CaptureHandle {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     bridge: tokio::task::JoinHandle<()>,
-    peak: Arc<AtomicU16>,
 }
 
 impl CaptureHandle {
-    /// Session peak of device-delivered PCM (see [`meter_and_send`]).
-    pub fn peak_meter(&self) -> Arc<AtomicU16> {
-        Arc::clone(&self.peak)
-    }
-
     /// Stop capture and wait for the thread to exit.
     /// Dropping a `CaptureHandle` also stops capture (see the `Drop` impl), but without joining.
     /// Call `stop()` when you need to be sure the device is released before continuing.
@@ -79,11 +73,9 @@ pub fn spawn_pcm_capture(
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
-    let peak = Arc::new(AtomicU16::new(0));
-    let peak_cb = Arc::clone(&peak);
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), VoiceError>>(1);
     let thread = thread::spawn(move || {
-        run_capture_loop(sample_rate, sync_tx, stop_flag, peak_cb, ready_tx);
+        run_capture_loop(sample_rate, sync_tx, stop_flag, ready_tx);
     });
 
     // Wait briefly for the device to actually open (mirrors the STT `wait_ready` handshake)
@@ -109,7 +101,6 @@ pub fn spawn_pcm_capture(
         stop,
         thread: Some(thread),
         bridge,
-        peak,
     })
 }
 
@@ -146,14 +137,7 @@ pub fn capture_pcm_for_duration(
     let stop_flag = Arc::clone(&stop);
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), VoiceError>>(1);
     let thread = thread::spawn(move || {
-        // Duration probe does not read the session peak.
-        run_capture_loop(
-            sample_rate,
-            sync_tx,
-            stop_flag,
-            Arc::new(AtomicU16::new(0)),
-            ready_tx,
-        );
+        run_capture_loop(sample_rate, sync_tx, stop_flag, ready_tx);
     });
 
     // Report device-open failures before recording instead of returning empty
@@ -201,7 +185,6 @@ fn run_capture_loop(
     sample_rate: u32,
     sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
-    peak: Arc<AtomicU16>,
     ready_tx: std::sync::mpsc::SyncSender<Result<(), VoiceError>>,
 ) {
     let dropped = Arc::new(AtomicUsize::new(0));
@@ -211,7 +194,6 @@ fn run_capture_loop(
         sample_rate,
         sync_tx,
         Arc::clone(&stop),
-        peak,
         Arc::clone(&dropped),
     ) {
         Ok(v) => {
@@ -234,7 +216,6 @@ pub(super) fn open_capture_stream(
     sample_rate: u32,
     sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
-    peak: Arc<AtomicU16>,
     dropped: Arc<AtomicUsize>,
 ) -> Result<(cpal::Stream, String), VoiceError> {
     let device = default_input_device()?;
@@ -273,7 +254,6 @@ pub(super) fn open_capture_stream(
         target_rate: sample_rate,
         sync_tx,
         stop,
-        peak,
         dropped,
     };
 
@@ -379,7 +359,6 @@ where
         target_rate,
         sync_tx,
         stop,
-        peak,
         dropped,
     } = params;
     let channels = in_channels as usize;

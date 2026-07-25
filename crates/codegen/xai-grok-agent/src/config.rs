@@ -514,6 +514,7 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
+            // Ask user tool (without plan mode)
             (&grok_build::AskUserQuestionTool).into(),
         ],
         behavior_preset: None,

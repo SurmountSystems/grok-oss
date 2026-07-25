@@ -22,6 +22,8 @@ use xai_grok_tools::implementations::grok_build::task::types::{
 /// The subagent_type stays fixed so the role keeps a capable toolset on whichever harness is chosen.
 /// The three role spawners and the parent-side `describe_subagent_type` probe all read it, so the gated/probed toolset matches the spawned one.
 pub(crate) const GOAL_ROLE_SUBAGENT_TYPE: &str = "general-purpose";
+pub(crate) const GOAL_ROLE_AWAIT_BUDGET_EXCEEDED: &str =
+    "goal role subagent exceeded foreground wait budget";
 
 /// The planner is aborting regardless, so this is a bound on cleanup, not a correctness gate.
 const GOAL_PLANNER_CANCEL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);

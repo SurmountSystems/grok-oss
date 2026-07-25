@@ -31,6 +31,10 @@ pub use self::tool_overrides::{
     ClearableField, MAX_WEB_SEARCH_DOMAINS, SearchDateBound, SearchDateBoundError, ToolOverrides,
     ToolOverridesUpdate, WebSearchOptions, WebSearchOptionsError, XSearchOptions,
 };
+pub use self::tool_overrides::{
+    ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,
+    WebSearchOptions, XSearchOptions,
+};
 pub use self::types::*;
 
 pub use async_openai::types::responses as rs;

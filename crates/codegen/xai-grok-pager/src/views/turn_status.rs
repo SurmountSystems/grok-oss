@@ -1118,6 +1118,22 @@ mod tests {
         );
     }
     #[test]
+    fn idle_with_subagents_and_held_queue_shows_force_hint() {
+        let mut args = idle_args(Watchers {
+            subagents: 1,
+            ..Watchers::default()
+        });
+        args.held_queue = 1;
+        args.held_queue_top_sendable = true;
+        let text = render_row_text(args, 90);
+        assert!(
+            text.contains("1 subagent still running")
+                && text.contains("1 queued — send now to force"),
+            "idle background hold must explain the queue + how to force, got: {text:?}"
+        );
+    }
+
+    #[test]
     fn idle_with_one_subagent_uses_singular() {
         let text = render_idle_with_watchers(Watchers {
             subagents: 1,

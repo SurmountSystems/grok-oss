@@ -336,9 +336,12 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
-                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                xai_acp_lib::AcpClientMessage,
+            >();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                PersistenceMsg,
+            >();
             let actor = std::sync::Arc::new(
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
             );
@@ -404,16 +407,19 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                     )
                     .await
             });
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                loop {
-                    if already_reported(&actor, "bg-normal").await {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("synthetic turn marked completion reported");
+            tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    async {
+                        loop {
+                            if already_reported(&actor, "bg-normal").await {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    },
+                )
+                .await
+                .expect("synthetic turn marked completion reported");
             turn.abort();
             assert!(
                 already_reported(&actor, "bg-normal").await,

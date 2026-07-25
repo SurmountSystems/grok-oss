@@ -379,6 +379,7 @@ pub(crate) fn default_palette_entries(
 ) -> Vec<PaletteEntry> {
     let screen_mode = slash.screen_mode();
     let mut entries = vec![
+        // ── Session ──
         PaletteEntry {
             label: "Session".into(),
             shortcut: String::new(),
@@ -434,6 +435,7 @@ pub(crate) fn default_palette_entries(
             shortcut: "/feedback".into(),
             command: PaletteCommand::OpenFeedbackModal,
         },
+        // ── Context ──
         PaletteEntry {
             label: "Context".into(),
             shortcut: String::new(),
@@ -459,6 +461,7 @@ pub(crate) fn default_palette_entries(
             shortcut: "/memory".into(),
             command: PaletteCommand::Memory,
         },
+        // ── Model & Input ──
         PaletteEntry {
             label: "Model & Input".into(),
             shortcut: String::new(),
@@ -484,6 +487,7 @@ pub(crate) fn default_palette_entries(
             shortcut: "Ctrl+G".into(),
             command: PaletteCommand::EditPromptExternal,
         },
+        // ── Tools ──
         PaletteEntry {
             label: "Tools".into(),
             shortcut: String::new(),
@@ -536,6 +540,7 @@ pub(crate) fn default_palette_entries(
             shortcut: "/config-agents".into(),
             command: PaletteCommand::OpenAgentsModal,
         },
+        // ── Other ──
         PaletteEntry {
             label: "Other".into(),
             shortcut: String::new(),

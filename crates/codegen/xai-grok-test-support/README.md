@@ -97,6 +97,20 @@ server.set_conversations(vec![
 - Do not add process global env mutation. Keep filesystem and environment ownership in `TestSandbox`; process groups, output tails, and kill tree ownership stay in `TestProcess` and `TestProcessTree`.
 - Diagnostics may name sandbox paths and sanitized loopback URLs. URL parsing fails closed: userinfo, query, and fragment are stripped, and malformed or non loopback values are redacted.
 
+## Sandbox contract
+
+- Keep the `TestSandbox` alive at least as long as every child using its paths.
+- Use the builder only for construction-time endpoint/git choices. Use
+  `set_env`/`extend_env` for test-specific flags and terminal brands; the last
+  explicit override wins. Use `remove_env` to test absence.
+- Do not add process-global env mutation. Keep filesystem/environment ownership
+  in `TestSandbox`; process groups, jobs, output tails, and kill-tree ownership
+  stay in the separate `TestProcess`/`TestProcessTree` harness.
+- Diagnostics may name sandbox paths and sanitized HTTP(S)/WS(S) loopback URLs.
+  URL parsing fails closed: userinfo/query/fragment are stripped, while malformed
+  or non-loopback values are redacted. Credential-like key segments/suffixes are
+  always redacted.
+
 ## Adding a capability
 
 - **A response mode** (`inference_route.rs`): extend the private `ResponseMode` and its `text`, add the setter on `InferenceRoute` and its `MockInferenceServer` wrapper, and add the mode's arm per endpoint to the one `match` in `InferenceRoute::serve`. Scripted responses must still win. The echo pinning test must pass unmodified.

@@ -41,6 +41,45 @@ impl ActionableStartupWarning {
     }
 }
 
+pub(crate) const DOCTOR_ACTION: &str = "Run /doctor for details and fixes.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActionableStartupWarning {
+    warning: StartupWarning,
+    ids: Vec<crate::diagnostics::DiagnosticId>,
+}
+
+impl ActionableStartupWarning {
+    pub(crate) fn new(
+        severity: WarningSeverity,
+        message: impl Into<String>,
+        ids: impl IntoIterator<Item = crate::diagnostics::DiagnosticId>,
+    ) -> Self {
+        let ids = ids.into_iter().collect::<Vec<_>>();
+        assert!(
+            !ids.is_empty(),
+            "doctor-linked startup notice requires an ID"
+        );
+        Self {
+            warning: StartupWarning {
+                severity,
+                message: message.into(),
+                action: Some(DOCTOR_ACTION.to_owned()),
+            },
+            ids,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ids(&self) -> &[crate::diagnostics::DiagnosticId] {
+        &self.ids
+    }
+
+    pub(crate) fn into_warning(self) -> StartupWarning {
+        self.warning
+    }
+}
+
 /// A non-fatal startup warning from any subsystem.
 /// This is a **display contract only**: the subsystem formats the message and optional action hint.
 /// Actionable diagnostic notices link to `/doctor`, which owns detailed evidence and remediation.

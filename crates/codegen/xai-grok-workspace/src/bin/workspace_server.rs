@@ -1015,6 +1015,216 @@ mod tests {
         );
     }
     #[test]
+    fn hub_connect_failed_dwell_is_within_design_bounds() {
+        assert!(HUB_CONNECT_FAILED_DWELL >= Duration::from_millis(500));
+        assert!(HUB_CONNECT_FAILED_DWELL <= Duration::from_secs(2));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn hub_connect_failed_dwell_elapses_exact_budget() {
+        let start = tokio::time::Instant::now();
+        dwell_after_hub_connect_failed().await;
+        assert_eq!(start.elapsed(), HUB_CONNECT_FAILED_DWELL);
+    }
+    #[test]
+    fn classify_hub_connect_auth_needles() {
+        assert_eq!(
+            classify_hub_connect_failure("hub error: handshake auth failed: HTTP 401"),
+            ErrorClass::HubAuth
+        );
+        assert_eq!(
+            classify_hub_connect_failure("handshake auth failed: HTTP 401"),
+            ErrorClass::HubAuth
+        );
+        assert_eq!(
+            classify_hub_connect_failure("hub error: auth error: token rejected"),
+            ErrorClass::HubAuth
+        );
+        assert_eq!(
+            classify_hub_connect_failure("HTTP 401 unauthorized"),
+            ErrorClass::HubConnect
+        );
+        assert_eq!(
+            classify_hub_connect_failure("token refresh failed"),
+            ErrorClass::HubConnect
+        );
+    }
+    #[test]
+    fn classify_from_client_error_display_round_trip() {
+        let handshake = WorkspaceError::HubError(
+            xai_computer_hub_sdk::ClientError::HandshakeAuthFailed { status: 401 }.to_string(),
+        );
+        let handshake_msg = handshake.to_string();
+        assert_eq!(
+            classify_hub_connect_failure(&handshake_msg),
+            ErrorClass::HubAuth
+        );
+        assert_eq!(
+            hub_connect_failure_log_message(ErrorClass::HubAuth),
+            WORKSPACE_HUB_AUTH_FAILED_MARKER
+        );
+        let auth = WorkspaceError::HubError(
+            xai_computer_hub_sdk::ClientError::AuthError("token rejected".into()).to_string(),
+        );
+        assert_eq!(
+            classify_hub_connect_failure(&auth.to_string()),
+            ErrorClass::HubAuth
+        );
+        let network = WorkspaceError::HubError(
+            xai_computer_hub_sdk::ClientError::NetworkError("connection refused".into())
+                .to_string(),
+        );
+        assert_eq!(
+            classify_hub_connect_failure(&network.to_string()),
+            ErrorClass::HubConnect
+        );
+        assert_ne!(
+            hub_connect_failure_log_message(ErrorClass::HubConnect),
+            WORKSPACE_HUB_AUTH_FAILED_MARKER
+        );
+    }
+    #[test]
+    fn classify_hub_connect_non_auth_is_hub_connect() {
+        assert_eq!(
+            classify_hub_connect_failure("hub error: network error: connection refused"),
+            ErrorClass::HubConnect
+        );
+        assert_eq!(
+            classify_hub_connect_failure("hub error: protocol error: bad hello"),
+            ErrorClass::HubConnect
+        );
+        assert_eq!(
+            classify_hub_connect_failure("failed to create workspace: disk full"),
+            ErrorClass::Unknown
+        );
+    }
+    #[test]
+    fn hub_auth_marker_is_stable_literal() {
+        assert_eq!(
+            WORKSPACE_HUB_AUTH_FAILED_MARKER,
+            "workspace hub auth failed"
+        );
+    }
+    #[test]
+    fn hub_connect_error_detail_strips_hub_error_prefix() {
+        let err = WorkspaceError::HubError("handshake auth failed: HTTP 401".into());
+        assert_eq!(
+            hub_connect_error_detail(&err.to_string()),
+            "handshake auth failed: HTTP 401"
+        );
+        let other = WorkspaceError::HubError("network error: timeout".into());
+        assert_eq!(
+            hub_connect_error_detail(&other.to_string()),
+            "network error: timeout"
+        );
+    }
+    /// Install a capturing tracing subscriber for the duration of an async
+    /// report; returns emitted event messages.
+    async fn report_with_captured_messages(
+        handle: &DiagHandle,
+        err: &WorkspaceError,
+    ) -> (Duration, Vec<String>) {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, SubscriberExt as _};
+        use tracing_subscriber::{Layer, Registry};
+        #[derive(Default)]
+        struct MsgVisitor {
+            message: Option<String>,
+        }
+        impl Visit for MsgVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = Some(format!("{value:?}").trim_matches('"').to_owned());
+                }
+            }
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "message" {
+                    self.message = Some(value.to_owned());
+                }
+            }
+        }
+        struct CaptureLayer {
+            msgs: Arc<Mutex<Vec<String>>>,
+        }
+        impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut v = MsgVisitor::default();
+                event.record(&mut v);
+                if let Some(msg) = v.message {
+                    self.msgs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(msg);
+                }
+            }
+        }
+        let msgs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(CaptureLayer { msgs: msgs.clone() });
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let start = tokio::time::Instant::now();
+        report_hub_connect_failure(handle, err).await;
+        let elapsed = start.elapsed();
+        let messages = msgs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        (elapsed, messages)
+    }
+    #[tokio::test(start_paused = true)]
+    async fn report_hub_connect_failure_sets_ready_failed_auth_and_dwells() {
+        let handle = DiagHandle::new(Some("nonce-auth".to_owned()));
+        let bound = diag_server::serve(diag_server::DiagListener::Tcp(0), handle.clone(), None)
+            .await
+            .expect("bind");
+        let port = bound.port.expect("tcp port");
+        let err = WorkspaceError::HubError("handshake auth failed: HTTP 401".into());
+        let (elapsed, messages) = report_with_captured_messages(&handle, &err).await;
+        assert_eq!(elapsed, HUB_CONNECT_FAILED_DWELL);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m == WORKSPACE_HUB_AUTH_FAILED_MARKER),
+            "auth path must emit marker, got {messages:?}"
+        );
+        let response = reqwest::get(format!("http://127.0.0.1:{port}/ready"))
+            .await
+            .expect("request");
+        assert_eq!(response.status().as_u16(), 503);
+        let body: serde_json::Value = response.json().await.expect("json");
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["error_class"], "hub_auth");
+        assert_eq!(body["error_detail"], "handshake auth failed: HTTP 401");
+        assert_eq!(body["launch_id"], "nonce-auth");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn report_hub_connect_failure_sets_ready_failed_hub_connect() {
+        let handle = DiagHandle::new(None);
+        let bound = diag_server::serve(diag_server::DiagListener::Tcp(0), handle.clone(), None)
+            .await
+            .expect("bind");
+        let port = bound.port.expect("tcp port");
+        let err = WorkspaceError::HubError("network error: connection refused".into());
+        let (elapsed, messages) = report_with_captured_messages(&handle, &err).await;
+        assert_eq!(elapsed, HUB_CONNECT_FAILED_DWELL);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m == "failed to connect workspace to hub"),
+            "non-auth path must emit connect failure line, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| m != WORKSPACE_HUB_AUTH_FAILED_MARKER),
+            "non-auth path must not emit auth marker, got {messages:?}"
+        );
+        let response = reqwest::get(format!("http://127.0.0.1:{port}/ready"))
+            .await
+            .expect("request");
+        assert_eq!(response.status().as_u16(), 503);
+        let body: serde_json::Value = response.json().await.expect("json");
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["error_class"], "hub_connect");
+        assert_eq!(body["error_detail"], "network error: connection refused");
+    }
+    #[test]
     fn capabilities_flag_parses_and_defaults_off() {
         let args = Args::try_parse_from(["xai-workspace-server"]).unwrap();
         assert!(!args.capabilities);

@@ -621,6 +621,21 @@ mod tests {
         assert_eq!(p.to_string(), "my-custom");
     }
 
+    /// Hosts with a retargetable `$GROK_HOME/hooks` symlink (fail-closed under
+    /// write-deny) cannot resolve enforcing profiles against the real home.
+    fn skip_if_host_hook_write_deny_unresolvable() -> bool {
+        if !crate::hook_write_deny::profile_enforces_hook_write_deny(&ProfileName::Workspace) {
+            return false;
+        }
+        match crate::hook_write_deny::resolve_hook_write_deny_snapshot() {
+            Ok(_) => false,
+            Err(e) => {
+                eprintln!("skipping profile resolve test: host hook write-deny unresolvable ({e})");
+                true
+            }
+        }
+    }
+
     #[test]
     fn built_in_network_restriction_values() {
         if skip_if_host_hook_write_deny_unresolvable() {
