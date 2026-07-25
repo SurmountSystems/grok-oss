@@ -221,13 +221,25 @@ Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **parent/ses
 
 ## Isolation: Worktree Mode
 
-For tasks that modify files, run a subagent in an isolated git worktree with `isolation: worktree`. This keeps the child's edits from conflicting with the parent's:
+By default, subagents share the parent workspace (`isolation: none`). For tasks that must keep edits separate from the parent, request an isolated git worktree with `isolation: worktree`:
 
 - The subagent works in its own copy of the working tree.
 - Its changes stay isolated from the parent until you merge them.
 - The subagent's result includes the worktree path.
 
 Grok Build manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
+
+**Prefer no worktree** when parallel children edit disjoint paths or when you want simpler git state. Skills that orchestrate subagents should default to `isolation: none` unless the user asks for a worktree.
+
+### Disabling worktrees globally
+
+```toml
+# ~/.grok/config.toml
+[subagents]
+allow_worktree = false
+```
+
+When `allow_worktree = false`, spawn **forces** `isolation = none` even if the agent requested `worktree` or a role/persona defaulted to worktree. Resume of a child that already has a worktree still reuses that path.
 
 ---
 

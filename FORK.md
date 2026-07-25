@@ -92,6 +92,16 @@ list when you ship fork work.
 - [x] **Onto land path** — after product is on their tip, join Surmount `main` with `merge -s ours` so the tip is PR-able (`docs/upstream-history.md`, `just upstream-join-main`)
 - [x] **PRs accepted** — CONTRIBUTING / this fork
 - [x] **Parent = HITL only** — main thread goals/spawn/join notes/human git; research + implementation in subagents. Hard stop on CI / multi-file. See [`AGENTS.md`](AGENTS.md)
+- [x] **Subagent worktree policy** — prefer isolation none; config
+  `[subagents] allow_worktree = false` forces none on spawn. User-guide
+  `05-configuration` + `16-subagents`. Host skills dual-pin todo namespaces
+  (`plan:*` / `impl:*` / …) + worktree optional. Campaign:
+  `doc/dev/campaigns/operator-orchestration-2026-07.md`
+- [x] **`/execute-plan` honors `allow_worktree`** — host skill defaults to
+  shared-cwd protocol (serial/disjoint writers, on-disk reviews, no worktree
+  path handoffs); worktree only when policy allows; fall back if spawn forces
+  none or create fails. Join:
+  `doc/dev/research/execute-plan-no-worktree-2026-07-24.md`
 
 ### Skills (multi-source)
 

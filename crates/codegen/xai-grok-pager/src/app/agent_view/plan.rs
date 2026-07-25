@@ -771,7 +771,9 @@ mod approve_plan_flush_tests {
     fn assert_outcome_approved(
         mut rx: tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>>,
     ) {
-        let resp = rx.try_recv().expect("should receive exit_plan_mode response");
+        let resp = rx
+            .try_recv()
+            .expect("should receive exit_plan_mode response");
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");

@@ -130,6 +130,16 @@ pub(crate) async fn run_shell_child(
         cwd,
         &definition,
     );
+    // Global policy: `[subagents] allow_worktree = false` forces shared workspace.
+    if !ctx.subagent_allow_worktree
+        && effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None
+    {
+        tracing::info!(
+            subagent_id = %request.id,
+            "Forcing isolation=none: [subagents] allow_worktree = false"
+        );
+        effective_runtime.isolation = xai_tool_types::SubagentIsolationMode::None;
+    }
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {
         tracing::error!(

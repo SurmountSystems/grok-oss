@@ -314,6 +314,7 @@ dimensions = 1024                     # vector dimensions
 ```toml
 [subagents]
 enabled = true
+allow_worktree = true                 # false → force isolation=none on spawn
 
 [subagents.toggle]
 explore = true                        # enable/disable specific types
@@ -322,6 +323,11 @@ plan = false
 [subagents.models]
 explore = "grok-build"               # route to different models
 ```
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `enabled` | `true` | Master switch for subagent spawning (`GROK_SUBAGENTS=0` also disables). |
+| `allow_worktree` | `true` | When `false`, spawn forces `isolation = none` even if the tool or a role/persona asked for `worktree`. Prefer `false` when children should share the parent workspace. |
 
 To pin the model a subagent uses, set its entry under `[subagents.models]`.
 

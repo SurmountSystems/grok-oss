@@ -219,11 +219,22 @@ impl MemoryConfig {
 /// `.grok/config.toml`. Enabled by default; can be disabled via
 /// `GROK_SUBAGENTS=0` env var or `[subagents] enabled = false`
 /// in config.toml.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SubagentsConfig {
     /// Whether subagent support is enabled.
     pub enabled: bool,
+    /// When `false`, spawn forces `isolation = none` even if the task tool
+    /// (or a role/persona default) requested `worktree`. Default `true`
+    /// (worktrees allowed). Prefer `false` when you want children to share
+    /// the parent workspace.
+    ///
+    /// ```toml
+    /// [subagents]
+    /// allow_worktree = false
+    /// ```
+    #[serde(default = "default_true")]
+    pub allow_worktree: bool,
     /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
     /// available models registry. Parsed from `[subagents.models]` in config.toml.
@@ -273,6 +284,21 @@ pub struct SubagentsConfig {
     /// ```
     #[serde(default)]
     pub personas: std::collections::HashMap<String, SubagentPersona>,
+}
+fn default_true() -> bool {
+    true
+}
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_worktree: true,
+            models: Default::default(),
+            toggle: Default::default(),
+            roles: Default::default(),
+            personas: Default::default(),
+        }
+    }
 }
 use xai_grok_subagent_resolution::config::{SubagentPersona, SubagentRole};
 impl SubagentsConfig {

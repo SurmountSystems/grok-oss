@@ -179,6 +179,27 @@ patch) is in the HITL runbook if ever required again.
   items only. When something is finished, move the lasting truth into FORK or
   the right process doc — do not leave it only in residual.
 
+## Operator orchestration (task levels + worktrees)
+
+Campaign notes:
+[`doc/dev/campaigns/operator-orchestration-2026-07.md`](doc/dev/campaigns/operator-orchestration-2026-07.md)
+(join detail:
+[`doc/dev/research/task-worktree-pins-2026-07-24.md`](doc/dev/research/task-worktree-pins-2026-07-24.md)).
+
+| Layer | Where |
+|-------|--------|
+| Durable residual | `RESIDUAL.md` / campaign docs (L0) |
+| Session todos | Namespaced only: `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` — never wipe foreign prefixes |
+| Child joins | Short on-disk notes (L2) |
+
+**Prefer no worktrees** for subagents unless isolation is required. Product:
+`[subagents] allow_worktree = false` forces `isolation = none`. Host skills
+(`/implement`, `/plan`, `/execute-plan`) prefer shared workspace by default.
+`/execute-plan` auto-adapts: default `isolation_mode=shared-cwd` (serial or
+disjoint writers; on-disk review files; no worktree handoff paths). Worktree
+only when allowed and needed; if spawn forces none or create fails, fall back.
+Join: `doc/dev/research/execute-plan-no-worktree-2026-07-24.md`.
+
 ## Naming
 
 - `xai-*` crates and paths stay for mergeability with upstream.

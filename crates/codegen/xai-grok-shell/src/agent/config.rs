@@ -1585,6 +1585,11 @@ pub struct Config {
     /// Keys are agent names, values are booleans. Omitted agents default to enabled.
     #[serde(skip)]
     pub subagent_toggle: std::collections::HashMap<String, bool>,
+    /// Whether subagent spawns may use `isolation = worktree`. From
+    /// `[subagents] allow_worktree` (default `true`). When `false`, spawn
+    /// forces shared workspace (`isolation = none`).
+    #[serde(skip)]
+    pub subagent_allow_worktree: bool,
     /// Trust-independent roles from inline, user, and bundled sources.
     #[serde(skip)]
     pub subagent_roles:
@@ -1907,6 +1912,7 @@ impl Default for Config {
             subagents_enabled: true,
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
+            subagent_allow_worktree: true,
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
             disable_web_search: false,
@@ -2195,6 +2201,7 @@ impl Config {
     pub fn resolve_subagents(&mut self, cli_flag: bool, raw_config: &toml::Value) {
         let sa = crate::config::SubagentsConfig::resolve(cli_flag, raw_config);
         self.subagents_enabled = sa.enabled;
+        self.subagent_allow_worktree = sa.allow_worktree;
         self.subagent_model_overrides = sa.models;
         self.subagent_toggle = sa.toggle;
         self.subagent_roles = sa.roles;
@@ -2203,7 +2210,7 @@ impl Config {
     /// Resolve all `#[serde(skip)]` runtime fields that have resolver functions.
     ///
     /// Call immediately after `new_from_toml_cfg()`. Fields resolved:
-    /// - subagents base layers (6 fields) via `SubagentsConfig::resolve`
+    /// - subagents base layers (7 fields) via `SubagentsConfig::resolve`
     /// - respect_gitignore via `ToolsConfig::resolve`
     /// - disable_zdr_incompatible_tools via `ToolsConfig::resolve`
     /// - managed_mcps_enabled via `ManagedMcpsConfig::resolve`

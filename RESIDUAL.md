@@ -32,6 +32,22 @@ or code — not only here.
    settings commit (mirror model-switch / economic-mode patterns,
    `restart_required: false`) is still open.
 
+6. **Todo levels product surface (session board)**  
+   Host skills pin namespaces (`plan:*` `impl:*` `pr-N:*` `recon:*`
+   `residual:*`) and merge policy. Product still lacks a first-class
+   namespaced todo API / gate that rejects foreign-prefix wipe. Optional
+   later: runtime guard or docs-only.
+
+7. **Notes / join channel for child artifacts**  
+   Join-on-disk is process law; no dedicated product “notes channel” UI for
+   L2 child summaries yet. Skills write scratch paths; residual if a pane
+   is desired.
+
+8. **`allow_worktree` remaining**  
+   Skill half done: `/execute-plan` shared-cwd auto-adapt (host skill + dual-pin).
+   Still open: optional product default `allow_worktree = false` for OSS installs
+   (config key + force-none already ship; default flip not done).
+
 ## Not residual (resolved elsewhere)
 
 - CI checks-only (no release package in GHA) — FORK + justfile + AGENTS  

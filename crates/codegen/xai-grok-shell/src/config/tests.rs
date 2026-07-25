@@ -1204,6 +1204,31 @@ fn subagents_config_toggle_missing_defaults_to_empty() {
     });
 }
 #[test]
+fn subagents_config_allow_worktree_defaults_true() {
+    without_grok_subagents(|| {
+        let config = toml::Value::Table(toml::map::Map::new());
+        let sa = SubagentsConfig::resolve(false, &config);
+        assert!(
+            sa.allow_worktree,
+            "allow_worktree should default to true when unset"
+        );
+    });
+    let empty: SubagentsConfig = toml::from_str("").unwrap();
+    assert!(empty.allow_worktree, "serde empty section body defaults true");
+    let disabled: SubagentsConfig = toml::from_str("allow_worktree = false").unwrap();
+    assert!(!disabled.allow_worktree);
+}
+#[test]
+fn subagents_config_allow_worktree_false_via_resolve() {
+    without_grok_subagents(|| {
+        let config: toml::Value =
+            toml::from_str("[subagents]\nenabled = true\nallow_worktree = false").unwrap();
+        let sa = SubagentsConfig::resolve(false, &config);
+        assert!(sa.enabled);
+        assert!(!sa.allow_worktree);
+    });
+}
+#[test]
 fn subagents_config_is_subagent_enabled_absent_defaults_true() {
     let sa = SubagentsConfig {
         enabled: true,

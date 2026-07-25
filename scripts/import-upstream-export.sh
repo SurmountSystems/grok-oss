@@ -154,6 +154,9 @@ FORK_PATHS=(
   # --- workflows + Surmount-only crates ---
   .github/workflows/upstream-export.yml
   .github/workflows/ci.yml         # Surmount quality gate (no release package)
+  # Rhai Grok workflows (team recon status, etc.). Not GitHub Actions YAML.
+  # Without this path, import drops Surmount-only .grok/workflows/*.rhai.
+  .grok/workflows
   crates/codegen/grok-rate-limit
 )
 
