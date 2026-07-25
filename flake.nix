@@ -274,6 +274,12 @@
           # fenix / crane) once; only the realized closure is just-only.
           justPkg = pkgs.just;
 
+          # Host-CI toolchain only: rustc, nextest, mem-guard, build deps, git.
+          # Do NOT add desktop audio recorders (pw-record/parec/arecord) — quality
+          # tests must not see mic tools just because the developer desktop has them.
+          # `just cargo-ci` under CI_LOW_MEM scrubs PATH to /nix/store allowlist
+          # (see scripts/with-ci-hermetic-path.sh); git must live here so scrub
+          # does not drop VCS needed by cargo git deps and git-using unit tests.
           ci-tools = pkgs.buildEnv {
             name = "grok-oss-ci-tools";
             paths =
@@ -288,6 +294,7 @@
                 pkgs.openssl
                 pkgs.perl
                 pkgs.ripgrep
+                pkgs.git
                 justPkg
               ]
               ++ lib.optionals pkgs.stdenv.isLinux [
@@ -302,7 +309,7 @@
               "/share"
             ];
             meta = {
-              description = "Host CI toolchain: fenix rustc, cargo-nextest, cargo-mem-guard, mold, build deps";
+              description = "Host CI toolchain: fenix rustc, cargo-nextest, cargo-mem-guard, mold, git, build deps";
               homepage = "https://github.com/SurmountSystems/grok-oss";
               license = lib.licenses.asl20;
             };

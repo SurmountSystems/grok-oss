@@ -324,6 +324,48 @@ Only the top-level session spawns subagents. A subagent cannot spawn its own sub
 
 ---
 
+## Token efficiency
+
+The parent session’s context is expensive. Filling it with logs, greps, and long file reads hurts quality long before the hard limit, and a parent compact can wipe coordination detail. Use subagents so heavy work runs in a fresh window; keep the parent as coordinator.
+
+### Parent coordinates; children do the heavy work
+
+- **Parent keeps:** goals, spawn/wait, short on-disk join notes, status to you.
+- **Children own:** multi-file search, CI log fetch, root-cause reads, implementation, and review loops.
+- Prefer **tight prompts** (goal, paths, acceptance, where to write a short summary). Prefer **short returns** (verdict, paths, residuals) over pasting whole transcripts into the parent.
+
+### Parent is coordinator only (spawn first)
+
+On a **CI failure**, **regression**, or **multi-file diagnosis**, the parent’s **first** tool use should be spawning a tightly scoped subagent — not pulling CI logs, opening failing tests, or grepping the hot path in the parent.
+
+| Parent may | Parent should not (even “just a quick look”) |
+| ---------- | --------------------------------------------- |
+| Set goals, spawn/wait children | Pull CI logs or open failing test files first |
+| Read short on-disk summaries children wrote | Re-run the child’s greps “to be sure” |
+| One-line status to you | Solo marathons of multi-file research or fix work |
+
+**Failure mode to avoid:** parent greps docs + fetches logs + finds the test file, *then* spawns. That already burned the parent context. Spawn first; children own fetch/read/fix.
+
+### Join on disk
+
+Children write short summary or review files. The parent reads those only — not full child transcripts and not whole hot modules after a summary already named the set. After compaction, reseed from on-disk artifacts rather than re-exploring from zero.
+
+### Depth is one
+
+Children cannot spawn children (see [Depth Limits](#depth-limits)). Hierarchical work means the **parent** layers specialists in sequence or parallel (inventory → root cause → fix → verify), each with a tight prompt and an on-disk artifact.
+
+### Soft quality band
+
+Treat the parent as a **coordinator budget**, not a place to hoard tool output. Soft guidance: keep parent context lighter when you can (quality often drops well before the hard cap). Child isolation is the win: each subagent starts fresh so deep loops do not force an early parent compact.
+
+### Parallelism without waste
+
+Spawn for **independent**, **disjoint** scopes when the join is cheap. Do not fan out many identical explores over the same files, or spawn for pure status checks with no real work. Cap concurrent children when scopes would otherwise overlap.
+
+Skills and project agent rules (for example `AGENTS.md` in a repo, or your host agent config) may pin a stricter “hard stop” for operators — this section is the product-facing summary those rules link to.
+
+---
+
 ## When to Use Subagents
 
 **Good use cases:**
@@ -332,6 +374,7 @@ Only the top-level session spawns subagents. A subagent cannot spawn its own sub
 - Running tests in parallel while the parent implements changes
 - Reviewing generated changes before you commit them
 - Delegating independent tasks that do not depend on each other
+- CI failures, regressions, and multi-file root cause (spawn first; join on short summaries)
 
 **When not to use:**
 

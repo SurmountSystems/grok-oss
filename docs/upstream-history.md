@@ -192,12 +192,19 @@ CONTINUE=1 SURMOUNT_REF=origin/main bash /tmp/put-history-on-xai.sh
 - Agents **never** `git commit` / never GPG bypass; hand `git cherry-pick --continue` and `git commit -S`
 - **No parent-solo conflict marathons** across many UU files (shell + pager + sampler). Use **strategic subagents** (below).
 - **No wasteful swarm:** not one agent per file, not overlapping scopes, not N identical explores
+- **Spawn first** on multi-file conflict resolve and on post-pick CI red: first tool turn is a tightly scoped child — parent must not pull CI logs, open failing tests, or re-grep the hot path before spawn. Join on short on-disk notes only.
+- **Docs can lie.** Prefer code, `git show`, both conflict sides, and short child notes over assuming from FORK/AGENTS/research prose. Verify before claim. (*There are lies, damned lies, and then there is documentation.*)
 
 ### Subagents for conflict resolve (strategic, not wasteful)
+
+**Main/parent thread = HITL only:** goals, spawn/wait, join short on-disk notes,
+hand human signed git, brief status. Research and conflict resolve never run in
+the parent. Project law: [`AGENTS.md`](../AGENTS.md).
 
 Multi-file cherry-pick resolve is exactly the work global rules say belongs in
 children: deep reads of both sides, tip vs product, surgical edits. Parent
 holds the goal, the conflict table, and join checks — not full file bodies.
+**Hard stop:** spawn first; do not parent-marathon diagnose then spawn.
 
 **Good fan-out for #7 (example, ~2–3 agents max):**
 
@@ -340,9 +347,36 @@ with a clean tree.
 - [ ] `git diff --stat <old-tree> <new-tree>` reviewed (not empty “noise only”)
 - [ ] Permission / workspace / shell / pager high-churn areas skimmed for behavior changes
 - [ ] Fork-only files still present: branding, OpenRouter, `grok-rate-limit`, AUR, FORK.md, justfile, flake
+- [ ] **Process pins still present** (import only restores `FORK_PATHS`; expanded list includes AGENTS/RESIDUAL/join/hermetic/`doc/dev`/assert script — run the assert, do not eyeball alone):
+  - [ ] `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins` (fails if pins missing)
+  - [ ] `AGENTS.md`, `RESIDUAL.md`, `FORK.md`
+  - [ ] `scripts/join-main-into-onto.sh`, `scripts/with-ci-hermetic-path.sh`, `scripts/assert-process-pins.sh`
+  - [ ] `scripts/put-history-on-xai.sh` + other import/sync scripts already in `FORK_PATHS`
+  - [ ] `docs/upstream-history.md` (+ import/onto logs)
+  - [ ] Review `FORK_PATHS` in `scripts/import-upstream-export.sh` only if the assert failed or a new process path is needed
 - [ ] `just ci` or at least `cargo check -p xai-grok-pager-bin` + focused tests
 - [ ] `docs/upstream-import-log.md` updated
 - [ ] Signed commit on Surmount (no signing bypass)
+
+## Skills & process pins vs recon (brief)
+
+Skills are **multi-source**: product on this branch owns discovery/load order,
+project skill roots, and user-guide; operator skill bodies live under
+`~/.agents/skills` (host); bundled packs are a network cache under
+`~/.grok/bundled/skills`. See [`FORK.md`](../FORK.md) and
+`doc/dev/research/where-skills-come-from-2026-07-24.md`.
+
+| Survives recon without special care | At risk unless restored / re-picked |
+|-------------------------------------|-------------------------------------|
+| Host `~/.agents/skills`, `~/.grok/AGENTS.md` | Paths **not** listed in import `FORK_PATHS` |
+| Paths listed in import `FORK_PATHS` (includes AGENTS, RESIDUAL, join/hermetic/assert, `doc/dev`) | Shared user-guide (xAI base on import; conflict on onto) |
+| Product commits cherry-picked on onto | Onto tip missing a pin before join (`-s ours` cannot backfill) |
+
+Assert anytime: `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins`.
+
+**Join does not restore content** — missing process files on the onto tip stay
+missing after `merge -s ours`. Chat-only pins do not survive compaction or recon.
+Pin durable law in AGENTS / FORK / this doc (and host skills when operator-only).
 
 ## Pins
 

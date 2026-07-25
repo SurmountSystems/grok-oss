@@ -20,6 +20,23 @@ There is **no** `MODE=overlay` / commit-tree mode in the current scripts.
 | 2026-07-22 | `3af4d5d39897855bdcc74f23e690024a5dc05573` | `e595174931be9bfb490aacf149e2c9cc0ca0ebba` | product via cherry-pick | landed as PR #12 (`f8126f9` tip family) | First full HITL land: put-history → join → PR #12 |
 | 2026-07-24 *(join landed; CI fixes dirty)* | `6e386420825bd44ae648c63e7c8cba12fcec9401` | `3db5a3bd92232bb54581fb8701c6ec79ba48293d` | `origin/main` @ `8b933eb` | branch `onto-xai/6e386420825b` **pre-join tip `56d1fc2`**; tree `2cbad23add47…` | Product stack complete: OpenRouter→#2→#3→#4→#7→#12→#13. `join-main-into-onto.sh` ran (`-s ours`); Join committed (`b1bd97d`). Post-join CI test fixes in worktree (branding asserts, shell workflow restore/cap, persist_ack abort, merge-dup tests).. Then `just check`, push, PR base=main, close #11+#14. |
 
+## Process-pin survival (import FORK_PATHS, 2026-07-24)
+
+Import used to restore a minimal fork list and **silently drop** project
+`AGENTS.md`, `RESIDUAL.md`, `README.md` branding, `scripts/join-main-into-onto.sh`,
+`scripts/with-ci-hermetic-path.sh`, research under `doc/dev/` + `docs/dev/`, and
+Surmount `ci.yml`. Those are now in `FORK_PATHS` in
+`scripts/import-upstream-export.sh`. After restore (and anytime post-onto):
+
+```bash
+./scripts/assert-process-pins.sh          # worktree
+./scripts/assert-process-pins.sh HEAD     # or a tip tree-ish
+just upstream-assert-process-pins
+```
+
+Detail: [`doc/dev/research/fork-paths-hardening-2026-07-24.md`](../doc/dev/research/fork-paths-hardening-2026-07-24.md).
+Canonical recon law remains [`docs/upstream-history.md`](upstream-history.md).
+
 ## How to append (after stack lands)
 
 ```bash

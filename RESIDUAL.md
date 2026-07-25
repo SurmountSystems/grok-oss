@@ -39,6 +39,11 @@ or code — not only here.
 - put-history is cherry-pick — upstream-history + onto log  
 - Auto-implement **appends** after existing local queue — `auto_implement.rs` + FORK  
 - GPG / no bulk replace / no agent commit defaults — AGENTS.md  
+- Import recon process pins (`FORK_PATHS` expanded + post-restore assert) —
+  `scripts/import-upstream-export.sh`, `scripts/assert-process-pins.sh`,
+  `just upstream-assert-process-pins`, FORK § recon, upstream-history checklist,
+  `doc/dev/research/fork-paths-hardening-2026-07-24.md`  
+
 
 ## Local quality before push
 

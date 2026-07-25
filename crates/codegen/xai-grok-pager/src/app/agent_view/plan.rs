@@ -176,11 +176,23 @@ impl AgentView {
         self.casual_commenting_range = Some(0..1);
     }
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
+        // Flush composer drafts before taking the view so mouse/`a` approve
+        // does not swallow an unsaved line comment or freeform note.
+        // Mirrors question-view submit_question_answers → swap_question_freeform.
+        self.flush_plan_composer_before_approve();
+        let freeform = {
+            let text = self.prompt.text().to_string();
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        };
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
-        let review_comments = if !pav.comments.is_empty() {
-            let formatted = pav.format_feedback(None);
+        let review_comments = if !pav.comments.is_empty() || freeform.is_some() {
+            let formatted = pav.format_feedback(freeform.as_deref());
             if formatted.trim().is_empty() {
                 None
             } else {
@@ -213,6 +225,43 @@ impl AgentView {
             });
         }
         InputOutcome::Changed
+    }
+    /// Commit any in-progress plan-approval composer text into durable state
+    /// before Approve takes `plan_approval_view`.
+    ///
+    /// - **Commenting** + non-empty draft + range → same as `save_plan_comment`
+    ///   (pushes into `pav.comments`, restores stashed freeform into prompt).
+    /// - **Commenting** with empty draft → drop the draft range and restore
+    ///   any stashed freeform so leftover overall notes are not lost.
+    /// - **Prompt** freeform is left in the prompt for the caller to read.
+    fn flush_plan_composer_before_approve(&mut self) {
+        let Some(focus) = self.plan_approval_view.as_ref().map(|p| p.focus) else {
+            return;
+        };
+        if focus != PlanApprovalFocus::Commenting {
+            return;
+        }
+        let has_draft = !self.prompt.text().trim().is_empty()
+            && self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.commenting_range.is_some());
+        if has_draft {
+            let _ = self.save_plan_comment();
+            return;
+        }
+        // Empty Commenting draft: clear commenting state and restore freeform
+        // that was stashed when the user entered line-comment mode.
+        if let Some(ref mut pav) = self.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.commenting_range = None;
+            pav.editing_comment_id = None;
+            if let Some(stashed) = pav.stashed_feedback_prompt.take() {
+                self.prompt.restore(stashed);
+            } else {
+                self.prompt.set_text("");
+            }
+        }
     }
     pub(crate) fn abandon_plan(&mut self) -> InputOutcome {
         let Some(mut pav) = self.plan_approval_view.take() else {
@@ -653,6 +702,11 @@ impl AgentView {
         InputOutcome::Changed
     }
     pub(super) fn send_casual_plan_comments(&mut self) -> InputOutcome {
+        // Flush in-progress casual line comment before send (same swallow bug
+        // as plan approve: mouse/`s` previously only sent already-saved list).
+        if self.casual_commenting_range.is_some() && !self.prompt.text().trim().is_empty() {
+            let _ = self.save_casual_plan_comment();
+        }
         if self.plan_comments.is_empty() {
             self.show_toast("No comments to send.");
             return InputOutcome::Changed;
@@ -671,6 +725,183 @@ impl AgentView {
         self.cancel_line_viewer();
         self.show_toast("Plan feedback sent.");
         InputOutcome::Action(Action::SendPrompt(text))
+    }
+}
+#[cfg(test)]
+mod approve_plan_flush_tests {
+    use super::*;
+    use crate::views::plan_approval_view::{
+        ExitPlanModeExtRequest, PlanApprovalFocus, PlanApprovalViewState,
+    };
+    use crate::views::prompt_widget::StashedPrompt;
+    use agent_client_protocol as acp;
+    use xai_acp_lib::AcpResult;
+
+    fn make_agent() -> AgentView {
+        test_fixtures::make_agent()
+    }
+
+    /// Plan approval parked with a response channel so we can assert outcome.
+    fn install_plan_approval(
+        agent: &mut AgentView,
+        plan_content: &str,
+    ) -> tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request = ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-approve-flush".into(),
+            plan_content: Some(plan_content.into()),
+        };
+        let view = PlanApprovalViewState::new(
+            request,
+            StashedPrompt {
+                text: "original chat".into(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        );
+        agent.plan_approval_view = Some(view);
+        rx
+    }
+
+    fn assert_outcome_approved(
+        mut rx: tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>>,
+    ) {
+        let resp = rx.try_recv().expect("should receive exit_plan_mode response");
+        let raw = resp.expect("should be Ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw.0.get()).expect("should be valid JSON");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Approve while Commenting with a non-empty draft must commit the draft
+    /// into the approve Interject (not swallow it when taking the view).
+    #[test]
+    fn approve_plan_flushes_commenting_draft_into_interject() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\n## Step 1\nDo something");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Commenting;
+            pav.commenting_range = Some(3..4);
+            pav.stashed_feedback_prompt = Some(StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            });
+        }
+        agent.prompt.set_text("please add tests for this step");
+
+        let outcome = agent.approve_plan();
+
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "approve must clear plan_approval_view"
+        );
+        assert_outcome_approved(rx);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains("please add tests for this step"),
+                    "Interject must include flushed line-comment draft; got {text:?}"
+                );
+                assert!(
+                    text.contains("approved the plan with the following review comments"),
+                    "Interject must use the approve-with-comments framing; got {text:?}"
+                );
+            }
+            other => panic!("expected Interject with flushed draft, got {other:?}"),
+        }
+        // Original chat restored after approve (not the draft left in composer).
+        assert_eq!(agent.prompt.text(), "original chat");
+    }
+
+    /// Approve while Prompt has freeform feedback must fold freeform into
+    /// the approve Interject (mouse/`a` path; Enter-on-Prompt still revises).
+    #[test]
+    fn approve_plan_includes_prompt_freeform_in_interject() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nDo the thing");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            // Also keep a previously saved line comment so freeform is
+            // "Additional feedback" in format_feedback.
+            pav.comments.push(PlanComment {
+                id: 0,
+                line_range: 1..2,
+                text: "saved earlier".into(),
+            });
+            pav.next_comment_id = 1;
+        }
+        agent.prompt.set_text("ship it but watch the edge cases");
+
+        let outcome = agent.approve_plan();
+
+        assert!(agent.plan_approval_view.is_none());
+        assert_outcome_approved(rx);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains("saved earlier"),
+                    "Interject must keep already-saved comments; got {text:?}"
+                );
+                assert!(
+                    text.contains("ship it but watch the edge cases"),
+                    "Interject must include freeform left in Prompt; got {text:?}"
+                );
+            }
+            other => panic!("expected Interject with freeform, got {other:?}"),
+        }
+    }
+
+    /// Empty Approve (no draft, no saved comments) still just approves.
+    #[test]
+    fn approve_plan_empty_still_approves_without_interject() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nempty path");
+        agent.plan_approval_view.as_mut().unwrap().focus = PlanApprovalFocus::Preview;
+        agent.prompt.set_text("");
+
+        let outcome = agent.approve_plan();
+
+        assert!(agent.plan_approval_view.is_none());
+        assert_outcome_approved(rx);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "empty approve must not invent an Interject; got {outcome:?}"
+        );
+        assert_eq!(agent.prompt.text(), "original chat");
+    }
+
+    /// Casual send while composing a new comment must flush the draft first.
+    #[test]
+    fn send_casual_plan_comments_flushes_in_progress_draft() {
+        let mut agent = make_agent();
+        agent.enter_casual_commenting_for_test();
+        agent.prompt.set_text("casual draft must be sent");
+        // No previously saved comments — only the in-progress draft.
+
+        let outcome = agent.send_casual_plan_comments();
+
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains("casual draft must be sent"),
+                    "casual send must flush composer draft; got {text:?}"
+                );
+            }
+            other => panic!("expected SendPrompt with flushed draft, got {other:?}"),
+        }
+        assert!(agent.plan_comments.is_empty());
+        assert!(agent.casual_commenting_range.is_none());
     }
 }
 #[cfg(test)]

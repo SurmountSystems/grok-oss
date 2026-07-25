@@ -240,15 +240,35 @@ fn fake_standalone_facts_compose_through_shared_view() {
     );
     let report = collect_report_with(snapshot);
 
-    assert_eq!(report.issue_count(), 1);
+    // Shared-view issues only. `collect_report_with` also runs the live voice
+    // input-device probe after the view, which appends `voice.no-input-device`
+    // when no system recorder is on PATH (typical headless CI). That host fact
+    // is outside the fake snapshot under test.
+    let view_issues: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding.disposition == FindingDisposition::Issue
+                && finding.id != crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID
+        })
+        .collect();
+    assert_eq!(
+        view_issues.len(),
+        1,
+        "unexpected view issues: {:?}",
+        view_issues
+            .iter()
+            .map(|finding| finding.id)
+            .collect::<Vec<_>>()
+    );
     assert!(
         report
             .findings
             .iter()
-            .all(|finding| { finding.id != DiagnosticId::new("terminal", "control-mode") })
+            .all(|finding| finding.id != DiagnosticId::new("terminal", "control-mode"))
     );
     assert_eq!(
-        report.findings[0].id,
+        view_issues[0].id,
         DiagnosticId::new("terminal", "tmux-clipboard")
     );
 }

@@ -113,24 +113,47 @@ echo "Branch:   $BRANCH"
 echo
 
 # Fork-only paths restored from BASE after applying xAI tree.
+# Keep this list surgical: only Surmount-only process / packaging / recon
+# tooling that is absent from xAI exports (or must not take the xAI version).
+# Product seams inside xai-grok-* are NOT listed — re-apply those via diff.
+# Research: doc/dev/research/skills-survive-upstream-recon-2026-07-24.md
+#           doc/dev/research/fork-paths-hardening-2026-07-24.md
 FORK_PATHS=(
-  FORK.md
-  CONTRIBUTING.md
-  SECURITY.md
-  justfile
-  flake.nix
+  # --- product identity / packaging ---
+  FORK.md                 # divergence inventory + sync job table
+  CONTRIBUTING.md         # Surmount contributor entry
+  SECURITY.md             # Surmount security contact
+  README.md               # Grok OSS branding (xAI README would clobber)
+  justfile                # Surmount recipes (check/ci/upstream-*)
+  flake.nix               # Nix package for grok-oss
   flake.lock
+  packaging               # AUR / distro packaging
+
+  # --- process pins (must survive import; silent drop = lost law) ---
+  AGENTS.md               # project Hard stop, onto recovery, residual pointer
+  RESIDUAL.md             # open human-intent residual tracker
+
+  # --- living upstream recon docs + process research ---
   docs/upstream-history.md
   docs/upstream-import-log.md
   docs/upstream-onto-log.md
   docs/git-workflow.md
-  packaging
+  docs/dev                # RCA / plans under docs/dev/**
+  doc/dev                 # operator research under doc/dev/research/**
+
+  # --- recon + CI hermeticity scripts (all Surmount-only) ---
   scripts/detect-upstream-export.sh
   scripts/import-upstream-export.sh
   scripts/sync-upstream.sh
   scripts/put-history-on-xai.sh
   scripts/replay-onto-upstream.sh
+  scripts/join-main-into-onto.sh   # land path; was missing → drop on import
+  scripts/with-ci-hermetic-path.sh # CI PATH scrub; was missing → drop
+  scripts/assert-process-pins.sh   # post-import / post-onto presence check
+
+  # --- workflows + Surmount-only crates ---
   .github/workflows/upstream-export.yml
+  .github/workflows/ci.yml         # Surmount quality gate (no release package)
   crates/codegen/grok-rate-limit
 )
 
@@ -147,7 +170,11 @@ for p in "${FORK_PATHS[@]}"; do
     || git ls-tree -d --name-only "$BASE_REF" "$p" 2>/dev/null | grep -q .; then
     if git checkout "$BASE_REF" -- "$p" 2>/dev/null; then
       echo "  keep fork path: $p"
+    else
+      echo "  WARN: could not checkout fork path: $p" >&2
     fi
+  else
+    echo "  skip (absent on base): $p"
   fi
 done
 
@@ -155,6 +182,35 @@ done
 if [[ -e result ]] || [[ -L result ]]; then
   git rm -f --ignore-unmatch result 2>/dev/null || rm -f result
   echo "  removed result (nix build symlink)"
+fi
+
+# Fail closed if process pins did not survive restore (list gap or base hole).
+echo
+echo "Asserting process-pin paths after restore ..."
+if [[ -x ./scripts/assert-process-pins.sh ]]; then
+  if ! ./scripts/assert-process-pins.sh; then
+    echo "error: process pins missing after FORK_PATHS restore." >&2
+    echo "  Extend FORK_PATHS or ensure base ($BASE_REF) has the paths." >&2
+    echo "  You are on $BRANCH with a partial import tree; original was $ORIGINAL_BRANCH" >&2
+    exit 1
+  fi
+else
+  # Transition: assert script not on BASE yet — still require core pins.
+  echo "WARN: scripts/assert-process-pins.sh missing; running minimal pin check" >&2
+  _core_missing=0
+  for _f in AGENTS.md FORK.md RESIDUAL.md README.md \
+            scripts/join-main-into-onto.sh scripts/put-history-on-xai.sh \
+            docs/upstream-history.md; do
+    if [[ ! -e $_f ]]; then
+      echo "  missing: $_f" >&2
+      _core_missing=1
+    fi
+  done
+  if [[ "$_core_missing" -ne 0 ]]; then
+    echo "error: core process pins missing after FORK_PATHS restore." >&2
+    exit 1
+  fi
+  echo "OK: minimal core process pins present (full assert script not on base yet)."
 fi
 
 echo
@@ -211,10 +267,11 @@ echo
 echo "=== Review checklist ==="
 echo "1. git diff $BASE_REF --stat"
 echo "2. Re-apply / fix OpenRouter, grok-oss binary, grok-rate-limit if clobbered"
-echo "3. just ci  (or cargo check -p xai-grok-pager-bin)"
-echo "4. Append docs/upstream-import-log.md"
-echo "5. Sign if needed: git commit --amend -S --no-edit"
-echo "6. PR $BRANCH -> main  (do not force-push main to xAI)"
+echo "3. Process pins: ./scripts/assert-process-pins.sh  (AGENTS, FORK, RESIDUAL, join script, …)"
+echo "4. just ci  (or cargo check -p xai-grok-pager-bin)"
+echo "5. Append docs/upstream-import-log.md"
+echo "6. Sign if needed: git commit --amend -S --no-edit"
+echo "7. PR $BRANCH -> main  (do not force-push main to xAI)"
 echo
 echo "XAI_TIP=$XAI_TIP"
 echo "XAI_TREE=$XAI_TREE"
