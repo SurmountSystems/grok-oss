@@ -14,6 +14,18 @@ Use a skill for a repeatable procedure that's too specific for AGENTS.md but too
 
 ## Skill Locations
 
+Skills are **multi-source**. Grok owns discovery and load order in the product;
+skill *bodies* may live in the project, your home directory, a network-synced
+bundle cache, config paths, server inject, or plugins. Same-named skills shadow
+by scope (local/repo beat user; user beats bundled).
+
+Rough load order (higher bare-name priority first): project walk (`.agents`
+before `.grok` at each tier) → user home (same order) → `[skills].paths` →
+server → bundled (`~/.grok/bundled/skills`) → plugins. Process pins for agents
+working **in this repository** live in project `AGENTS.md` / `FORK.md`;
+operator skill packs often live under `~/.agents/skills` on the host and are
+not the same thing as product process docs.
+
 Grok discovers skills from these directories, in priority order:
 
 | Location | Scope | Priority | Notes |
@@ -139,6 +151,8 @@ Grok asks where to save the skill:
 
 - **Project** (`<repo_root>/.grok/skills/<name>/`) -- available only in this repository and shareable with teammates through version control. Grok recommends this scope inside a git repository.
 - **User** (`~/.grok/skills/<name>/`) -- available across all your projects.
+
+To distribute a skill to a whole team or organization, package it in a plugin and publish it through a marketplace. See [Create your own marketplace](09-plugins.md#create-your-own-marketplace) and [Distribute across an organization](09-plugins.md#distribute-across-an-organization).
 
 The new skill appears in the slash menu within a few seconds, because Grok reloads skills when files change on disk.
 

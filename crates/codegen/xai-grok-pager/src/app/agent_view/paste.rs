@@ -479,8 +479,10 @@ pub(super) mod paste_key_tests {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
+                compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
+                session_notes: crate::app::agent::SessionNotes::default(),
             },
             ScrollbackState::new(),
         )
@@ -1210,17 +1212,19 @@ pub(super) mod paste_key_tests {
     /// Build a `QuestionViewState` already in `InputMode` focus.
     pub(in crate::app::agent_view) fn make_question_view_state_in_input_mode()
     -> crate::views::question_view::QuestionViewState {
-        let question =
-            xai_grok_tools::implementations::grok_build::ask_user_question::Question {
-                question: "Pick one?".to_string(),
-                options: vec![
-                xai_grok_tools::implementations::grok_build::ask_user_question::QuestionOption
-                { label : "A".to_string(), description : "Option A".to_string(), preview
-                : None, id : None, },
+        let question = xai_grok_tools::implementations::grok_build::ask_user_question::Question {
+            question: "Pick one?".to_string(),
+            options: vec![
+                xai_grok_tools::implementations::grok_build::ask_user_question::QuestionOption {
+                    label: "A".to_string(),
+                    description: "Option A".to_string(),
+                    preview: None,
+                    id: None,
+                },
             ],
-                multi_select: Some(false),
-                id: None,
-            };
+            multi_select: Some(false),
+            id: None,
+        };
         let mut state = crate::views::question_view::QuestionViewState::new(
             "tc-1".into(),
             vec![question],
@@ -2069,16 +2073,11 @@ pub(super) mod paste_key_tests {
             &mut scratch,
             None,
             false,
-            0,
-            &[],
-            &std::collections::BTreeSet::new(),
-            None,
+            crate::app::agent_view::BannerSlotParams::none(),
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
     }
     /// The scrolled-off/overlay branch of `AgentView::draw` (render.rs) must

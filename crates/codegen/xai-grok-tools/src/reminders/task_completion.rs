@@ -643,11 +643,13 @@ impl Reminder for TaskCompletionReminder {
             .chain(&reserved_ids)
             .cloned()
             .collect::<Vec<_>>();
-        let (terminal, event_sender) = {
+        let (terminal, event_sender, parent_session_id) = {
             let res = resources.lock().await;
             (
                 res.get::<Terminal>().map(|t| t.0.clone()),
                 res.get::<SubagentEventSender>().cloned(),
+                res.get::<crate::types::resources::OwnerSessionId>()
+                    .map(|owner| owner.0.clone()),
             )
         };
         let mut reminders = Vec::new();
@@ -730,6 +732,7 @@ impl Reminder for TaskCompletionReminder {
             if sender
                 .0
                 .send(SubagentEvent::Completions(SubagentCompletionsRequest {
+                    parent_session_id,
                     suppress_ids,
                     respond_to: tx,
                 }))
@@ -798,6 +801,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("abc-123"));
@@ -824,6 +828,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         };
         let msg = format_monitor_completion(&task, Some("get_command_or_subagent_output"));
         assert!(
@@ -856,6 +861,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         };
         let msg = format_monitor_completion(&task, None);
         assert!(
@@ -883,6 +889,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("cargo test"));
@@ -907,6 +914,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("exit code: unknown"));
@@ -934,6 +942,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -972,6 +981,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -1009,6 +1019,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("exit code: 0"));
@@ -1169,6 +1180,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         }
     }
     fn make_running(id: &str) -> TaskSnapshot {
@@ -1189,6 +1201,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
         }
     }
     fn make_bg_started(id: &str) -> crate::types::output::BackgroundTaskStarted {
@@ -1915,8 +1928,9 @@ mod tests {
             "batch must lead with event + monitor counts and default tool hint: {batched}"
         );
         assert!(
-            batched
-            .contains("<monitor description=\"alpha\" task_id=\"task-0\">\n[1] a first\n[2] a second\n</monitor>"),
+            batched.contains(
+                "<monitor description=\"alpha\" task_id=\"task-0\">\n[1] a first\n[2] a second\n</monitor>"
+            ),
             "task-0 group: description once on the tag, ordinal tick labels: {batched}"
         );
         assert!(

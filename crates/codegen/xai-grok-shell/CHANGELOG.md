@@ -10,16 +10,59 @@
 - **Zed-compatible credential discovery**: when no local key is set, Grok OSS read-only probes Zed’s `development_credentials` file and Zed’s OS keychain layouts. Grok OSS never writes Zed’s stores.
 
 
+
+# 0.2.111 — 2026-07-22
+
+## Features
+
+- Users can now disable image generation and video generation tools (and their slash commands) via config.toml or environment variables.
+- `/session-info` now displays whether the session uses OAuth or an API key and where to manage the account.
+- You can now run `grok doctor fix` commands directly from inside the TUI instead of only from the CLI.
+
+## Bug Fixes
+
+- **`!cmd` commands** now allow up to one hour before timing out.
+- **npm package** now installs the native binary under `$GROK_HOME/bin` (honoring the same override as the Rust CLI).
+- **Startup warnings** now point to `/doctor` for details and fixes.
+- **Dashboard hover and clicks** no longer miss the gaps between items in wide mode.
+- **Shift/Alt+Enter** now inserts a newline while editing a queued prompt.
+- **Queued prompt edits** under combine mode no longer lose changes due to premature hold release.
+- Forking a session that used compaction no longer causes later rewinds to fail with missing checkpoint errors.
+- When a permission prompt appears while viewing scrollback, focus now correctly moves to the prompt so you can answer.
+- Pressing Esc once now cancels the current agent turn (except in fullscreen vim scrollback mode).
+- Grok now automatically stops a turn that keeps repeating the exact same tool call many times in a row.
+- Configs using either spelling of the workspace teleport disable flag now load and save correctly.
+- Background subagent completion messages no longer leak into unrelated sessions when multiple sessions are active.
+- When the auto-permission classifier times out or fails, Grok now shows a normal permission prompt instead of silently denying.
+- **Managed MCP tools** no longer time out prematurely on slow operations like Notion updates.
+
+## Performance
+
+- Voice dictation on macOS now uses less memory by running capture in a temporary helper process.
+
+
+# 0.2.110 — 2026-07-21
+
+## Features
+
+- **Removing MCP servers, plugins, or hook sources** in the Extensions modal now asks for confirmation (press y to proceed).
+
+## Bug Fixes
+
+- **Session creation failures** (including disk full) now show an error message instead of hanging on "Starting session…".
+- **Auto-compact** that fails due to an expired token now lets you log in and automatically retry the compact + original prompt.
+
+
 # 0.2.109 — 2026-07-21
 
 ## Features
 
 - **/usage** now shows token counts and cost for the current session.
-- **grok doctor fix terminal.ssh-wrap** can install the recommended SSH wrapper alias.
+- **grok doctor fix ssh-wrap** can set up `grok wrap ssh` automatically for Bash, zsh, and fish.
 - **[model_providers.<id>]** lets operators share gateway settings across custom models.
 - **Reasoning effort** now accepts `max` as its own tier (above `xhigh`) when the model advertises it.
 - **Queued follow-ups** can now be batched into a single model turn with the new combine_queued_prompts setting.
-- **/doctor** is now the main slash command for terminal, tmux, clipboard and keyboard diagnostics.
+- **/doctor** is now the main in-app command for checking terminal, tmux, clipboard, and keyboard setup.
 - **read_file** now returns full Markdown files inside skills/ directories without truncation.
 
 ## Bug Fixes
@@ -36,7 +79,7 @@
 
 - **Sessions** can now be resumed after moving the working directory or switching machines.
 - **Ctrl+G** in minimal mode opens the current prompt draft in an external editor without sending it; fullscreen keeps the tasks pane.
-- **grok doctor** now shows standalone terminal, tmux, clipboard, and keyboard diagnostics without starting the TUI.
+- **grok doctor** checks terminal, tmux, clipboard, and keyboard setup without opening the TUI.
 
 ## Bug Fixes
 

@@ -554,6 +554,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "model",
             "multiline",
             "new",
+            "onboarding",
             "personas",
             "plan",
             "plan-view",
@@ -585,7 +586,9 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "timestamps",
             "title",
             "toggle-mouse-reporting",
+            "tour",
             "transcript",
+            "tutorial",
             "t",
             "usage",
             "view-plan",
@@ -773,9 +776,13 @@ pub(crate) struct ListCommandsRequest {
     pub cwd: Option<String>,
 }
 
-#[derive(serde::Serialize)]
-pub(crate) struct ListCommandsResponse {
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ListCommandsResponse {
     pub commands: Vec<acp::AvailableCommand>,
+    /// Live-session tool names (`None` = unknown / pre-session). Same set as
+    /// `AvailableCommandsUpdate.meta.tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 }
 
 /// Build the available commands list, optionally scoped to a working directory.
@@ -804,6 +811,7 @@ pub(crate) async fn list_commands(
     );
     ListCommandsResponse {
         commands: available_commands(&skills, availability, &workflows),
+        tools: None,
     }
 }
 

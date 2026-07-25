@@ -31,6 +31,7 @@ mod display_refresh_startup;
 mod effects;
 pub mod roster;
 pub mod session_startup;
+pub(crate) mod session_title_resolve;
 pub mod status_blocks;
 pub mod subagent;
 pub mod subscription;
@@ -147,6 +148,19 @@ pub(crate) fn minimal_mode_active() -> bool {
 pub(crate) fn set_minimal_mode_active_for_test(on: bool) {
     MINIMAL_MODE_ACTIVE.store(on, Ordering::Release);
 }
+/// Whether a bare Esc cancels a running turn: minimal mode and non-vim
+/// fullscreen get the single-Esc cancel; fullscreen vim mode keeps the
+/// mid-turn swallow (Ctrl+C stays the cancel gesture there).
+///
+/// Pure over its inputs — production callers pass the agent's injected
+/// effective screen mode (`AgentView::is_minimal_mode`, seeded by
+/// `apply_app_scoped_gates`; never the [`minimal_mode_active`] process
+/// global) and tests pass explicit booleans. `vim_mode` is the
+/// scrollback-nav setting (`[ui].vim_mode` / `/vim-mode`), not the prompt
+/// `simple_mode`.
+pub(crate) fn esc_cancels_turn(is_minimal: bool, vim_mode: bool) -> bool {
+    is_minimal || !vim_mode
+}
 /// Whether the opt-in mouse-reporting toggle feature is enabled
 /// (`[ui] mouse_reporting_toggle` / `GROK_MOUSE_REPORTING_TOGGLE`). Seeded once
 /// at startup; gates both the `Ctrl+R` shortcut registration and the
@@ -166,6 +180,19 @@ pub(crate) fn voice_mode_enabled() -> bool {
 /// Test helper for the process-global voice gate.
 pub fn set_voice_mode_enabled_for_test(on: bool) {
     VOICE_MODE_ENABLED.store(on, Ordering::Release);
+}
+/// Process-global gate for the Ctrl+Space / F8 voice chord, for key-routing
+/// and view code without an `AppView` (`resolve_action`, the cheatsheet).
+/// Default ON. Seeded at startup from `[ui].voice_keybind_enabled` and
+/// updated live by the settings setter; unlike [`VOICE_MODE_ENABLED`] it only
+/// silences the keybinding — `/voice` and the other voice surfaces stay up.
+pub(crate) static VOICE_KEYBIND_ENABLED: AtomicBool = AtomicBool::new(true);
+pub(crate) fn voice_keybind_enabled() -> bool {
+    VOICE_KEYBIND_ENABLED.load(Ordering::Acquire)
+}
+/// Test helper for the process-global voice-keybind gate.
+pub fn set_voice_keybind_enabled_for_test(on: bool) {
+    VOICE_KEYBIND_ENABLED.store(on, Ordering::Release);
 }
 /// `[features] voice_mode` from merged `requirements.toml`.
 pub(crate) fn voice_mode_requirement_pin() -> Option<bool> {
@@ -453,16 +480,15 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let grok_com_config =
-        match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
-            Ok(c) => c.grok_com_config,
-            Err(e) => {
-                tracing::warn!(
-                    error = % e, "failed to parse config for auth refresh, using defaults"
-                );
-                xai_grok_shell::auth::GrokComConfig::default()
-            }
-        };
+    let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
+        &raw_config,
+    ) {
+        Ok(c) => c.grok_com_config,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
+            xai_grok_shell::auth::GrokComConfig::default()
+        }
+    };
     let refreshed_auth = xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config).await;
     let early_prefetch =
         xai_grok_shell::agent::models::start_early_prefetch_with_auth(refreshed_auth);
@@ -499,9 +525,7 @@ pub async fn run(
         match std::env::current_dir() {
             Ok(cwd) => xai_grok_shell::agent::folder_trust::grant_folder_trust(&cwd),
             Err(e) => {
-                tracing::warn!(
-                    error = % e, "--trust: failed to resolve cwd; folder not trusted"
-                )
+                tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted")
             }
         }
     }
@@ -668,12 +692,18 @@ pub async fn run(
     let relaunched_into_minimal = screen_mode_override == Some(ScreenMode::Minimal);
     let relaunched_into_fullscreen = screen_mode_override == Some(ScreenMode::Fullscreen);
     tracing::info!(
-        use_alt_screen = screen_mode.is_fullscreen(), minimal = screen_mode.is_minimal(),
-        mouse_capture = ! screen_mode.is_minimal(), minimal_live_rows = config_watcher
-        .current().minimal_live_rows, is_control_mode, no_alt_screen_cli = args
-        .no_alt_screen, minimal_cli = args.minimal, fullscreen_cli = args.fullscreen,
-        config_screen_mode = ? config_screen_mode, auto_minimal_mouse_leak, config_mode =
-        ? alt_screen_config_mode, multiplexer = ? term_ctx.multiplexer,
+        use_alt_screen = screen_mode.is_fullscreen(),
+        minimal = screen_mode.is_minimal(),
+        mouse_capture = !screen_mode.is_minimal(),
+        minimal_live_rows = config_watcher.current().minimal_live_rows,
+        is_control_mode,
+        no_alt_screen_cli = args.no_alt_screen,
+        minimal_cli = args.minimal,
+        fullscreen_cli = args.fullscreen,
+        config_screen_mode = ?config_screen_mode,
+        auto_minimal_mouse_leak,
+        config_mode = ?alt_screen_config_mode,
+        multiplexer = ?term_ctx.multiplexer,
         "resolved fullscreen policy"
     );
     engage_startup_theme(screen_mode);
@@ -734,13 +764,14 @@ pub async fn run(
         match &result {
             Ok(_) => {
                 tracing::warn!(
-                    error = % cleanup_error,
+                    error = %cleanup_error,
                     "terminal cleanup failed after successful event loop"
                 )
             }
             Err(run_error) => {
                 tracing::warn!(
-                    error = % cleanup_error, run_error = % run_error,
+                    error = %cleanup_error,
+                    run_error = %run_error,
                     "terminal cleanup also failed"
                 )
             }
@@ -756,7 +787,7 @@ pub async fn run(
                     &relaunch.session_id,
                     relaunch.minimal,
                 ) {
-                    tracing::error!(error = % e, "screen-mode relaunch failed");
+                    tracing::error!(error = %e, "screen-mode relaunch failed");
                     print_relaunch_failure_hint(
                         &e,
                         &relaunch.session_id,
@@ -782,8 +813,8 @@ pub async fn run(
 /// shows which session lives there and where it left off.
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
 fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
-    let cli = screen_mode_relaunch::cli_hint_name();
     use crate::render::line_utils::truncate_str;
+    let cli = screen_mode_relaunch::cli_hint_name();
     let _ = writeln!(w);
     if let Some(summary) = &info.summary {
         let _ = writeln!(w, "{}", truncate_str(&summary.title, max_width));
@@ -1156,8 +1187,10 @@ fn init_terminal(
                 let _ = execute!(stderr, event::PushKeyboardEnhancementFlags(flags));
             });
             tracing::info!(
-                kitty.flags = ? flags, kitty.disambiguate = true, kitty
-                .report_event_types = true, kitty.report_all_keys = false,
+                kitty.flags = ?flags,
+                kitty.disambiguate = true,
+                kitty.report_event_types = true,
+                kitty.report_all_keys = false,
                 "kitty keyboard protocol pushed"
             );
         } else {
@@ -1908,19 +1941,31 @@ mod tests {
     fn print_exit_resume_hint_writes_expected_lines() {
         let mut buf = Vec::new();
         print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
+        let out = String::from_utf8(buf).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok-oss --resume sess-abc\n"
+            out,
+            format!("\nResume this session with:\n  {cli} --resume sess-abc\n")
+        );
+        // Cargo-test binaries are not product-named → Surmount default.
+        assert_eq!(cli, screen_mode_relaunch::DEFAULT_CLI_HINT_NAME);
+        assert_eq!(cli, "grok-oss");
+        assert!(
+            !out.contains("  grok --resume"),
+            "must not recommend upstream `grok` binary:\n{out}"
         );
     }
     #[test]
     fn print_exit_resume_hint_includes_minimal_flag() {
         let mut buf = Vec::new();
         print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
+        let out = String::from_utf8(buf).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok-oss --minimal --resume sess-abc\n"
+            out,
+            format!("\nResume this session with:\n  {cli} --minimal --resume sess-abc\n")
         );
+        assert!(!out.contains("  grok --minimal"), "{out}");
     }
     #[test]
     fn print_exit_resume_hint_includes_session_summary() {
@@ -1935,17 +1980,18 @@ mod tests {
         };
         let mut buf = Vec::new();
         print_exit_resume_hint(&info, 80, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
+        let out = String::from_utf8(buf).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            concat!(
-                "\n",
-                "Fix flaky CI test\n",
-                "> make the suite deterministic\n",
-                "  Pinned the seed; 200 consecutive green runs.\n",
-                "\n",
-                "Resume this session with:\n",
-                "  grok-oss --resume sess-abc\n",
+            out,
+            format!(
+                "\nFix flaky CI test\n> make the suite deterministic\n  Pinned the seed; 200 consecutive green runs.\n\nResume this session with:\n  {cli} --resume sess-abc\n"
             )
+        );
+        assert_eq!(cli, "grok-oss");
+        assert!(
+            !out.contains("  grok --resume"),
+            "must not recommend upstream `grok` binary:\n{out}"
         );
     }
     #[test]
@@ -1961,11 +2007,16 @@ mod tests {
         };
         let mut buf = Vec::new();
         print_exit_resume_hint(&info, 20, &mut buf);
+        let cli = screen_mode_relaunch::cli_hint_name();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains(&format!("\n{}…\n", "t".repeat(19))));
         assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));
         assert!(out.contains(&format!("\n  {}…\n", "r".repeat(17))));
-        assert!(out.contains("  grok-oss --resume sess-abc\n"));
+        assert!(out.contains(&format!("  {cli} --resume sess-abc\n")));
+        assert!(
+            !out.contains("  grok --resume"),
+            "must not recommend upstream `grok`:\n{out}"
+        );
     }
     #[test]
     fn print_relaunch_failure_hint_writes_expected_lines() {

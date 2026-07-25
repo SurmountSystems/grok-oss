@@ -117,6 +117,14 @@ pub async fn set_default_model(value: String) -> Result<()> {
     .await
 }
 
+/// Persist `[privacy].privacy_banner_acked` (RFC 3339 UTC dismiss time).
+pub async fn set_privacy_banner_acked(acked_at_rfc3339: String) -> Result<()> {
+    update_config(|cfg| {
+        cfg.privacy.privacy_banner_acked = Some(acked_at_rfc3339);
+    })
+    .await
+}
+
 /// Persist `[ui].fork_secondary_model` via `update_config`.
 ///
 /// Caller must validate against the model catalog. Empty string
@@ -269,6 +277,12 @@ pub async fn set_voice_capture_mode(value: String) -> Result<()> {
 /// locale, falling back to English).
 pub async fn set_voice_stt_language(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.voice_stt_language = Some(value)).await
+}
+
+/// Persist `[ui].voice_keybind_enabled` via `update_config`. When `false` the
+/// Ctrl+Space / F8 voice chord is ignored (`/voice` still works).
+pub async fn set_voice_keybind_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.voice_keybind_enabled = Some(value)).await
 }
 
 /// Persist `[ui].default_selected_permission` via `update_config`. Value is

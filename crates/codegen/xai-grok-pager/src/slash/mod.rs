@@ -46,6 +46,9 @@ pub struct SuggestionRow {
     pub insert_text: String,
     /// Character positions for fuzzy match highlighting.
     pub indices: Vec<u32>,
+    /// Free-form bracketed tag (e.g. "new") from the resolved tag map. `None`
+    /// for untagged command rows and always `None` for arg rows.
+    pub tag: Option<String>,
 }
 
 impl SuggestionRow {
@@ -59,6 +62,7 @@ impl SuggestionRow {
             description: trigger.description.clone(),
             insert_text,
             indices: Vec::new(),
+            tag: None,
         }
     }
 
@@ -68,6 +72,7 @@ impl SuggestionRow {
             description: item.description.clone(),
             insert_text: item.insert_text.clone(),
             indices: Vec::new(),
+            tag: None,
         }
     }
 
@@ -272,6 +277,11 @@ pub struct SlashController {
     /// defaults to an isolated in-memory store (no disk I/O) for tests and any
     /// surface that has not been wired up.
     mru: std::rc::Rc<std::cell::RefCell<mru::SlashMru>>,
+    /// Resolved per-command tag map (canonical name → free-form tag). Owned by
+    /// `AppView` and injected via [`Self::set_command_tags`] so agent prompts
+    /// and the dashboard share one map; defaults to empty for tests and any
+    /// surface that has not been wired up.
+    command_tags: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>,
 }
 
 impl SlashController {
@@ -300,6 +310,9 @@ impl SlashController {
             workflows_available: false,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             mru,
+            command_tags: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -307,6 +320,16 @@ impl SlashController {
     /// process-wide store into agent prompts and the dashboard dispatch input.
     pub fn set_mru(&mut self, mru: std::rc::Rc<std::cell::RefCell<mru::SlashMru>>) {
         self.mru = mru;
+    }
+
+    /// Replace the per-command tag map with a shared one. Used by `AppView` to
+    /// inject the resolved (remote + local) tag map into agent prompts and the
+    /// dashboard dispatch input.
+    pub fn set_command_tags(
+        &mut self,
+        command_tags: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>,
+    ) {
+        self.command_tags = command_tags;
     }
 
     /// Gate `/announcements` on presence of session announcements (critical or promo).
@@ -837,6 +860,9 @@ impl SlashController {
             // No cap here -- the dropdown renderer handles scrolling.
             let mut seen = HashSet::new();
             let mut rows = Vec::new();
+            // Retain canonicals so tags are set in a second pass, keeping the
+            // `takes_args_now` command callback outside any tag-map borrow.
+            let mut canonicals: Vec<&str> = Vec::new();
             for (i, trigger) in triggers.iter().enumerate() {
                 if !visible_indices.contains(&i) {
                     continue;
@@ -848,8 +874,20 @@ impl SlashController {
                         .map(|cmd| cmd.takes_args_now(&ctx))
                         .unwrap_or(false);
                     rows.push(SuggestionRow::from_command(trigger, takes));
+                    canonicals.push(trigger.canonical.as_str());
                 }
             }
+            // Tag from the data map in one scoped borrow; key off canonical
+            // (never the alias/display).
+            {
+                let command_tags = self.command_tags.borrow();
+                for (row, canonical) in rows.iter_mut().zip(canonicals.iter()) {
+                    row.tag = command_tags.get(*canonical).cloned();
+                }
+            }
+            // Surface tagged commands (curated new/beta) at the top of the bare "/" menu;
+            // stable so registry order is preserved within the tagged and untagged groups.
+            rows.sort_by_key(|r| r.tag.is_none());
             return rows;
         }
 
@@ -929,6 +967,14 @@ impl SlashController {
             .iter()
             .map(|t| (t.canonical.clone(), t.source))
             .collect();
+        // Tag each candidate from the data map (canonical key); one shared
+        // borrow, dropped before the scoring borrow below.
+        {
+            let command_tags = self.command_tags.borrow();
+            for (row, (canonical, _)) in rows.iter_mut().zip(sort_meta.iter()) {
+                row.tag = command_tags.get(canonical.as_str()).cloned();
+            }
+        }
         // Resolve all recency scores under a single borrow (one keystroke =
         // one borrow, not one per candidate).
         let mru_scores: Vec<u64> = {
@@ -983,6 +1029,19 @@ impl SlashController {
         self.arg_suggestions(command.as_ref(), models, &input.args_query)
     }
 
+    fn argument_highlight_indices(&mut self, query: &str, display: &str) -> Vec<u32> {
+        let token = query.split_whitespace().next_back().unwrap_or("");
+        let fragment = token.rsplit(['/', '\\']).next().unwrap_or(token);
+        self.matcher
+            .indices_for(fragment, display)
+            .or_else(|| {
+                fragment
+                    .rsplit_once('.')
+                    .and_then(|(_, suffix)| self.matcher.indices_for(suffix, display))
+            })
+            .unwrap_or_default()
+    }
+
     /// Generate argument suggestions for a specific command.
     fn arg_suggestions(
         &mut self,
@@ -1012,7 +1071,7 @@ impl SlashController {
         hits.into_iter()
             .map(|(idx, _)| {
                 let mut row = SuggestionRow::from_arg(&items[idx]);
-                row.indices = self.matcher.indices(row.display.as_str());
+                row.indices = self.argument_highlight_indices(trimmed, &row.display);
                 row
             })
             .collect()
@@ -2144,6 +2203,7 @@ mod tests {
             description: String::new(),
             insert_text: "/Privacy ".to_string(),
             indices: Vec::new(),
+            tag: None,
         };
         // Without smart-case, starts_with("p") fails on "Privacy" and ghost disappears
         // while the dropdown still highlights the row via CaseMatching::Smart.
@@ -2383,6 +2443,116 @@ mod tests {
         ctrl.record_command_use("q", "/quit");
         assert!(ctrl.mru_last_used("", "quit") > 0);
         assert_eq!(ctrl.mru_last_used("", "exit"), 0);
+    }
+
+    /// Inject a per-command tag map into a controller (test seam).
+    fn set_tags(ctrl: &mut SlashController, entries: &[(&str, &str)]) {
+        let map: std::collections::HashMap<String, String> = entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        ctrl.set_command_tags(std::rc::Rc::new(std::cell::RefCell::new(map)));
+    }
+
+    /// Tag of the row whose display equals `name` in the current snapshot.
+    fn row_tag(snap: &SlashSnapshot, name: &str) -> Option<String> {
+        snap.matches
+            .iter()
+            .find(|r| r.display == name)
+            .unwrap_or_else(|| panic!("row {name} missing"))
+            .tag
+            .clone()
+    }
+
+    /// A command with a tag-map entry (keyed by canonical) carries that tag in
+    /// both the empty-query and the typed-query branches; one without has `None`.
+    #[test]
+    fn command_row_tag_from_map_keyed_by_canonical() {
+        let mut ctrl = tie_controller(&["alpha", "bravo"], &[]);
+        set_tags(&mut ctrl, &[("alpha", "new")]);
+        let state = SlashState::default();
+        let models = ModelState::default();
+
+        ctrl.refresh(&state, "/", 1, &models);
+        let snap = state.snapshot();
+        assert_eq!(row_tag(&snap, "/alpha"), Some("new".to_string()));
+        assert_eq!(row_tag(&snap, "/bravo"), None);
+
+        // Typed-query branch tags the same way.
+        ctrl.refresh(&state, "/al", 3, &models);
+        let typed = state.snapshot();
+        assert_eq!(
+            row_tag(&typed, "/alpha"),
+            Some("new".to_string()),
+            "typed-query rows carry tags too"
+        );
+    }
+
+    /// The bare "/" picker surfaces tagged commands first, preserving registry
+    /// order within the tagged and untagged groups (stable; not alphabetized).
+    #[test]
+    fn empty_query_sorts_tagged_commands_first_stably() {
+        // Registry order: alpha, bravo, charlie, delta. Tag the 2nd and 4th.
+        let mut ctrl = tie_controller(&["alpha", "bravo", "charlie", "delta"], &[]);
+        set_tags(&mut ctrl, &[("bravo", "new"), ("delta", "beta")]);
+        let state = SlashState::default();
+        let models = ModelState::default();
+
+        ctrl.refresh(&state, "/", 1, &models);
+        let order: Vec<String> = state
+            .snapshot()
+            .matches
+            .iter()
+            .map(|r| r.display.clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["/bravo", "/delta", "/alpha", "/charlie"],
+            "tagged-first, stable registry order within each group"
+        );
+    }
+
+    /// ACP commands — including bundled skills that arrive as skill-shaped ACP
+    /// commands — tag from the map the same way as builtins.
+    #[test]
+    fn acp_and_skill_commands_tag_from_map() {
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(vec![
+                Arc::new(TieCmd("builtin-cmd")) as Arc<dyn SlashCommand>
+            ]),
+            std::path::PathBuf::from("."),
+        );
+        // A skill arrives as an ACP command carrying skill meta (scope + path).
+        let skill_meta = serde_json::json!({
+            "scope": "local",
+            "path": "/home/user/.grok/skills/skill-cmd/SKILL.md",
+        })
+        .as_object()
+        .cloned()
+        .expect("skill meta is an object");
+        let skill_cmd =
+            agent_client_protocol::AvailableCommand::new("skill-cmd".to_string(), String::new())
+                .meta(skill_meta);
+        ctrl.registry_mut().set_acp_commands(&[
+            agent_client_protocol::AvailableCommand::new("acp-command".to_string(), String::new()),
+            skill_cmd,
+        ]);
+        assert!(
+            ctrl.registry()
+                .get("skill-cmd")
+                .expect("skill command present")
+                .is_skill(),
+            "skill-shaped ACP command must classify as a skill"
+        );
+
+        set_tags(&mut ctrl, &[("acp-command", "beta"), ("skill-cmd", "new")]);
+        let state = SlashState::default();
+        let models = ModelState::default();
+        ctrl.refresh(&state, "/", 1, &models);
+        let snap = state.snapshot();
+        assert_eq!(row_tag(&snap, "/acp-command"), Some("beta".to_string()));
+        assert_eq!(row_tag(&snap, "/skill-cmd"), Some("new".to_string()));
+        assert_eq!(row_tag(&snap, "/builtin-cmd"), None);
     }
 
     #[test]
@@ -2684,6 +2854,11 @@ mod tests {
             .collect();
         assert_eq!(rows, vec![("first", true), ("second", false)]);
 
+        ctrl.refresh(&state, "/chain fir", 10, &models);
+        let snap = state.snapshot();
+        assert!(snap.open);
+        assert_eq!(snap.matches[0].indices, vec![0, 1, 2]);
+
         // Typing "first " triggers the phase-2 sub-menu of terminal rows.
         ctrl.refresh(&state, "/chain first ", 13, &models);
         let snap = state.snapshot();
@@ -2693,6 +2868,11 @@ mod tests {
             .map(|r| (r.display.as_str(), r.insert_text.ends_with(' ')))
             .collect();
         assert_eq!(rows, vec![("alpha", false), ("beta", false)]);
+
+        ctrl.refresh(&state, "/chain first al", 15, &models);
+        let snap = state.snapshot();
+        assert!(snap.open);
+        assert_eq!(snap.matches[0].indices, vec![0, 1]);
     }
 
     #[test]
@@ -2711,6 +2891,56 @@ mod tests {
             .collect();
         assert!(displays.contains(&"/doctor"), "matches: {displays:?}");
         assert!(!displays.contains(&"/terminal-setup"));
+
+        for text in ["/doctor ", "/terminal-setup "] {
+            ctrl.refresh(&state, text, text.len(), &models);
+            let snapshot = state.snapshot();
+            assert!(!snapshot.open, "bare args opened for {text:?}");
+            assert!(snapshot.matches.is_empty(), "matches for {text:?}");
+        }
+        for (text, inserted, indices) in [
+            ("/doctor f", "fix", vec![0]),
+            ("/doctor fix s", "fix ssh-wrap", vec![0]),
+            ("/doctor fix ssh", "fix ssh-wrap", vec![0, 1, 2]),
+            ("/doctor fix terminal.s", "fix ssh-wrap", vec![0]),
+            (
+                "/doctor fix tmux-c",
+                "fix tmux-clipboard",
+                vec![0, 1, 2, 3, 4, 5],
+            ),
+            ("/doctor fix dcs", "fix dcs-passthrough", vec![0, 1, 2]),
+            (
+                "/doctor fix tmux-e",
+                "fix tmux-extended-keys",
+                vec![0, 1, 2, 3, 4, 5],
+            ),
+            ("/terminal-setup f", "fix", vec![0]),
+            ("/terminal-setup fix s", "fix ssh-wrap", vec![0]),
+        ] {
+            ctrl.refresh(&state, text, text.len(), &models);
+            let snapshot = state.snapshot();
+            assert!(snapshot.open, "no matches for {text:?}");
+            assert_eq!(snapshot.matches[0].insert_text, inserted);
+            assert_eq!(snapshot.matches[0].indices, indices, "{text:?}");
+        }
+
+        for text in [
+            "/doctor fix ssh-wrap",
+            "/doctor fix terminal.ssh-wrap",
+            "/doctor fix tmux-clipboard",
+            "/doctor fix terminal.tmux-clipboard",
+            "/doctor fix dcs-passthrough",
+            "/doctor fix terminal.dcs-passthrough",
+            "/doctor fix tmux-extended-keys",
+            "/doctor fix terminal.tmux-extended-keys",
+            "/terminal-setup fix ssh-wrap",
+            "/terminal-setup fix terminal.ssh-wrap",
+        ] {
+            ctrl.refresh(&state, text, text.len(), &models);
+            let snapshot = state.snapshot();
+            assert!(!snapshot.open, "exact form left picker open for {text:?}");
+            assert!(snapshot.matches.is_empty(), "matches for {text:?}");
+        }
 
         let text = "/terminal-setup";
         ctrl.refresh(&state, text, text.len(), &models);

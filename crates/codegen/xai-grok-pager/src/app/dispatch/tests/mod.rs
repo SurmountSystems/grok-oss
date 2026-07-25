@@ -43,7 +43,8 @@ use super::modes::{
 };
 use super::permissions::drain_permission_queue;
 use super::prompt::{
-    dispatch_send_prompt, dispatch_send_prompt_inner, input_can_trigger_project_picker,
+    dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner,
+    input_can_trigger_project_picker,
 };
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
@@ -131,6 +132,7 @@ fn test_app() -> AppView {
         new_session_worktree_mode: crate::app::app_view::WorktreeMode::Never,
         fork_worktree_mode: crate::app::app_view::WorktreeMode::Ask,
         restore_code: None,
+        resume_local_miss: None,
         agent_override: None,
         bootstrap_acp_commands: Vec::new(),
         auth_methods: vec![acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
@@ -154,6 +156,10 @@ fn test_app() -> AppView {
         is_zdr: false,
         team_role: None,
         coding_data_retention_opt_out: false,
+        privacy_notice_rollout: false,
+        privacy_banner_reshow_days: None,
+        privacy_banner_acked: None,
+        privacy_banner_accept_inflight: false,
         show_tips: None,
         auto_compact_threshold_percent: None,
         auto_compact_threshold_tokens: None,
@@ -177,6 +183,7 @@ fn test_app() -> AppView {
         slash_mru: std::rc::Rc::new(std::cell::RefCell::new(
             crate::slash::mru::SlashMru::new_in_memory(),
         )),
+        command_tags: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         welcome_prompt_focused: false,
         welcome_tip_typing_dismissed: false,
         welcome_menu_index: None,
@@ -196,6 +203,11 @@ fn test_app() -> AppView {
         welcome_gate_url_rect: None,
         welcome_changelog_cta_rect: None,
         welcome_upgrade_cta_rect: None,
+        welcome_privacy_banner_accept_rect: None,
+        welcome_privacy_banner_customize_rect: None,
+        welcome_privacy_banner_legal_rect: None,
+        welcome_toast: None,
+        welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
         auth_show_raw_url: false,
         auth_mouse_disabled: false,
@@ -253,6 +265,7 @@ fn test_app() -> AppView {
         session_picker_grouped: false,
         cancel_rewind_enabled: true,
         session_recap_available: false,
+        tutorial: None,
         dashboard: None,
         dashboard_return: None,
         dashboard_persisted: None,
@@ -305,8 +318,10 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         bg_tool_call_to_task: std::collections::HashMap::new(),
         scheduled_tasks: std::collections::HashMap::new(),
         in_flight_prompt: None,
+        compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
+        session_notes: crate::app::agent::SessionNotes::default(),
     }
 }
 pub(super) fn test_app_with_agent() -> AppView {
@@ -498,7 +513,7 @@ fn authenticating_seq(app: &AppView) -> u64 {
     }
 }
 /// Extract text from the last system message in an agent's scrollback.
-fn last_system_text(app: &AppView, id: AgentId) -> String {
+pub(super) fn last_system_text(app: &AppView, id: AgentId) -> String {
     system_text_from_end(app, id, 0)
 }
 /// Like [`last_system_text`] but takes an offset from the end.
@@ -551,8 +566,10 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         ScrollbackState::new(),
     );
@@ -561,7 +578,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
 }
 /// Build an app with three agents (ids 0, 1, 2) and `active_view` set
 /// to agent 0.
-fn three_agent_app() -> AppView {
+pub(super) fn three_agent_app() -> AppView {
     let mut app = test_app_with_agent();
     insert_placeholder_agent(&mut app, AgentId(1));
     insert_placeholder_agent(&mut app, AgentId(2));
@@ -601,11 +618,17 @@ fn make_ask_user_question_args(
         session_id: "test-session".into(),
         tool_call_id: tool_call_id.into(),
         mode: xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionMode::Default,
-        questions: vec![
-            Question { question : "ACP-driven question".into(), options :
-            vec![QuestionOption { label : "ok".into(), description : "ok".into(), preview
-            : None, id : None, }], multi_select : Some(false), id : None, }
-        ],
+        questions: vec![Question {
+                question: "ACP-driven question".into(),
+                options: vec![QuestionOption {
+                    label: "ok".into(),
+                    description: "ok".into(),
+                    preview: None,
+                    id: None,
+                }],
+                multi_select: Some(false),
+                            id: None,
+            }],
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let ext = acp::ExtRequest::new(
@@ -689,8 +712,10 @@ fn two_agent_app_with_bg_task() -> AppView {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         ScrollbackState::new(),
     );

@@ -42,6 +42,7 @@ pub mod mcps;
 pub mod model;
 pub mod multiline;
 pub mod new;
+pub mod note;
 pub mod personas;
 pub mod plan;
 pub mod plugin;
@@ -64,6 +65,7 @@ pub mod timeline;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
+pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
@@ -85,7 +87,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(fork::ForkCommand),
         Arc::new(compact::CompactCommand),
         Arc::new(economic_mode::EconomicModeCommand),
-        Arc::new(doctor::DoctorCommand),
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),
         Arc::new(history::HistoryCommand),
@@ -94,6 +95,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(edit_prompt::EditPromptCommand),
         Arc::new(expand::ExpandCommand),
         Arc::new(context::ContextCommand),
+        // Screen-mode switchers: visible only in the opposite mode.
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::minimal()),
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
         Arc::new(model::ModelCommand),
@@ -123,6 +125,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(workflows::WorkflowsCommand),
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
+        Arc::new(doctor::DoctorCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(imagine::ImagineCommand),
@@ -140,11 +143,16 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(usage::UsageCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
+        Arc::new(note::NoteCommand),
         Arc::new(release_notes::ReleaseNotesCommand),
+        Arc::new(tutorial::TutorialCommand),
         Arc::new(config_agents::ConfigAgentsCommand),
         Arc::new(personas::PersonasCommand),
+        // Hidden easter egg: never listed, runs on bare `/gboom`.
         Arc::new(gboom::GboomCommand),
+        // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
         Arc::new(scroll_debug::ScrollDebugCommand),
+        // Debug toggles: always registered, listed only on debug binaries.
         Arc::new(debug::DebugCommand),
     ]
 }
@@ -297,6 +305,9 @@ mod tests {
             "model",
             "multiline",
             "new",
+            "note",
+            "notes",
+            "onboarding",
             "personas",
             "plan",
             "plan-view",
@@ -329,7 +340,9 @@ mod tests {
             "timestamps",
             "title",
             "toggle-mouse-reporting",
+            "tour",
             "transcript",
+            "tutorial",
             "t",
             "usage",
             "view-plan",
@@ -362,7 +375,7 @@ mod tests {
         let quit_cmd = reg.get("quit").unwrap();
         assert_eq!(exit_cmd.name(), quit_cmd.name());
         let doctor = reg.get("doctor").unwrap();
-        assert_eq!(doctor.usage(), "/doctor");
+        assert_eq!(doctor.usage(), "/doctor [fix [FIX]]");
         for alias in ["terminal-setup", "terminal-check", "terminal-info"] {
             assert_eq!(reg.get(alias).unwrap().name(), doctor.name());
             assert_eq!(reg.get(alias).unwrap().usage(), doctor.usage());
@@ -681,6 +694,19 @@ mod tests {
         assert!(
             reg.get("tasks").is_some(),
             "/tasks should be registered in builtins"
+        );
+    }
+    #[test]
+    fn note_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("note").is_some(),
+            "/note should be registered in builtins"
+        );
+        assert_eq!(
+            reg.get("notes").expect("/notes alias").name(),
+            "note",
+            "/notes should alias /note"
         );
     }
     #[test]

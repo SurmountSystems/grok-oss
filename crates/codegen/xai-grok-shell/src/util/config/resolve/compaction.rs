@@ -228,6 +228,51 @@ mod compaction_wall_clock_budget_tests {
 }
 
 #[cfg(test)]
+mod compaction_tool_choice_tests {
+    use super::{CompactionToolChoice, resolve_compaction_tool_choice_from as resolve};
+
+    #[test]
+    fn default_is_auto() {
+        assert_eq!(resolve(None, None, None), CompactionToolChoice::Auto);
+    }
+
+    #[test]
+    fn precedence_env_over_config_over_remote() {
+        assert_eq!(
+            resolve(Some("none"), Some("auto"), Some("auto")),
+            CompactionToolChoice::None
+        );
+        assert_eq!(
+            resolve(None, Some("none"), Some("auto")),
+            CompactionToolChoice::None
+        );
+        assert_eq!(
+            resolve(None, None, Some("none")),
+            CompactionToolChoice::None
+        );
+    }
+
+    #[test]
+    fn garbage_falls_through() {
+        assert_eq!(
+            resolve(Some("garbage"), None, Some("none")),
+            CompactionToolChoice::None
+        );
+        assert_eq!(
+            resolve(Some("garbage"), Some("also-bad"), None),
+            CompactionToolChoice::Auto
+        );
+    }
+
+    #[test]
+    fn from_str_case_insensitive() {
+        assert_eq!("AUTO".parse(), Ok(CompactionToolChoice::Auto));
+        assert_eq!(" None ".parse(), Ok(CompactionToolChoice::None));
+        assert!("required".parse::<CompactionToolChoice>().is_err());
+    }
+}
+
+#[cfg(test)]
 mod resolve_auto_compact_threshold_dual_mode_tests {
     use super::*;
     use crate::agent::config::{Config, SessionConfig};

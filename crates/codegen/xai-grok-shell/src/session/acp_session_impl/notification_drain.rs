@@ -147,6 +147,38 @@ impl SessionActor {
                 }
                 return;
             }
+            // Parked / awaiting plan approval has no running_task (resume
+            // re-park is detached). Promoting a queued prompt would start a
+            // new turn while exit_plan_mode is still waiting on the user —
+            // that hijacks the in-flight plan decision. Hold until approve /
+            // revise / abandon clears the gate.
+            let plan_approval_open = self.plan_mode.lock().is_awaiting_plan_approval()
+                || crate::session::pending_interaction::has_parked_plan_approval(
+                    &self.pending_interactions,
+                );
+            if plan_approval_open {
+                let queue_depth = state.pending_inputs.len();
+                if queue_depth > 0 {
+                    xai_grok_telemetry::unified_log::debug(
+                        "shell.prompt.start_blocked",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "reason": "plan_approval_open",
+                            "queue_depth": queue_depth,
+                        })),
+                    );
+                    tracing::debug!(
+                        target: "qtrace",
+                        pid = std::process::id(),
+                        event = "server_start_blocked",
+                        reason = "plan_approval_open",
+                        queue_depth,
+                        session = self.session_info.id.0.as_ref(),
+                        "maybe_start_running_task blocked: plan approval is open",
+                    );
+                }
+                return;
+            }
             if state.pending_inputs.is_empty() {
                 return;
             }
@@ -167,6 +199,13 @@ impl SessionActor {
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
         if state.running_task.is_some() || state.pending_inputs.is_empty() {
+            return;
+        }
+        if self.plan_mode.lock().is_awaiting_plan_approval()
+            || crate::session::pending_interaction::has_parked_plan_approval(
+                &self.pending_interactions,
+            )
+        {
             return;
         }
 
@@ -237,6 +276,7 @@ impl SessionActor {
             json_schema,
             origin,
             running_display,
+            tool_overrides_update,
         ) = {
             let Some(front) = state.pending_inputs.front_mut() else {
                 return;
@@ -256,8 +296,10 @@ impl SessionActor {
                 front.json_schema.clone(),
                 front.origin.clone(),
                 running_display,
+                front.tool_overrides_update.take(),
             )
         };
+        self.apply_tool_overrides_update(tool_overrides_update);
         if matches!(origin, super::PromptOrigin::User) {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
@@ -588,6 +630,7 @@ impl SessionActor {
             json_schema: None,
             origin: super::PromptOrigin::NotificationDrain,
             task_wake_fallback: None,
+            tool_overrides_update: None,
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,

@@ -246,6 +246,12 @@ impl crate::types::resources::ResourceType for BashParams {
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Product default advertised in the model-facing schema (FG). Not applied as a
+/// serde default: omit/`None` must remain "use host/FG policy, BG unbounded".
+fn schema_default_timeout_ms() -> Option<u64> {
+    Some(120_000)
+}
+
 /// Input for the bash/terminal command tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BashToolInput {
@@ -258,11 +264,14 @@ pub struct BashToolInput {
     /// the task runs until it exits or is killed via the kill task tool.
     // keep in sync with the rustdoc above
     #[schemars(
-        description = "Optional timeout in milliseconds (max 300000). Default: 120000 (2 minutes). `timeout: 0` in background mode disables the wrapper timeout entirely; the task runs until it exits or is killed via the kill task tool."
+        description = "Optional timeout in milliseconds (max 300000). Default: 120000 (2 minutes). `timeout: 0` in background mode disables the wrapper timeout entirely; the task runs until it exits or is killed via the kill task tool.",
+        default = "schema_default_timeout_ms"
     )]
     // Some models serialize numeric tool args
     // as JSON strings (`"120000"`), which a plain `Option<u64>` rejects. Accept
     // string-or-number here; the schema still advertises an integer.
+    // Serde default stays None so omit ≠ Some(120000): background omit must stay
+    // unbounded (see resolve_effective_timeout). Schema still advertises 120000.
     #[serde(
         default,
         deserialize_with = "crate::types::schema::deserialize_lenient_u64",
@@ -447,7 +456,11 @@ fn is_pure_status_print(trimmed: &str) -> bool {
 /// - Normal: `exit: N [annotations]\n<stripped_output>`
 /// - Killed by harness/signal: `exit: killed (reason) [annotations]\n<stripped_output>`
 /// - Backgrounded: verbose `[Command moved to background]...` format.
-pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
+///
+/// `append_noop_reminder` gates the no-op-command end-turn `<system-reminder>`.
+/// Callers pass the session's `SystemRemindersEnabled` value so the nudge
+/// follows the same switch as every other system reminder.
+pub(crate) fn format_default_prompt(bash: &BashOutput, append_noop_reminder: bool) -> String {
     let output_str = if bash.output_for_prompt.is_empty() {
         let raw = String::from_utf8_lossy(&bash.output);
         strip_ansi_escapes::strip_str(&raw).to_string()
@@ -478,7 +491,7 @@ pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
             None => format!("exit: {}{}", bash.exit_code, annotations(bash)),
         };
         let prompt = format!("{}\n{}", header, output_str);
-        if bash.signal.is_none() && is_noop_command(&bash.command) {
+        if append_noop_reminder && bash.signal.is_none() && is_noop_command(&bash.command) {
             format!("{}\n\n{}", prompt.trim_end(), NOOP_END_TURN_REMINDER)
         } else {
             prompt
@@ -2028,6 +2041,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 foreground_block_budget: None,
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
+                description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             };
 
             let handle = match backend.run_background(request).await {
@@ -2063,7 +2077,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 output_file: bg_output_file.clone(),
                 task_id: task_id.clone(),
                 monitor_description: None,
-                description: Some(input.description.clone()),
+                description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             });
 
             let retrieval_hint = Self::background_retrieval_hint(&resources, &task_id).await?;
@@ -2124,6 +2138,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 foreground_block_budget: Self::effective_foreground_block_budget(&params),
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
+                description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             };
 
             let result = match backend.run(request).await {
@@ -2157,7 +2172,7 @@ impl xai_tool_runtime::Tool for BashTool {
                     output_file: output_file.clone(),
                     task_id: tool_call_id.as_str().to_owned(),
                     monitor_description: None,
-                    description: Some(input.description.clone()),
+                    description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
                 });
 
                 let retrieval_hint =
@@ -2224,14 +2239,23 @@ impl xai_tool_runtime::Tool for BashTool {
                 truncated: result.truncated,
                 signal: result.signal,
                 timed_out: result.timed_out,
-                description: Some(input.description),
+                description: Some(input.description).filter(|d| !d.trim().is_empty()),
                 current_dir: cwd.to_string_lossy().to_string(),
                 output_file: output_file.to_string_lossy().to_string(),
                 total_bytes: result.total_bytes,
                 output_delta: None,
                 was_bare_echo: false,
             };
-            bash.output_for_prompt = format_default_prompt(&bash);
+            // Gate the no-op end-turn reminder on the same switch as every other
+            // system reminder (absent resource => enabled, mirroring
+            // `finalize_output`), so toolsets with `system_reminders_enabled=false`
+            // don't receive it.
+            let append_noop_reminder = resources
+                .lock()
+                .await
+                .get::<crate::types::resources::SystemRemindersEnabled>()
+                .is_none_or(|e| e.0);
+            bash.output_for_prompt = format_default_prompt(&bash, append_noop_reminder);
 
             // Bare `echo "<msg>"` usage (common model anti-pattern for "just output something").
             // We tag it for statistics (grok_build backend) and can surface an educational
@@ -2276,6 +2300,34 @@ impl xai_tool_runtime::Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bash_timeout_schema_defaults_to_120s() {
+        let schema = serde_json::to_value(schemars::schema_for!(BashToolInput)).unwrap();
+        let timeout = &schema["properties"]["timeout"];
+        assert_eq!(
+            timeout.get("default"),
+            Some(&serde_json::json!(120_000)),
+            "timeout schema should advertise default 120000, got {timeout}"
+        );
+        // Serde omit stays None so background without timeout remains unbounded.
+        let missing: BashToolInput =
+            serde_json::from_str(r#"{"command":"ls","description":"list"}"#).unwrap();
+        assert_eq!(missing.timeout, None);
+        let zero: BashToolInput =
+            serde_json::from_str(r#"{"command":"ls","description":"list","timeout":0}"#).unwrap();
+        assert_eq!(zero.timeout, Some(0));
+        // Explicit BG omit still resolves unbounded.
+        assert_eq!(
+            BashTool::resolve_effective_timeout(
+                missing.timeout,
+                true,
+                DEFAULT_TIMEOUT,
+                DEFAULT_MAX_TIMEOUT_MS,
+            ),
+            std::time::Duration::MAX
+        );
+    }
+
     use crate::computer::types::{
         BackgroundHandle, ComputerError, KillOutcome, TaskSnapshot, TerminalBackend,
         TerminalRunRequest, TerminalRunResult,
@@ -2288,8 +2340,7 @@ mod tests {
 
     /// Models occasionally serialize numeric tool args as JSON strings. The
     /// `timeout` field must accept both `120000` and `"120000"`, stay `None`
-    /// when omitted or null. Regression for the `invalid type: string
-    /// "120000", expected u64` failure seen with some models.
+    /// when omitted or null (FG host policy / BG unbounded).
     #[test]
     fn timeout_accepts_string_or_integer() {
         let from_int: BashToolInput =
@@ -3378,7 +3429,7 @@ mod tests {
             output_delta: None,
             was_bare_echo: false,
         };
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
         bash
     }
 
@@ -3431,7 +3482,7 @@ mod tests {
         let mut bash = make_bash_output(-1, "partial\n");
         bash.signal = Some("timeout".to_string());
         bash.timed_out = true;
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
         // Synthetic kill reasons render as `exit: killed (reason)` — no
         // redundant `[signal=…]` / `[timeout]` annotation.
         assert!(
@@ -3476,7 +3527,8 @@ mod tests {
         for reason in ["timeout", "max_runtime", "cancelled", "killed", "signal 15"] {
             let mut bash = make_bash_output(-1, "partial\n");
             bash.signal = Some(reason.to_string());
-            bash.output_for_prompt = format_default_prompt(&bash);
+            bash.output_for_prompt =
+                format_default_prompt(&bash, /* append_noop_reminder */ true);
             let expected = format!("exit: killed ({})", reason);
             assert!(
                 bash.output_for_prompt.starts_with(&expected),
@@ -3496,7 +3548,7 @@ mod tests {
 
         let mut oom = make_bash_output(137, "killed\n");
         oom.signal = Some("oom".to_string());
-        oom.output_for_prompt = format_default_prompt(&oom);
+        oom.output_for_prompt = format_default_prompt(&oom, /* append_noop_reminder */ true);
         assert!(oom.output_for_prompt.starts_with("exit: 137 [signal=oom]"));
     }
 
@@ -3506,7 +3558,7 @@ mod tests {
         bash.signal = Some("backgrounded".to_string());
         bash.output_file = "/tmp/bg.log".to_string();
         bash.total_bytes = 10000;
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
         assert!(
             bash.output_for_prompt
                 .starts_with("[Command moved to background]")
@@ -3549,10 +3601,30 @@ mod tests {
             "printf hi",
             "printf 'done\\n'",
         ] {
-            let prompt = format_default_prompt(&bash_output_with_command(cmd, ""));
+            let prompt = format_default_prompt(
+                &bash_output_with_command(cmd, ""),
+                /* append_noop_reminder */ true,
+            );
             assert!(
                 prompt.contains(NOOP_END_TURN_REMINDER),
                 "no-op command {cmd:?} should append the end-turn reminder, got: {prompt:?}"
+            );
+        }
+    }
+
+    /// With `append_noop_reminder = false` (session `system_reminders_enabled=false`),
+    /// the no-op end-turn reminder is suppressed even for no-op commands. Mirrors
+    /// gating the reminder on the shared `SystemRemindersEnabled` switch.
+    #[test]
+    fn default_prompt_noop_reminder_suppressed_when_disabled() {
+        for cmd in ["true", ":", "", "echo ok", "printf hi"] {
+            let prompt = format_default_prompt(
+                &bash_output_with_command(cmd, ""),
+                /* append_noop_reminder */ false,
+            );
+            assert!(
+                !prompt.contains("<system-reminder>"),
+                "no-op command {cmd:?} must not append the reminder when disabled, got: {prompt:?}"
             );
         }
     }
@@ -3571,7 +3643,10 @@ mod tests {
             "echo hi; ls",
             "printf '%s' \"$x\"",
         ] {
-            let prompt = format_default_prompt(&bash_output_with_command(cmd, "hi\n"));
+            let prompt = format_default_prompt(
+                &bash_output_with_command(cmd, "hi\n"),
+                /* append_noop_reminder */ true,
+            );
             assert!(
                 !prompt.contains("<system-reminder>"),
                 "normal command {cmd:?} must not append the end-turn reminder, got: {prompt:?}"

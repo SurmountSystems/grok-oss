@@ -254,6 +254,21 @@ impl SettingsModalState {
         }
     }
 
+    /// Focus a setting by registry key (Browse mode). Returns whether the
+    /// key was found; no-op if missing.
+    pub fn focus_key(&mut self, key: &str) -> bool {
+        if let Some(idx) = self
+            .rows
+            .iter()
+            .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
+        {
+            self.selected = idx;
+            self.clamp_selected_to_visible();
+            return true;
+        }
+        false
+    }
+
     /// Filtered row indices in render order.
     pub fn filtered_indices(&self) -> &[usize] {
         &self.filtered_cache
@@ -773,7 +788,12 @@ pub(super) fn setting_row_visible(
     minimal: bool,
     voice_mode: bool,
 ) -> bool {
-    if !voice_mode && matches!(meta.key, "voice_capture_mode" | "voice_stt_language") {
+    if !voice_mode
+        && matches!(
+            meta.key,
+            "voice_keybind_enabled" | "voice_capture_mode" | "voice_stt_language"
+        )
+    {
         return false;
     }
     if meta.key == "voice_capture_mode" && !kitty_releases {
@@ -843,6 +863,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
+        "voice_keybind_enabled" => Some(Action::SetVoiceKeybindEnabled(new)),
         "remember_tool_approvals" => Some(Action::SetRememberToolApprovals(new)),
         "toolset.ask_user_question.timeout_enabled" => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))

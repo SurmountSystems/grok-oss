@@ -161,7 +161,7 @@ impl StaticShellSnapshot {
         };
 
         Ok(PreparedStaticCommand {
-            binary: shell_binary(self.shell),
+            binary: shell_binary(self.shell).to_string(),
             args,
             fd_mappings: vec![FdMapping {
                 parent_fd: state_in_read,

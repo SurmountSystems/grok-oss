@@ -183,17 +183,67 @@ The `resume_from` parameter lets a new subagent continue where a completed subag
 
 The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
 
+### MCP inheritance
+
+Subagents inherit the parent session’s **already-connected** MCP servers by default. That includes local stdio/HTTP servers and plugin-sourced agents (for example `my-plugin:reviewer`). The child discovers and calls those tools with `search_tool` / `use_tool` the same way the parent does.
+
+Control inheritance with agent frontmatter `mcpInheritance`:
+
+| Value | Effect |
+| ----- | ------ |
+| `all` (default if omitted) | Inherit every parent-connected MCP server |
+| `none` | Inherit no parent MCP servers |
+| `named: [server, …]` | Inherit only the listed server names |
+| `except: [server, …]` | Inherit all parent servers except the listed names |
+
+Example:
+
+```yaml
+---
+name: research-only
+description: Read MCP tools but not internal connectors
+tools: search_tool, use_tool, Read
+mcpInheritance:
+  except:
+    - internal-tools
+---
+```
+
+**Plugin agents** inherit parent MCP the same way. For security they still cannot:
+
+- Declare their own `mcpServers` in agent frontmatter (ignored with a warning)
+- Declare hooks in agent frontmatter
+- Set `permissionMode: bypassPermissions`
+
+Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **parent/session** after the plugin is trusted — they are not a child-only frontmatter declaration. See [Plugins](09-plugins.md) and [MCP Servers](07-mcp-servers.md).
+
 ---
 
 ## Isolation: Worktree Mode
 
-For tasks that modify files, run a subagent in an isolated git worktree with `isolation: worktree`. This keeps the child's edits from conflicting with the parent's:
+By default, subagents share the parent workspace (`isolation: none`). For tasks that must keep edits separate from the parent, request an isolated git worktree with `isolation: worktree`:
 
 - The subagent works in its own copy of the working tree.
 - Its changes stay isolated from the parent until you merge them.
 - The subagent's result includes the worktree path.
 
 Grok Build manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
+
+**Prefer no worktree** when parallel children edit disjoint paths or when you want simpler git state. Skills that orchestrate subagents should default to `isolation: none` unless the user asks for a worktree.
+
+### Worktree isolation is off by default
+
+Surmount OSS defaults `[subagents] allow_worktree` to **`false`**. Empty config means spawn **forces** `isolation = none` even if the agent requested `worktree` or a role/persona defaulted to worktree. Resume of a child that already has a worktree still reuses that path.
+
+To **opt in** to worktree isolation:
+
+```toml
+# ~/.grok/config.toml
+[subagents]
+allow_worktree = true
+```
+
+**Migration:** earlier releases defaulted `allow_worktree` to `true`. If you relied on that, set the key above explicitly. Force-none still applies whenever the value is `false` (default or explicit).
 
 ---
 
@@ -249,6 +299,19 @@ To view the available agent types and personas, open the command palette with `C
 
 Subagents appear at the top of the tasks pane in their own collapsible "Subagents" group.
 
+### Queue hold while subagents run
+
+Queued follow-ups **hold** not only when the parent is blocked waiting on a subagent, but also whenever **any background subagent is still live** — even if the parent already looks idle. That keeps typed follow-ups from starting a conflicting main turn while children work.
+
+- Status cue: e.g. `N subagent(s) still running · M queued — send now to force`.
+- **Send now** force-starts the next parent turn despite live children.
+- When the last holding subagent finishes, the queue drains on its own (no extra keystroke).
+- **Monitors** and long-running background commands alone do **not** hold the queue (they can run indefinitely).
+
+For **annotations that must not become a turn at all**, use [`/note`](04-slash-commands.md#note) instead of typing into the composer or queue. Session notes are operator-local and never drain as prompts.
+
+See also [keyboard shortcuts — during an active turn](03-keyboard-shortcuts.md#during-an-active-turn-agent-running).
+
 ---
 
 ## Viewing Subagents in the TUI
@@ -290,6 +353,48 @@ Only the top-level session spawns subagents. A subagent cannot spawn its own sub
 
 ---
 
+## Token efficiency
+
+The parent session’s context is expensive. Filling it with logs, greps, and long file reads hurts quality long before the hard limit, and a parent compact can wipe coordination detail. Use subagents so heavy work runs in a fresh window; keep the parent as coordinator.
+
+### Parent coordinates; children do the heavy work
+
+- **Parent keeps:** goals, spawn/wait, short on-disk join notes, status to you.
+- **Children own:** multi-file search, CI log fetch, root-cause reads, implementation, and review loops.
+- Prefer **tight prompts** (goal, paths, acceptance, where to write a short summary). Prefer **short returns** (verdict, paths, residuals) over pasting whole transcripts into the parent.
+
+### Parent is coordinator only (spawn first)
+
+On a **CI failure**, **regression**, or **multi-file diagnosis**, the parent’s **first** tool use should be spawning a tightly scoped subagent — not pulling CI logs, opening failing tests, or grepping the hot path in the parent.
+
+| Parent may | Parent should not (even “just a quick look”) |
+| ---------- | --------------------------------------------- |
+| Set goals, spawn/wait children | Pull CI logs or open failing test files first |
+| Read short on-disk summaries children wrote | Re-run the child’s greps “to be sure” |
+| One-line status to you | Solo marathons of multi-file research or fix work |
+
+**Failure mode to avoid:** parent greps docs + fetches logs + finds the test file, *then* spawns. That already burned the parent context. Spawn first; children own fetch/read/fix.
+
+### Join on disk
+
+Children write short summary or review files. The parent reads those only — not full child transcripts and not whole hot modules after a summary already named the set. After compaction, reseed from on-disk artifacts rather than re-exploring from zero.
+
+### Depth is one
+
+Children cannot spawn children (see [Depth Limits](#depth-limits)). Hierarchical work means the **parent** layers specialists in sequence or parallel (inventory → root cause → fix → verify), each with a tight prompt and an on-disk artifact.
+
+### Soft quality band
+
+Treat the parent as a **coordinator budget**, not a place to hoard tool output. Soft guidance: keep parent context lighter when you can (quality often drops well before the hard cap). Child isolation is the win: each subagent starts fresh so deep loops do not force an early parent compact.
+
+### Parallelism without waste
+
+Spawn for **independent**, **disjoint** scopes when the join is cheap. Do not fan out many identical explores over the same files, or spawn for pure status checks with no real work. Cap concurrent children when scopes would otherwise overlap.
+
+Skills and project agent rules (for example `AGENTS.md` in a repo, or your host agent config) may pin a stricter “hard stop” for operators — this section is the product-facing summary those rules link to.
+
+---
+
 ## When to Use Subagents
 
 **Good use cases:**
@@ -298,6 +403,7 @@ Only the top-level session spawns subagents. A subagent cannot spawn its own sub
 - Running tests in parallel while the parent implements changes
 - Reviewing generated changes before you commit them
 - Delegating independent tasks that do not depend on each other
+- CI failures, regressions, and multi-file root cause (spawn first; join on short summaries)
 
 **When not to use:**
 

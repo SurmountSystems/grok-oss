@@ -41,12 +41,14 @@ fn local_terminal() -> TerminalContext {
 }
 
 fn ssh_wrap_fix_request(home: &std::path::Path) -> crate::diagnostics::FixRequest {
-    crate::diagnostics::FixRequest {
-        id: crate::diagnostics::SSH_WRAP_ID,
-        home: home.to_path_buf(),
-        shell: Some(std::path::PathBuf::from("/bin/bash")),
-        validator: None,
-    }
+    crate::diagnostics::FixRequest::new_for_test(
+        crate::diagnostics::SSH_WRAP_ID,
+        home,
+        Some(std::path::PathBuf::from("/bin/bash")),
+        None,
+        None,
+    )
+    .unwrap()
 }
 
 static TMUX_ROUTE: ClipboardRoute = ClipboardRoute {
@@ -96,6 +98,12 @@ fn healthy_report() -> DiagnosticReport {
             multiplexer: MultiplexerKind::Undetected,
             byobu: None,
             ssh: false,
+            tmux: crate::diagnostics::TmuxFacts {
+                extended_keys: crate::diagnostics::TmuxOptionFact::Unavailable,
+                set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
+                allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,
+                allow_passthrough: crate::diagnostics::TmuxOptionFact::Unavailable,
+            },
             color: ColorFacts {
                 level: RuntimeFact::Available(ColorLevel::TrueColor),
                 available_themes: ThemeKind::ALL.to_vec(),
@@ -156,7 +164,9 @@ fn mixed_report() -> DiagnosticReport {
                 fix: "set -g set-clipboard on".to_owned(),
                 config_path: Some("~/.tmux.conf".to_owned()),
             }),
-            automatic_remediation: None,
+            automatic_remediation: crate::diagnostics::automatic_remediation_for(
+                DiagnosticId::new("terminal", "tmux-clipboard"),
+            ),
             note: Some("Reload tmux after editing.".to_owned()),
         },
         DiagnosticFinding {
@@ -230,15 +240,35 @@ fn fake_standalone_facts_compose_through_shared_view() {
     );
     let report = collect_report_with(snapshot);
 
-    assert_eq!(report.issue_count(), 1);
+    // Shared-view issues only. `collect_report_with` also runs the live voice
+    // input-device probe after the view, which appends `voice.no-input-device`
+    // when no system recorder is on PATH (typical headless CI). That host fact
+    // is outside the fake snapshot under test.
+    let view_issues: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding.disposition == FindingDisposition::Issue
+                && finding.id != crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID
+        })
+        .collect();
+    assert_eq!(
+        view_issues.len(),
+        1,
+        "unexpected view issues: {:?}",
+        view_issues
+            .iter()
+            .map(|finding| finding.id)
+            .collect::<Vec<_>>()
+    );
     assert!(
         report
             .findings
             .iter()
-            .all(|finding| { finding.id != DiagnosticId::new("terminal", "control-mode") })
+            .all(|finding| finding.id != DiagnosticId::new("terminal", "control-mode"))
     );
     assert_eq!(
-        report.findings[0].id,
+        view_issues[0].id,
         DiagnosticId::new("terminal", "tmux-clipboard")
     );
 }
@@ -309,6 +339,19 @@ fn human_wayland_error_includes_detail_once() {
     report.facts.clipboard.data_control = DataControlFact::Error;
     report.facts.clipboard.delivery = ClipboardDelivery::Failed;
     report.facts.clipboard.fix = Some("/minimal".to_owned());
+    report.findings.push(DiagnosticFinding {
+        id: crate::diagnostics::CLIPBOARD_DELIVERY_UNAVAILABLE_ID,
+        disposition: FindingDisposition::Issue,
+        message: "No configured clipboard route can reach the intended clipboard".to_owned(),
+        remediation: None,
+        automatic_remediation: None,
+        note: Some(
+            "Each in-app copy is also written to the backup path shown by the operation. Use \
+             `/copy <file>` for an explicit file or `/minimal` for terminal-native selection, \
+             then check the native clipboard tool reported above."
+                .to_owned(),
+        ),
+    });
     report.probe_notes = vec![ProbeNote {
         probe: "wayland.data-control",
         status: ProbeStatus::Error,
@@ -319,9 +362,9 @@ fn human_wayland_error_includes_detail_once() {
         concat!(
             "Grok Doctor\n",
             "\n",
-            "Terminal\n",
+            "Environment\n",
             "  · terminal                     Ghostty\n",
-            "  ? xtversion                    no reply\n",
+            "  ? terminal version             no reply\n",
             "  · multiplexer                  None detected\n",
             "  · ssh                          no\n",
             "  · color                        truecolor\n",
@@ -331,10 +374,13 @@ fn human_wayland_error_includes_detail_once() {
             "  · native                       unavailable\n",
             "  · tmux                         off\n",
             "  · osc 52                       off\n",
-            "  · wrap                         off\n",
+            "  · SSH wrap                     off\n",
             "  ? data-control                 error: probe worker died\n",
             "  · status                       unavailable\n",
-            "  · fix                          /minimal\n",
+            "\n",
+            "Findings\n",
+            "  ! clipboard.delivery-unavailable No configured clipboard route can reach the intended clipboard\n",
+            "      Each in-app copy is also written to the backup path shown by the operation. Use `/copy <file>` for an explicit file or `/minimal` for terminal-native selection, then check the native clipboard tool reported above.\n",
             "\n",
             "1 issue, 0 recommendations\n",
         )
@@ -424,9 +470,9 @@ fn human_healthy_fixture_is_exact() {
         concat!(
             "Grok Doctor\n",
             "\n",
-            "Terminal\n",
+            "Environment\n",
             "  · terminal                     Ghostty\n",
-            "  ? xtversion                    no reply\n",
+            "  ? terminal version             no reply\n",
             "  · multiplexer                  None detected\n",
             "  · ssh                          no\n",
             "  · color                        truecolor\n",
@@ -436,7 +482,7 @@ fn human_healthy_fixture_is_exact() {
             "  · native                       local (pbcopy)\n",
             "  · tmux                         off\n",
             "  · osc 52                       off\n",
-            "  · wrap                         off\n",
+            "  · SSH wrap                     off\n",
             "  · status                       confirmed\n",
             "\n",
             "0 issues, 0 recommendations\n",
@@ -451,9 +497,9 @@ fn human_mixed_fixture_is_exact() {
         concat!(
             "Grok Doctor\n",
             "\n",
-            "Terminal\n",
+            "Environment\n",
             "  · terminal                     Ghostty\n",
-            "  · xtversion                    Ghostty 1.2.3\n",
+            "  · terminal version             Ghostty 1.2.3\n",
             "  · multiplexer                  tmux\n",
             "  · byobu                        tmux\n",
             "  · ssh                          yes\n",
@@ -466,26 +512,27 @@ fn human_mixed_fixture_is_exact() {
             "  · native                       local (pbcopy)\n",
             "  · tmux                         on\n",
             "  · osc 52                       supported\n",
-            "  · wrap                         off\n",
+            "  · SSH wrap                     off\n",
             "  · status                       confirmed\n",
             "\n",
             "Findings\n",
             "  ! terminal.tmux-clipboard      OSC 52 clipboard passthrough is disabled\n",
+            "    → Automatic setup: `grok doctor fix tmux-clipboard`\n",
             "    → Add `set -g set-clipboard on` to ~/.tmux.conf\n",
             "      Reload tmux after editing.\n",
             "  i terminal.ssh-wrap            Use local SSH wrapping\n",
             "    → Automatic setup: `grok doctor fix ssh-wrap`\n",
             "    → One-off: `grok wrap ssh <host>`\n",
             "\n",
-            "Probe notes\n",
+            "Checks not completed\n",
             "  ? tmux.version                 unavailable\n",
             "  ? tmux.extended-keys           unavailable\n",
             "  ? tmux.allow-passthrough-support unsupported\n",
             "  ? runtime.fullscreen-active    unavailable\n",
             "  ? tmux.control-mode            error: server unavailable\n",
             "\n",
-            "Live TUI evidence\n",
-            "  Run /doctor inside Grok.\n",
+            "Needs a running session\n",
+            "  Some checks only run in Grok. Start Grok and run /doctor.\n",
             "\n",
             "1 issue, 1 recommendation\n",
         )
@@ -505,15 +552,14 @@ fn fix_preview_contains_exact_change_and_caveats() {
     let mut preview = Vec::new();
     write_fix_preview(&plan, &mut preview).unwrap();
     let preview = String::from_utf8(preview).unwrap();
+    assert_eq!(preview, crate::diagnostics::format_fix_preview(&plan));
     assert!(preview.contains("File: "));
     assert!(
         preview.contains(
             "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='grok wrap ssh'"
         )
     );
-    assert!(
-        preview.contains("One-off alternative without changing config: `grok wrap ssh <host>`")
-    );
+    assert!(preview.contains("To use once without changing config: `grok wrap ssh <host>`"));
     assert!(preview.contains("Use `command ssh ...` to bypass the alias."));
     assert!(preview.contains("ssh -f"));
     assert!(preview.contains("ControlPersist"));
@@ -534,7 +580,7 @@ fn decline_is_success_and_does_not_write() {
     let mut output = Vec::new();
     apply_fix_plan(
         FixArgs {
-            id: "ssh-wrap".to_owned(),
+            id: Some("ssh-wrap".to_owned()),
             yes: false,
         },
         true,
@@ -544,7 +590,11 @@ fn decline_is_success_and_does_not_write() {
         plan,
     )
     .unwrap();
-    assert!(String::from_utf8(output).unwrap().ends_with("Cancelled.\n"));
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .ends_with("Fix cancelled.\n")
+    );
     assert!(!temp.path().join(".bashrc").exists());
 }
 
@@ -560,7 +610,7 @@ fn non_tty_without_yes_fails_safely_before_write() {
     .unwrap();
     let error = apply_fix_plan(
         FixArgs {
-            id: "terminal.ssh-wrap".to_owned(),
+            id: Some("terminal.ssh-wrap".to_owned()),
             yes: false,
         },
         false,
@@ -573,7 +623,7 @@ fn non_tty_without_yes_fails_safely_before_write() {
     assert!(
         error
             .to_string()
-            .contains("non-interactive stdin without --yes")
+            .contains("Cannot apply this fix without confirmation")
     );
     assert!(!temp.path().join(".bashrc").exists());
 }
@@ -607,9 +657,9 @@ fn human_incomplete_fixture_is_exact_without_duplicate_probe_rows() {
         concat!(
             "Grok Doctor\n",
             "\n",
-            "Terminal\n",
+            "Environment\n",
             "  · terminal                     Ghostty\n",
-            "  ? xtversion                    unavailable\n",
+            "  ? terminal version             unavailable\n",
             "  · multiplexer                  None detected\n",
             "  · ssh                          no\n",
             "  ? color                        unavailable\n",
@@ -619,11 +669,11 @@ fn human_incomplete_fixture_is_exact_without_duplicate_probe_rows() {
             "  · native                       local (pbcopy)\n",
             "  · tmux                         off\n",
             "  · osc 52                       off\n",
-            "  · wrap                         off\n",
+            "  · SSH wrap                     off\n",
             "  · status                       confirmed\n",
             "\n",
-            "Live TUI evidence\n",
-            "  Run /doctor inside Grok.\n",
+            "Needs a running session\n",
+            "  Some checks only run in Grok. Start Grok and run /doctor.\n",
             "\n",
             "0 issues, 0 recommendations\n",
         )
@@ -730,7 +780,10 @@ fn json_contract_is_structural_stable_ordered_and_ansi_free() {
                         "fix": "set -g set-clipboard on",
                         "configPath": "~/.tmux.conf"
                     },
-                    "automaticRemediation": null,
+                    "automaticRemediation": {
+                        "fixId": "terminal.tmux-clipboard",
+                        "command": "grok doctor fix terminal.tmux-clipboard"
+                    },
                     "note": "Reload tmux after editing."
                 },
                 {
@@ -948,6 +1001,49 @@ fn newline_variant_and_field_mappings_are_stable() {
         json["facts"]["newline"],
         serde_json::json!({"kind": "no_kitty_keyboard_protocol"})
     );
+}
+
+#[test]
+fn clipboard_issue_count_preserves_legacy_reports_without_double_counting_named_findings() {
+    let mut report = healthy_report();
+    report.facts.clipboard.delivery = ClipboardDelivery::Failed;
+    assert_eq!(report.issue_count(), 1, "legacy fact-only report");
+    report.findings.push(DiagnosticFinding {
+        id: crate::diagnostics::CLIPBOARD_DELIVERY_UNAVAILABLE_ID,
+        disposition: FindingDisposition::Issue,
+        message: "clipboard unavailable".to_owned(),
+        remediation: None,
+        automatic_remediation: None,
+        note: Some("manual recovery".to_owned()),
+    });
+    assert_eq!(report.issue_count(), 1, "named finding replaces fact count");
+}
+
+#[test]
+fn new_named_findings_extend_json_without_schema_changes() {
+    let mut report = healthy_report();
+    report.facts.clipboard.delivery = ClipboardDelivery::Unverified;
+    report.facts.clipboard.fix = Some("grok wrap <ssh command> or /minimal".to_owned());
+    report.findings.push(DiagnosticFinding {
+        id: crate::diagnostics::CLIPBOARD_DELIVERY_UNVERIFIED_ID,
+        disposition: FindingDisposition::Issue,
+        message: "Clipboard delivery could not be verified across this remote boundary".to_owned(),
+        remediation: None,
+        automatic_remediation: None,
+        note: Some("Run /doctor guidance".to_owned()),
+    });
+
+    let mut output = Vec::new();
+    write_report(&report, true, &mut output).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schemaVersion"], "1");
+    assert_eq!(json["facts"]["clipboard"]["delivery"], "unverified");
+    assert_eq!(
+        json["facts"]["clipboard"]["fix"],
+        "grok wrap <ssh command> or /minimal"
+    );
+    assert_eq!(json["findings"][0]["id"], "clipboard.delivery-unverified");
+    assert_eq!(json["counts"]["issues"], 1);
 }
 
 #[test]

@@ -7,6 +7,267 @@ use super::super::task_result::{
 use super::*;
 use xai_grok_shell::session::unified_list::ListScope;
 
+fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTarget {
+    let agent = &app.agents[&id];
+    crate::app::actions::DoctorFixTarget {
+        agent_id: id,
+        session_id: agent.session.session_id.clone(),
+        session_binding_epoch: agent.session_binding_epoch,
+        cwd: agent.session.cwd.clone(),
+    }
+}
+
+#[test]
+fn doctor_planning_promotes_initial_session_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().unbind_session_id();
+    let target = doctor_target(&app, id);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id("bound".into());
+    dispatch_task_result(
+        TaskResult::DoctorFixPlanned {
+            target,
+            result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
+                crate::diagnostics::test_fix_plan(temp.path()),
+            ))),
+        },
+        &mut app,
+    );
+    let Some(crate::views::question_view::LocalQuestionKind::DoctorFix { target, .. }) = app.agents
+        [&id]
+        .question_view
+        .as_ref()
+        .and_then(|question| question.local_kind.as_ref())
+    else {
+        panic!("planning must open the doctor modal");
+    };
+    assert_eq!(
+        target.session_id.as_ref().map(|id| id.0.as_ref()),
+        Some("bound")
+    );
+}
+
+#[test]
+fn doctor_planning_rejects_bind_replace_and_unbind_rebind() {
+    let temp = tempfile::tempdir().unwrap();
+    for replacement in ["bind-replace", "unbind-rebind"] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().unbind_session_id();
+        let target = doctor_target(&app, id);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.bind_session_id("first".into());
+        if replacement == "bind-replace" {
+            agent.bind_session_id("second".into());
+        } else {
+            agent.unbind_session_id();
+            agent.bind_session_id("first".into());
+        }
+        dispatch_task_result(
+            TaskResult::DoctorFixPlanned {
+                target,
+                result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
+                    crate::diagnostics::test_fix_plan(temp.path()),
+                ))),
+            },
+            &mut app,
+        );
+        assert!(app.agents[&id].question_view.is_none(), "{replacement}");
+        assert!(
+            last_system_text(&app, id).contains("session changed"),
+            "{replacement}"
+        );
+    }
+}
+
+#[test]
+fn doctor_planning_opens_refuses_remote_and_rejects_stale_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let target = doctor_target(&app, id);
+
+    app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+    let scrollback_len = app.agents[&id].scrollback.len();
+    dispatch_task_result(
+        TaskResult::DoctorFixPlanned {
+            target: target.clone(),
+            result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
+                crate::diagnostics::test_fix_plan(temp.path()),
+            ))),
+        },
+        &mut app,
+    );
+    assert_eq!(app.agents[&id].prompt.text(), "");
+    assert_eq!(
+        app.agents[&id].scrollback.len(),
+        scrollback_len,
+        "the confirmation preview belongs only in the question modal"
+    );
+    let question = app.agents[&id]
+        .question_view
+        .as_ref()
+        .expect("doctor question")
+        .questions
+        .first()
+        .expect("doctor question contents");
+    assert!(
+        question.options[0]
+            .preview
+            .as_deref()
+            .is_some_and(|preview| preview.contains("Doctor Fix")),
+        "the modal must retain the exact fix preview"
+    );
+    app.agents.get_mut(&id).unwrap().question_view = None;
+
+    dispatch_task_result(
+        TaskResult::DoctorFixPlanned {
+            target: target.clone(),
+            result: Ok(crate::app::actions::DoctorPlanningOutcome::RunLocally(
+                "grok doctor fix ssh-wrap".to_owned(),
+            )),
+        },
+        &mut app,
+    );
+    assert!(
+        last_system_text(&app, id)
+            .contains("On your local computer, run: grok doctor fix ssh-wrap")
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id("replacement".into());
+    dispatch_task_result(
+        TaskResult::DoctorFixPlanned {
+            target: target.clone(),
+            result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
+                crate::diagnostics::test_fix_plan(temp.path()),
+            ))),
+        },
+        &mut app,
+    );
+    assert!(app.agents[&id].question_view.is_none());
+    assert!(last_system_text(&app, id).contains("session changed"));
+}
+
+#[test]
+fn doctor_apply_completion_prefers_initiator_then_active_and_welcome_fallback() {
+    let mut app = three_agent_app();
+    let initiator = AgentId(0);
+    let active = AgentId(1);
+    app.active_view = ActiveView::Agent(active);
+    let target = doctor_target(&app, initiator);
+
+    dispatch_task_result(
+        TaskResult::DoctorFixApplied {
+            target: target.clone(),
+            result: Err("stale plan".to_owned()),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        last_system_text(&app, initiator),
+        "Could not apply the fix: stale plan"
+    );
+
+    app.agents.shift_remove(&initiator);
+    dispatch_task_result(
+        TaskResult::DoctorFixApplied {
+            target: target.clone(),
+            result: Err("apply failed".to_owned()),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        last_system_text(&app, active),
+        "Could not apply the fix: apply failed"
+    );
+
+    app.agents.clear();
+    app.active_view = ActiveView::Welcome;
+    dispatch_task_result(
+        TaskResult::DoctorFixApplied {
+            target,
+            result: Err("validator failed".to_owned()),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        app.startup_warnings.last().unwrap().message,
+        "Could not apply the fix: validator failed"
+    );
+}
+
+#[test]
+fn doctor_apply_reload_success_does_not_claim_live_finding_disappeared() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let target = doctor_target(&app, id);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(".tmux.conf");
+    dispatch_task_result(
+        TaskResult::DoctorFixApplied {
+            target,
+            result: Ok(crate::diagnostics::FixOutcome::new_for_test(
+                crate::diagnostics::TMUX_CLIPBOARD_ID,
+                crate::diagnostics::FixStatus::Applied,
+                path.clone(),
+                None,
+                crate::diagnostics::FixActivation::RequiresReload,
+                None,
+            )),
+        },
+        &mut app,
+    );
+    let output = last_system_text(&app, id);
+    assert!(
+        output.starts_with(&format!(
+            "Added `set -g set-clipboard on` to `{}`.",
+            path.display()
+        )),
+        "{output}"
+    );
+    assert!(
+        output.contains("Reload tmux with `tmux source-file"),
+        "{output}"
+    );
+    assert!(output.contains("Run /doctor again to verify"), "{output}");
+    assert!(!output.contains("0 issues"), "{output}");
+    assert!(!output.contains("Environment\n"), "{output}");
+}
+
+#[test]
+fn doctor_apply_success_only_renders_resolution_instructions() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let target = doctor_target(&app, id);
+    let temp = tempfile::tempdir().unwrap();
+    dispatch_task_result(
+        TaskResult::DoctorFixApplied {
+            target,
+            result: Ok(crate::diagnostics::FixOutcome::new_for_test(
+                crate::diagnostics::SSH_WRAP_ID,
+                crate::diagnostics::FixStatus::Applied,
+                temp.path().join(".bashrc"),
+                None,
+                crate::diagnostics::FixActivation::SatisfiedNow,
+                Some(crate::diagnostics::ShellKind::Bash),
+            )),
+        },
+        &mut app,
+    );
+    let output = last_system_text(&app, id);
+    assert!(output.starts_with("Set up SSH wrapping in"), "{output}");
+    assert!(output.contains("Start a new shell"), "{output}");
+    assert!(!output.contains("Environment\n"), "{output}");
+    assert!(!output.contains("Findings\n"), "{output}");
+}
+
 #[test]
 fn stale_auth_copy_timeout_does_not_clear_newer_feedback() {
     let mut app = test_app();
@@ -582,6 +843,63 @@ fn uninstall_result_notice_is_footer_only_not_row_anchored() {
         n.entry_index, None,
         "uninstall removes the row → footer-only, no stale row checkmark"
     );
+}
+
+#[test]
+fn confirmation_required_builds_plugins_confirmation_with_confirmed_true() {
+    use crate::views::extensions_modal::{
+        ConfirmationAction, ExtensionsModalState, ExtensionsTab, ModalMessage,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Plugins);
+        modal.picker_state.selected = 2;
+        modal.pending_entry_index = Some(3);
+        modal.last_plugins_action = Some(xai_hooks_plugins_types::PluginsAction::Uninstall {
+            plugin_id: "user/ab12/gone".into(),
+            confirmed: false,
+        });
+        app.agents.get_mut(&id).unwrap().extensions_modal = Some(modal);
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PluginsActionResult {
+            agent_id: id,
+            result: Ok(xai_hooks_plugins_types::ActionOutcome {
+                status: xai_hooks_plugins_types::OutcomeStatus::ConfirmationRequired,
+                message: "Uninstalling removes 2 plugins from this repository.".into(),
+                requires_reload: false,
+                requires_restart: false,
+            }),
+        }),
+        &mut app,
+    );
+
+    let modal = app.agents[&id].extensions_modal.as_ref().unwrap();
+    match &modal.modal_message {
+        Some(ModalMessage::Confirmation {
+            message,
+            action,
+            pending_entry_index,
+        }) => {
+            // Server message only; footer owns y/cancel hints.
+            assert_eq!(
+                message,
+                "Uninstalling removes 2 plugins from this repository."
+            );
+            assert_eq!(*pending_entry_index, Some(3));
+            assert_eq!(
+                action,
+                &ConfirmationAction::Plugins(xai_hooks_plugins_types::PluginsAction::Uninstall {
+                    plugin_id: "user/ab12/gone".into(),
+                    confirmed: true,
+                })
+            );
+        }
+        other => panic!("expected Confirmation overlay, got {other:?}"),
+    }
 }
 
 /// Regression (Bugbot): a failed `x.ai/subagent/cancel` RPC must NOT

@@ -289,10 +289,25 @@ impl AgentView {
         }
     }
 
-    /// Visible held rows for the "N queued" hint. 0 outside sendable waits.
+    /// Whether the local drip-feed queue should hold while background
+    /// subagents are still live — even when the parent looks idle (not blocked
+    /// on a wait). Matches the still-running watcher cue's subagent count
+    /// (standalone children only; workflow-owned children roll into workflows).
+    ///
+    /// Commands/monitors are intentionally **not** part of this hold: they
+    /// often run indefinitely (dev servers, log tails), and holding the queue
+    /// forever would strand follow-ups. Subagents finish.
+    pub(crate) fn holds_queue_for_background(&self) -> bool {
+        self.watchers().subagents > 0
+    }
+
+    /// Visible held rows for the "N queued" hint. Non-zero only while a
+    /// sendable wait is active **or** background subagents are holding the
+    /// drain (parent may look idle). Goal-gated via
+    /// [`Self::is_parked_on_sendable_wait`] for the wait path (0 during a goal
+    /// — shell exempts goal turns).
     pub(crate) fn held_queue_count(&self) -> usize {
-        // Goal-gated via `is_parked_on_sendable_wait` (0 during a goal — shell exempts goal turns).
-        if !self.is_parked_on_sendable_wait() {
+        if !self.is_parked_on_sendable_wait() && !self.holds_queue_for_background() {
             return 0;
         }
         self.visible_held_queue_len()
@@ -359,7 +374,11 @@ impl AgentView {
             return true;
         }
         self.session.pending_prompts.front().is_some_and(|p| {
-            p.kind == crate::app::agent::QueueEntryKind::Prompt && p.wire_matches_display()
+            // Deferred `/plan <desc>` rows refuse force-interject (would drop
+            // enter-plan semantics) — do not advertise "Enter to send now".
+            p.kind == crate::app::agent::QueueEntryKind::Prompt
+                && p.wire_matches_display()
+                && !p.enter_plan_mode
         })
     }
 
@@ -512,6 +531,20 @@ impl AgentView {
         // Local rows: only plain prompts / raw skill rows can re-send (others would send display text, not payload).
         if self.queue_row_prompt_like(id) != Some(true) {
             self.show_toast("Can't send this now — it runs when the current turn ends");
+            return InputOutcome::Changed;
+        }
+        // Deferred `/plan <desc>` rows must not force-interject as a normal
+        // agent-mode prompt — that would drop `enter_plan_mode`. Same class as
+        // client-expanded skill rows: refuse and keep the row queued.
+        if self
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.id == id && p.enter_plan_mode)
+        {
+            self.show_toast(
+                "Can't send this now — it runs as a plan turn when the current work ends",
+            );
             return InputOutcome::Changed;
         }
         if let Some(prompt) = self.remove_local_queue_row(id) {
@@ -1086,6 +1119,53 @@ mod queue_edit_routing_tests {
         assert!(!agent.queue.overlay.visible);
         assert!(!agent.queue.overlay.focused);
         assert_eq!(agent.active_pane, AgentPane::Scrollback);
+    }
+
+    /// Mid-turn force-interject of a deferred `/plan <desc>` row must refuse —
+    /// sending via SendPromptNow would drop `enter_plan_mode` and run as a
+    /// normal agent-mode prompt.
+    #[test]
+    fn force_interject_enter_plan_row_refuses_without_dropping_flag() {
+        let mut agent = running_agent_local_only();
+        agent.session.pending_prompts.clear();
+        agent
+            .session
+            .enqueue_enter_plan_prompt("design the API".into(), Vec::new());
+        agent.queue.sync_from_merged(
+            &agent.session.pending_prompts,
+            &agent.shared_queue,
+            agent.session.current_prompt_id.as_deref(),
+            agent.expect_send_now_cancel.as_deref(),
+            &agent.send_now_painted_blocks,
+        );
+        assert!(
+            !agent.held_queue_top_sendable(),
+            "enter-plan top row must not advertise send-now"
+        );
+
+        let registry = non_vscode_registry();
+        let ids = agent.queue.entry_ids();
+        assert_eq!(ids.len(), 1);
+        agent.queue.list_state.select_by_id(ids[0]);
+        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "must refuse force-interject, got {outcome:?}"
+        );
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+        assert!(
+            agent.session.pending_prompts[0].enter_plan_mode,
+            "enter_plan_mode flag must survive refuse"
+        );
+        assert_eq!(
+            agent.session.pending_prompts[0].text, "design the API",
+            "row stays queued"
+        );
+        let toast = agent.toast.as_ref().map(|(m, _)| m.as_str());
+        assert!(
+            toast.is_some_and(|m| m.contains("plan turn")),
+            "toast should explain plan-turn deferral, got {toast:?}"
+        );
     }
 
     /// Interjecting a Server-origin row routes to `Action::QueueInterjectShared`

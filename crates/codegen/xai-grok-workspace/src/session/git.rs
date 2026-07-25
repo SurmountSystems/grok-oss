@@ -65,7 +65,7 @@ pub const GIT_STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
 /// *required* for the requested operation (e.g. `git add`, `git commit`) are
 /// unaffected.  See `git(1)` and `GIT_OPTIONAL_LOCKS`.
 pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
-    tracing::debug!(cwd = % cwd.display(), args = ? args, "git_cli");
+    tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli");
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd).arg("--no-optional-locks");
     for &(key, val) in xai_tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
@@ -94,7 +94,9 @@ pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
         Ok(o) => o,
         Err(e) => {
             tracing::error!(
-                error = % e, error_kind = ? e.kind(), cwd = % cwd.display(),
+                error = %e,
+                error_kind = ?e.kind(),
+                cwd = %cwd.display(),
                 "git_cli: Command::output() FAILED (spawn error)"
             );
             return Err(e.into());
@@ -107,7 +109,7 @@ pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let code = output.status.code();
-        tracing::debug!(exit_code = ? code, stderr = % stderr, "git_cli failed");
+        tracing::debug!(exit_code = ?code, stderr = %stderr, "git_cli failed");
         Err(anyhow::anyhow!(
             "{}",
             if stderr.is_empty() {
@@ -135,7 +137,7 @@ pub async fn jj_cli_mut(cwd: &Path, args: &[&str]) -> Result<String> {
     jj_cli_inner(cwd, args, false).await
 }
 async fn jj_cli_inner(cwd: &Path, args: &[&str], ignore_wc: bool) -> Result<String> {
-    tracing::debug!(cwd = % cwd.display(), args = ? args, ignore_wc, "jj_cli");
+    tracing::debug!(cwd = %cwd.display(), args = ?args, ignore_wc, "jj_cli");
     let mut cmd = Command::new("jj");
     cmd.current_dir(cwd)
         .stderr(std::process::Stdio::piped())
@@ -148,7 +150,9 @@ async fn jj_cli_inner(cwd: &Path, args: &[&str], ignore_wc: bool) -> Result<Stri
         Ok(o) => o,
         Err(e) => {
             tracing::error!(
-                error = % e, error_kind = ? e.kind(), cwd = % cwd.display(),
+                error = %e,
+                error_kind = ?e.kind(),
+                cwd = %cwd.display(),
                 "jj_cli_inner: Command::output() FAILED (spawn error)"
             );
             return Err(e.into());
@@ -158,13 +162,20 @@ async fn jj_cli_inner(cwd: &Path, args: &[&str], ignore_wc: bool) -> Result<Stri
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !stderr.is_empty() {
-            tracing::warn!(cwd = % cwd.display(), "jj_cli success with stderr warnings");
+            tracing::warn!(
+                cwd = %cwd.display(),
+                "jj_cli success with stderr warnings"
+            );
         }
         tracing::debug!(exit_code = 0, stdout_len = stdout.len(), "jj_cli success");
         Ok(stdout)
     } else {
         let code = output.status.code();
-        tracing::warn!(cwd = % cwd.display(), exit_code = ? code, "jj_cli FAILED");
+        tracing::warn!(
+            cwd = %cwd.display(),
+            exit_code = ?code,
+            "jj_cli FAILED"
+        );
         Err(anyhow::anyhow!(
             "{}",
             if stderr.is_empty() {
@@ -1175,9 +1186,7 @@ async fn status_via_cli(
     let root = root_res.ok().map(|s| s.trim_end_matches('/').to_string());
     let git_dir = git_dir_res.ok();
     let common_dir = common_dir_res.ok();
-    let is_worktree = matches!(
-        (& git_dir, & common_dir), (Some(gd), Some(cd)) if gd != cd
-    );
+    let is_worktree = matches!((&git_dir, &common_dir), (Some(gd), Some(cd)) if gd != cd);
     let main_root = if is_worktree {
         common_dir.and_then(|d| {
             let p = PathBuf::from(&d);
@@ -1225,8 +1234,12 @@ async fn status_via_cli(
         unstaged,
     };
     tracing::debug!(
-        root = ? data.root, branch = ? data.branch, staged = data.staged.len(), unstaged
-        = data.unstaged.len(), elapsed = ? start.elapsed(), "git.status (CLI fallback)"
+        root = ?data.root,
+        branch = ?data.branch,
+        staged = data.staged.len(),
+        unstaged = data.unstaged.len(),
+        elapsed = ?start.elapsed(),
+        "git.status (CLI fallback)"
     );
     Ok(data)
 }
@@ -1361,14 +1374,19 @@ pub async fn status(
     let libgit2_err = match &result {
         Ok(data) => {
             tracing::debug!(
-                root = ? data.root, branch = ? data.branch, staged = data.staged.len(),
-                unstaged = data.unstaged.len(), elapsed = ? start.elapsed(), "git.status"
+                root = ?data.root,
+                branch = ?data.branch,
+                staged = data.staged.len(),
+                unstaged = data.unstaged.len(),
+                elapsed = ?start.elapsed(),
+                "git.status"
             );
             return result;
         }
         Err(e) => {
             tracing::warn!(
-                error = % e, elapsed = ? start.elapsed(),
+                error = %e,
+                elapsed = ?start.elapsed(),
                 "git.status: libgit2 failed, falling back to CLI"
             );
             e.to_string()
@@ -1447,12 +1465,14 @@ pub async fn read_files(
     match &result {
         Ok(data) => {
             tracing::debug!(
-                files = data.files.len(), errors = data.errors.len(), elapsed = ? start
-                .elapsed(), "git.files"
+                files = data.files.len(),
+                errors = data.errors.len(),
+                elapsed = ?start.elapsed(),
+                "git.files"
             )
         }
         Err(e) => {
-            tracing::debug!(error = % e, elapsed = ? start.elapsed(), "git.files failed")
+            tracing::debug!(error = %e, elapsed = ?start.elapsed(), "git.files failed")
         }
     }
     result
@@ -1481,7 +1501,8 @@ pub async fn diffs(
                 Some(oid) => oid.to_string(),
                 None => {
                     tracing::warn!(
-                        from = % from, to = % to,
+                        from = %from,
+                        to = %to,
                         "git.diffs: could not compute merge-base, falling back to direct diff"
                     );
                     from.clone()
@@ -1563,12 +1584,10 @@ pub async fn diffs(
     .await?;
     match &result {
         Ok(data) => {
-            tracing::debug!(
-                files = data.files.len(), elapsed = ? start.elapsed(), "git.diffs"
-            )
+            tracing::debug!(files = data.files.len(), elapsed = ?start.elapsed(), "git.diffs")
         }
         Err(e) => {
-            tracing::debug!(error = % e, elapsed = ? start.elapsed(), "git.diffs failed")
+            tracing::debug!(error = %e, elapsed = ?start.elapsed(), "git.diffs failed")
         }
     }
     result
@@ -1624,9 +1643,7 @@ pub async fn stage(git_root: &Path, paths: Option<Vec<String>>) -> Result<StageD
         args.extend(paths_to_stage.iter().map(String::as_str));
         git_cli(git_root, &args).await
     };
-    tracing::debug!(
-        paths = paths_to_stage.len(), elapsed = ? start.elapsed(), "git.stage"
-    );
+    tracing::debug!(paths = paths_to_stage.len(), elapsed = ?start.elapsed(), "git.stage");
     result.map(|_| StageData {
         paths: paths_to_stage,
     })
@@ -1642,8 +1659,9 @@ pub async fn unstage(git_root: &Path, paths: Option<Vec<String>>) -> Result<()> 
         _ => git_cli(git_root, &["reset", "HEAD"]).await,
     };
     tracing::debug!(
-        paths = paths.as_ref().map(| v | v.len()).unwrap_or(0), elapsed = ? start
-        .elapsed(), "git.unstage"
+        paths = paths.as_ref().map(|v| v.len()).unwrap_or(0),
+        elapsed = ?start.elapsed(),
+        "git.unstage"
     );
     result.map(|_| ())
 }
@@ -1689,7 +1707,7 @@ pub async fn discard(
         }
         git_cli(git_root, &args).await?;
     }
-    tracing::debug!(paths = path_refs.len(), elapsed = ? start.elapsed(), "git.discard");
+    tracing::debug!(paths = path_refs.len(), elapsed = ?start.elapsed(), "git.discard");
     Ok(())
 }
 pub async fn stash(git_root: &Path, include_untracked: bool) -> Result<()> {
@@ -1699,7 +1717,7 @@ pub async fn stash(git_root: &Path, include_untracked: bool) -> Result<()> {
         args.push("--include-untracked");
     }
     git_cli(git_root, &args).await?;
-    tracing::debug!(include_untracked, elapsed = ? start.elapsed(), "git.stash");
+    tracing::debug!(include_untracked, elapsed = ?start.elapsed(), "git.stash");
     Ok(())
 }
 /// Tracing target used by all `--restore-code` log lines that are NOT
@@ -1711,7 +1729,8 @@ pub const RESTORE_CODE_LOG: &str = "xai_restore_code";
 /// future refactor cannot silently downgrade one site to `debug!`.
 pub fn warn_registry_disabled_restore(session_id: &str) {
     tracing::warn!(
-        target : RESTORE_CODE_LOG, session_id,
+        target: RESTORE_CODE_LOG,
+        session_id,
         "session registry disabled — staged/unstaged/untracked will not be restored"
     );
 }
@@ -1794,8 +1813,11 @@ pub async fn stash_before_destructive_op(
     }
     if let Some(reason) = in_progress_state_reason(git_root) {
         tracing::warn!(
-            target : RESTORE_CODE_LOG, path = % git_root.display(), label, session_id,
-            reason = % reason,
+            target: RESTORE_CODE_LOG,
+            path = %git_root.display(),
+            label,
+            session_id,
+            reason = %reason,
             "stash_before_destructive_op: skipping stash (in-progress operation detected)"
         );
         return StashOutcome::Skipped(reason);
@@ -1813,8 +1835,11 @@ pub async fn stash_before_destructive_op(
     {
         let reason = format!("git stash failed: {e}");
         tracing::warn!(
-            target : RESTORE_CODE_LOG, path = % git_root.display(), label, session_id,
-            error = % e,
+            target: RESTORE_CODE_LOG,
+            path = %git_root.display(),
+            label,
+            session_id,
+            error = %e,
             "stash_before_destructive_op: stash failed, continuing without stash"
         );
         return StashOutcome::Skipped(reason);
@@ -1823,8 +1848,11 @@ pub async fn stash_before_destructive_op(
         Ok(s) if !s.trim().is_empty() => {
             let stash_ref = s.trim().to_owned();
             tracing::info!(
-                target : RESTORE_CODE_LOG, path = % git_root.display(), label,
-                session_id, stash_ref = % stash_ref,
+                target: RESTORE_CODE_LOG,
+                path = %git_root.display(),
+                label,
+                session_id,
+                stash_ref = %stash_ref,
                 "stash_before_destructive_op: dirty state stashed"
             );
             StashOutcome::Stashed(stash_ref)
@@ -1832,7 +1860,9 @@ pub async fn stash_before_destructive_op(
         _ => {
             let reason = "git rev-parse stash@{0} returned empty or failed".to_owned();
             tracing::warn!(
-                target : RESTORE_CODE_LOG, path = % git_root.display(), label,
+                target: RESTORE_CODE_LOG,
+                path = %git_root.display(),
+                label,
                 session_id,
                 "stash_before_destructive_op: could not capture stash ref after push"
             );
@@ -1858,7 +1888,8 @@ pub async fn checkout_session_commit(
         && current.trim() == target_sha
     {
         tracing::debug!(
-            path = % git_root.display(), commit = % target_sha,
+            path = %git_root.display(),
+            commit = %target_sha,
             "checkout_session_commit: already at target commit"
         );
         return CheckoutSessionOutcome {
@@ -1882,33 +1913,40 @@ pub async fn checkout_session_commit(
     };
     if git_cli(git_root, &["checkout", target_sha]).await.is_ok() {
         tracing::info!(
-            path = % git_root.display(), commit = % target_sha, stash_ref = ? outcome
-            .stash_ref, "checkout_session_commit: checked out session HEAD"
+            path = %git_root.display(),
+            commit = %target_sha,
+            stash_ref = ?outcome.stash_ref,
+            "checkout_session_commit: checked out session HEAD"
         );
         outcome.checked_out = true;
         return outcome;
     }
     tracing::info!(
-        path = % git_root.display(), commit = % target_sha,
+        path = %git_root.display(),
+        commit = %target_sha,
         "checkout_session_commit: local checkout failed, fetching from origin"
     );
     if git_cli(git_root, &["fetch", "origin"]).await.is_err() {
         tracing::warn!(
-            path = % git_root.display(), commit = % target_sha,
+            path = %git_root.display(),
+            commit = %target_sha,
             "checkout_session_commit: fetch failed, giving up"
         );
         return outcome;
     }
     if git_cli(git_root, &["checkout", target_sha]).await.is_ok() {
         tracing::info!(
-            path = % git_root.display(), commit = % target_sha, stash_ref = ? outcome
-            .stash_ref, "checkout_session_commit: checked out after fetch"
+            path = %git_root.display(),
+            commit = %target_sha,
+            stash_ref = ?outcome.stash_ref,
+            "checkout_session_commit: checked out after fetch"
         );
         outcome.checked_out = true;
         return outcome;
     }
     tracing::warn!(
-        path = % git_root.display(), commit = % target_sha,
+        path = %git_root.display(),
+        commit = %target_sha,
         "checkout_session_commit: checkout still failed after fetch, giving up"
     );
     outcome
@@ -2061,7 +2099,8 @@ async fn staged_paths(git_root: &Path) -> Option<Vec<PathBuf>> {
         Ok(out) => out,
         Err(e) => {
             tracing::warn!(
-                path = % git_root.display(), error = % e,
+                path = %git_root.display(),
+                error = %e,
                 "staged_paths: `git diff --cached` failed; skipping git-checkpoint \
                  capture for this turn rather than recording an empty staged set"
             );
@@ -2114,7 +2153,8 @@ pub async fn soft_restore_git_state(
 ) -> GitRestoreOutcome {
     let Some(git_root) = resolve_git_root(cwd).await else {
         tracing::warn!(
-            path = % cwd.display(), session_id,
+            path = %cwd.display(),
+            session_id,
             "soft_restore_git_state: aborting — could not resolve git repo root"
         );
         return GitRestoreOutcome {
@@ -2129,7 +2169,9 @@ pub async fn soft_restore_git_state(
         StashOutcome::Stashed(r) => Some(r),
         StashOutcome::Skipped(reason) => {
             tracing::warn!(
-                path = % git_root.display(), session_id, reason = % reason,
+                path = %git_root.display(),
+                session_id,
+                reason = %reason,
                 "soft_restore_git_state: aborting — dirty tree could not be stashed"
             );
             return GitRestoreOutcome {
@@ -2142,18 +2184,23 @@ pub async fn soft_restore_git_state(
     };
     if let Err(e) = git_cli(&git_root, &["reset", "--soft", &git_ref.head]).await {
         tracing::warn!(
-            path = % git_root.display(), session_id, commit = % git_ref.head, error = %
-            e, "soft_restore_git_state: reset --soft failed"
+            path = %git_root.display(),
+            session_id,
+            commit = %git_ref.head,
+            error = %e,
+            "soft_restore_git_state: reset --soft failed"
         );
         let stash_ref = match stash_ref {
             Some(stash) => match git_cli(&git_root, &["stash", "pop"]).await {
                 Ok(_) => None,
                 Err(pop_err) => {
                     tracing::warn!(
-                        path = % git_root.display(), session_id, stash_ref = % stash,
-                        error = % pop_err,
+                        path = %git_root.display(),
+                        session_id,
+                        stash_ref = %stash,
+                        error = %pop_err,
                         "soft_restore_git_state: could not restore stashed changes after a \
-                     failed reset; uncommitted work remains in the stash"
+                         failed reset; uncommitted work remains in the stash"
                     );
                     Some(stash)
                 }
@@ -2171,7 +2218,9 @@ pub async fn soft_restore_git_state(
         Ok(_) => true,
         Err(e) => {
             tracing::warn!(
-                path = % git_root.display(), session_id, error = % e,
+                path = %git_root.display(),
+                session_id,
+                error = %e,
                 "soft_restore_git_state: `git reset -- .` (unstage) failed; staged path \
                  set may not match the recorded checkpoint"
             );
@@ -2179,8 +2228,11 @@ pub async fn soft_restore_git_state(
         }
     };
     tracing::info!(
-        path = % git_root.display(), session_id, commit = % git_ref.head, staged =
-        git_ref.staged.len(), stash_ref = ? stash_ref,
+        path = %git_root.display(),
+        session_id,
+        commit = %git_ref.head,
+        staged = git_ref.staged.len(),
+        stash_ref = ?stash_ref,
         "soft_restore_git_state: soft-restored HEAD and unstaged; staged paths re-applied post-FS-revert"
     );
     GitRestoreOutcome {
@@ -2201,7 +2253,8 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
     }
     let Some(git_root) = resolve_git_root(cwd).await else {
         tracing::warn!(
-            path = % cwd.display(), session_id,
+            path = %cwd.display(),
+            session_id,
             "restage_git_paths: could not resolve git repo root; staged path set not restored"
         );
         return false;
@@ -2218,7 +2271,9 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
         return true;
     }
     tracing::debug!(
-        path = % git_root.display(), session_id, total = git_ref.staged.len(),
+        path = %git_root.display(),
+        session_id,
+        total = git_ref.staged.len(),
         "restage_git_paths: batched `git add` failed; falling back to per-path best-effort"
     );
     let mut failed_adds = 0usize;
@@ -2233,8 +2288,10 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
     }
     if failed_adds > 0 {
         tracing::debug!(
-            path = % git_root.display(), session_id, failed_adds, total = git_ref.staged
-            .len(),
+            path = %git_root.display(),
+            session_id,
+            failed_adds,
+            total = git_ref.staged.len(),
             "restage_git_paths: some recorded staged paths could not be re-added \
              (typically removed during the turn; best-effort)"
         );
@@ -2287,7 +2344,7 @@ pub async fn commit(
             }
         }
     }
-    tracing::debug!(amend, push, sync, elapsed = ? start.elapsed(), "git.commit");
+    tracing::debug!(amend, push, sync, elapsed = ?start.elapsed(), "git.commit");
     Ok(CommitResult {
         data: CommitData {
             commit_hash,

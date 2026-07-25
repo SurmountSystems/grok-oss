@@ -67,6 +67,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "collapsed_edit_blocks",
     "respect_manual_folds",
     "hunk_tracker_mode",
+    "voice_keybind_enabled",
     "voice_capture_mode",
     "voice_stt_language",
     // Contextual-hints group + its per-tip child toggles (exercised via the
@@ -242,6 +243,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetRememberToolApprovals value differs from expected"
+            )
+        }
+        ("voice_keybind_enabled", Action::SetVoiceKeybindEnabled(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetVoiceKeybindEnabled value differs from expected"
             )
         }
         (
@@ -1817,6 +1824,7 @@ fn registry_kind_membership_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             "auto_update",
             "show_tips",
+            "voice_keybind_enabled",
             // Per-tip contextual-hint children (hidden from the top-level list,
             // toggled inside the group sub-sheet) are still Bool settings.
             "contextual_hints.undo",
@@ -1984,9 +1992,10 @@ fn defaults_round_trip_through_registry() {
             "scroll_lines" => SettingValue::Int(3),
             "invert_scroll" => SettingValue::Bool(false),
             "display_refresh_auto_cadence" => SettingValue::Bool(false),
-            "coding_data_sharing" => SettingValue::Enum("opt-in"),
+            "coding_data_sharing" => SettingValue::Enum("opt-out"),
             "default_selected_permission" => SettingValue::Enum("always_allow_all_sessions"),
             "hunk_tracker_mode" => SettingValue::Enum("agent_only"),
+            "voice_keybind_enabled" => SettingValue::Bool(true),
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
             "plan_mode" => SettingValue::Enum("off"),
@@ -2083,7 +2092,8 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
-            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_)) => {}
+            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
+            | SettingsKeyOutcome::Action(Action::SetVoiceKeybindEnabled(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
                 meta.key, other
@@ -4720,8 +4730,8 @@ fn pr9_enter_on_coding_data_sharing_row_enters_picking_enum() {
             assert_eq!(*key, "coding_data_sharing");
             assert_eq!(
                 original_value,
-                &SettingValue::Enum("opt-in"),
-                "default snapshot opt_out=false → original 'opt-in'"
+                &SettingValue::Enum("opt-out"),
+                "default snapshot opt_out=true → original 'opt-out'"
             );
         }
         other => panic!("expected PickingEnum mode, got {other:?}"),
@@ -6306,6 +6316,31 @@ fn voice_stt_language_picker_enter_dispatches_set_commit() {
         matches!(s.mode(), SettingsModalMode::Browse),
         "Enter commit must return to Browse"
     );
+}
+
+/// Space-toggle on `voice_keybind_enabled` dispatches the typed setter.
+/// Default is ON (the chord works out of the box), so toggling flips it off.
+#[test]
+fn space_on_voice_keybind_enabled_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "voice_keybind_enabled");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "voice_keybind_enabled", false);
+}
+
+/// Value-column click toggles `voice_keybind_enabled` in one click.
+#[test]
+fn mouse_click_on_voice_keybind_enabled_indicator_toggles_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "voice_keybind_enabled") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "voice_keybind_enabled", false);
 }
 
 /// Value-column click on the voice_stt_language row opens the picker in ONE

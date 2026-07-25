@@ -103,7 +103,7 @@ tempfile = { workspace = true }
 
 [features]
 # Exposes `#[cfg(test)]` test-only helpers (mock setters, test guards,
-# deterministic pinning) to downstream crates' test builds. Enabled by
+# deterministic pinning) to downstream crates' test builds.
 test-support = []
 # CI builds a single shared rlib variant per crate, so the pager's CI
 # test target links the same render lib as production. Enabling the test-only

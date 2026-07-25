@@ -134,12 +134,12 @@ const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "opt-in",
         display: "Opt in",
-        description: "Allow SpaceXAI to retain and use coding session data for training and product improvement.",
+        description: "Allow SpaceXAI to retain coding session data for model training and product improvement.",
     },
     EnumChoice {
         canonical: "opt-out",
         display: "Opt out",
-        description: "Do not retain coding session data. Code requests will not be used for training.",
+        description: "Do not retain coding session data for training. Does not disable product analytics.",
     },
 ];
 
@@ -1194,27 +1194,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned. Persisted in auth metadata (not config.toml).
         // Reads from `PagerLocalSnapshot.coding_data_sharing_opt_out`.
-        // Default "opt-in" matches `AuthEntry::coding_data_retention_opt_out = false`.
+        // Default "opt-out" matches `AuthEntry::coding_data_retention_opt_out = true`
+        // (safer consumer default; server enrichment may still opt the user in).
         // ZDR / non-admin guards are enforced at dispatch time.
+        // Do not put "telemetry" in keywords — that word is the config-file
+        // analytics toggle (Monitoring / Configuration docs).
         SettingMeta {
             key: "coding_data_sharing",
             category: SettingCategory::Privacy,
             owner: SettingOwner::Shell,
             label: "Coding data sharing",
-            description: "Controls whether SpaceXAI may retain and train on coding session data.",
+            description: "Controls whether SpaceXAI may retain and train on coding session \
+                          data. Does not affect product analytics; see Configuration and \
+                          Monitoring docs.",
             keywords: &[
                 "privacy",
                 "data",
                 "sharing",
                 "coding",
                 "retention",
-                "telemetry",
                 "training",
                 "opt-in",
                 "opt-out",
             ],
             kind: SettingKind::Enum {
-                default: "opt-in",
+                default: "opt-out",
                 choices: CODING_DATA_SHARING_CHOICES,
                 supports_preview: false,
             },
@@ -1524,6 +1528,36 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: true,
             hidden_in_minimal: false,
         },
+        // SHELL-owned, persisted to `[ui].voice_keybind_enabled`. Default ON —
+        // `None` (inherit) reads as `true`. Disables only the Ctrl+Space / F8
+        // chord; `/voice` (and Esc / the recording-row `[stop]`) keep working.
+        SettingMeta {
+            key: "voice_keybind_enabled",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shell,
+            label: "Voice shortcut",
+            description: "Enable the Ctrl+Space / F8 shortcut for voice dictation. \
+                          When off, the keys are ignored; /voice still starts \
+                          dictation.",
+            keywords: &[
+                "voice",
+                "dictation",
+                "mic",
+                "microphone",
+                "speech",
+                "stt",
+                "keybinding",
+                "hotkey",
+                "ctrl+space",
+                "f8",
+                "disable",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.voice_keybind_enabled.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned, persisted to `[ui].voice_capture_mode`. The `hold` choice
         // is hidden on terminals without key-release reporting (see
         // `effective_enum_choices`) and falls back to `toggle` at runtime.
@@ -1687,8 +1721,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
             label: "SSH wrap",
-            description: "At session load over SSH, recommend `grok wrap ssh` for \
-                          clipboard forwarding and terminal restore.",
+            description: "Show a `/doctor` tip when an SSH session is not using `grok wrap`.",
             keywords: &[
                 "ssh",
                 "wrap",

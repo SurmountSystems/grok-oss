@@ -657,10 +657,9 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].kind, ConfigWarningKind::NotATable);
         assert!(matches!(
-                    &warnings[0].target,
-                    WarningTarget::Model { key, field: None }
-        if key == "oops"
-                ));
+            &warnings[0].target,
+            WarningTarget::Model { key, field: None } if key == "oops"
+        ));
     }
 
     /// Exhaustive literal (no `..`): a new struct field is a compile error
@@ -681,6 +680,12 @@ mod tests {
             top_p: Some(0.9),
             api_backend: Some(ApiBackend::Messages),
             extra_headers: [("x-team".to_owned(), "codegen".to_owned())]
+                .into_iter()
+                .collect(),
+            query_params: [("api-version".to_owned(), "2026-07-22".to_owned())]
+                .into_iter()
+                .collect(),
+            env_http_headers: [("x-tenant-token".to_owned(), "TENANT_TOKEN_VAR".to_owned())]
                 .into_iter()
                 .collect(),
             context_window: Some(200_000),

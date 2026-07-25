@@ -15,7 +15,7 @@ use super::setters::{
     set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
     set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
     set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
-    set_voice_stt_language_inner,
+    set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -150,12 +150,37 @@ pub(in crate::app::dispatch) fn dispatch_open_howto_guides(app: &mut AppView) ->
 
 /// Open the settings modal. Reads the live `UiConfig` snapshot
 /// (sans-IO). Single-instance: `debug_assert!` catches routing bugs.
-pub(in crate::app::dispatch) fn dispatch_open_settings(app: &mut AppView) -> Vec<Effect> {
+///
+/// `focus_key` selects a settings row after open (e.g. `coding_data_sharing`).
+/// When not on an agent view, switches to an existing agent or creates a
+/// placeholder session so the modal can mount.
+pub(in crate::app::dispatch) fn dispatch_open_settings(
+    app: &mut AppView,
+    focus_key: Option<&'static str>,
+) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
     use crate::views::settings_modal::SettingsModalState;
 
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
+    let mut effects = vec![];
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => {
+            if let Some(existing) = app.agents.keys().next().copied() {
+                crate::app::dispatch::ctx::switch_to_agent(
+                    app,
+                    existing,
+                    crate::app::dispatch::ctx::SwitchCause::Picker,
+                );
+                existing
+            } else {
+                let (new_id, create_effects) =
+                    crate::app::dispatch::session::lifecycle::dispatch_new_session_inner_with_id(
+                        app, None,
+                    );
+                effects.extend(create_effects);
+                new_id
+            }
+        }
     };
     // Snapshot the registry + UiConfig + pager-local state BEFORE the
     // mutable borrow on `agent` so the borrow checker is happy.
@@ -173,20 +198,23 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(app: &mut AppView) -> Vec
     let voice_stt_language_from_app = app.voice_config.language.clone();
 
     let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
+        return effects;
     };
 
-    debug_assert!(
-        !matches!(&agent.active_modal, Some(ActiveModal::Settings { .. })),
-        "OpenSettings dispatched while settings modal is already open — input routing bug"
-    );
-    // Defensive close in release builds: silent no-op risk is higher
-    // than the cost of a single extra branch on a hot path that isn't
-    // hot. Mirrors the shortcuts-cheatsheet precedent at
-    // `views/shortcuts_help.rs:336-340`.
     if matches!(&agent.active_modal, Some(ActiveModal::Settings { .. })) {
+        if focus_key.is_none() {
+            debug_assert!(
+                false,
+                "OpenSettings dispatched while settings modal is already open — input routing bug"
+            );
+            // Defensive close in release builds: silent no-op risk is higher
+            // than the cost of a single extra branch on a hot path that isn't
+            // hot. Mirrors the shortcuts-cheatsheet precedent at
+            // `views/shortcuts_help.rs:336-340`.
+            agent.active_modal = None;
+            return effects;
+        }
         agent.active_modal = None;
-        return vec![];
     }
 
     tracing::info!(target: "settings", "opened modal");
@@ -217,13 +245,20 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(app: &mut AppView) -> Vec
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
     };
-    let state = Box::new(SettingsModalState::new(
+    let mut state = Box::new(SettingsModalState::new(
         registry,
         ui_snapshot,
         pager_snapshot,
     ));
+    if let Some(key) = focus_key
+        && state.focus_key(key)
+    {
+        // Land directly on the setting's chooser page (e.g. the coding data
+        // sharing opt-in/out picker), not just the focused browse row.
+        state.try_enter_picking_enum();
+    }
     agent.active_modal = Some(ActiveModal::Settings { state });
-    vec![]
+    effects
 }
 
 /// Open the reset-settings confirmation modal.
@@ -855,6 +890,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetHunkTrackerMode((*s).to_string()))
         }
         ("screen_mode", SettingValue::Enum(s)) => Some(Action::SetScreenMode((*s).to_string())),
+        ("voice_keybind_enabled", SettingValue::Bool(b)) => {
+            Some(Action::SetVoiceKeybindEnabled(*b))
+        }
         ("voice_capture_mode", SettingValue::Enum(s)) => {
             Some(Action::SetVoiceCaptureMode((*s).to_string()))
         }
@@ -1116,6 +1154,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("screen_mode", SettingValue::Enum(s)) => {
             set_screen_mode_inner(app, crate::settings::canonical_screen_mode(Some(s)));
+        }
+        ("voice_keybind_enabled", SettingValue::Bool(b)) => {
+            set_voice_keybind_enabled_inner(app, *b)
         }
         ("voice_capture_mode", SettingValue::Enum(s)) => {
             set_voice_capture_mode_inner(

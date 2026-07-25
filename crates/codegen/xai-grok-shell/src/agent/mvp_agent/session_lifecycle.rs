@@ -23,9 +23,7 @@ impl MvpAgent {
             let sid = id.0.to_string();
             tokio::spawn(async move {
                 if let Err(e) = client.finalize(&sid).await {
-                    tracing::warn!(
-                        error = % e, "session registry finalize failed (non-fatal)"
-                    );
+                    tracing::warn!(error = %e, "session registry finalize failed (non-fatal)");
                 }
             });
         }
@@ -46,6 +44,11 @@ impl MvpAgent {
         if let Some(ops) = self.workspace_ops.borrow().as_ref() {
             ops.end_local_session(id.0.as_ref());
         }
+        let _ = self
+            .subagent_event_tx
+            .send(xai_grok_tools::implementations::grok_build::task::types::SubagentEvent::DiscardSessionCompletions {
+                parent_session_id: id.0.to_string(),
+            });
     }
     /// Get-or-create the per-session dispatch lock (see
     /// [`Self::dispatch_locks`]). Cheap clone of the shared `Rc`.
@@ -85,7 +88,9 @@ impl MvpAgent {
             .borrow_mut()
             .push((id.0.to_string(), final_state));
         tracing::debug!(
-            session_id = % id.0, ? final_state, "roster delta: session removed"
+            session_id = %id.0,
+            ?final_state,
+            "roster delta: session removed"
         );
         self.emit_roster_changed(Vec::new(), vec![id.0.to_string()]);
     }
@@ -298,7 +303,7 @@ impl MvpAgent {
         for id in dead {
             if self.sessions.borrow().contains_key(&id) {
                 tracing::warn!(
-                    session_id = % id.0,
+                    session_id = %id.0,
                     "Resident session actor exited unexpectedly; reaping as DeadFailed"
                 );
                 self.reap_dead_session(&id);
@@ -306,7 +311,7 @@ impl MvpAgent {
                 self.session_threads.borrow_mut().remove(&id);
                 self.session_live_state.borrow_mut().remove(&id);
                 tracing::debug!(
-                    session_id = % id.0,
+                    session_id = %id.0,
                     "Reaped finished thread for non-resident session (clean exit)"
                 );
             }
@@ -403,10 +408,14 @@ impl MvpAgent {
             .unwrap_or(true)
     }
     /// Entry counts for every collection [`Self::remove_session`] drains,
-    /// plus the workspace binding and subagent maps.
-    pub(crate) fn registry_snapshot(&self) -> RegistrySnapshot {
-        let (subagent_pending, subagent_active, subagent_completed) =
-            self.subagent_coordinator.borrow().registry_snapshot();
+    /// plus workspace bindings and shared coordinator state.
+    pub(crate) async fn registry_snapshot(&self) -> RegistrySnapshot {
+        let subagents =
+            xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                self.subagent_event_tx.clone(),
+            )
+            .registry_counts()
+            .await;
         RegistrySnapshot {
             sessions: self.sessions.borrow().len(),
             session_threads: self.session_threads.borrow().len(),
@@ -417,9 +426,9 @@ impl MvpAgent {
             session_live_state: self.session_live_state.borrow().len(),
             session_index_claims: self.session_index_claims.borrow().len(),
             require_gateway_sessions: self.require_gateway_sessions.borrow().len(),
-            subagent_pending,
-            subagent_active,
-            subagent_completed,
+            subagent_pending: subagents.pending,
+            subagent_active: subagents.active,
+            subagent_completed: subagents.completed,
             workspace_bindings: self
                 .workspace_ops
                 .borrow()

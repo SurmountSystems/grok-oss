@@ -39,6 +39,26 @@ or code — not only here.
 - put-history is cherry-pick — upstream-history + onto log  
 - Auto-implement **appends** after existing local queue — `auto_implement.rs` + FORK  
 - GPG / no bulk replace / no agent commit defaults — AGENTS.md  
+- Import recon process pins (`FORK_PATHS` expanded + post-restore assert) —
+  `scripts/import-upstream-export.sh`, `scripts/assert-process-pins.sh`,
+  `just upstream-assert-process-pins`, FORK § recon, upstream-history checklist,
+  `doc/dev/research/fork-paths-hardening-2026-07-24.md`  
+- Todo levels product surface (`priority`/`meta` writable; `merge: false`
+  keep-unless-mentioned for protected prefixes; light `[kind]` badge) —
+  FORK + `doc/dev/research/todo-levels-product-2026-07-24.md`  
+- Session notes channel (`/note` not a pending prompt; list + `/tasks`
+  count) — FORK + `doc/dev/research/notes-channel-2026-07-24.md` +
+  user-guide `04-slash-commands`
+- Git recon depth (host `git-recon` skill + `scripts/recon-status.sh` +
+  `just recon-status` + FORK_PATHS/assert pin + optional Rhai status
+  workflow) — FORK Process + `doc/dev/research/recon-status-script-2026-07-24.md`
+  + `doc/dev/research/git-recon-skill-created-2026-07-24.md`
+- `allow_worktree` OSS default `false` — `SubagentsConfig` Default + serde
+  (`default_allow_worktree` → false); empty config force-none; opt in with
+  `allow_worktree = true`. Force-none path + tests green. User-guide
+  migration notes in `05-configuration` + `16-subagents`. FORK Process +
+  `doc/dev/research/task-worktree-pins-2026-07-24.md`
+
 
 ## Local quality before push
 

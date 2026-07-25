@@ -169,8 +169,8 @@ pub(crate) fn date_rollover_reminder(
     }
     Some(format!(
         "The local date has changed since this session started. Today's date is now \
-         {today}. The \"Today's date\" value shown in the <user_info> block above was set \
-         earlier in the session and is now stale; use {today} as the current date."
+         {today}. Any date shown earlier in this session was set at startup and is now stale; \
+         use {today} as the current date."
     ))
 }
 /// Body of the one-shot interrupt `<system-reminder>` injected on the next real
@@ -449,6 +449,14 @@ fn format_workflow_completion_reminder(
                 );
             }
         }
+        if run.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
+            let _ = writeln!(
+                buf,
+                "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" — \
+                 completed agents replay from the journal and the failed step re-executes.",
+                run.run_id
+            );
+        }
         let report_path = session_dir
             .join("workflows")
             .join(&run.run_id)
@@ -484,16 +492,20 @@ pub(super) fn todo_gate_active(
     definition.carries_task_completion_discipline(audience)
 }
 impl SessionActor {
-    /// Date rollover for long-running sessions. When a session crosses a
-    /// local-midnight boundary the `Today's date` value stamped into the cached
-    /// `<user_info>` prefix goes stale (the prefix is only re-stamped on
-    /// compaction / resume, to preserve the prompt cache). Detect the change
-    /// and inject a one-shot `<system-reminder>` announcing the new date.
-    ///
-    /// Self-dedupes via `last_announced_local_date`, so it fires at most once
-    /// per calendar day regardless of how many turns occur. Skipped when the
-    /// active template manages this surface elsewhere.
+    /// Injects a one-shot date-rollover `<system-reminder>` when a long session crosses local
+    /// midnight, since the cached `<user_info>` prefix keeps its startup date to preserve the prompt
+    /// cache. Self-dedupes via `last_announced_local_date` (at most once per day). Skipped for
+    /// date-free templates and the harness that owns this surface.
     pub(super) async fn maybe_inject_date_rollover_reminder(&self) {
+        let template_surfaces_date = self
+            .agent
+            .borrow()
+            .definition()
+            .user_message_template
+            .surfaces_local_date();
+        if !template_surfaces_date && !self.prefix_carries_fallback_date.get() {
+            return;
+        }
         let today = chrono::Local::now().date_naive();
         let last = self.last_announced_local_date.get();
         let Some(reminder) = date_rollover_reminder(today, last) else {
@@ -502,7 +514,9 @@ impl SessionActor {
         self.last_announced_local_date.set(today);
         self.push_system_reminder(&reminder);
         tracing::debug!(
-            previous = % last, today = % today, "Injected date rollover reminder"
+            previous = %last,
+            today = %today,
+            "Injected date rollover reminder"
         );
     }
     /// Inject a one-shot `<system-reminder>` telling the model its previous turn
@@ -510,8 +524,8 @@ impl SessionActor {
     /// repair into a "cancelled" tool-result, no permission tool-result). The
     /// flag is armed by [`Self::cancel_running_task`] only on the no-active-tool
     /// abort path, and is consumed exactly once (caller gates to real user
-    /// prompts). Skipped when the active template manages this surface
-    /// elsewhere, matching [`Self::maybe_inject_date_rollover_reminder`].
+    /// prompts). Skipped for the harness that owns this surface; unlike the date-rollover reminder,
+    /// no template scoping applies to an interrupt notice.
     pub(super) async fn maybe_inject_interrupt_reminder(&self) {
         if !self.events.take_pending_interrupt_reminder() {
             return;
@@ -571,13 +585,15 @@ impl SessionActor {
                 .collect();
             if goal_loop_active {
                 tracing::info!(
-                    count = bash_completions.len(), task_ids = ? ids,
+                    count = bash_completions.len(),
+                    task_ids = ?ids,
                     "dropping between-turn bash task completions (goal loop active)"
                 );
                 self.mark_completions_reported(&ids).await;
             } else {
                 tracing::info!(
-                    count = bash_completions.len(), task_ids = ? ids,
+                    count = bash_completions.len(),
+                    task_ids = ?ids,
                     "draining between-turn bash task completions"
                 );
                 let task_output_name =
@@ -610,9 +626,11 @@ impl SessionActor {
             .as_ref()
             .map(|reservations| reservations.snapshot())
             .unwrap_or_default();
+        let parent_session_id = Some(self.session_id_string());
         let (respond_to, rx) = tokio::sync::oneshot::channel();
         if tx
             .send(SubagentEvent::Completions(SubagentCompletionsRequest {
+                parent_session_id,
                 suppress_ids,
                 respond_to,
             }))
@@ -629,14 +647,16 @@ impl SessionActor {
         let ids: Vec<&str> = completions.iter().map(|c| c.subagent_id.as_str()).collect();
         if goal_loop_active {
             tracing::info!(
-                count = completions.len(), subagent_ids = ? ids,
+                count = completions.len(),
+                subagent_ids = ?ids,
                 "dropping between-turn subagent completions (goal loop active)"
             );
             self.mark_completions_reported(&ids).await;
             return;
         }
         tracing::info!(
-            count = completions.len(), subagent_ids = ? ids,
+            count = completions.len(),
+            subagent_ids = ?ids,
             "draining between-turn subagent completions"
         );
         let reminder =
@@ -663,7 +683,8 @@ impl SessionActor {
             runs.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
         };
         tracing::info!(
-            restored = ? names(& restored), fresh = ? names(& fresh),
+            restored = ?names(&restored),
+            fresh = ?names(&fresh),
             "draining between-turn workflow completions"
         );
         let session_dir = crate::session::persistence::session_dir(&self.session_info);
@@ -837,7 +858,15 @@ mod workflow_reminder_tests {
         let run = failed_run(detail);
         let session_dir = tempfile::tempdir().unwrap();
         let reminder = format_workflow_completion_reminder(&[run], session_dir.path(), false, None);
-        let rendered_detail = reminder.split_once("  Detail: ").unwrap().1.trim_end();
+        let rendered_detail = reminder
+            .split_once("  Detail: ")
+            .unwrap()
+            .1
+            .lines()
+            .next()
+            .unwrap()
+            .trim_end();
+        assert!(reminder.contains("resume_from_run_id: \"wf_1\""));
         assert!(rendered_detail.starts_with("first second "));
         assert!(rendered_detail.ends_with('…'));
         assert!(rendered_detail.len() <= WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);

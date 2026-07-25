@@ -5,6 +5,11 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
+use xai_grok_tools::implementations::grok_build::task::types::{
+    ModelOverrideProvenance, SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
+    SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
+};
 use xai_workflow::{AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostRequest};
 
 use super::notify::WorkflowNotifySender;
@@ -17,8 +22,8 @@ pub(crate) const WORKFLOW_MAX_AGENT_RUNS: u32 =
     (xai_workflow::MAX_AGENT_BUDGET as u32) * (SCHEMA_CONTRACT_RETRIES + 1);
 pub(crate) const WORKFLOW_MAX_SCRIPT_TELEMETRY_EVENTS: u32 = 64;
 pub(crate) const WORKFLOW_MAX_SCRATCH_FILES: usize = 64;
-pub(crate) const WORKFLOW_MAX_SCRATCH_FILE_BYTES: usize = 1024 * 1024;
-pub(crate) const WORKFLOW_MAX_SCRATCH_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const WORKFLOW_MAX_SCRATCH_FILE_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const WORKFLOW_MAX_SCRATCH_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const WORKFLOW_MAX_AGENT_PROMPT_BYTES: usize = 1024 * 1024;
 const WORKFLOW_MAX_TEMPLATE_OUTPUT_BYTES: usize = 1024 * 1024;
 const WORKFLOW_MAX_PHASE_BYTES: usize = 256;
@@ -121,7 +126,7 @@ struct HostService {
 
 struct FinishOnce<'a> {
     host: &'a HostService,
-    agent_id: &'a str,
+    agent_id: String,
     finished: bool,
 }
 
@@ -133,11 +138,20 @@ impl FinishOnce<'_> {
         }
         self.host.params.tracker.lock().agent_finished(
             &self.host.params.run_id,
-            self.agent_id,
+            &self.agent_id,
             state,
             total_tokens,
             total_duration,
         );
+    }
+
+    fn rebind(&mut self, new_agent_id: &str) {
+        self.host.params.tracker.lock().rebind_agent_id(
+            &self.host.params.run_id,
+            &self.agent_id,
+            new_agent_id,
+        );
+        self.agent_id = new_agent_id.to_string();
     }
 }
 
@@ -310,11 +324,6 @@ impl HostService {
     }
 
     async fn spawn_agent(&self, mut opts: AgentOpts) -> Result<AgentResult, HostError> {
-        use xai_grok_tools::implementations::grok_build::task::types::{
-            ModelOverrideProvenance, SubagentEvent, SubagentOwner, SubagentRequest,
-            SubagentRuntimeOverrides,
-        };
-
         if self.params.cancel.is_cancelled() {
             return Err(HostError::Cancelled);
         }
@@ -397,15 +406,14 @@ impl HostService {
         );
         let mut row = FinishOnce {
             host: self,
-            agent_id: &id,
+            agent_id: id.clone(),
             finished: false,
         };
         let cancel_token = CancellationToken::new();
 
         let spawn_once =
             |child_id: String, prompt: String, resume_from: Option<String>, fork_context: bool| {
-                let (result_tx, result_rx) = oneshot::channel();
-                let request = SubagentRequest {
+                SubagentRequest {
                     id: child_id,
                     prompt,
                     description: description.clone(),
@@ -429,9 +437,7 @@ impl HostService {
                     fork_context,
                     owner: SubagentOwner::workflow(&self.params.run_id),
                     cancel_token: cancel_token.clone(),
-                    result_tx,
-                };
-                (request, result_rx)
+                }
             };
 
         let mut attempts: u32 = 0;
@@ -454,32 +460,25 @@ impl HostService {
             let child_id = if attempts == 1 {
                 id.clone()
             } else {
-                uuid::Uuid::now_v7().to_string()
+                let retry_id = uuid::Uuid::now_v7().to_string();
+                row.rebind(&retry_id);
+                retry_id
             };
-            let (request, result_rx) = spawn_once(
+            let request = spawn_once(
                 child_id.clone(),
                 next_prompt.clone(),
                 resume_child,
                 fork_context,
             );
 
-            if self
-                .params
-                .subagent_event_tx
-                .send(SubagentEvent::Spawn(Box::new(request)))
-                .is_err()
-            {
-                row.finish("failed", total_tokens, total_duration);
-                return Err(HostError::Failed(
-                    "subagent coordinator channel closed".into(),
-                ));
-            }
             self.active_agents.fetch_add(1, Ordering::Relaxed);
             self.tick();
 
-            let mut result_rx = result_rx;
+            let backend = ChannelBackend::new(self.params.subagent_event_tx.clone());
+            let result_fut = backend.spawn(request);
+            tokio::pin!(result_fut);
             let result = tokio::select! {
-                result = &mut result_rx => result,
+                result = &mut result_fut => result,
                 _ = self.params.cancel.cancelled() => {
                     cancel_token.cancel();
                     self.active_agents.fetch_sub(1, Ordering::Relaxed);
@@ -492,7 +491,7 @@ impl HostService {
             let Ok(result) = result else {
                 row.finish("failed", total_tokens, total_duration);
                 return Err(HostError::Failed(
-                    "subagent result channel closed before completion".into(),
+                    "subagent coordinator channel closed before completion".into(),
                 ));
             };
             total_tokens = total_tokens.saturating_add(result.total_tokens_used);
@@ -588,15 +587,12 @@ impl HostService {
     }
 
     async fn cancel_and_drain_children(&self) -> HostDrainOutcome {
-        use xai_grok_tools::implementations::grok_build::task::types::{
-            SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
-        };
-
         let (respond_to, response) = oneshot::channel();
         if self
             .params
             .subagent_event_tx
             .send(SubagentEvent::Cancel(SubagentCancelRequest {
+                parent_session_id: Some(self.params.parent_session_id.clone()),
                 target: SubagentCancelTarget::WorkflowRunId(self.params.run_id.clone()),
                 respond_to,
             }))

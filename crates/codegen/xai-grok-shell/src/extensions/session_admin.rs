@@ -417,23 +417,14 @@ async fn handle_reload_all_mcp_servers(agent: &MvpAgent) -> ExtResult {
         // `load_mcp_servers()` output here was redundant — and silently
         // dropped client servers that exist in no on-disk config, tearing
         // them down on every config hot-reload.
-        let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
-            handle.initial_client_mcp_servers.clone(),
+        if crate::session::managed_mcp::merge_and_send_managed_mcp_update(
+            &handle.cmd_tx,
             &cwd,
+            handle.initial_client_mcp_servers.clone(),
             &managed,
             agent.plugin_registry_handle().snapshot().as_deref(),
             &compat,
-        );
-
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        if handle
-            .cmd_tx
-            .send(SessionCommand::UpdateMcpServers {
-                mcp_servers: merged,
-                respond_to: tx,
-            })
-            .is_ok()
-        {
+        ) {
             updated += 1;
         }
     }
@@ -668,9 +659,7 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
                 acp::Error::invalid_request().data(format!("unknown session id: {}", session_id.0))
             );
         };
-        let response = crate::session::slash_commands::ListCommandsResponse {
-            commands: handle.list_available_commands().await,
-        };
+        let response = handle.list_available_commands().await;
         return Ok(acp::ExtResponse::new(Arc::from(
             serde_json::value::to_raw_value(&response)?,
         )));

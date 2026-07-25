@@ -404,8 +404,31 @@ where
             Ok(s) => Ok(Some(s)),
             Err(e) => {
                 tracing::warn!(
-                    error = % e,
+                    error = %e,
                     "ignoring malformed remote worktree_auto_gc; falling through to TOML/defaults"
+                );
+                Ok(None)
+            }
+        },
+    }
+}
+/// Nested `slash_command_tags` map: present-but-malformed → `None` (warn) so one
+/// bad value cannot fail the whole [`RemoteSettings`] parse.
+fn deserialize_tolerant_slash_command_tags<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::collections::BTreeMap<String, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match serde_json::from_value::<std::collections::BTreeMap<String, String>>(v) {
+            Ok(m) => Ok(Some(m)),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ignoring malformed remote slash_command_tags; falling through to local/none"
                 );
                 Ok(None)
             }
@@ -715,6 +738,12 @@ pub struct RemoteSettings {
     /// `None` or `[]` = no tips shown.
     #[serde(default)]
     pub tips: Option<Vec<String>>,
+    /// Free-form per-command tags (e.g. `new`, `beta`) rendered as a bracketed
+    /// label in the slash dropdown, keyed by canonical command name. Present-but-
+    /// malformed → `None` (does not fail the whole parse); local
+    /// `[slash_command_tags]` overrides per key. See `resolve_slash_command_tags`.
+    #[serde(default, deserialize_with = "deserialize_tolerant_slash_command_tags")]
+    pub slash_command_tags: Option<std::collections::BTreeMap<String, String>>,
     /// When present, controls the non-Git-repo warning at session start.
     /// Controlled via remote settings (`non_git_warning` in `grok_build_settings`).
     /// Takes precedence over `[features] non_git_warning` in config.toml:
@@ -781,8 +810,7 @@ pub struct RemoteSettings {
     /// is set in config.toml. Absent → default (**disabled** — ships dark).
     #[serde(default)]
     pub subagent_worktree_snapshot_enabled: Option<bool>,
-    /// When `Some(true)`, enable the `image_gen` tool for session-based auth users.
-    /// When `Some(false)` or absent, the tool is hidden regardless of credentials.
+    /// `image_gen` / `/imagine`. `None` → env / `[features]` / default on.
     #[serde(default)]
     pub image_gen_enabled: Option<bool>,
     /// remote settings flag: optional Imagine model override for `image_gen`.
@@ -791,8 +819,10 @@ pub struct RemoteSettings {
     /// (`grok-imagine-image-quality`). Absent/empty → default model.
     #[serde(default)]
     pub image_gen_model_override: Option<String>,
-    /// When `Some(true)`, enable the `video_gen` tool for session-based auth users.
-    /// When `Some(false)` or absent, the tool is hidden regardless of credentials.
+    /// Optional Imagine model override for `image_edit`. Absent/empty → default.
+    #[serde(default)]
+    pub image_edit_model_override: Option<String>,
+    /// Video tools / `/imagine-video`. `None` → env / `[features]` / default on.
     #[serde(default)]
     pub video_gen_enabled: Option<bool>,
     /// When `Some(true)`, enable the process-wide image normalize cache that
@@ -861,6 +891,17 @@ pub struct RemoteSettings {
     /// Controlled via remote settings. Default `false` (blocked) during beta.
     #[serde(default)]
     pub zdr_access_enabled: Option<bool>,
+    /// When `Some(true)`, the client may show the coding-data sharing upsell
+    /// banner. Controlled via remote settings (`privacy_notice_rollout`).
+    /// Absent/`None` means off so older servers and missing flags keep the
+    /// banner hidden.
+    #[serde(default)]
+    pub privacy_notice_rollout: Option<bool>,
+    /// Days after a privacy-banner dismiss before it may re-show for users who
+    /// remain coding-data opted-out. From `grok_build_settings`.
+    /// `None` / `0` = never re-show after dismiss.
+    #[serde(default)]
+    pub privacy_banner_reshow_days: Option<u64>,
     /// remote settings tier of the `remember_tool_approvals` gate (whether per-tool
     /// "Always allow …" prompt options are shown). Lowest precedence; typically
     /// targeted per-org. Default `false`.
@@ -1063,7 +1104,7 @@ where
                     Ok(a) => out.push(a),
                     Err(e) => {
                         tracing::warn!(
-                            error = % e,
+                            error = %e,
                             "remote settings announcements: dropped malformed item"
                         );
                     }
@@ -1084,7 +1125,8 @@ fn parse_goal_role_model_tolerant(value: serde_json::Value) -> Option<GoalRoleMo
         Ok(model) => Some(model),
         Err(e) => {
             tracing::warn!(
-                error = % e, "remote settings goal role model: dropped malformed value"
+                error = %e,
+                "remote settings goal role model: dropped malformed value"
             );
             None
         }
@@ -1858,6 +1900,30 @@ mod tests {
             serde_json::from_str::<RemoteSettings>(json).is_err(),
             "expected parse error for {json}"
         );
+    }
+    #[test]
+    fn remote_settings_privacy_notice_rollout_absent_null_true_false() {
+        assert_eq!(parse_remote("{}").privacy_notice_rollout, None);
+        assert_eq!(
+            parse_remote(r#"{"privacy_notice_rollout": null}"#).privacy_notice_rollout,
+            None
+        );
+        let on = parse_remote(r#"{"privacy_notice_rollout": true}"#);
+        assert_eq!(on.privacy_notice_rollout, Some(true));
+        assert_eq!(round_trip_remote(&on).privacy_notice_rollout, Some(true));
+        let off = parse_remote(r#"{"privacy_notice_rollout": false}"#);
+        assert_eq!(off.privacy_notice_rollout, Some(false));
+        assert_eq!(round_trip_remote(&off).privacy_notice_rollout, Some(false));
+    }
+    #[test]
+    fn remote_settings_privacy_banner_reshow_days() {
+        assert_eq!(parse_remote("{}").privacy_banner_reshow_days, None);
+        assert_eq!(
+            parse_remote(r#"{"privacy_banner_reshow_days": 30}"#).privacy_banner_reshow_days,
+            Some(30)
+        );
+        let s = parse_remote(r#"{"privacy_banner_reshow_days": 7}"#);
+        assert_eq!(round_trip_remote(&s).privacy_banner_reshow_days, Some(7));
     }
     #[test]
     fn remote_settings_jemalloc_heap_profile_fields_absent_and_null() {

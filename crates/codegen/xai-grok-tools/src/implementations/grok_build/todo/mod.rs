@@ -34,62 +34,86 @@ pub(crate) fn validate_no_duplicate_ids(updates: &[TodoUpdate]) -> Result<(), To
     Ok(())
 }
 
-/// `merge=false`: the incoming list fully replaces the existing todo state.
+/// Id prefixes owned by skills / session layers. On `merge=false` full replace,
+/// items with these prefixes are **kept unless mentioned** in the replace
+/// payload (so a skill cannot silently wipe foreign namespaces).
+pub const PROTECTED_TODO_PREFIXES: &[&str] = &["plan:", "impl:", "pr-", "recon:", "residual:"];
+
+/// True when `id` starts with a protected skill/session namespace prefix.
+pub fn is_protected_todo_id(id: &str) -> bool {
+    PROTECTED_TODO_PREFIXES
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+}
+
+/// Build a [`TodoItem`] from a write update (replace or insert-on-merge).
+fn item_from_update(u: &TodoUpdate) -> TodoItem {
+    let content = if u.has_no_content() {
+        u.id.clone()
+    } else {
+        // has_no_content is false ⇒ content is Some and non-empty.
+        u.content.clone().unwrap()
+    };
+    TodoItem {
+        content,
+        priority: u.priority.unwrap_or_default(),
+        status: u.status.unwrap_or(TodoStatus::Pending),
+        meta: u.meta.clone(),
+    }
+}
+
+/// `merge=false`: the incoming list replaces the existing todo state, except
+/// **protected-prefix** items (`plan:`, `impl:`, `pr-`, `recon:`, `residual:`)
+/// that are **not** listed in `updates` are preserved (keep-unless-mentioned).
 /// If `content` is omitted for an item, the `id` is used as a fallback.
 /// If `status` is omitted, it defaults to `Pending`.
+/// Optional `priority` / `meta` on each update are applied when present.
 pub(crate) fn apply_replace(
     state: &mut TodoState,
     updates: &[TodoUpdate],
 ) -> Result<(), TodoError> {
+    use std::collections::HashSet;
+    let mentioned: HashSet<&str> = updates.iter().map(|u| u.id.as_str()).collect();
+    // Snapshot protected items not in the replace set before clear.
+    let preserved: Vec<(TodoId, TodoItem)> = state
+        .todo_items_with_ids()
+        .filter(|(id, _)| is_protected_todo_id(id) && !mentioned.contains(id.as_str()))
+        .map(|(id, item)| (id.clone(), item.clone()))
+        .collect();
+
     state.clear();
     for u in updates {
-        let content = if u.has_no_content() {
-            u.id.clone()
-        } else {
-            u.content.clone().unwrap()
-        };
-        let status = u.status.unwrap_or(TodoStatus::Pending);
-        state.push(
-            u.id.clone(),
-            TodoItem {
-                content,
-                priority: TodoPriority::default(),
-                status,
-                meta: None,
-            },
-        );
+        state.push(u.id.clone(), item_from_update(u));
+    }
+    // Re-attach unmentioned protected items (order: after the replace set).
+    for (id, item) in preserved {
+        if !state.has_id(&id) {
+            state.push(id, item);
+        }
     }
     Ok(())
 }
 
 /// `merge=true`: updates are merged into the existing state.
-/// - **Existing items**: `content` is optional — if omitted the previous
-///   value is kept. This lets the model mark an item from `in_progress` →
-///   `completed` without echoing the content back.
+/// - **Existing items**: `content` / `priority` / `meta` are optional — if
+///   omitted the previous value is kept. This lets the model mark an item
+///   from `in_progress` → `completed` without echoing the content back.
 /// - **New items** (id not yet in state): if `content` is omitted the `id`
 ///   is used as a fallback so the tool never errors on a merge call. This
 ///   makes the tool resilient to state being lost between calls.
 pub(crate) fn apply_merge(state: &mut TodoState, updates: &[TodoUpdate]) -> Result<(), TodoError> {
     for u in updates {
-        if state.update(&u.id, u.content.as_deref(), u.status) {
+        if state.update(
+            &u.id,
+            u.content.as_deref(),
+            u.status,
+            u.priority,
+            u.meta.clone(),
+        ) {
             // Existing item – partial update succeeded, content was optional.
             continue;
         }
-        let content = if u.has_no_content() {
-            u.id.clone()
-        } else {
-            u.content.clone().unwrap()
-        };
-        let status = u.status.unwrap_or(TodoStatus::Pending);
-        state.push(
-            u.id.clone(),
-            TodoItem {
-                content,
-                priority: TodoPriority::default(),
-                status,
-                meta: None,
-            },
-        );
+        state.push(u.id.clone(), item_from_update(u));
     }
     Ok(())
 }
@@ -169,11 +193,17 @@ impl TodoState {
         self.todos.clear();
     }
 
+    /// Partial update of an existing item. Returns `false` if `id` is unknown.
+    ///
+    /// Omitted fields (`None`) leave the prior value unchanged. Empty-string
+    /// `content` is treated as omitted (does not wipe).
     pub fn update(
         &mut self,
         id: &TodoId,
         content: Option<&str>,
         status: Option<TodoStatus>,
+        priority: Option<TodoPriority>,
+        meta: Option<serde_json::Value>,
     ) -> bool {
         let Some(todo) = self.todos.get_mut(id) else {
             return false;
@@ -185,6 +215,12 @@ impl TodoState {
         }
         if let Some(status) = status {
             todo.status = status;
+        }
+        if let Some(priority) = priority {
+            todo.priority = priority;
+        }
+        if let Some(meta) = meta {
+            todo.meta = Some(meta);
         }
         true
     }
@@ -219,6 +255,22 @@ pub struct TodoUpdate {
         description = "The status of the todo item: pending, in_progress, completed, or cancelled"
     )]
     pub status: Option<TodoStatus>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional priority: high, medium, or low")]
+    pub priority: Option<TodoPriority>,
+
+    /// Optional metadata object for multi-level session boards.
+    ///
+    /// Documented keys (others allowed):
+    /// - `kind`: `residual` | `phase` | `work` | `child`
+    /// - `parentId`: id of a parent todo when nesting levels
+    /// - `namespace`: owning skill/session prefix (e.g. `plan`, `impl`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Optional metadata JSON object. Documented keys: kind (residual|phase|work|child), parentId, namespace."
+    )]
+    pub meta: Option<serde_json::Value>,
 }
 
 impl TodoUpdate {
@@ -238,13 +290,14 @@ pub struct TodoWriteInput {
     /// When true (the default), merge the provided todos into the existing
     /// list by id (partial updates are allowed — leave unchanged fields
     /// undefined). When explicitly set to false, the provided todos replace
-    /// the existing list entirely.
+    /// the existing list, except protected-prefix ids (`plan:`, `impl:`,
+    /// `pr-`, `recon:`, `residual:`) that are not mentioned are kept.
     #[serde(
         default = "default_merge",
         deserialize_with = "crate::types::schema::deserialize_lenient_bool"
     )]
     #[schemars(
-        description = "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list."
+        description = "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list. Protected-prefix ids (plan:, impl:, pr-, recon:, residual:) not mentioned in the replace set are preserved so foreign namespaces are not silently wiped."
     )]
     pub merge: bool,
 
@@ -375,6 +428,24 @@ mod tests {
             id: id.to_owned(),
             content: content.map(str::to_owned),
             status,
+            priority: None,
+            meta: None,
+        }
+    }
+
+    fn make_update_with_meta(
+        id: &str,
+        content: Option<&str>,
+        status: Option<TodoStatus>,
+        priority: Option<TodoPriority>,
+        meta: Option<serde_json::Value>,
+    ) -> TodoUpdate {
+        TodoUpdate {
+            id: id.to_owned(),
+            content: content.map(str::to_owned),
+            status,
+            priority,
+            meta,
         }
     }
 
@@ -1002,6 +1073,241 @@ mod tests {
         assert_eq!(
             get_item(&state, "analyze_and_propose").status,
             TodoStatus::InProgress
+        );
+    }
+
+    // ── priority + meta write path ───────────────────────────────────
+
+    #[tokio::test]
+    async fn meta_and_priority_round_trip_via_todo_write() {
+        let tool = TodoWriteTool;
+        let mut resources = Resources::new();
+        resources.register_state::<TodoState>();
+        let shared = resources.into_shared();
+
+        let meta = serde_json::json!({
+            "kind": "phase",
+            "parentId": "plan:root",
+            "namespace": "impl"
+        });
+        let input = TodoWriteInput {
+            merge: false,
+            todos: vec![make_update_with_meta(
+                "impl:1",
+                Some("Wire meta fields"),
+                Some(TodoStatus::InProgress),
+                Some(TodoPriority::High),
+                Some(meta.clone()),
+            )],
+        };
+        let output = expect_success(
+            xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(output.todos.len(), 1);
+        assert_eq!(output.todos[0].priority, TodoPriority::High);
+        assert_eq!(output.todos[0].meta, Some(meta.clone()));
+
+        // Merge status-only must preserve priority + meta.
+        let input2 = TodoWriteInput {
+            merge: true,
+            todos: vec![make_update("impl:1", None, Some(TodoStatus::Completed))],
+        };
+        let output2 = expect_success(
+            xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input2)
+                .await
+                .unwrap(),
+        );
+        let item = output2
+            .todos
+            .iter()
+            .find(|t| t.content == "Wire meta fields")
+            .expect("content preserved");
+        assert_eq!(item.status, TodoStatus::Completed);
+        assert_eq!(item.priority, TodoPriority::High);
+        assert_eq!(item.meta, Some(meta));
+
+        // Resources state still holds meta after serialize/load.
+        {
+            let res = shared.lock().await;
+            let snapshot = res.serialize();
+            drop(res);
+            let mut resources2 = Resources::new();
+            resources2.register_state::<TodoState>();
+            let data: std::collections::HashMap<
+                String,
+                std::collections::HashMap<String, serde_json::Value>,
+            > = serde_json::from_value(snapshot).unwrap();
+            resources2.load_from(data);
+            let restored = resources2.get::<State<TodoState>>().unwrap();
+            let item = get_item(&restored.0, "impl:1");
+            assert_eq!(item.priority, TodoPriority::High);
+            assert_eq!(
+                item.meta.as_ref().and_then(|m| m.get("kind")),
+                Some(&serde_json::json!("phase"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_false_preserves_foreign_prefix_items_not_in_replace_set() {
+        let tool = TodoWriteTool;
+        let resources = Resources::new();
+        let shared = resources.into_shared();
+
+        // Seed mixed board: plan + recon + plain.
+        let seed = TodoWriteInput {
+            merge: false,
+            todos: vec![
+                make_update("plan:1", Some("Plan step"), Some(TodoStatus::Pending)),
+                make_update(
+                    "recon:inventory",
+                    Some("Inventory crates"),
+                    Some(TodoStatus::InProgress),
+                ),
+                make_update("scratch", Some("Ephemeral"), Some(TodoStatus::Pending)),
+            ],
+        };
+        xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), seed)
+            .await
+            .unwrap();
+
+        // Implement skill opens with merge:false and only its own ids.
+        let replace = TodoWriteInput {
+            merge: false,
+            todos: vec![make_update(
+                "impl:1",
+                Some("Do the slice"),
+                Some(TodoStatus::InProgress),
+            )],
+        };
+        let output = expect_success(
+            xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), replace)
+                .await
+                .unwrap(),
+        );
+
+        let ids: Vec<_> = output
+            .state
+            .todo_items_with_ids()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert!(ids.contains(&"plan:1"), "plan:* must survive: {ids:?}");
+        assert!(
+            ids.contains(&"recon:inventory"),
+            "recon:* must survive: {ids:?}"
+        );
+        assert!(ids.contains(&"impl:1"), "new impl item present: {ids:?}");
+        assert!(
+            !ids.contains(&"scratch"),
+            "unprotected unmentioned id is dropped: {ids:?}"
+        );
+        assert_eq!(get_item(&output.state, "plan:1").content, "Plan step");
+        assert_eq!(
+            get_item(&output.state, "recon:inventory").content,
+            "Inventory crates"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_false_can_replace_protected_when_mentioned() {
+        let tool = TodoWriteTool;
+        let resources = Resources::new();
+        let shared = resources.into_shared();
+
+        let seed = TodoWriteInput {
+            merge: false,
+            todos: vec![make_update(
+                "plan:1",
+                Some("Old plan text"),
+                Some(TodoStatus::Pending),
+            )],
+        };
+        xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), seed)
+            .await
+            .unwrap();
+
+        let replace = TodoWriteInput {
+            merge: false,
+            todos: vec![make_update(
+                "plan:1",
+                Some("Updated plan text"),
+                Some(TodoStatus::Completed),
+            )],
+        };
+        let output = expect_success(
+            xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), replace)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(output.state.todo_items().count(), 1);
+        assert_eq!(
+            get_item(&output.state, "plan:1").content,
+            "Updated plan text"
+        );
+        assert_eq!(
+            get_item(&output.state, "plan:1").status,
+            TodoStatus::Completed
+        );
+    }
+
+    #[test]
+    fn old_callers_json_without_priority_or_meta_still_deserialize() {
+        // Legacy callers send only id/content/status.
+        let json = serde_json::json!({
+            "merge": true,
+            "todos": [
+                {"id": "1", "content": "Legacy task", "status": "pending"}
+            ]
+        });
+        let input: TodoWriteInput = serde_json::from_value(json).unwrap();
+        assert!(input.merge);
+        assert_eq!(input.todos.len(), 1);
+        assert_eq!(input.todos[0].id, "1");
+        assert_eq!(input.todos[0].content.as_deref(), Some("Legacy task"));
+        assert_eq!(input.todos[0].status, Some(TodoStatus::Pending));
+        assert_eq!(input.todos[0].priority, None);
+        assert_eq!(input.todos[0].meta, None);
+
+        let mut state = TodoState::default();
+        apply_merge(&mut state, &input.todos).unwrap();
+        let item = get_item(&state, "1");
+        assert_eq!(item.content, "Legacy task");
+        assert_eq!(item.priority, TodoPriority::Medium);
+        assert_eq!(item.meta, None);
+    }
+
+    #[test]
+    fn protected_prefix_helpers() {
+        assert!(is_protected_todo_id("plan:1"));
+        assert!(is_protected_todo_id("impl:slice"));
+        assert!(is_protected_todo_id("pr-3:fix"));
+        assert!(is_protected_todo_id("recon:map"));
+        assert!(is_protected_todo_id("residual:open"));
+        assert!(!is_protected_todo_id("1"));
+        assert!(!is_protected_todo_id("scratch"));
+        assert!(!is_protected_todo_id("planning")); // not plan: prefix
+    }
+
+    #[test]
+    fn merge_updates_priority_and_meta_on_existing() {
+        let mut state = seed_state(&[("1", "Task", TodoStatus::Pending)]);
+        let updates = vec![make_update_with_meta(
+            "1",
+            None,
+            Some(TodoStatus::InProgress),
+            Some(TodoPriority::Low),
+            Some(serde_json::json!({"kind": "work"})),
+        )];
+        apply_merge(&mut state, &updates).unwrap();
+        let item = get_item(&state, "1");
+        assert_eq!(item.content, "Task");
+        assert_eq!(item.status, TodoStatus::InProgress);
+        assert_eq!(item.priority, TodoPriority::Low);
+        assert_eq!(
+            item.meta.as_ref().and_then(|m| m.get("kind")),
+            Some(&serde_json::json!("work"))
         );
     }
 }

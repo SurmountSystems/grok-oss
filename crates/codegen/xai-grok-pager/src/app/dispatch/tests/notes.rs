@@ -1,4 +1,4 @@
-//! Tests for feedback / remember / btw / recap dispatchers.
+//! Tests for feedback / remember / btw / recap / session-note dispatchers.
 
 use super::*;
 use crate::app::dispatch::{recap_unavailable_toast, scrollback_has_user_messages};
@@ -419,4 +419,134 @@ fn btw_no_session_feedback_is_mode_specific() {
         Some("No active session")
     );
     assert_eq!(fullscreen.agents[&id].scrollback.len(), 0);
+}
+
+// ── Session notes (`/note`) — not pending prompts ───────────────────
+
+#[test]
+fn add_session_note_stores_without_enqueueing_prompt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("/note leftover composer");
+        // Queue already has a pending prompt — note must not touch it.
+        agent.session.enqueue_prompt("already queued".into());
+    }
+    let effects = dispatch(
+        Action::AddSessionNote {
+            text: "check hold gate".into(),
+            tags: vec!["queue".into()],
+        },
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "notes never fire ACP effects: {effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(agent.session.pending_prompts[0].text, "already queued");
+    assert_eq!(agent.session.session_notes.len(), 1);
+    let note = &agent.session.session_notes.list()[0];
+    assert_eq!(note.text, "check hold gate");
+    assert_eq!(note.tags, vec!["queue"]);
+    assert_eq!(agent.prompt.text(), "", "composer cleared");
+    assert!(
+        agent
+            .toast
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("Note saved") && t.contains("check hold")),
+        "full TUI toasts save: {:?}",
+        agent.toast
+    );
+}
+
+#[test]
+fn add_session_note_empty_toasts_without_storing() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(
+        Action::AddSessionNote {
+            text: "   ".into(),
+            tags: vec![],
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let agent = app.agents.get(&id).unwrap();
+    assert!(agent.session.session_notes.is_empty());
+    assert!(
+        agent
+            .toast
+            .as_ref()
+            .is_some_and(|(t, _)| t.contains("Note text required")),
+        "got {:?}",
+        agent.toast
+    );
+}
+
+#[test]
+fn add_session_note_minimal_commits_system_line() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    let id = AgentId(0);
+    let before = app.agents[&id].scrollback.len();
+    let effects = dispatch(
+        Action::AddSessionNote {
+            text: "minimal note".into(),
+            tags: vec![],
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let agent = app.agents.get(&id).unwrap();
+    assert!(agent.toast.is_none());
+    assert_eq!(agent.scrollback.len(), before + 1);
+    assert!(last_system_text(&app, id).contains("Note saved"));
+    assert!(last_system_text(&app, id).contains("minimal note"));
+}
+
+#[test]
+fn show_notes_empty_and_listed() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(Action::ShowNotes, &mut app);
+    assert!(effects.is_empty());
+    assert!(
+        last_system_text(&app, id).contains("No session notes"),
+        "got {}",
+        last_system_text(&app, id)
+    );
+
+    dispatch(
+        Action::AddSessionNote {
+            text: "first".into(),
+            tags: vec![],
+        },
+        &mut app,
+    );
+    dispatch(
+        Action::AddSessionNote {
+            text: "second\nmore".into(),
+            tags: vec!["tag".into()],
+        },
+        &mut app,
+    );
+    let effects = dispatch(Action::ShowNotes, &mut app);
+    assert!(effects.is_empty());
+    let text = last_system_text(&app, id);
+    assert!(text.contains("Session notes (2):"), "{text}");
+    assert!(text.contains("#1  first"), "{text}");
+    assert!(text.contains("#2  second  (+1 more line)"), "{text}");
+    assert!(text.contains("#tag"), "{text}");
+    // Still must not have created pending prompts from notes.
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+}
+
+#[test]
+fn show_notes_no_active_agent_is_noop() {
+    let mut app = test_app();
+    let effects = dispatch(Action::ShowNotes, &mut app);
+    assert!(effects.is_empty());
 }

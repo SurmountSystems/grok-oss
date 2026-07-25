@@ -1997,12 +1997,10 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     assert_eq!(app.agents.len(), 1);
     let new_id = *app.agents.keys().next().unwrap();
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { model_id : Some(m),
-        .. } if * m == model_id))
-    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::CreateSession { model_id: Some(m), .. } if *m == model_id
+    )));
     let agent = &app.agents[&new_id];
     assert_eq!(
         agent.session.deferred_model_switch,
@@ -2040,12 +2038,10 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
     let effects = dispatch(Action::DashboardCreateNewAgentWithDetail, &mut app);
     assert_eq!(app.agents.len(), 1);
     let new_id = *app.agents.keys().next().unwrap();
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { model_id : Some(m),
-        .. } if * m == model_id))
-    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::CreateSession { model_id: Some(m), .. } if *m == model_id
+    )));
     let agent = &app.agents[&new_id];
     assert_eq!(
         agent.session.deferred_model_switch,
@@ -2431,7 +2427,7 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
     );
     assert!(
         !parent_view.subagent_views[&child_sid]
-            .current_shortcut_hints(&app.registry)
+            .current_shortcut_hints(&app.registry, false)
             .iter()
             .any(|hint| hint.label == "send to bg")
     );
@@ -2446,16 +2442,11 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
         &mut scratch,
         None,
         false,
-        0,
-        &[],
-        &std::collections::BTreeSet::new(),
-        None,
+        crate::app::agent_view::BannerSlotParams::none(),
         &crate::app::bundle::BundleState::default(),
         false,
         &mut Vec::new(),
-        false,
-        false,
-        None,
+        crate::app::agent_view::AppRenderParams::default(),
     );
     assert!(child.hit_bg_button.rect.is_none());
     let parent_tool = parent_view
@@ -2507,6 +2498,7 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
         .join(urlencoding::encode("/tmp").as_ref())
         .join(&child_sid);
     std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
     let tool_line = format!(
         r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
     );
@@ -4490,10 +4482,10 @@ fn dashboard_stop_subagent_emits_kill_subagent_effect() {
         });
     }
     let effects = dispatch_dashboard_stop(&mut app);
-    assert!(
-        matches!(effects.as_slice(), [Effect::KillSubagent { subagent_id, .. }] if
-        subagent_id == "sa-xyz")
-    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::KillSubagent { subagent_id, .. }] if subagent_id == "sa-xyz"
+    ));
     assert!(app.dashboard.as_ref().unwrap().stop_confirm.is_none());
 }
 /// Happy path — matching ids → no panic, queue popped.
