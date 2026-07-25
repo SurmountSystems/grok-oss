@@ -39,26 +39,22 @@ Canonical HITL: `docs/upstream-history.md` § *HITL runbook* + *Live stack*.
 
 ---
 
-## FORK_PATHS / workflow survival (important)
+## FORK_PATHS / workflow survival (updated Slice 5 / W4)
 
-| Path | In `FORK_PATHS` today? | Import behavior |
-|------|------------------------|-----------------|
+| Path | In `FORK_PATHS` / assert? | Import behavior |
+|------|---------------------------|-----------------|
 | Host `~/.agents/skills/git-recon/**` | N/A (outside tree) | Safe |
 | `doc/dev/research/**` (this note) | Yes via `doc/dev` | Restored on import |
-| Project `.grok/workflows/git-recon-status.rhai` | **No** | **Dropped** on import unless extended |
+| `scripts/recon-status.sh` | **Yes** (`FORK_PATHS` + `REQUIRED_FILES`) | Restored on import |
+| Project `.grok/workflows/` (incl. `git-recon-status.rhai`) | **Yes** (dir in `FORK_PATHS` + `REQUIRED_DIRS`) | Restored when present on base |
 
-**If the status workflow must ride import as process infrastructure:**
+**Status probe preference:** `./scripts/recon-status.sh` / `just recon-status`
+first (skill § `recon:status`); Rhai workflow is optional agent-execute
+skeleton only. Dual-pin: FORK Process **Git recon depth**,
+`docs/upstream-history.md` HITL sequence, host skill.
 
-1. Add `.grok/workflows` (or the specific `.rhai`) to `FORK_PATHS` in
-   `scripts/import-upstream-export.sh`.
-2. Extend `scripts/assert-process-pins.sh` REQUIRED list if it should be gated.
-3. Dual-pin a one-line pointer in `docs/upstream-history.md` or `AGENTS.md`.
-
-Until then: treat the Rhai file as **optional convenience on this machine /
-when cherry-picked**; the **host skill** is the durable recon SOP.
-
-Inventory §4.2 / §6 already predicted this gap — not fixed in product scripts
-in this change set (out of scope).
+Follow-up join for the shell probe:
+[`recon-status-script-2026-07-24.md`](recon-status-script-2026-07-24.md).
 
 ---
 
@@ -66,17 +62,17 @@ in this change set (out of scope).
 
 - Slash / skill: `/git-recon` (or natural language onto / put-history / join /
   cherry-pick continue).
+- Status (prefer): `./scripts/recon-status.sh` or `just recon-status`.
 - Workflow (when registered): `/git-recon-status` or workflow tool
-  `name: "git-recon-status"` — status only.
+  `name: "git-recon-status"` — status only; prefer shell script when present.
 - Direction / import seams still: `/upstream-export-import`.
 
 ---
 
-## Non-claims
+## Non-claims (skill-create change set; Slice 5 filled gaps)
 
-- Does not change put-history / join / import scripts.
-- Does not add `recon-status.sh` product script (inventory optional follow-up).
-- Does not edit branch `AGENTS.md` / `FORK.md` beyond this research note (skill
-  dual-pin rule states when to touch them — process law already lives in
-  upstream-history + AGENTS).
-- Live stack SHAs move; re-read Live stack before land claims.
+- Skill create did not invent put-history modes or auto-continue.
+- Slice 5 **did** add `scripts/recon-status.sh`, `just recon-status`,
+  FORK_PATHS/assert pin, and dual residual FORK/RESIDUAL honesty.
+- Live stack SHAs move; re-read Live stack / **script output** before land
+  claims.

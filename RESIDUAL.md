@@ -32,22 +32,6 @@ or code — not only here.
    settings commit (mirror model-switch / economic-mode patterns,
    `restart_required: false`) is still open.
 
-6. **Todo levels product surface (session board)**  
-   Host skills pin namespaces (`plan:*` `impl:*` `pr-N:*` `recon:*`
-   `residual:*`) and merge policy. Product still lacks a first-class
-   namespaced todo API / gate that rejects foreign-prefix wipe. Optional
-   later: runtime guard or docs-only.
-
-7. **Notes / join channel for child artifacts**  
-   Join-on-disk is process law; no dedicated product “notes channel” UI for
-   L2 child summaries yet. Skills write scratch paths; residual if a pane
-   is desired.
-
-8. **`allow_worktree` remaining**  
-   Skill half done: `/execute-plan` shared-cwd auto-adapt (host skill + dual-pin).
-   Still open: optional product default `allow_worktree = false` for OSS installs
-   (config key + force-none already ship; default flip not done).
-
 ## Not residual (resolved elsewhere)
 
 - CI checks-only (no release package in GHA) — FORK + justfile + AGENTS  
@@ -59,6 +43,21 @@ or code — not only here.
   `scripts/import-upstream-export.sh`, `scripts/assert-process-pins.sh`,
   `just upstream-assert-process-pins`, FORK § recon, upstream-history checklist,
   `doc/dev/research/fork-paths-hardening-2026-07-24.md`  
+- Todo levels product surface (`priority`/`meta` writable; `merge: false`
+  keep-unless-mentioned for protected prefixes; light `[kind]` badge) —
+  FORK + `doc/dev/research/todo-levels-product-2026-07-24.md`  
+- Session notes channel (`/note` not a pending prompt; list + `/tasks`
+  count) — FORK + `doc/dev/research/notes-channel-2026-07-24.md` +
+  user-guide `04-slash-commands`
+- Git recon depth (host `git-recon` skill + `scripts/recon-status.sh` +
+  `just recon-status` + FORK_PATHS/assert pin + optional Rhai status
+  workflow) — FORK Process + `doc/dev/research/recon-status-script-2026-07-24.md`
+  + `doc/dev/research/git-recon-skill-created-2026-07-24.md`
+- `allow_worktree` OSS default `false` — `SubagentsConfig` Default + serde
+  (`default_allow_worktree` → false); empty config force-none; opt in with
+  `allow_worktree = true`. Force-none path + tests green. User-guide
+  migration notes in `05-configuration` + `16-subagents`. FORK Process +
+  `doc/dev/research/task-worktree-pins-2026-07-24.md`
 
 
 ## Local quality before push

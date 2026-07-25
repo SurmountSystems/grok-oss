@@ -48,6 +48,7 @@ pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
+        session_notes: crate::app::agent::SessionNotes::default(),
     }
 }
 pub(super) fn make_agent(session_id: Option<&str>) -> AgentView {

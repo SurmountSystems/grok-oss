@@ -623,11 +623,41 @@ impl AgentView {
                     //    that text as the next prompt.
                     // 2) Empty composer + a visible follow-up in the queue →
                     //    same as bare Enter: send the top row now.
-                    // 3) Idle / nothing to send → toast (never silent no-op).
+                    // 3) Idle + background subagents holding the queue → force
+                    //    drain (or enqueue + force drain for non-empty text).
+                    // 4) Idle / nothing to send → toast (never silent no-op).
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();
                     if !text.is_empty() {
                         if !turn_running {
+                            // Parent idle with live background subagents: Enter
+                            // would only queue/hold. Send-now force-starts the
+                            // turn with this text.
+                            if self.holds_queue_for_background() {
+                                if self.paste_probe_in_flight > 0 {
+                                    self.deferred_send = Some(AgentDeferredSend::Interject);
+                                    self.show_toast("Attaching image — send now when ready");
+                                    return InputOutcome::Changed;
+                                }
+                                let images = self.prompt.drain_images();
+                                self.prompt.set_text("");
+                                let queue_id = self.session.next_queue_id;
+                                self.session.next_queue_id += 1;
+                                self.session.pending_prompts.push_front(
+                                    crate::app::agent::QueuedPrompt {
+                                        images,
+                                        ..crate::app::agent::QueuedPrompt::plain(
+                                            queue_id,
+                                            text,
+                                            crate::app::agent::QueueEntryKind::Prompt,
+                                        )
+                                    },
+                                );
+                                // Toast only after force-drain succeeds (or reports
+                                // a hard gate like plan approval) — see
+                                // `dispatch_force_drain_queue`.
+                                return InputOutcome::Action(Action::ForceDrainQueue);
+                            }
                             self.show_toast("Nothing running to interrupt — press Enter to send");
                             return InputOutcome::Changed;
                         }
@@ -650,6 +680,13 @@ impl AgentView {
                         }
                         self.show_toast("Nothing queued to send now");
                         return InputOutcome::Changed;
+                    }
+                    // Idle + held for background subagents: force-drain the top
+                    // local row so send-now still works without a running turn.
+                    // Toast is chosen in `dispatch_force_drain_queue` after the
+                    // drain result (success vs plan-approval / other hard gate).
+                    if self.holds_queue_for_background() && self.has_held_user_queue() {
+                        return InputOutcome::Action(Action::ForceDrainQueue);
                     }
                     self.show_toast("Nothing running to interrupt — press Enter to send");
                     return InputOutcome::Changed;

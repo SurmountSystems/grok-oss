@@ -224,6 +224,9 @@ impl AgentView {
                 images: vec![],
             });
         }
+        // Approve continues implement shell-side (mid-turn or resume). Local
+        // pending stays held until that turn ends and the normal turn-end
+        // drain runs — do not race DrainQueue against the implement turn.
         InputOutcome::Changed
     }
     /// Commit any in-progress plan-approval composer text into durable state
@@ -282,7 +285,14 @@ impl AgentView {
                 action: "abandon".to_string(),
             });
         }
-        InputOutcome::Changed
+        // Abandon leaves no shell implement/revise turn. If we were idle
+        // (resume re-park) with local rows held by the plan-approval gate,
+        // promote them now as a clean independent next turn.
+        if self.session.state.is_idle() && !self.session.pending_prompts.is_empty() {
+            InputOutcome::Action(Action::DrainQueue)
+        } else {
+            InputOutcome::Changed
+        }
     }
     fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
         let Some(mut pav) = self.plan_approval_view.take() else {
@@ -316,6 +326,8 @@ impl AgentView {
                 action: "revise".to_string(),
             });
         }
+        // Revise continues plan mode shell-side — do not drain held follow-ups
+        // into a competing turn.
         InputOutcome::Changed
     }
     pub(crate) fn reopen_plan_approval(&mut self) {
@@ -969,6 +981,7 @@ mod plan_chip_tests {
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
+                session_notes: crate::app::agent::SessionNotes::default(),
             },
             ScrollbackState::new(),
         )

@@ -248,7 +248,7 @@ fn slash_plan_desc_forwards_skill_token_ranges() {
 }
 
 #[test]
-fn slash_plan_with_args_already_in_plan_is_noop() {
+fn slash_plan_with_args_already_in_plan_queues_deferred_enter_plan() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().plan_mode_active = true;
@@ -258,8 +258,108 @@ fn slash_plan_with_args_already_in_plan_is_noop() {
         &mut app,
     );
 
-    assert!(effects.is_empty(), "expected no effects, got: {effects:?}");
-    assert!(read_toast(&app).contains("/view-plan"));
+    // Idle + already in plan: deferred enter-plan row drains immediately as
+    // SetModeThenPrompt (clean next plan turn, not a drop/hijack).
+    assert_eq!(effects.len(), 1, "expected 1 effect, got: {effects:?}");
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::SetModeThenPrompt { mode_id, text, .. }
+                if &*mode_id.0 == "plan" && text == "add auth to the app"
+        ),
+        "expected SetModeThenPrompt for deferred enter-plan, got: {effects:?}"
+    );
+}
+
+/// `/plan <desc>` while a turn is running must not flip plan mode mid-turn —
+/// that would hijack the existing work. Description is held as a deferred
+/// enter-plan queue row until idle.
+#[test]
+fn slash_plan_with_args_while_turn_running_queues_without_mode_switch() {
+    use crate::app::agent::AgentState;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("/plan refactor the auth flow".into()),
+        &mut app,
+    );
+
+    assert!(
+        effects.is_empty(),
+        "must not emit SetSessionMode mid-turn (hijack), got: {effects:?}"
+    );
+    assert!(
+        app.agents[&id].plan_mode_pending.is_none(),
+        "must not set optimistic plan_mode_pending mid-turn"
+    );
+    let pending = &app.agents[&id].session.pending_prompts;
+    assert_eq!(pending.len(), 1, "description must stay queued");
+    assert_eq!(pending[0].text, "refactor the auth flow");
+    assert!(
+        pending[0].enter_plan_mode,
+        "queued row must carry deferred enter-plan flag"
+    );
+    assert!(
+        read_toast(&app).to_lowercase().contains("queued"),
+        "user should see a queued toast, got: {}",
+        read_toast(&app)
+    );
+}
+
+/// Pending follow-up must not drain while plan approval is open (idle resume
+/// re-park path would otherwise start a competing turn).
+#[test]
+fn slash_plan_with_args_while_plan_approval_open_queues_without_hijack() {
+    use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
+    use crate::views::prompt_widget::StashedPrompt;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-pending-hijack".into(),
+            plan_content: Some("# Existing plan".into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        ));
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("/plan brand new independent plan".into()),
+        &mut app,
+    );
+
+    assert!(
+        effects.is_empty(),
+        "must not start a turn while plan approval is open, got: {effects:?}"
+    );
+    assert!(
+        app.agents[&id].plan_approval_view.is_some(),
+        "existing plan approval must remain open"
+    );
+    let pending = &app.agents[&id].session.pending_prompts;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].text, "brand new independent plan");
+    assert!(pending[0].enter_plan_mode);
 }
 
 /// Multi-agent fan-out (sibling for `plan_mode`).

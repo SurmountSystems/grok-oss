@@ -231,15 +231,19 @@ Grok Build manages worktrees through the `x.ai/git/worktree/*` extension methods
 
 **Prefer no worktree** when parallel children edit disjoint paths or when you want simpler git state. Skills that orchestrate subagents should default to `isolation: none` unless the user asks for a worktree.
 
-### Disabling worktrees globally
+### Worktree isolation is off by default
+
+Surmount OSS defaults `[subagents] allow_worktree` to **`false`**. Empty config means spawn **forces** `isolation = none` even if the agent requested `worktree` or a role/persona defaulted to worktree. Resume of a child that already has a worktree still reuses that path.
+
+To **opt in** to worktree isolation:
 
 ```toml
 # ~/.grok/config.toml
 [subagents]
-allow_worktree = false
+allow_worktree = true
 ```
 
-When `allow_worktree = false`, spawn **forces** `isolation = none` even if the agent requested `worktree` or a role/persona defaulted to worktree. Resume of a child that already has a worktree still reuses that path.
+**Migration:** earlier releases defaulted `allow_worktree` to `true`. If you relied on that, set the key above explicitly. Force-none still applies whenever the value is `false` (default or explicit).
 
 ---
 
@@ -294,6 +298,19 @@ Grok Build shows running and finished work in side panes on the agent screen:
 To view the available agent types and personas, open the command palette with `Ctrl+P` and choose **Manage Agents** (`/config-agents`).
 
 Subagents appear at the top of the tasks pane in their own collapsible "Subagents" group.
+
+### Queue hold while subagents run
+
+Queued follow-ups **hold** not only when the parent is blocked waiting on a subagent, but also whenever **any background subagent is still live** — even if the parent already looks idle. That keeps typed follow-ups from starting a conflicting main turn while children work.
+
+- Status cue: e.g. `N subagent(s) still running · M queued — send now to force`.
+- **Send now** force-starts the next parent turn despite live children.
+- When the last holding subagent finishes, the queue drains on its own (no extra keystroke).
+- **Monitors** and long-running background commands alone do **not** hold the queue (they can run indefinitely).
+
+For **annotations that must not become a turn at all**, use [`/note`](04-slash-commands.md#note) instead of typing into the composer or queue. Session notes are operator-local and never drain as prompts.
+
+See also [keyboard shortcuts — during an active turn](03-keyboard-shortcuts.md#during-an-active-turn-agent-running).
 
 ---
 

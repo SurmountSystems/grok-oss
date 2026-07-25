@@ -150,6 +150,7 @@ FORK_PATHS=(
   scripts/join-main-into-onto.sh   # land path; was missing → drop on import
   scripts/with-ci-hermetic-path.sh # CI PATH scrub; was missing → drop
   scripts/assert-process-pins.sh   # post-import / post-onto presence check
+  scripts/recon-status.sh          # read-only onto/cherry-pick/merge status probe
 
   # --- workflows + Surmount-only crates ---
   .github/workflows/upstream-export.yml

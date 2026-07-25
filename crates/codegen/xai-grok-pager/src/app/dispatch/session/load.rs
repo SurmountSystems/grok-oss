@@ -177,6 +177,7 @@ fn dispatch_load_session_ungated(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         scrollback,
     );
@@ -834,6 +835,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         scrollback,
     );

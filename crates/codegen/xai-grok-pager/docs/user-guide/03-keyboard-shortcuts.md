@@ -179,13 +179,19 @@ Over SSH, the remote Grok process usually cannot access the terminal's local X11
 
 While the agent is generating:
 
-- **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends — and they deliberately **hold** while the agent is blocked waiting on background tasks or a subagent (a hint explains the hold and how to send one now).
-- **`Enter` again on the emptied composer** (double-Enter) sends the **top** queued follow-up now.
-- The **send now** chord is **cancel-and-send**: it stops the current turn (background tasks, subagents, and the rest of the queue keep running) and sends your message as the next turn, so it always appears at the bottom of the transcript:
+- **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends — and they deliberately **hold** while:
+  - the agent is **blocked waiting** on background-task output or a foreground subagent, or
+  - **any background subagent is still live** even when the parent looks idle (status: e.g. `N subagent(s) still running · M queued — send now to force`).
+
+  Running **monitors** alone do **not** hold the queue (they can run forever). When the last holding subagent finishes, the queue drains automatically.
+- **`Enter` again on the emptied composer** (double-Enter) sends the **top** queued follow-up now (mid-turn only).
+- The **send now** chord is **cancel-and-send** mid-turn: it stops the current turn (background tasks, subagents, and the rest of the queue keep running) and sends your message as the next turn, so it always appears at the bottom of the transcript:
   - **Non-empty composer** → cancel and send that text now.
   - **Empty composer** + a queued follow-up → send the **top** queued follow-up now (no need to focus the queue pane). On the queue pane, the same chord (or the **[Send now]** button) sends the **selected** row.
-  - **Idle**, or **empty composer with nothing queued** → no-op for that key.
-- While the agent is **blocked waiting** (on task output or a subagent), plain `Enter` with text also delivers immediately — the shell cancels the blocked turn and runs your message next.
+  - **Idle with live background subagents** + held queue (or typed text) → force-start the next turn without waiting for children.
+  - **Idle** with nothing held / nothing to force → toast (never a silent no-op).
+- While the agent is **blocked waiting** (on task output or a subagent), plain `Enter` with text also delivers immediately when nothing else is already queued — the shell cancels the blocked turn and runs your message next.
+- While the parent is **idle with live background subagents**, plain `Enter` with text **queues and holds** (does not start a conflicting main turn). Use **send now** to force, or wait for children to finish.
 
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|

@@ -1682,6 +1682,7 @@ fn set_simple_mode_propagates_to_every_agent() {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         ScrollbackState::new(),
     );

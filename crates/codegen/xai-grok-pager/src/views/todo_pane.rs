@@ -90,7 +90,24 @@ impl TodoListEntry {
             TodoStatus::Completed => style.completed,
             TodoStatus::Cancelled => style.cancelled,
         };
-        let styled = Line::from(Span::styled(item.content.clone(), status_style.text_style));
+        // Light level badge from `meta.kind` when present (residual|phase|work|child).
+        let kind = item
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("kind"))
+            .and_then(|v| v.as_str())
+            .filter(|k| !k.is_empty());
+        let styled = if let Some(kind) = kind {
+            Line::from(vec![
+                Span::styled(
+                    format!("[{kind}] "),
+                    status_style.text_style.add_modifier(Modifier::DIM),
+                ),
+                Span::styled(item.content.clone(), status_style.text_style),
+            ])
+        } else {
+            Line::from(Span::styled(item.content.clone(), status_style.text_style))
+        };
         Self {
             id,
             item,
@@ -525,6 +542,7 @@ impl TodoPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_shell::tools::TodoPriority;
 
     fn counts(completed: usize, cancelled: usize) -> TodoCounts {
         TodoCounts {
@@ -534,12 +552,47 @@ mod tests {
         }
     }
 
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
     #[test]
     fn empty_todos_message() {
         assert_eq!(
             empty_placeholder_message(true, TodoCounts::default()),
             "No todo items."
         );
+    }
+
+    #[test]
+    fn list_entry_shows_meta_kind_badge() {
+        let style = TodoPaneStyle::default();
+        let item = TodoItem {
+            content: "Wire the API".into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::Pending,
+            meta: Some(serde_json::json!({"kind": "phase", "namespace": "impl"})),
+        };
+        let entry = TodoListEntry::new(0, item, &style);
+        let text = line_text(entry.content());
+        assert!(
+            text.starts_with("[phase] "),
+            "expected kind badge prefix, got {text:?}"
+        );
+        assert!(text.contains("Wire the API"));
+    }
+
+    #[test]
+    fn list_entry_without_meta_kind_is_plain_content() {
+        let style = TodoPaneStyle::default();
+        let item = TodoItem {
+            content: "Plain task".into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::Pending,
+            meta: None,
+        };
+        let entry = TodoListEntry::new(0, item, &style);
+        assert_eq!(line_text(entry.content()), "Plain task");
     }
 
     #[test]

@@ -27,14 +27,18 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
 
 /// Enter plan mode via `/plan`.
 ///
-/// When not in plan mode: emits `SetSessionMode` (or `SetModeThenPrompt`
-/// if a description is provided). When already in plan mode: no-op with toast.
-/// Use `/view-plan` to open the current saved plan preview.
+/// When idle and not already in plan mode: emits `SetSessionMode` (or
+/// `SetModeThenPrompt` if a description is provided).
 ///
-/// When a description is present, the mode switch and prompt send must be
-/// ordered: the mode switch ACP call must complete before the prompt is
-/// dispatched. `SetModeThenPrompt` bundles both into a single spawned task
-/// to guarantee this ordering.
+/// When a turn is running, plan approval is open, or plan mode is already
+/// active: a description is **queued** as a deferred enter-plan row that
+/// drains only after the current work / approval settles. Mode is **not**
+/// switched mid-flight — that would hijack the existing plan or turn.
+/// Bare `/plan` with no description while already in plan stays a no-op
+/// toast (use `/view-plan`).
+///
+/// When a description is present and drain succeeds immediately, the mode
+/// switch and prompt send are ordered via `SetModeThenPrompt`.
 pub(super) fn dispatch_enter_plan_mode(
     app: &mut AppView,
     description: Option<String>,
@@ -47,72 +51,77 @@ pub(super) fn dispatch_enter_plan_mode(
     };
 
     let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
-    if in_plan {
+    let plan_approval_open = agent.plan_approval_view.is_some();
+    let busy = !agent.session.state.is_idle() || plan_approval_open;
+
+    // Bare `/plan` while already planning: show the current plan; do not
+    // re-toggle. Descriptions fall through to deferred queue below.
+    if in_plan && description.is_none() {
         app.show_toast("Already in plan mode. Use /view-plan to view the current plan.");
         return vec![];
     }
 
-    let agent = app.agents.get_mut(&id).unwrap();
     let Some(session_id) = agent.session.session_id.clone() else {
         agent.show_toast("No active session");
         return vec![];
     };
 
-    // Set optimistic pending state (same pattern as dispatch_cycle_mode).
-    agent.plan_mode_pending = Some(true);
-    tracing::info!("Plan mode entered via /plan slash command");
-
     let mode_id = acp::SessionModeId::new("plan");
 
     if let Some(desc) = description {
-        // Enqueue and drain: maybe_drain_queue does all synchronous turn
-        // setup (scrollback, start_turn, prompt_id) and returns a SendPrompt.
-        // We combine it with the mode switch into a single sequential effect
-        // so the mode switch completes before the prompt is sent.
-        // The description is a plain prompt: capture composer-recognized
-        // tokens like the normal submit path (offsets recomputed against
-        // `desc` since the leading `/plan ` was stripped).
-        let skill_token_ranges = agent
-            .prompt
-            .slash_controller
-            .recognized_token_ranges(&desc, &agent.session.models);
-        agent
-            .session
-            .enqueue_prompt_with_skill_tokens(desc, skill_token_ranges);
-        let drain = maybe_drain_queue(agent);
-        note_peek_page_flip(app, id, drain.page_flip_entry);
-        let mut effects = Vec::with_capacity(1);
-        for eff in drain.effects {
-            match eff {
-                Effect::SendPrompt {
-                    agent_id,
-                    text,
-                    prompt_id,
-                    skill_token_ranges,
-                    ..
-                } => {
-                    effects.push(Effect::SetModeThenPrompt {
-                        session_id: session_id.clone(),
-                        mode_id: mode_id.clone(),
-                        agent_id,
-                        text,
-                        prompt_id,
-                        skill_token_ranges,
-                    });
+        // Scope agent mutations so the borrow ends before note_peek / toast.
+        let (effects, page_flip, held) = {
+            let agent = app.agents.get_mut(&id).expect("agent checked above");
+            // Capture composer-recognized tokens against the stripped desc
+            // (leading `/plan ` was removed by the slash runner).
+            let skill_token_ranges = agent
+                .prompt
+                .slash_controller
+                .recognized_token_ranges(&desc, &agent.session.models);
+
+            // Busy or already in plan: queue a deferred enter-plan row. Do not
+            // flip plan_mode_pending / SetSessionMode mid-turn or while approval
+            // is open — that hijacks the existing plan lifecycle.
+            if busy || in_plan {
+                agent
+                    .session
+                    .enqueue_enter_plan_prompt(desc, skill_token_ranges);
+                // Try drain in case we are idle + only "already in plan" (no
+                // approval): starts a clean next plan turn immediately.
+                let drain = maybe_drain_queue(agent);
+                let held = drain.effects.is_empty();
+                (drain.effects, drain.page_flip_entry, held)
+            } else {
+                // Idle, not in plan: optimistic mode + immediate drain.
+                agent.plan_mode_pending = Some(true);
+                tracing::info!("Plan mode entered via /plan slash command");
+                agent
+                    .session
+                    .enqueue_enter_plan_prompt(desc, skill_token_ranges);
+                let drain = maybe_drain_queue(agent);
+                // Drain already emits SetModeThenPrompt for enter_plan_mode
+                // rows. Fallback: roll back optimistic pending if something
+                // prevented drain; the row stays queued with the enter-plan flag.
+                if drain.effects.is_empty() {
+                    agent.plan_mode_pending = None;
                 }
-                other => effects.push(other),
+                let held = drain.effects.is_empty();
+                (drain.effects, drain.page_flip_entry, held)
             }
-        }
-        // If drain was empty (not idle), just emit the mode switch — the
-        // prompt stays queued and will drain naturally when the agent idles.
-        if effects.is_empty() {
-            effects.push(Effect::SetSessionMode {
-                session_id,
-                mode_id,
-            });
+        };
+        note_peek_page_flip(app, id, page_flip);
+        if held {
+            if busy || in_plan {
+                app.show_toast("Queued plan — starts after current work finishes.");
+            }
+            return vec![];
         }
         effects
     } else {
+        // Bare `/plan`, not in plan: enter plan mode without a prompt.
+        let agent = app.agents.get_mut(&id).expect("agent checked above");
+        agent.plan_mode_pending = Some(true);
+        tracing::info!("Plan mode entered via /plan slash command");
         vec![Effect::SetSessionMode {
             session_id,
             mode_id,

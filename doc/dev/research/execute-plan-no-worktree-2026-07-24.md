@@ -30,7 +30,7 @@ File: `~/.agents/skills/execute-plan/SKILL.md`
 |------|------|
 | `AGENTS.md` | execute-plan honors allow_worktree / shared-cwd |
 | `FORK.md` | hierarchical checkbox for execute-plan + allow_worktree |
-| `RESIDUAL.md` | skill half closed; OSS default-false still open |
+| `RESIDUAL.md` | skill half closed; OSS default-false closed (see task-worktree-pins) |
 | Campaign | `doc/dev/campaigns/operator-orchestration-2026-07.md` |
 | Prior research | `doc/dev/research/task-worktree-pins-2026-07-24.md` |
 
@@ -39,10 +39,11 @@ File: `~/.agents/skills/execute-plan/SKILL.md`
 `~/.agents/skills/skill-maintenance/test-required-pins.sh` asserts execute-plan
 SKILL mentions `allow_worktree`, `shared-cwd`, `isolation_mode`.
 
-## Not in this slice
+## Not in this slice (later / elsewhere)
 
-- Product default flip `allow_worktree = false` for OSS installs
-- Product namespaced-todo API / L2 notes channel
+- Product default flip `allow_worktree = false` for OSS installs — **done**
+  in a later pass (`SubagentsConfig` default false; see task-worktree-pins)
+- Product namespaced-todo API / L2 notes channel — done separately
 - No git commit (human-only)
 
 ## Verify

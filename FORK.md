@@ -92,8 +92,9 @@ list when you ship fork work.
 - [x] **Onto land path** — after product is on their tip, join Surmount `main` with `merge -s ours` so the tip is PR-able (`docs/upstream-history.md`, `just upstream-join-main`)
 - [x] **PRs accepted** — CONTRIBUTING / this fork
 - [x] **Parent = HITL only** — main thread goals/spawn/join notes/human git; research + implementation in subagents. Hard stop on CI / multi-file. See [`AGENTS.md`](AGENTS.md)
-- [x] **Subagent worktree policy** — prefer isolation none; config
-  `[subagents] allow_worktree = false` forces none on spawn. User-guide
+- [x] **Subagent worktree policy** — prefer isolation none; product default
+  `[subagents] allow_worktree = false` (empty config force-none; opt in with
+  `true`). Spawn still forces none when false. User-guide migration notes in
   `05-configuration` + `16-subagents`. Host skills dual-pin todo namespaces
   (`plan:*` / `impl:*` / …) + worktree optional. Campaign:
   `doc/dev/campaigns/operator-orchestration-2026-07.md`
@@ -102,6 +103,23 @@ list when you ship fork work.
   path handoffs); worktree only when policy allows; fall back if spawn forces
   none or create fails. Join:
   `doc/dev/research/execute-plan-no-worktree-2026-07-24.md`
+- [x] **Todo levels product surface** — `todo_write` accepts optional
+  `priority` + `meta` (`kind`, `parentId`, `namespace`); `merge: false`
+  keep-unless-mentioned for protected prefixes (`plan:`, `impl:`, `pr-`,
+  `recon:`, `residual:`). Light `[kind]` badge in todo pane. Join:
+  `doc/dev/research/todo-levels-product-2026-07-24.md`
+- [x] **Session notes channel** — `/note` stores operator mid-session
+  annotations that are **not** pending main-turn prompts (session-local
+  store; list via bare `/note` / `/notes`; count on `/tasks`). Does not
+  replace on-disk L2 join notes. Join:
+  `doc/dev/research/notes-channel-2026-07-24.md`
+- [x] **Git recon depth** — host skill `/git-recon` (status → route →
+  conflict ≤3 buckets → stage → human-sign → land; never agent-commit);
+  product `scripts/recon-status.sh` + `just recon-status` (read-only probe);
+  pin in `FORK_PATHS` + `assert-process-pins`; optional
+  `.grok/workflows/git-recon-status.rhai`. Joins:
+  `doc/dev/research/git-recon-skill-created-2026-07-24.md`,
+  `doc/dev/research/recon-status-script-2026-07-24.md`
 
 ### Skills (multi-source)
 
@@ -125,7 +143,7 @@ history. Chat-only pins die at compaction.
 
 | Path | Import | Put-history | Join (`-s ours`) |
 |------|--------|-------------|------------------|
-| Paths in `FORK_PATHS` (AGENTS, RESIDUAL, FORK, `docs/upstream-*`, join/hermetic/assert scripts, `doc/dev`, …) | **Restored** from base; post-restore `assert-process-pins` | Via cherry-picks | Tip tree kept |
+| Paths in `FORK_PATHS` (AGENTS, RESIDUAL, FORK, `docs/upstream-*`, join/hermetic/assert/`recon-status` scripts, `.grok/workflows`, `doc/dev`, …) | **Restored** from base; post-restore `assert-process-pins` | Via cherry-picks | Tip tree kept |
 | Product commits after seed | N/A (tree = xAI + restore) | Cherry-picked onto tip | Tip tree kept |
 | Paths **not** in `FORK_PATHS` and absent from xAI | **Dropped** | Only if stacked | Cannot backfill missing |
 | Shared user-guide / crate seams | xAI base | Conflict resolve | Tip tree only |
@@ -156,11 +174,12 @@ There is **no** `ci-quick` or `ci-host` recipe.
 **PATH hermeticity (CI / low-mem):** with `CI_LOW_MEM=1`, `cargo-ci` enters
 `nix develop .#ci`, then `scripts/with-ci-hermetic-path.sh` rebuilds `PATH`
 from **`/nix/store` bins only** (ci-tools + stdenv: rustc, nextest, mold, git,
-coreutils, …). Host desktop tools (`pw-record` / `parec` / `arecord`, …) are
-not visible to quality tests — matches headless GHA. Interactive `just dev` /
-default shell keep impure host `PATH`. Audio recorders are intentionally
-**not** in `ci-tools`. Escape hatch: `GROK_CI_ALLOW_HOST_PATH=1`. Closest GHA
-repro: `CI_LOW_MEM=1 CI_SYSTEM=x86_64-linux just ci`.
+python3, coreutils, …). Host desktop tools (`pw-record` / `parec` / `arecord`,
+…) are not visible to quality tests — matches headless GHA. Interactive
+`just dev` / default shell keep impure host `PATH`. Audio recorders are
+intentionally **not** in `ci-tools`; `python3` **is** (cgroup + mock LSP e2e
+spawn it under scrubbed PATH). Escape hatch: `GROK_CI_ALLOW_HOST_PATH=1`.
+Closest GHA repro: `CI_LOW_MEM=1 CI_SYSTEM=x86_64-linux just ci`.
 
 ## Versioning and “am I up to date?”
 

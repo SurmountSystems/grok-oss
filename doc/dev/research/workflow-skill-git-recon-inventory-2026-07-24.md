@@ -1,27 +1,41 @@
 # Workflow / skill inventory — git recon, merge, cherry-pick, commit friction
 
 **Date:** 2026-07-24  
-**Mode:** research inventory (no product code change).  
+**Mode:** research inventory (historical).  
 **Workspace:** `/home/hunter/Projects/surmount/grok-build`  
 **Also scanned:** host skills `~/.agents/skills/`, global hooks `~/.git-hooks`,  
 `~/.grok` deny + PreToolUse, bundled `create-workflow` skill.
 
-**Goal:** ground a future **workflow skill** (or Grok Build Rhai workflow + skill
-wrapper) that automates merge / cherry-pick / onto struggles without violating
-signing or agent-commit policy.
+**Status (W4 / Slice 5 — not residual):** host skill `git-recon`, product
+`scripts/recon-status.sh` + `just recon-status`, FORK_PATHS/assert pin for
+script + `.grok/workflows`, dual residual FORK Process entry. This file is
+the pre-ship inventory; living SOP is the skill + recon-status join notes.
+
+> **Superseded by Slice 5 / W4.** Body sections below are a **frozen pre-ship
+> snapshot** (present-tense “no X yet / not in FORK_PATHS / optional future”
+> is historical). Do **not** re-elevate those lines as open residual.
+> Living truth: FORK Process **Git recon depth**,
+> [`recon-status-script-2026-07-24.md`](recon-status-script-2026-07-24.md),
+> [`git-recon-skill-created-2026-07-24.md`](git-recon-skill-created-2026-07-24.md),
+> host `~/.agents/skills/git-recon/SKILL.md`. Annotated “*(superseded)*”
+> markers flag the main false-gap sentences.
+
+**Goal (at write time):** ground a future **workflow skill** (or Grok Build Rhai
+workflow + skill wrapper) that automates merge / cherry-pick / onto struggles
+without violating signing or agent-commit policy.
 
 ---
 
 ## Plain answer
 
-| Layer | What exists today | Friction |
+| Layer | What exists today *(inventory write-time; see banner)* | Friction |
 |-------|-------------------|----------|
 | **Repo scripts** | Detect, import, put-history (real cherry-pick), join (`-s ours`), assert pins, sync | Solid mechanics; stop on conflict; human must sign continues / join |
 | **Docs** | `docs/upstream-history.md` HITL runbook, onto-log, git-workflow, FORK/AGENTS | Compaction-safe if re-read; long; Live stack drifts |
 | **Host skill** | `upstream-export-import` — direction table, hard rules, spawn-first | Orchestration prose, not an executable state machine |
 | **PR skill** | `pr-babysit` — merge-not-rebase, stage + hand commit | Some older body lines still show bare `git commit` examples (policy override at top) |
 | **GPG guards** | global pre/post-commit, PreToolUse, config.toml deny | Agents cannot create/bypass unsigned tips; good |
-| **Rhai workflows** | Product supports them (`create-workflow`); **no** repo/user git-recon `.rhai` yet | Opportunity: fan-out conflict resolve + gates; cannot own GPG |
+| **Rhai workflows** | Product supports them (`create-workflow`); **no** repo/user git-recon `.rhai` yet *(superseded — `.grok/workflows/git-recon-status.rhai` + FORK_PATHS)* | Opportunity: fan-out conflict resolve + gates; cannot own GPG |
 | **Signing** | Every new object under `commit.gpgsign=true` wants a signature | Upstream tip commits unsigned OK as parents; **our** stack commits + join need sign |
 
 **Signing boundary (recommended, matches current policy):**
@@ -83,6 +97,8 @@ just upstream-sync …
 | **create-workflow** (bundled) | `~/.grok/bundled/skills/create-workflow/SKILL.md` | How to author Rhai workflows (`agent`/`parallel`/`await_user`) |
 
 No project `.grok/workflows/*.rhai` and no `~/.grok/workflows/` yet for git recon.
+*(superseded — project `.grok/workflows/git-recon-status.rhai` ships; dir in
+`FORK_PATHS` + assert `REQUIRED_DIRS`.)*
 
 ### 1.5 Signing enforcement stack (machine)
 
@@ -169,13 +185,18 @@ xai-org/main (unsigned orphan exports; pull-only)
 
 ### 3.4 Skill vs automation gaps
 
+*(Write-time gaps; several closed by Slice 5 / W4 — see banner.)*
+
 - `upstream-export-import` is excellent **checklist prose**, not a state machine
   with “next command + UU file partition + hand-off blob”.
+  *(partially superseded — host `git-recon` owns recon state machine + fan-out.)*
 - No single “where am I?” command that prints: CHERRY_PICK_HEAD / MERGE_HEAD /
   onto tip / unmerged count / next human command.
+  *(superseded — `./scripts/recon-status.sh` / `just recon-status`.)*
 - `pr-babysit` and upstream skill share commit policy but not conflict-rule
   tables (fork seams vs feature-vs-main).
-- Rhai workflows can `await_user` for signed continues — **unused** for recon.
+- Rhai workflows can `await_user` for signed continues — **unused** for recon
+  *(status Rhai skeleton exists; full await_user conflict loop still optional).*
 
 ### 3.5 Anti-patterns already documented (must not re-break)
 
@@ -222,24 +243,25 @@ structured status, `await_user` at every sign gate, scratch reports.
 | Spawning read-write agents with self-contained conflict prompts | Guaranteeing correct seam choice without review |
 | Parsing `git status` / UU lists into disjoint buckets (script-side) | Force-push / rewrite main |
 | `await_user("user", "Run: git cherry-pick --continue …")` | Unlocking GPG in agent sandbox |
-| Writing scratch join notes; `complete(#{…})` summary | Surviving as process law (workflow file may be in `.grok/` — **not** in `FORK_PATHS` today) |
+| Writing scratch join notes; `complete(#{…})` summary | Surviving as process law *(write-time: workflow path **not** in `FORK_PATHS`; **superseded** — `.grok/workflows` is in `FORK_PATHS` + assert)* |
 
 **Capability modes:** conflict agents need `read-write` (or `all` if they run
 git stage); status probes `read-only` / execute for git porcelain.
 
 **Survival:** if the workflow is product-shared, put it under a path that
 import restores **or** document “host-only workflow” + dual-pin the SOP in
-branch docs. Today `.grok/workflows` is **not** in `FORK_PATHS`.
+branch docs. *(Write-time: “Today `.grok/workflows` is **not** in
+`FORK_PATHS`.” **Superseded** — dir is in `FORK_PATHS` + `REQUIRED_DIRS`.)*
 
 ### 4.3 Script improvements (product — optional follow-ups, not this note’s job)
 
-| Idea | Why |
-|------|-----|
-| `scripts/recon-status.sh` | One-shot CHERRY_PICK/MERGE/onto/unmerged/next cmd |
-| import: default `--no-commit` like join | Align with agent-never-commit |
-| put-history: optional `STOP_BEFORE_COMMIT=1` / env to pause before each pick sign | Reduce mid-loop GPG failures (design carefully) |
-| Remove gpgsign=false suggestion from import error text | Policy hygiene |
-| Ensure join + put-history always on early FORK_PATHS / first product picks | Mid-stack script missing |
+| Idea | Why | Slice 5 / W4? |
+|------|-----|---------------|
+| `scripts/recon-status.sh` | One-shot CHERRY_PICK/MERGE/onto/unmerged/next cmd | **Shipped** *(not residual)* |
+| import: default `--no-commit` like join | Align with agent-never-commit | Still optional hygiene |
+| put-history: optional `STOP_BEFORE_COMMIT=1` / env to pause before each pick sign | Reduce mid-loop GPG failures (design carefully) | Still optional |
+| Remove gpgsign=false suggestion from import error text | Policy hygiene | Still optional |
+| Ensure join + put-history always on early FORK_PATHS / first product picks | Mid-stack script missing | Process pins expanded; mid-stack bare tip still a known friction |
 
 ---
 
@@ -273,8 +295,9 @@ branch docs. Today `.grok/workflows` is **not** in `FORK_PATHS`.
 | Host skill `~/.agents/skills/**` | Unaffected | Unaffected | Unaffected |
 | `~/.grok/AGENTS.md`, hooks | Unaffected | Unaffected | Unaffected |
 | Branch `AGENTS.md`, `FORK.md`, `docs/upstream-*`, scripts | Restored via `FORK_PATHS` + assert | Reappear when picks include them | Tree frozen — no backfill from main |
-| Project `.grok/workflows/*.rhai` (if added) | **Not** in `FORK_PATHS` → **drop** on import unless added | Only if cherry-picked | Keeps tip only |
+| Project `.grok/workflows/*.rhai` (if added) | Write-time: **Not** in `FORK_PATHS` → **drop** *(**superseded** — dir restored via `FORK_PATHS` + assert)* | Only if cherry-picked | Keeps tip only |
 | Research under `doc/dev/research/**` | In `FORK_PATHS` as `doc/dev` | Via stack | Tip only |
+| `scripts/recon-status.sh` *(post-Slice 5)* | In `FORK_PATHS` + assert `REQUIRED_FILES` | Via stack | Tip only |
 
 **Dual-pin law for any new git-recon skill:**
 
@@ -283,51 +306,61 @@ branch docs. Today `.grok/workflows` is **not** in `FORK_PATHS`.
    `AGENTS.md` § onto + link to this research.  
 3. If shipping a Rhai workflow for the team: add path to `FORK_PATHS` +
    `assert-process-pins.sh` **or** keep workflow host-only and dual-pin the SOP.
+   *(Done for `.grok/workflows` + recon-status script — not open residual.)*
 
 ---
 
 ## 7. Six capability bullets (new skill / workflow target)
 
+*(Write-time target list. **Slice 5 / W4 shipped** these as host `git-recon`
+SOP + product status probe + dual residual — not open residual. Full Rhai
+await_user resolve loop remains optional.)*
+
 1. **Status probe** — Detect CHERRY_PICK_HEAD / sequencer / MERGE_HEAD /
    onto branch / unmerged paths / whether main is ancestor; emit the **single
-   next** human or agent action (no invented modes).
+   next** human or agent action (no invented modes). *(shipped: recon-status.sh)*
 
 2. **Direction router** — Import vs put-history vs PR-merge-main vs join-only;
    call the right script (`detect` / `put-history` / `join` / `assert`) with
-   safe defaults (no `FORCE=1` unless asked).
+   safe defaults (no `FORCE=1` unless asked). *(shipped: git-recon recon:route)*
 
 3. **Conflict fan-out** — Partition UU files into ≤3 disjoint scopes; spawn
    self-contained resolve agents (tip APIs vs product seams vs union);
-   join on disk; parent only checks empty UU + no markers.
+   join on disk; parent only checks empty UU + no markers. *(shipped: skill + conflict-fanout.md)*
 
 4. **Human sign gate** — After resolve/stage (or join `--no-commit`), **stop**
    and paste exact `git cherry-pick --continue` / `git commit -S …` lines;
-   never agent-commit; never suggest gpgsign bypass.
+   never agent-commit; never suggest gpgsign bypass. *(shipped: hand-commands.md)*
 
 5. **Stack resume** — Drive `CONTINUE=1` put-history after each signed
    continue; refuse rebuild while mid-pick; refuse casual abort; update or
-   point at Live stack / onto-log fields.
+   point at Live stack / onto-log fields. *(shipped in skill SOP)*
 
 6. **Land checklist** — Join staged → human sign → tree/ancestor asserts →
    `just check` → push (if asked) → PR base=main → process-pin assert → log
    append hints; dual-pin survival reminder for any process correction.
+   *(shipped in skill recon:land; actual onto PR land is human residual)*
 
 ---
 
 ## 8. Suggested shape (implementation later — not done here)
 
+> **Partial ship (Slice 5 / W4):** host skill `git-recon`, product
+> `recon-status.sh` + `just recon-status`, status Rhai
+> `git-recon-status.rhai`, FORK_PATHS/assert pins. Remaining optional only:
+> full await_user conflict loop, import `--no-commit` default, scrub
+> gpgsign=false suggestion. Not residual for git-recon depth.
+
 ```text
-Host skill:  ~/.agents/skills/git-recon/SKILL.md   (or extend upstream-export-import)
+Host skill:  ~/.agents/skills/git-recon/SKILL.md   (SHIPPED)
   when-to-use: onto, cherry-pick continue, join, import, merge main into PR
   sections: status, directions, conflict spawn, hand-sign templates, survival
 
-Optional Rhai: .grok/workflows/git-recon.rhai  (project) or ~/.grok/workflows/
-  phases: Status → Stack/Resolve loop → Join stage → Verify → Report
-  await_user at every commit boundary
-  parallel() only for disjoint conflict buckets
+Optional Rhai: .grok/workflows/git-recon-status.rhai  (SHIPPED status-only)
+  full multi-phase await_user conflict loop: still optional / not residual for W4
 
-Product scripts (optional PRs): recon-status.sh; import --no-commit default;
-  scrub gpgsign=false from import error text
+Product scripts: recon-status.sh (SHIPPED); import --no-commit default +
+  scrub gpgsign=false from import error text (still optional hygiene)
 ```
 
 **Depends on (already shipped):** put-history, join, assert, upstream-history

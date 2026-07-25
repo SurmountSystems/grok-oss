@@ -46,6 +46,7 @@ REQUIRED_FILES=(
   scripts/join-main-into-onto.sh
   scripts/with-ci-hermetic-path.sh
   scripts/assert-process-pins.sh
+  scripts/recon-status.sh
   scripts/replay-onto-upstream.sh
   .github/workflows/upstream-export.yml
   .github/workflows/ci.yml

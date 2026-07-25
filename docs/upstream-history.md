@@ -139,6 +139,10 @@ git fetch origin main
 git fetch xai-org main --force
 ./scripts/detect-upstream-export.sh   # record XAI_TIP / XAI_TREE
 
+# Anytime mid-stack / after compaction: live probe (prefer over guessing from docs)
+./scripts/recon-status.sh             # or: just recon-status
+# → branch, CHERRY_PICK/MERGE, UU count, onto-ish, recommended next human action
+
 # clean worktree preferred
 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh
 # on conflict: resolve carefully (see rules below), then:
@@ -350,7 +354,7 @@ with a clean tree.
 - [ ] **Process pins still present** (import only restores `FORK_PATHS`; expanded list includes AGENTS/RESIDUAL/join/hermetic/`doc/dev`/assert script — run the assert, do not eyeball alone):
   - [ ] `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins` (fails if pins missing)
   - [ ] `AGENTS.md`, `RESIDUAL.md`, `FORK.md`
-  - [ ] `scripts/join-main-into-onto.sh`, `scripts/with-ci-hermetic-path.sh`, `scripts/assert-process-pins.sh`
+  - [ ] `scripts/join-main-into-onto.sh`, `scripts/with-ci-hermetic-path.sh`, `scripts/assert-process-pins.sh`, `scripts/recon-status.sh`
   - [ ] `scripts/put-history-on-xai.sh` + other import/sync scripts already in `FORK_PATHS`
   - [ ] `docs/upstream-history.md` (+ import/onto logs)
   - [ ] Review `FORK_PATHS` in `scripts/import-upstream-export.sh` only if the assert failed or a new process path is needed

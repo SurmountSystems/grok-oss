@@ -1520,6 +1520,9 @@ impl SessionActor {
             ResumeAction::LeaveOnly => {
                 tracing::info!("[exit_plan_mode] resume: user abandoned plan");
                 self.leave_plan_mode_to_default();
+                // Approval gate is clear — promote any prompts that were held
+                // while plan approval was open (see maybe_start_running_task).
+                SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
             }
             ResumeAction::StayAndRevise(text) => {
                 tracing::info!("[exit_plan_mode] resume: user requested changes");

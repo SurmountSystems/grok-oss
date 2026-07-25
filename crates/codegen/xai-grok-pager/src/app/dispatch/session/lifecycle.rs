@@ -323,6 +323,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: true,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         scrollback,
     );
@@ -660,6 +661,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         scrollback,
     );

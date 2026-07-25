@@ -289,15 +289,41 @@ struct TodoUpdateArgs {
     content: Option<String>,
     #[serde(default)]
     status: Option<TodoStatus>,
+    #[serde(default)]
+    priority: Option<TodoPriority>,
+    #[serde(default)]
+    meta: Option<serde_json::Value>,
 }
 
-/// `merge=false`: replace the state entirely. Mirrors production's
-/// `apply_replace`. Split out from the merge path to match the
-/// two-function shape in `xai-grok-tools` (F29).
+/// Protected skill/session prefixes — must match `PROTECTED_TODO_PREFIXES`
+/// in `xai-grok-tools` todo write path (keep-unless-mentioned on replace).
+fn is_protected_todo_id(id: &str) -> bool {
+    id.starts_with("plan:")
+        || id.starts_with("impl:")
+        || id.starts_with("pr-")
+        || id.starts_with("recon:")
+        || id.starts_with("residual:")
+}
+
+/// `merge=false`: replace the state, preserving unmentioned protected-prefix
+/// items. Mirrors production's `apply_replace` (F29 + namespace guard).
 fn apply_replace(state: &mut TodoState, updates: Vec<TodoUpdateArgs>) {
+    use std::collections::HashSet;
+    let mentioned: HashSet<&str> = updates.iter().map(|u| u.id.as_str()).collect();
+    let preserved: Vec<(String, TodoItem)> = state
+        .todo_items_with_ids()
+        .filter(|(id, _)| is_protected_todo_id(id) && !mentioned.contains(id.as_str()))
+        .map(|(id, item)| (id.clone(), item.clone()))
+        .collect();
+
     state.clear();
     for u in updates {
         push_new(state, u);
+    }
+    for (id, item) in preserved {
+        if !state.has_id(&id) {
+            state.push(id, item);
+        }
     }
 }
 
@@ -306,7 +332,13 @@ fn apply_replace(state: &mut TodoState, updates: Vec<TodoUpdateArgs>) {
 /// the update omits `content`. (F29)
 fn apply_merge(state: &mut TodoState, updates: Vec<TodoUpdateArgs>) {
     for u in updates {
-        if state.update(&u.id, u.content.as_deref(), u.status) {
+        if state.update(
+            &u.id,
+            u.content.as_deref(),
+            u.status,
+            u.priority,
+            u.meta.clone(),
+        ) {
             continue;
         }
         push_new(state, u);
@@ -318,6 +350,8 @@ fn push_new(state: &mut TodoState, u: TodoUpdateArgs) {
         id,
         content,
         status,
+        priority,
+        meta,
     } = u;
     let content = content
         .filter(|c| !c.is_empty())
@@ -327,9 +361,9 @@ fn push_new(state: &mut TodoState, u: TodoUpdateArgs) {
         id,
         TodoItem {
             content,
-            priority: TodoPriority::default(),
+            priority: priority.unwrap_or_default(),
             status,
-            meta: None,
+            meta,
         },
     );
 }

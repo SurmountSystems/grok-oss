@@ -33,9 +33,9 @@ use super::modes::{
     set_permission_mode, set_plan_mode, set_yolo_mode,
 };
 use super::notes::{
-    dispatch_enter_feedback_mode, dispatch_enter_remember_mode,
+    dispatch_add_session_note, dispatch_enter_feedback_mode, dispatch_enter_remember_mode,
     dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
-    dispatch_send_recap, dispatch_send_remember_note,
+    dispatch_send_recap, dispatch_send_remember_note, dispatch_show_notes,
 };
 use super::permissions::{
     dispatch_permission_cancel, dispatch_permission_followup, dispatch_permission_select,
@@ -46,7 +46,7 @@ use super::prompt::{
     dispatch_show_plan_nudge, dispatch_show_undo_tip, dispatch_show_word_select_tip,
 };
 use super::queue;
-use super::queue::dispatch_drain_queue;
+use super::queue::{dispatch_drain_queue, dispatch_force_drain_queue};
 use super::rewind::{
     dispatch_inline_edit_submit, dispatch_rewind, dispatch_rewind_back_to_mode_select,
     dispatch_rewind_cancel_offer, dispatch_rewind_confirm,
@@ -341,6 +341,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowWordSelectTip => dispatch_show_word_select_tip(app),
         Action::AcceptWordSelectTip => dispatch_accept_word_select_tip(app),
         Action::DrainQueue => dispatch_drain_queue(app),
+        Action::ForceDrainQueue => dispatch_force_drain_queue(app),
         Action::QueueRemoveShared {
             id,
             expected_version,
@@ -940,6 +941,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
+        Action::AddSessionNote { text, tags } => dispatch_add_session_note(app, text, tags),
+        Action::ShowNotes => dispatch_show_notes(app),
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),

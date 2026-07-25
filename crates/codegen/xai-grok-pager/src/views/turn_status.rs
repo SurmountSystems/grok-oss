@@ -298,6 +298,11 @@ pub fn render_turn_status(
     // Idle or parked with watchers: persistent still-running cue (not
     // scrollback — it must never scroll away). Lower priority than the
     // starting-session and drain-blocked cues above.
+    //
+    // When background subagents hold the pending-prompt queue, append a
+    // held-queue suffix so the operator sees why Enter did not start a turn.
+    // Sendable-wait holds use "Enter to send now"; idle background holds use
+    // "send now to force" (bare Enter only queues while children live).
     if (state.is_idle() || parked)
         && let Some(cue) = still_running_label(watchers)
     {
@@ -312,11 +317,24 @@ pub fn render_turn_status(
         } else {
             theme.gray
         };
-        let cue_width = (icon.width() + cue.width()).min(area.width as usize) as u16;
-        let spans = vec![
+        let queue_suffix = if held_queue > 0 && state.is_idle() {
+            if held_queue_top_sendable {
+                format!(" · {held_queue} queued — send now to force")
+            } else {
+                format!(" · {held_queue} queued")
+            }
+        } else {
+            String::new()
+        };
+        let full_label = format!("{cue}{queue_suffix}");
+        let cue_width = (icon.width() + full_label.width()).min(area.width as usize) as u16;
+        let mut spans = vec![
             Span::styled(icon, Style::default().fg(theme.accent_system)),
             Span::styled(cue, Style::default().fg(label_fg)),
         ];
+        if !queue_suffix.is_empty() {
+            spans.push(Span::styled(queue_suffix, Style::default().fg(theme.gray)));
+        }
         buf.set_line(area.x, area.y, &Line::from(spans), area.width);
         return TurnStatusOutput {
             watching_cue: show_buttons.then(|| Rect::new(area.x, area.y, cue_width, 1)),
@@ -1366,6 +1384,22 @@ mod tests {
         assert!(
             text.contains("2 subagents still running"),
             "idle with subagents must render the still-running cue, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn idle_with_subagents_and_held_queue_shows_force_hint() {
+        let mut args = idle_args(Watchers {
+            subagents: 1,
+            ..Watchers::default()
+        });
+        args.held_queue = 1;
+        args.held_queue_top_sendable = true;
+        let text = render_row_text(args, 90);
+        assert!(
+            text.contains("1 subagent still running")
+                && text.contains("1 queued — send now to force"),
+            "idle background hold must explain the queue + how to force, got: {text:?}"
         );
     }
 

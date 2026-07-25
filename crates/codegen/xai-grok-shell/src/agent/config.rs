@@ -1586,8 +1586,9 @@ pub struct Config {
     #[serde(skip)]
     pub subagent_toggle: std::collections::HashMap<String, bool>,
     /// Whether subagent spawns may use `isolation = worktree`. From
-    /// `[subagents] allow_worktree` (default `true`). When `false`, spawn
-    /// forces shared workspace (`isolation = none`).
+    /// `[subagents] allow_worktree` (default `false`). When `false`, spawn
+    /// forces shared workspace (`isolation = none`). Opt in with
+    /// `allow_worktree = true`.
     #[serde(skip)]
     pub subagent_allow_worktree: bool,
     /// Trust-independent roles from inline, user, and bundled sources.
@@ -1912,7 +1913,7 @@ impl Default for Config {
             subagents_enabled: true,
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
-            subagent_allow_worktree: true,
+            subagent_allow_worktree: false,
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
             disable_web_search: false,

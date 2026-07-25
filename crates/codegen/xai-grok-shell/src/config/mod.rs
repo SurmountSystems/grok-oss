@@ -225,15 +225,15 @@ pub struct SubagentsConfig {
     /// Whether subagent support is enabled.
     pub enabled: bool,
     /// When `false`, spawn forces `isolation = none` even if the task tool
-    /// (or a role/persona default) requested `worktree`. Default `true`
-    /// (worktrees allowed). Prefer `false` when you want children to share
-    /// the parent workspace.
+    /// (or a role/persona default) requested `worktree`. Default `false`
+    /// (Surmount OSS: no worktrees by default — children share the parent
+    /// workspace). Set `allow_worktree = true` to allow isolation=worktree.
     ///
     /// ```toml
     /// [subagents]
-    /// allow_worktree = false
+    /// allow_worktree = true
     /// ```
-    #[serde(default = "default_true")]
+    #[serde(default = "default_allow_worktree")]
     pub allow_worktree: bool,
     /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
@@ -285,14 +285,14 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub personas: std::collections::HashMap<String, SubagentPersona>,
 }
-fn default_true() -> bool {
-    true
+fn default_allow_worktree() -> bool {
+    false
 }
 impl Default for SubagentsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            allow_worktree: true,
+            allow_worktree: false,
             models: Default::default(),
             toggle: Default::default(),
             roles: Default::default(),

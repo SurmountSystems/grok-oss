@@ -341,6 +341,23 @@ Send an aside to the agent without interrupting the current task. In minimal mod
 /btw also check the error handling
 ```
 
+### `/note`
+
+Leave a **mid-session operator note** that is **not** a pending main-turn prompt. Use this while a turn, plan approval, or background subagents are running when you want a personal annotation without enqueueing text that will hijack the agent when the parent becomes idle.
+
+```
+/note check queue hold when subagents finish
+/note follow up on flake PATH #ci #hermetic
+/note                  # list notes for this session
+```
+
+- Stores the note on the **current session only** (id, time, text, optional trailing `#tags`).
+- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for on-disk join notes that agents write for other agents.
+- Bare `/note` (or alias `/notes`) lists notes as a system block. `/tasks` also shows a count when notes exist.
+- Full TUI confirms a save with a toast; minimal mode writes a short system line.
+
+Promote-to-queue / promote-to-todo is intentionally deferred.
+
 ### `/mcps`
 
 Open the MCP servers management modal.

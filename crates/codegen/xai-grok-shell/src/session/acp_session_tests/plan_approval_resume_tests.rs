@@ -389,6 +389,66 @@ async fn request_plan_approval_future_drop_clears_flag() {
         .await;
 }
 
+/// Queued prompts must not promote while plan approval is awaiting — that
+/// would start a competing turn and hijack the in-flight exit_plan_mode
+/// decision (resume re-park has no running_task).
+#[tokio::test(flavor = "current_thread")]
+async fn maybe_start_blocked_while_awaiting_plan_approval() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx, _persistence_rx) = actor_with_channels().await;
+            actor.plan_mode.lock().set_awaiting_plan_approval(true);
+
+            let (item, mut respond_rx) = user_item_with_rx("pending-plan", "client");
+            {
+                let mut state = actor.state.lock().await;
+                assert!(state.running_task.is_none(), "fixture starts idle");
+                state.pending_inputs.push_back(item);
+            }
+
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor
+                .clone()
+                .maybe_start_running_task(completion_tx)
+                .await;
+
+            {
+                let state = actor.state.lock().await;
+                assert!(
+                    state.running_task.is_none(),
+                    "must not start a turn while awaiting plan approval"
+                );
+                assert_eq!(
+                    state.pending_inputs.len(),
+                    1,
+                    "queued prompt must stay pending"
+                );
+            }
+            // Respond channel still open — prompt was not promoted/removed.
+            assert!(
+                respond_rx.try_recv().is_err(),
+                "held prompt must not resolve its RPC"
+            );
+
+            // Clear the gate and start succeeds.
+            actor.plan_mode.lock().set_awaiting_plan_approval(false);
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor
+                .clone()
+                .maybe_start_running_task(completion_tx)
+                .await;
+            {
+                let state = actor.state.lock().await;
+                assert!(
+                    state.running_task.is_some(),
+                    "after approval gate clears, queue must promote"
+                );
+            }
+        })
+        .await;
+}
+
 /// Resume with the flag set but no `plan.md` on disk: clear the bit and issue NO
 /// reverse-request.
 #[tokio::test(flavor = "current_thread")]

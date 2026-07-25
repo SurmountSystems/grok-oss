@@ -390,5 +390,9 @@ upstream-join-main *ARGS:
 upstream-assert-process-pins *ARGS:
     ./scripts/assert-process-pins.sh {{ ARGS }}
 
+# Read-only recon probe: branch, CHERRY_PICK/MERGE, UU count, onto-ish, next human action
+recon-status:
+    ./scripts/recon-status.sh
+
 upstream-sync *ARGS:
     ./scripts/sync-upstream.sh {{ ARGS }}

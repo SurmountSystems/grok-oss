@@ -184,6 +184,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
+    let mut try_drain_after_subagent_finish = false;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let changed = match session_notif.update {
@@ -362,6 +363,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
+                session_notes: crate::app::agent::SessionNotes::default(),
             };
             let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
             child_scrollback.set_appearance(agent.scrollback.appearance().clone());
@@ -599,6 +601,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             if !resuming {
                 agent.maybe_push_parked_marker();
             }
+            // Queue may have been holding for live background subagents while
+            // the parent looked idle. Once the last child finishes, try drain
+            // so queued follow-ups start without another keystroke. Deferred
+            // past this match so `agent`'s mut borrow of `app` is released.
+            try_drain_after_subagent_finish = !resuming
+                && agent.session.state.is_idle()
+                && !agent.session.pending_prompts.is_empty()
+                && !agent.holds_queue_for_background();
             true
         }
         XaiSessionUpdate::HookAnnotation { message } => {
@@ -1016,6 +1026,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         } else {
             tracing::warn!("PluginsChanged: agent or modal disappeared before skills re-fetch");
         }
+    }
+    if try_drain_after_subagent_finish {
+        let effects = super::super::dispatch::maybe_drain_queue_and_note_peek(app, parent_id);
+        app.pending_effects.extend(effects);
     }
     if let Some(agent) = app.agents.get_mut(&parent_id) {
         if let Some(seq) = meta.event_seq

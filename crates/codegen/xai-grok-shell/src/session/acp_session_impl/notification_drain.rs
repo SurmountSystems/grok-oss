@@ -147,6 +147,38 @@ impl SessionActor {
                 }
                 return;
             }
+            // Parked / awaiting plan approval has no running_task (resume
+            // re-park is detached). Promoting a queued prompt would start a
+            // new turn while exit_plan_mode is still waiting on the user —
+            // that hijacks the in-flight plan decision. Hold until approve /
+            // revise / abandon clears the gate.
+            let plan_approval_open = self.plan_mode.lock().is_awaiting_plan_approval()
+                || crate::session::pending_interaction::has_parked_plan_approval(
+                    &self.pending_interactions,
+                );
+            if plan_approval_open {
+                let queue_depth = state.pending_inputs.len();
+                if queue_depth > 0 {
+                    xai_grok_telemetry::unified_log::debug(
+                        "shell.prompt.start_blocked",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "reason": "plan_approval_open",
+                            "queue_depth": queue_depth,
+                        })),
+                    );
+                    tracing::debug!(
+                        target: "qtrace",
+                        pid = std::process::id(),
+                        event = "server_start_blocked",
+                        reason = "plan_approval_open",
+                        queue_depth,
+                        session = self.session_info.id.0.as_ref(),
+                        "maybe_start_running_task blocked: plan approval is open",
+                    );
+                }
+                return;
+            }
             if state.pending_inputs.is_empty() {
                 return;
             }
@@ -167,6 +199,13 @@ impl SessionActor {
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
         if state.running_task.is_some() || state.pending_inputs.is_empty() {
+            return;
+        }
+        if self.plan_mode.lock().is_awaiting_plan_approval()
+            || crate::session::pending_interaction::has_parked_plan_approval(
+                &self.pending_interactions,
+            )
+        {
             return;
         }
 

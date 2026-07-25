@@ -42,6 +42,7 @@ pub mod mcps;
 pub mod model;
 pub mod multiline;
 pub mod new;
+pub mod note;
 pub mod personas;
 pub mod plan;
 pub mod plugin;
@@ -142,6 +143,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(usage::UsageCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
+        Arc::new(note::NoteCommand),
         Arc::new(release_notes::ReleaseNotesCommand),
         Arc::new(tutorial::TutorialCommand),
         Arc::new(config_agents::ConfigAgentsCommand),
@@ -690,6 +692,19 @@ mod tests {
         assert!(
             reg.get("tasks").is_some(),
             "/tasks should be registered in builtins"
+        );
+    }
+    #[test]
+    fn note_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("note").is_some(),
+            "/note should be registered in builtins"
+        );
+        assert_eq!(
+            reg.get("notes").expect("/notes alias").name(),
+            "note",
+            "/notes should alias /note"
         );
     }
     #[test]

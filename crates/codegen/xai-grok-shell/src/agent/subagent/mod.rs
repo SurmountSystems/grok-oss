@@ -213,8 +213,8 @@ pub(crate) struct SubagentSpawnContext {
     /// Omitted agents default to enabled (`true`).
     pub subagent_toggle: std::collections::HashMap<String, bool>,
     /// Whether `isolation = worktree` is allowed. From
-    /// `[subagents] allow_worktree` (default `true`). When `false`, spawn
-    /// forces shared workspace.
+    /// `[subagents] allow_worktree` (default `false`). When `false`, spawn
+    /// forces shared workspace. Opt in with `allow_worktree = true`.
     pub subagent_allow_worktree: bool,
     /// Whether web search is force-disabled via `--disable-web-search`.
     /// Inherited from the parent session.

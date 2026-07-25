@@ -54,6 +54,22 @@ pub(super) fn task_model_override_error(
     let requested = requested?;
     crate::agent::models::task_model_error_for_catalog(requested, available, is_session_auth)
 }
+
+/// Apply global `[subagents] allow_worktree` policy to resolved isolation.
+///
+/// When worktrees are banned (`allow_worktree == false`), any non-`None`
+/// isolation is forced to [`SubagentIsolationMode::None`]. When allowed, the
+/// resolved isolation is returned unchanged.
+pub(super) fn apply_allow_worktree_policy(
+    allow_worktree: bool,
+    isolation: xai_tool_types::SubagentIsolationMode,
+) -> xai_tool_types::SubagentIsolationMode {
+    if !allow_worktree && isolation != xai_tool_types::SubagentIsolationMode::None {
+        xai_tool_types::SubagentIsolationMode::None
+    } else {
+        isolation
+    }
+}
 /// Runtime adapter for one shell child. Shared lifecycle state is owned by the
 /// `xai-grok-tools` coordinator actor and reached only through `reporter`.
 #[tracing::instrument(
@@ -131,14 +147,14 @@ pub(crate) async fn run_shell_child(
         &definition,
     );
     // Global policy: `[subagents] allow_worktree = false` forces shared workspace.
-    if !ctx.subagent_allow_worktree
-        && effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None
-    {
+    let isolation_before = effective_runtime.isolation;
+    effective_runtime.isolation =
+        apply_allow_worktree_policy(ctx.subagent_allow_worktree, isolation_before);
+    if effective_runtime.isolation != isolation_before {
         tracing::info!(
             subagent_id = %request.id,
             "Forcing isolation=none: [subagents] allow_worktree = false"
         );
-        effective_runtime.isolation = xai_tool_types::SubagentIsolationMode::None;
     }
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {

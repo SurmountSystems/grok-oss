@@ -1,8 +1,10 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use super::handle_request::{
-    canonical_total_tokens, record_subagent_usage, usage_is_incomplete,
+    apply_allow_worktree_policy, canonical_total_tokens, record_subagent_usage,
+    usage_is_incomplete,
 };
+use xai_tool_types::SubagentIsolationMode;
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, test_gateway_with_receiver,
 };
@@ -26,6 +28,32 @@ fn cancellation_makes_an_otherwise_complete_usage_snapshot_incomplete() {
     assert!(usage_is_incomplete(false, true, 10, false));
     assert!(!usage_is_incomplete(false, false, 0, false));
     assert!(usage_is_incomplete(true, false, 0, false));
+}
+
+/// Spawn-path force-none: `[subagents] allow_worktree = false` must collapse
+/// worktree isolation to shared workspace before any worktree is created.
+#[test]
+fn apply_allow_worktree_policy_forces_none_when_banned() {
+    assert_eq!(
+        apply_allow_worktree_policy(false, SubagentIsolationMode::Worktree),
+        SubagentIsolationMode::None,
+        "allow=false + worktree → force none"
+    );
+    assert_eq!(
+        apply_allow_worktree_policy(true, SubagentIsolationMode::Worktree),
+        SubagentIsolationMode::Worktree,
+        "allow=true + worktree → unchanged"
+    );
+    assert_eq!(
+        apply_allow_worktree_policy(false, SubagentIsolationMode::None),
+        SubagentIsolationMode::None,
+        "allow=false + already none → no-op"
+    );
+    assert_eq!(
+        apply_allow_worktree_policy(true, SubagentIsolationMode::None),
+        SubagentIsolationMode::None,
+        "allow=true + none → unchanged"
+    );
 }
 #[tokio::test]
 async fn usage_ack_precedes_terminal_presentation() {

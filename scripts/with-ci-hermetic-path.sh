@@ -7,8 +7,9 @@
 # desktop PATH. Interactive `nix develop` / default shell stay impure.
 #
 # Expectation: already inside `nix develop .#ci` (or equivalent) so PATH
-# begins with ci-tools + stdenv store bins. This script drops everything
-# that is not under /nix/store.
+# begins with ci-tools + stdenv store bins (rustc, nextest, git, python3,
+# mold, coreutils, …). This script drops everything that is not under
+# /nix/store. Tools tests spawn (e.g. python3) must be in packages.ci-tools.
 #
 # Escape hatch (debug only): GROK_CI_ALLOW_HOST_PATH=1 keeps the full PATH.
 #

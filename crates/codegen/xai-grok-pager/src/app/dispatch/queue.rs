@@ -196,6 +196,16 @@ impl QueueDrain {
 }
 
 pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
+    maybe_drain_queue_with(agent, false)
+}
+
+/// Drain the next queued prompt even when background subagents would hold the
+/// queue. Used by send-now while the parent is idle with live children.
+pub(super) fn force_drain_queue_past_background(agent: &mut AgentView) -> QueueDrain {
+    maybe_drain_queue_with(agent, true)
+}
+
+fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -> QueueDrain {
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
@@ -216,6 +226,14 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         log_blocked("turn_running", sid);
         return QueueDrain::blocked();
     }
+    // Hold the drain while plan approval is open. A pending follow-up (including
+    // a deferred `/plan <desc>`) must not start a new turn that would cancel or
+    // corrupt the in-flight exit_plan_mode decision — it waits for a clean
+    // independent next turn after the user approves, revises, or quits.
+    if agent.plan_approval_view.is_some() {
+        log_blocked("plan_approval_open", sid);
+        return QueueDrain::blocked();
+    }
     // Hold the drain during an in-flight model switch. See the
     // `model_switch_pending` field doc for why a reconnect must clear it.
     if agent.session.model_switch_pending {
@@ -224,6 +242,13 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     }
     if agent.session.loading_replay {
         log_blocked("loading_replay", sid);
+        return QueueDrain::blocked();
+    }
+    // Parent looks idle but background subagents are still live: hold the
+    // pending-prompt queue so typed Enter does not start a conflicting main
+    // turn. Send-now uses `force_drain_queue_past_background` to bypass.
+    if !bypass_background_hold && agent.holds_queue_for_background() {
+        log_blocked("background_subagents_live", sid);
         return QueueDrain::blocked();
     }
     // Server-owned next turn: a non-running server row (including this
@@ -383,7 +408,31 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
 
             let combined_segs = queued.combined_texts.clone();
-            let effects = if let Some(mut blocks) = queued.wire_blocks {
+            // Deferred enter-plan is checked first so wire/images/combined arms
+            // cannot drop the mode switch. Slash `/plan <desc>` only stamps
+            // plain text today; non-plain enter-plan rows fail closed to
+            // `SetModeThenPrompt` (display text + skill ranges) rather than
+            // sending agent-mode blocks.
+            let effects = if queued.enter_plan_mode {
+                if queued.wire_blocks.is_some() || !queued.images.is_empty() || multi {
+                    tracing::warn!(
+                        target: "qtrace",
+                        has_wire = queued.wire_blocks.is_some(),
+                        image_count = queued.images.len(),
+                        multi,
+                        "enter_plan_mode row had non-plain payload; draining as plain SetModeThenPrompt"
+                    );
+                }
+                agent.plan_mode_pending = Some(true);
+                vec![Effect::SetModeThenPrompt {
+                    session_id,
+                    mode_id: acp::SessionModeId::new("plan"),
+                    agent_id,
+                    text: queued.text,
+                    prompt_id,
+                    skill_token_ranges: queued.skill_token_ranges,
+                }]
+            } else if let Some(mut blocks) = queued.wire_blocks {
                 // Skill injection: send structured blocks.
                 // Annotate the first text block's meta with the display text
                 // so the pager can reconstruct the clean prompt on session
@@ -970,6 +1019,21 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
     drain.effects
 }
 
+/// Force-drain past background-subagent hold; same page-flip bookkeeping.
+pub(crate) fn force_drain_queue_past_background_and_note_peek(
+    app: &mut AppView,
+    agent_id: AgentId,
+) -> Vec<Effect> {
+    let drain = {
+        let Some(agent) = app.agents.get_mut(&agent_id) else {
+            return vec![];
+        };
+        force_drain_queue_past_background(agent)
+    };
+    note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+    drain.effects
+}
+
 /// Try to drain the next queued prompt (triggered after editing completes).
 pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
     if app.reconnect_pending {
@@ -979,6 +1043,38 @@ pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
     maybe_drain_queue_and_note_peek(app, id)
+}
+
+/// Drain past a background-subagent hold (send-now while parent idle + children live).
+///
+/// Toast is applied here (not at the key handler) so we only claim "starting
+/// despite background subagents" when the force path actually drained. Hard
+/// gates that force cannot bypass (plan approval, model switch, …) get an
+/// accurate message instead of a misleading success toast.
+pub(super) fn dispatch_force_drain_queue(app: &mut AppView) -> Vec<Effect> {
+    if app.reconnect_pending {
+        return vec![];
+    }
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let plan_approval_open = app
+        .agents
+        .get(&id)
+        .is_some_and(|a| a.plan_approval_view.is_some());
+    let effects = force_drain_queue_past_background_and_note_peek(app, id);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        if effects.is_empty() {
+            if plan_approval_open {
+                agent.show_toast("Still waiting on plan approval");
+            }
+            // Other hard gates (model switch, server queue owns next, …): leave
+            // the queue held without a false "starting despite…" toast.
+        } else {
+            agent.show_toast("Send now — starting despite background subagents");
+        }
+    }
+    effects
 }
 
 /// `Action::QueueInterjectShared` arm: map the (possibly edited) queue
@@ -2586,6 +2682,330 @@ mod tests {
         );
     }
 
+    /// Idle agent with plan approval open: pending rows must not drain into a
+    /// competing turn (would hijack / stale-cancel the in-flight approval).
+    #[test]
+    fn drain_blocked_when_plan_approval_open() {
+        use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
+        use crate::views::prompt_widget::StashedPrompt;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "follow-up during approval");
+
+        let agent = app.agents.get_mut(&id).unwrap();
+        assert!(agent.session.state.is_idle());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            ExitPlanModeExtRequest {
+                session_id: "s".into(),
+                tool_call_id: "tc".into(),
+                plan_content: Some("# Plan".into()),
+            },
+            StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        ));
+
+        let effects = maybe_drain_queue(agent).effects;
+        assert!(
+            effects.is_empty(),
+            "drain must hold while plan approval is open, got {effects:?}"
+        );
+        assert_eq!(
+            agent.session.pending_prompts.len(),
+            1,
+            "follow-up stays queued until approval settles"
+        );
+        assert!(agent.plan_approval_view.is_some());
+    }
+
+    /// Deferred `/plan <desc>` row drains as SetModeThenPrompt when idle.
+    #[test]
+    fn deferred_enter_plan_row_drains_as_set_mode_then_prompt() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .session
+            .enqueue_enter_plan_prompt("design the API".into(), Vec::new());
+        assert!(agent.session.pending_prompts[0].enter_plan_mode);
+
+        let effects = maybe_drain_queue(agent).effects;
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::SetModeThenPrompt {
+                    mode_id,
+                    text,
+                    ..
+                }] if &*mode_id.0 == "plan" && text == "design the API"
+            ),
+            "expected SetModeThenPrompt, got {effects:?}"
+        );
+        assert_eq!(agent.plan_mode_pending, Some(true));
+        assert!(agent.session.pending_prompts.is_empty());
+    }
+
+    /// enter_plan_mode is honored even when a future path stamps the flag onto
+    /// a non-plain row (images / wire / combined) — fail closed to
+    /// SetModeThenPrompt rather than dropping the mode switch.
+    #[test]
+    fn enter_plan_mode_non_plain_row_still_sets_mode() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        let queue_id = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::agent::QueuedPrompt {
+                images: vec![crate::app::agent_view::test_fixtures::test_pasted_image()],
+                enter_plan_mode: true,
+                ..crate::app::agent::QueuedPrompt::plain(
+                    queue_id,
+                    "plan with image",
+                    crate::app::agent::QueueEntryKind::Prompt,
+                )
+            });
+
+        let effects = maybe_drain_queue(agent).effects;
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::SetModeThenPrompt {
+                    mode_id,
+                    text,
+                    ..
+                }] if &*mode_id.0 == "plan" && text == "plan with image"
+            ),
+            "enter_plan_mode must win over the images arm, got {effects:?}"
+        );
+        assert_eq!(agent.plan_mode_pending, Some(true));
+    }
+
+    /// Force-drain while plan approval is open must not claim "starting despite
+    /// background subagents" — toast reports the hard gate instead.
+    #[test]
+    fn force_drain_while_plan_approval_toasts_waiting_not_starting() {
+        use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
+        use crate::views::prompt_widget::StashedPrompt;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "follow-up");
+
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut info = running_subagent_info("bg-child");
+        info.is_background = true;
+        agent.subagent_sessions.insert("bg-child".into(), info);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            ExitPlanModeExtRequest {
+                session_id: "s".into(),
+                tool_call_id: "tc".into(),
+                plan_content: Some("# Plan".into()),
+            },
+            StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        ));
+        assert!(agent.holds_queue_for_background());
+        assert!(agent.plan_approval_view.is_some());
+
+        let effects = dispatch(Action::ForceDrainQueue, &mut app);
+        assert!(
+            effects.is_empty(),
+            "force drain cannot bypass plan approval, got {effects:?}"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Still waiting on plan approval"),
+            "must not toast success when approval still blocks"
+        );
+    }
+
+    /// Idle parent + live background subagent: local queue holds (does not start
+    /// a conflicting main turn). Send-now / force drain still goes through.
+    #[test]
+    fn background_subagent_holds_queue_while_parent_idle() {
+        use crate::app::agent::AgentState;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "follow-up while children run");
+
+        let agent = app.agents.get_mut(&id).unwrap();
+        assert!(agent.session.state.is_idle());
+        // Without children, idle drain starts the turn immediately.
+        assert!(
+            !agent.holds_queue_for_background(),
+            "predicate false with no live children"
+        );
+
+        agent.subagent_sessions.insert("bg-child".into(), {
+            let mut info = running_subagent_info("bg-child");
+            info.is_background = true;
+            info
+        });
+        assert!(
+            agent.holds_queue_for_background(),
+            "live standalone subagent holds the queue"
+        );
+        assert_eq!(
+            agent.held_queue_count(),
+            1,
+            "held row feeds the still-running cue"
+        );
+
+        let effects = maybe_drain_queue(agent).effects;
+        assert!(
+            effects.is_empty(),
+            "auto drain must hold while background subagents live, got {effects:?}"
+        );
+        assert_eq!(
+            agent.session.pending_prompts.len(),
+            1,
+            "follow-up stays queued"
+        );
+        assert!(
+            matches!(agent.session.state, AgentState::Idle),
+            "parent stays idle"
+        );
+
+        // Force path (send-now while idle) bypasses the hold.
+        let effects = force_drain_queue_past_background(agent).effects;
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
+            "force drain must start the turn despite live children, got {effects:?}"
+        );
+        assert!(agent.session.pending_prompts.is_empty());
+    }
+
+    /// ForceDrainQueue action toasts success only when the turn actually starts.
+    #[test]
+    fn force_drain_dispatch_toasts_starting_despite_subagents() {
+        use crate::app::agent::AgentState;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "follow-up while children run");
+
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut info = running_subagent_info("bg-child");
+        info.is_background = true;
+        agent.subagent_sessions.insert("bg-child".into(), info);
+        assert!(matches!(agent.session.state, AgentState::Idle));
+        assert!(agent.holds_queue_for_background());
+
+        let effects = dispatch(Action::ForceDrainQueue, &mut app);
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
+            "expected SendPrompt, got {effects:?}"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Send now — starting despite background subagents"),
+        );
+    }
+
+    /// When the last background subagent finishes, the hold lifts so a later
+    /// drain can start the queued turn.
+    #[test]
+    fn background_subagent_hold_lifts_when_children_finish() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "run after children");
+
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut info = running_subagent_info("bg-child");
+        info.is_background = true;
+        agent.subagent_sessions.insert("bg-child".into(), info);
+
+        assert!(maybe_drain_queue(agent).effects.is_empty());
+        assert_eq!(agent.session.pending_prompts.len(), 1);
+
+        agent
+            .subagent_sessions
+            .get_mut("bg-child")
+            .unwrap()
+            .finished = true;
+        assert!(
+            !agent.holds_queue_for_background(),
+            "finished children no longer hold"
+        );
+        assert_eq!(
+            agent.held_queue_count(),
+            0,
+            "held-count drops when the hold lifts"
+        );
+
+        let effects = maybe_drain_queue(agent).effects;
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
+            "queue drains once children finish, got {effects:?}"
+        );
+    }
+
+    /// Running monitors alone do **not** hold the queue (they can run forever).
+    #[test]
+    fn monitors_alone_do_not_hold_queue() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        enqueue_local(&mut app, id, "should drain");
+
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.bg_tasks.insert(
+            "mon-1".into(),
+            crate::app::agent::BgTaskState {
+                task_id: "mon-1".into(),
+                tool_call_id: "call-mon-1".into(),
+                command: "tail -f log".into(),
+                description: Some("watch log".into()),
+                cwd: "/tmp".into(),
+                output_file: "/tmp/out".into(),
+                status: crate::app::agent::BgTaskStatus::Running,
+                start_time: std::time::SystemTime::now(),
+                end_time: None,
+                exit_code: None,
+                signal: None,
+                stdout: String::new(),
+                stdout_line_count: 0,
+                truncated: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                is_monitor: true,
+                restored_from_replay: false,
+            },
+        );
+        assert!(
+            !agent.holds_queue_for_background(),
+            "monitors are not part of the subagent hold"
+        );
+        let effects = maybe_drain_queue(agent).effects;
+        assert!(
+            matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
+            "monitor-only session must not hold the queue, got {effects:?}"
+        );
+    }
+
     /// T1 regression: once the model resumes streaming in the SAME turn, the
     /// parked/stopped look must flip off (the running chrome returns) even if
     /// the wait tool's terminal ToolCallUpdate never reached this client —
@@ -2702,6 +3122,17 @@ mod tests {
         agent.session.pending_prompts.clear();
         agent.session.enqueue_prompt("plain follow-up".into());
         assert!(agent.held_queue_top_sendable());
+
+        // Deferred enter-plan is prompt-like for display but refuses force —
+        // do not advertise "Enter to send now".
+        agent.session.pending_prompts.clear();
+        agent
+            .session
+            .enqueue_enter_plan_prompt("plan follow-up".into(), Vec::new());
+        assert!(
+            !agent.held_queue_top_sendable(),
+            "enter-plan top row must not advertise send-now"
+        );
 
         // A server row (renders first in the merge) is always sendable.
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
