@@ -37,8 +37,7 @@ pub(crate) fn validate_no_duplicate_ids(updates: &[TodoUpdate]) -> Result<(), To
 /// Id prefixes owned by skills / session layers. On `merge=false` full replace,
 /// items with these prefixes are **kept unless mentioned** in the replace
 /// payload (so a skill cannot silently wipe foreign namespaces).
-pub const PROTECTED_TODO_PREFIXES: &[&str] =
-    &["plan:", "impl:", "pr-", "recon:", "residual:"];
+pub const PROTECTED_TODO_PREFIXES: &[&str] = &["plan:", "impl:", "pr-", "recon:", "residual:"];
 
 /// True when `id` starts with a protected skill/session namespace prefix.
 pub fn is_protected_todo_id(id: &str) -> bool {
@@ -1161,11 +1160,7 @@ mod tests {
         let seed = TodoWriteInput {
             merge: false,
             todos: vec![
-                make_update(
-                    "plan:1",
-                    Some("Plan step"),
-                    Some(TodoStatus::Pending),
-                ),
+                make_update("plan:1", Some("Plan step"), Some(TodoStatus::Pending)),
                 make_update(
                     "recon:inventory",
                     Some("Inventory crates"),

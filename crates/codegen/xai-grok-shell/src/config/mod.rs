@@ -219,7 +219,7 @@ impl MemoryConfig {
 /// `.grok/config.toml`. Enabled by default; can be disabled via
 /// `GROK_SUBAGENTS=0` env var or `[subagents] enabled = false`
 /// in config.toml.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default)]
 pub struct SubagentsConfig {
     /// Whether subagent support is enabled.
@@ -287,18 +287,6 @@ pub struct SubagentsConfig {
 }
 fn default_allow_worktree() -> bool {
     false
-}
-impl Default for SubagentsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            allow_worktree: false,
-            models: Default::default(),
-            toggle: Default::default(),
-            roles: Default::default(),
-            personas: Default::default(),
-        }
-    }
 }
 use xai_grok_subagent_resolution::config::{SubagentPersona, SubagentRole};
 impl SubagentsConfig {

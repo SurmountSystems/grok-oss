@@ -305,6 +305,8 @@ mod tests {
             "model",
             "multiline",
             "new",
+            "note",
+            "notes",
             "onboarding",
             "personas",
             "plan",

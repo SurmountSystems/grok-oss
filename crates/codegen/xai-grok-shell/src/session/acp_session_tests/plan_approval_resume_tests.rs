@@ -408,10 +408,7 @@ async fn maybe_start_blocked_while_awaiting_plan_approval() {
             }
 
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
-            actor
-                .clone()
-                .maybe_start_running_task(completion_tx)
-                .await;
+            actor.clone().maybe_start_running_task(completion_tx).await;
 
             {
                 let state = actor.state.lock().await;
@@ -434,10 +431,7 @@ async fn maybe_start_blocked_while_awaiting_plan_approval() {
             // Clear the gate and start succeeds.
             actor.plan_mode.lock().set_awaiting_plan_approval(false);
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
-            actor
-                .clone()
-                .maybe_start_running_task(completion_tx)
-                .await;
+            actor.clone().maybe_start_running_task(completion_tx).await;
             {
                 let state = actor.state.lock().await;
                 assert!(
