@@ -326,9 +326,12 @@ pub async fn set_auto_update(value: bool) -> Result<()> {
 /// Persist `[session].auto_compact_threshold_percent` via `update_config`.
 ///
 /// Clears any absolute-token preference so percent mode is active.
-/// Restart-required: sessions resolve the threshold once at build time.
-/// Callers should pass a value in `0..=100` (the settings modal uses discrete
-/// choices 85/90/95/98).
+/// After a successful disk write, the pager live-applies open sessions via ACP
+/// `x.ai/auto_compact_threshold_changed` → `SessionCommand::SetAutoCompactThreshold`
+/// (no restart). Callers should pass a value in `0..=100` (settings modal:
+/// 85/90/95/98). Env `GROK_AUTO_COMPACT_THRESHOLD_*` still wins on the next
+/// full resolve (spawn / model switch); live-apply pushes the committed
+/// Settings value onto open session Cells until then.
 pub async fn set_auto_compact_threshold_percent(value: u8) -> Result<()> {
     update_config(|cfg| {
         cfg.session.auto_compact_threshold_percent = Some(value);
@@ -340,9 +343,10 @@ pub async fn set_auto_compact_threshold_percent(value: u8) -> Result<()> {
 /// Persist `[session].auto_compact_threshold_tokens` via `update_config`.
 ///
 /// Clears the session percent field so absolute-token mode wins the resolver
-/// (still below env overrides). Restart-required for open sessions.
-/// Grok 4.5 card presets: 200_000 (long-context price cliff) and 475_000
-/// (95% of the 500k window).
+/// (still below env overrides on full resolve). Open sessions pick up the
+/// committed tokens value live after successful persist (same ACP path as
+/// percent mode). Grok 4.5 card presets: 200_000 (long-context price cliff)
+/// and 475_000 (95% of the 500k window).
 pub async fn set_auto_compact_threshold_tokens(value: u64) -> Result<()> {
     update_config(|cfg| {
         cfg.session.auto_compact_threshold_tokens = Some(value);

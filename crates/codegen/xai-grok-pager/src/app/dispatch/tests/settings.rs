@@ -1245,7 +1245,7 @@ fn set_auto_compact_threshold_idempotent_re_commit() {
 }
 
 #[test]
-fn set_auto_compact_threshold_toast_includes_restart_marker() {
+fn set_auto_compact_threshold_toast_no_restart() {
     use crate::settings::AutoCompactThresholdChoice;
     let mut app = test_app_with_agent();
     let _ = dispatch(
@@ -1258,8 +1258,8 @@ fn set_auto_compact_threshold_toast_includes_restart_marker() {
         "toast must include the value, got {toast:?}"
     );
     assert!(
-        toast.contains("restart to apply"),
-        "toast must include the deferred-effect cue, got {toast:?}"
+        !toast.contains("restart to apply"),
+        "live-applied setting must not toast restart, got {toast:?}"
     );
 }
 
@@ -1359,8 +1359,7 @@ fn pr13_show_tips_rollback_from_none_state_restores_none() {
 }
 /// Toast text includes the "(restart to apply)" cue —
 /// matches the modal pill so the user gets consistent restart
-/// feedback through both surfaces. Mirror of
-/// `set_auto_compact_threshold_percent_toast_includes_restart_marker`.
+/// feedback through both surfaces (startup-only settings like show_tips).
 #[test]
 fn pr13_set_show_tips_toast_includes_restart_marker() {
     let mut app = test_app_with_agent();

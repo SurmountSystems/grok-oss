@@ -37,13 +37,177 @@ pub(crate) fn validate_no_duplicate_ids(updates: &[TodoUpdate]) -> Result<(), To
 /// Id prefixes owned by skills / session layers. On `merge=false` full replace,
 /// items with these prefixes are **kept unless mentioned** in the replace
 /// payload (so a skill cannot silently wipe foreign namespaces).
-pub const PROTECTED_TODO_PREFIXES: &[&str] = &["plan:", "impl:", "pr-", "recon:", "residual:"];
+pub const PROTECTED_TODO_PREFIXES: &[&str] =
+    &["plan:", "impl:", "pr-", "recon:", "residual:", "ask:"];
 
 /// True when `id` starts with a protected skill/session namespace prefix.
 pub fn is_protected_todo_id(id: &str) -> bool {
     PROTECTED_TODO_PREFIXES
         .iter()
         .any(|prefix| id.starts_with(prefix))
+}
+
+/// Prefix for auto-seeded user-ask todos (`ask:<prompt_id>`).
+pub const ASK_TODO_PREFIX: &str = "ask:";
+
+/// Max open `ask:*` todos kept on the board (oldest pruned first).
+pub const MAX_ASK_TODOS: usize = 20;
+
+/// Truncate ask content for the board (chars, not bytes).
+pub const ASK_CONTENT_MAX_CHARS: usize = 120;
+
+/// Build a stable protected id for a user ask from its prompt id.
+pub fn ask_todo_id(prompt_id: &str) -> String {
+    let slug: String = prompt_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(64)
+        .collect();
+    let slug = if slug.is_empty() { "turn".into() } else { slug };
+    format!("{ASK_TODO_PREFIX}{slug}")
+}
+
+/// Truncate user text for an ask todo content field.
+pub fn truncate_ask_content(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_owned();
+    }
+    let mut out: String = trimmed.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Upsert one `ask:*` item and prune oldest asks beyond [`MAX_ASK_TODOS`].
+///
+/// Merge-only semantics: does not clear non-ask todos. Returns `true` only when
+/// membership, content, or prune actually changed the board.
+pub fn seed_ask_todo(state: &mut TodoState, prompt_id: &str, content: &str) -> bool {
+    let content = truncate_ask_content(content, ASK_CONTENT_MAX_CHARS);
+    if content.is_empty() {
+        return false;
+    }
+    let id = ask_todo_id(prompt_id);
+    let mut changed = false;
+    if state.has_id(&id) {
+        let prior = state
+            .todo_items_with_ids()
+            .find(|(i, _)| i.as_str() == id.as_str())
+            .map(|(_, item)| item.content.clone());
+        if prior.as_deref() != Some(content.as_str()) {
+            let _ = state.update(&id, Some(&content), None, None, None);
+            changed = true;
+        }
+    } else {
+        state.push(
+            id.clone(),
+            TodoItem {
+                content,
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: Some(serde_json::json!({
+                    "kind": "work",
+                    "namespace": "ask",
+                })),
+            },
+        );
+        changed = true;
+    }
+    let before_len = state.todo_items().count();
+    prune_old_ask_todos(state, MAX_ASK_TODOS);
+    if state.todo_items().count() != before_len {
+        changed = true;
+    }
+    changed
+}
+
+/// Drop oldest `ask:*` items (by insertion order) when over `max_asks`.
+/// Prefers pruning completed/cancelled asks first, then oldest pending.
+pub fn prune_old_ask_todos(state: &mut TodoState, max_asks: usize) {
+    let ask_ids: Vec<TodoId> = state
+        .todo_items_with_ids()
+        .filter(|(id, _)| id.starts_with(ASK_TODO_PREFIX))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if ask_ids.len() <= max_asks {
+        return;
+    }
+    let mut removable: Vec<TodoId> = ask_ids
+        .iter()
+        .filter(|id| {
+            state
+                .todo_items_with_ids()
+                .find(|(i, _)| *i == *id)
+                .map(|(_, item)| {
+                    matches!(item.status, TodoStatus::Completed | TodoStatus::Cancelled)
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    for id in &ask_ids {
+        if removable.len() >= ask_ids.len().saturating_sub(max_asks) {
+            break;
+        }
+        if !removable.contains(id) {
+            removable.push(id.clone());
+        }
+    }
+    let to_remove = ask_ids.len().saturating_sub(max_asks);
+    for id in removable.into_iter().take(to_remove) {
+        state.todos.shift_remove(&id);
+    }
+}
+
+/// Choose the `plan.json` snapshot after compaction.
+///
+/// Prefer the live Resources `TodoState`. Never force an empty wipe when the
+/// live board still has items (that was the historical lie on compact).
+pub fn plan_json_snapshot_after_compact(live: Option<&TodoState>) -> TodoState {
+    live.cloned().unwrap_or_default()
+}
+
+/// Resolve durable todo state on session resume.
+///
+/// Prefer non-empty Resources / `tool_state.json`. When tool state wins, still
+/// **union in** any `ask:*` items present only in `plan.json` (backstop when
+/// asks were mirrored to plan but not yet flushed to tool_state). Fall back to
+/// a non-empty `plan.json` when tool state is missing or empty.
+///
+/// Returns `(state, needs_tool_state_persist)` — the bool is true when the
+/// caller should write Resources / `tool_state.json` (seed from plan or ask
+/// union changed the tool snapshot).
+pub fn effective_todo_state_on_resume(
+    from_tool_state: Option<TodoState>,
+    from_plan_json: Option<TodoState>,
+) -> Option<(TodoState, bool)> {
+    match from_tool_state {
+        Some(mut tool) if !tool.is_empty() => {
+            let mut merged_asks = false;
+            if let Some(plan) = from_plan_json.as_ref() {
+                for (id, item) in plan.todo_items_with_ids() {
+                    if id.starts_with(ASK_TODO_PREFIX) && !tool.has_id(id) {
+                        tool.push(id.clone(), item.clone());
+                        merged_asks = true;
+                    }
+                }
+            }
+            Some((tool, merged_asks))
+        }
+        _ => from_plan_json.filter(|p| !p.is_empty()).map(|p| (p, true)), // tool empty → seed from plan; must persist tool_state
+    }
+}
+
+/// True when `text` is slash-command shaped (leading `/` after trim) so ask
+/// auto-seed should skip — builtins and skill slash seed their own boards.
+pub fn is_slash_shaped_user_text(text: &str) -> bool {
+    text.trim_start().starts_with('/')
 }
 
 /// Build a [`TodoItem`] from a write update (replace or insert-on-merge).
@@ -63,8 +227,9 @@ fn item_from_update(u: &TodoUpdate) -> TodoItem {
 }
 
 /// `merge=false`: the incoming list replaces the existing todo state, except
-/// **protected-prefix** items (`plan:`, `impl:`, `pr-`, `recon:`, `residual:`)
-/// that are **not** listed in `updates` are preserved (keep-unless-mentioned).
+/// **protected-prefix** items (`plan:`, `impl:`, `pr-`, `recon:`, `residual:`,
+/// `ask:`) that are **not** listed in `updates` are preserved
+/// (keep-unless-mentioned).
 /// If `content` is omitted for an item, the `id` is used as a fallback.
 /// If `status` is omitted, it defaults to `Pending`.
 /// Optional `priority` / `meta` on each update are applied when present.
@@ -291,13 +456,13 @@ pub struct TodoWriteInput {
     /// list by id (partial updates are allowed — leave unchanged fields
     /// undefined). When explicitly set to false, the provided todos replace
     /// the existing list, except protected-prefix ids (`plan:`, `impl:`,
-    /// `pr-`, `recon:`, `residual:`) that are not mentioned are kept.
+    /// `pr-`, `recon:`, `residual:`, `ask:`) that are not mentioned are kept.
     #[serde(
         default = "default_merge",
         deserialize_with = "crate::types::schema::deserialize_lenient_bool"
     )]
     #[schemars(
-        description = "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list. Protected-prefix ids (plan:, impl:, pr-, recon:, residual:) not mentioned in the replace set are preserved so foreign namespaces are not silently wiped."
+        description = "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list. Protected-prefix ids (plan:, impl:, pr-, recon:, residual:, ask:) not mentioned in the replace set are preserved so foreign namespaces are not silently wiped."
     )]
     pub merge: bool,
 
@@ -1285,9 +1450,245 @@ mod tests {
         assert!(is_protected_todo_id("pr-3:fix"));
         assert!(is_protected_todo_id("recon:map"));
         assert!(is_protected_todo_id("residual:open"));
+        assert!(is_protected_todo_id("ask:turn-1"));
         assert!(!is_protected_todo_id("1"));
         assert!(!is_protected_todo_id("scratch"));
         assert!(!is_protected_todo_id("planning")); // not plan: prefix
+        assert!(!is_protected_todo_id("asking")); // not ask: prefix
+    }
+
+    #[test]
+    fn plan_json_snapshot_after_compact_keeps_live_board() {
+        let mut live = TodoState::default();
+        live.push(
+            "impl:1".into(),
+            TodoItem {
+                content: "still open".into(),
+                priority: TodoPriority::High,
+                status: TodoStatus::Pending,
+                meta: None,
+            },
+        );
+        let snap = plan_json_snapshot_after_compact(Some(&live));
+        assert!(!snap.is_empty());
+        assert!(snap.has_id("impl:1"));
+        // Empty live → empty snapshot is honest (not a forced wipe of non-empty).
+        assert!(plan_json_snapshot_after_compact(None).is_empty());
+        assert!(plan_json_snapshot_after_compact(Some(&TodoState::default())).is_empty());
+    }
+
+    #[test]
+    fn effective_todo_state_on_resume_prefers_tool_state() {
+        let mut tool = TodoState::default();
+        tool.push(
+            "impl:a".into(),
+            TodoItem {
+                content: "from tool".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+            },
+        );
+        let mut plan = TodoState::default();
+        plan.push(
+            "impl:b".into(),
+            TodoItem {
+                content: "from plan".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+            },
+        );
+        let (got, need_persist) =
+            effective_todo_state_on_resume(Some(tool.clone()), Some(plan.clone())).unwrap();
+        assert!(got.has_id("impl:a"));
+        assert!(!got.has_id("impl:b"));
+        assert!(!need_persist, "no ask merge → no forced tool_state rewrite");
+
+        let (from_plan, need_seed) =
+            effective_todo_state_on_resume(Some(TodoState::default()), Some(plan.clone())).unwrap();
+        assert!(from_plan.has_id("impl:b"));
+        assert!(need_seed, "plan fallback must flag tool_state persist");
+
+        let (from_plan_only, need_seed2) =
+            effective_todo_state_on_resume(None, Some(plan)).unwrap();
+        assert!(from_plan_only.has_id("impl:b"));
+        assert!(need_seed2);
+
+        assert!(effective_todo_state_on_resume(None, None).is_none());
+        assert!(
+            effective_todo_state_on_resume(Some(TodoState::default()), Some(TodoState::default()))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn effective_todo_state_on_resume_unions_asks_from_plan() {
+        let mut tool = TodoState::default();
+        tool.push(
+            "impl:a".into(),
+            TodoItem {
+                content: "from tool".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+            },
+        );
+        let mut plan = TodoState::default();
+        plan.push(
+            "impl:a".into(),
+            TodoItem {
+                content: "stale plan impl".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+            },
+        );
+        plan.push(
+            ask_todo_id("turn-1"),
+            TodoItem {
+                content: "user ask only on plan".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+            },
+        );
+        let (got, need_persist) = effective_todo_state_on_resume(Some(tool), Some(plan)).unwrap();
+        assert!(got.has_id("impl:a"));
+        assert_eq!(
+            got.todo_items_with_ids()
+                .find(|(id, _)| *id == "impl:a")
+                .unwrap()
+                .1
+                .content,
+            "from tool",
+            "tool content wins for non-ask"
+        );
+        assert!(got.has_id(&ask_todo_id("turn-1")), "ask from plan survives");
+        assert!(need_persist, "ask union requires tool_state flush");
+    }
+
+    #[test]
+    fn seed_ask_todo_false_when_unchanged() {
+        let mut state = TodoState::default();
+        assert!(seed_ask_todo(&mut state, "t1", "same question"));
+        assert!(!seed_ask_todo(&mut state, "t1", "same question"));
+        assert!(seed_ask_todo(&mut state, "t1", "edited question"));
+    }
+
+    #[test]
+    fn seed_ask_survives_with_nonempty_tool_board() {
+        // Regression: asks must land on the same board as prior impl:* so
+        // resume (tool_state preferred) keeps them after a pure-text turn.
+        let mut tool = TodoState::default();
+        tool.push(
+            "impl:1".into(),
+            TodoItem {
+                content: "prior work".into(),
+                priority: TodoPriority::High,
+                status: TodoStatus::InProgress,
+                meta: None,
+            },
+        );
+        assert!(seed_ask_todo(
+            &mut tool,
+            "user-abc",
+            "please also fix resume durability"
+        ));
+        let ask_id = ask_todo_id("user-abc");
+        assert!(tool.has_id("impl:1"));
+        assert!(tool.has_id(&ask_id));
+
+        let (restored, need) =
+            effective_todo_state_on_resume(Some(tool.clone()), Some(TodoState::default())).unwrap();
+        assert!(restored.has_id(&ask_id));
+        assert!(restored.has_id("impl:1"));
+        assert!(!need);
+
+        // Broken history: tool has only impl, plan has ask → union + persist flag.
+        let mut tool_stale = TodoState::default();
+        tool_stale.push(
+            "impl:1".into(),
+            TodoItem {
+                content: "prior work".into(),
+                priority: TodoPriority::High,
+                status: TodoStatus::InProgress,
+                meta: None,
+            },
+        );
+        let mut plan_with_ask = TodoState::default();
+        seed_ask_todo(
+            &mut plan_with_ask,
+            "user-abc",
+            "please also fix resume durability",
+        );
+        let (merged, need_flush) =
+            effective_todo_state_on_resume(Some(tool_stale), Some(plan_with_ask)).unwrap();
+        assert!(merged.has_id(&ask_id));
+        assert!(need_flush);
+    }
+
+    #[test]
+    fn is_slash_shaped_user_text_helper() {
+        assert!(is_slash_shaped_user_text("/resume"));
+        assert!(is_slash_shaped_user_text("  /implement foo"));
+        assert!(!is_slash_shaped_user_text("please /mention something"));
+        assert!(!is_slash_shaped_user_text("fix the board"));
+    }
+
+    #[test]
+    fn seed_ask_todo_and_protect_on_merge_false() {
+        let mut state = TodoState::default();
+        assert!(seed_ask_todo(
+            &mut state,
+            "user-turn-abc",
+            "Please fix the resume board after compact"
+        ));
+        let ask_id = ask_todo_id("user-turn-abc");
+        assert!(state.has_id(&ask_id));
+        assert!(is_protected_todo_id(&ask_id));
+
+        // merge:false with only impl:* must keep unmentioned ask:*
+        apply_replace(
+            &mut state,
+            &[make_update(
+                "impl:1",
+                Some("do work"),
+                Some(TodoStatus::Pending),
+            )],
+        )
+        .unwrap();
+        assert!(
+            state.has_id(&ask_id),
+            "ask:* must survive merge:false keep-unless-mentioned"
+        );
+        assert!(state.has_id("impl:1"));
+    }
+
+    #[test]
+    fn seed_ask_todo_prunes_beyond_cap() {
+        let mut state = TodoState::default();
+        for i in 0..(MAX_ASK_TODOS + 5) {
+            assert!(seed_ask_todo(
+                &mut state,
+                &format!("turn-{i}"),
+                &format!("Ask number {i}")
+            ));
+        }
+        let ask_count = state
+            .todo_items_with_ids()
+            .filter(|(id, _)| id.starts_with(ASK_TODO_PREFIX))
+            .count();
+        assert_eq!(ask_count, MAX_ASK_TODOS);
+    }
+
+    #[test]
+    fn truncate_ask_content_ellipsis() {
+        let long = "x".repeat(200);
+        let t = truncate_ask_content(&long, 10);
+        assert_eq!(t.chars().count(), 10);
+        assert!(t.ends_with('…'));
+        assert_eq!(truncate_ask_content("  hi  ", 120), "hi");
     }
 
     #[test]

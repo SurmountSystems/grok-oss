@@ -5,7 +5,7 @@
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
 //! - Phase timer `Xs` (gray, never truncates)
-//! - Queued-send hint `· N queued — Enter to send now` (gray, sendable waits only)
+//! - Queued-send hint `· N queued — Enter to interject` (gray, sendable waits only)
 //! - Fill space
 //! - Turn timer `Xm Ys` and optional token count `⇣Nk` (right-aligned, gray)
 //! - Cancel button `[stop]` (right-aligned, red on hover)
@@ -301,8 +301,9 @@ pub fn render_turn_status(
     //
     // When background subagents hold the pending-prompt queue, append a
     // held-queue suffix so the operator sees why Enter did not start a turn.
-    // Sendable-wait holds use "Enter to send now"; idle background holds use
-    // "send now to force" (bare Enter only queues while children live).
+    // Sendable-wait holds use "Enter to interject"; idle background holds use
+    // "Interject to force" (bare Enter only queues while children live;
+    // Interject chord / queue [Interject] force-drains).
     if (state.is_idle() || parked)
         && let Some(cue) = still_running_label(watchers)
     {
@@ -319,7 +320,7 @@ pub fn render_turn_status(
         };
         let queue_suffix = if held_queue > 0 && state.is_idle() {
             if held_queue_top_sendable {
-                format!(" · {held_queue} queued — send now to force")
+                format!(" · {held_queue} queued — Interject to force")
             } else {
                 format!(" · {held_queue} queued")
             }
@@ -564,12 +565,12 @@ pub fn render_turn_status(
         // saying why the queue is paused and how to send anyway. On the status
         // row (not an ephemeral tip) so it stays visible for the whole wait,
         // and dropped before the label truncates on a narrow terminal.
-        // "Enter to send now" is advertised only when Enter would actually
-        // send the top row (bash / client-expanded local rows refuse with a
-        // toast — see `AgentView::held_queue_top_sendable`).
+        // "Enter to interject" is advertised only when Enter would actually
+        // soft-interject the top row (bash / client-expanded local rows refuse
+        // with a toast — see `AgentView::held_queue_top_sendable`).
         let suffix = if held_queue > 0 && is_sendable_wait(activity) {
             if held_queue_top_sendable {
-                format!(" · {held_queue} queued — Enter to send now")
+                format!(" · {held_queue} queued — Enter to interject")
             } else {
                 format!(" · {held_queue} queued")
             }
@@ -1398,7 +1399,7 @@ mod tests {
         let text = render_row_text(args, 90);
         assert!(
             text.contains("1 subagent still running")
-                && text.contains("1 queued — send now to force"),
+                && text.contains("1 queued — Interject to force"),
             "idle background hold must explain the queue + how to force, got: {text:?}"
         );
     }
@@ -1547,7 +1548,7 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to send now"),
+            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to interject"),
             "phase timer must sit between the wait label and the queued hint, got: {text:?}"
         );
     }

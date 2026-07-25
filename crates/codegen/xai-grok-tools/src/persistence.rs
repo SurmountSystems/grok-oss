@@ -436,6 +436,51 @@ mod tests {
         assert_eq!(counter.counter, 7);
     }
 
+    /// Ask seed durability: prior impl:* + seeded ask:* must round-trip through
+    /// tool_state.json so resume (prefer tool_state) keeps asks after pure-text turns.
+    #[tokio::test]
+    async fn todo_state_with_ask_survives_tool_state_roundtrip() {
+        use crate::implementations::grok_build::todo::{
+            TodoItem, TodoPriority, TodoState, TodoStatus, ask_todo_id, seed_ask_todo,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("tool_state.json");
+        let persistence = ResourcesPersistence::new(state_path);
+
+        let mut resources = Resources::new();
+        resources.register_state::<TodoState>();
+        {
+            let st = resources.get_or_default::<State<TodoState>>();
+            st.0.push(
+                "impl:1".into(),
+                TodoItem {
+                    content: "prior".into(),
+                    priority: TodoPriority::High,
+                    status: TodoStatus::InProgress,
+                    meta: None,
+                },
+            );
+            assert!(seed_ask_todo(
+                &mut st.0,
+                "turn-xyz",
+                "please keep me after resume"
+            ));
+        }
+        persistence.save(&resources);
+        persistence.flush().await;
+
+        let mut restored = Resources::new();
+        restored.register_state::<TodoState>();
+        assert!(persistence.load(&mut restored));
+        let st = restored.get::<State<TodoState>>().unwrap();
+        assert!(st.0.has_id("impl:1"));
+        assert!(
+            st.0.has_id(&ask_todo_id("turn-xyz")),
+            "ask:* must survive tool_state.json round-trip"
+        );
+    }
+
     #[tokio::test]
     async fn resources_load_returns_false_when_no_file() {
         let dir = tempfile::tempdir().unwrap();

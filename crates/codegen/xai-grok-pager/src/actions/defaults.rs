@@ -627,11 +627,11 @@ pub(super) fn default_actions(
         // ── Prompt ───────────────────────────────────────────────────
         ActionDef {
             id: ActionId::InterjectPrompt,
-            // "send now" label: Enter queues a follow-up while a turn runs;
-            // this chord is cancel-and-send — stop the current turn and run
-            // the message as the next one ("send now").
-            label: "send now",
-            description: "Send now while running (cancels the current turn)",
+            // Soft interject: inject into the running turn; never cancel.
+            // Cancel is Esc/stop only. Ctrl+Enter (or terminal-family alt) is
+            // the primary mid-turn steer chord.
+            label: "interject",
+            description: "Interject into the running turn (does not cancel)",
             default_key: if in_apple_terminal {
                 key!('o', CONTROL)
             } else if in_vscode_family {
@@ -655,7 +655,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Send now (cancel-and-send): stops the current turn and runs your message as the next one, so it appears at the bottom of the transcript.\nPlain Enter while a turn is running only queues a follow-up for later; use this chord when you need the agent to take the new message immediately.\nWith text in the composer, the chord cancels and sends that text. With an empty composer, bare Enter (or this chord) force-sends the top queued follow-up — no need to focus the queue pane. On the queue pane, this chord (or [Send now]) force-sends the selected row.\nIf nothing can be sent now, a short toast explains why (never a silent no-op).",
+                "Soft interject: injects your message into the running turn at the next safe point without cancelling it. Cancel is Esc/stop only.\nPlain Enter while a turn is running queues a follow-up for later; use this chord when you need the agent to hear you mid-turn.\nWith text in the composer, the chord soft-interjects that text. With an empty composer, bare Enter (or this chord) soft-interjects the top queued follow-up — no need to focus the queue pane. On the queue pane, this chord (or [Interject]) soft-interjects the selected row.\nIf nothing can be interjected, a short toast explains why (never a silent no-op).",
             ),
         },
         ActionDef {

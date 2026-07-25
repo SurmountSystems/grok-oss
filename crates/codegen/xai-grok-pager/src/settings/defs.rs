@@ -1387,7 +1387,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             hidden_in_minimal: false,
         },
         // SHELL-owned dual auto-compact preference (percent or absolute tokens).
-        // Restart-required: sessions resolve the threshold once at build time.
+        // Live-applied: PersistSetting → ACP x.ai/auto_compact_threshold_changed
+        // updates open session Cells (same shape as model-switch threshold write).
         // Key kept as auto_compact_threshold_percent for config.toml continuity;
         // token choices write `[session].auto_compact_threshold_tokens` instead.
         SettingMeta {
@@ -1400,7 +1401,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           (with Economic mode on, the window is soft-capped at 200k), or a \
                           fixed token count (Grok 4.5 card: 200k = long-context price cliff \
                           where costs double for the entire request; 475k = 95% of 500k — \
-                          useful when Economic mode is off). Restart required for open sessions.",
+                          useful when Economic mode is off). Applies to open sessions live.",
             keywords: &[
                 "auto",
                 "compact",
@@ -1427,7 +1428,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 choices: AUTO_COMPACT_THRESHOLD_CHOICES,
                 supports_preview: false,
             },
-            restart_required: true,
+            restart_required: false,
             hidden_in_minimal: false,
         },
         // SHELL-owned startup-time settings (restart_required: true).
@@ -1659,9 +1660,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.send_now",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
-            label: "Send now",
+            label: "Interject tip",
             description: "After you queue a follow-up mid-turn, remind you that Enter \
-                          on an empty prompt sends the top queued item now.",
+                          on an empty prompt soft-interjects the top queued item.",
             keywords: &[
                 "send",
                 "now",

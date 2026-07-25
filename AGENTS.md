@@ -189,7 +189,7 @@ Campaign notes:
 | Layer | Where |
 |-------|--------|
 | Durable residual | `RESIDUAL.md` / campaign docs (L0) |
-| Session todos | Namespaced only: `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` — never wipe foreign prefixes. Product `todo_write` keeps unmentioned protected prefixes on `merge: false`; optional `priority` + `meta` (`kind` residual\|phase\|work\|child, `parentId`, `namespace`). Prefer `meta.kind`. Join: `doc/dev/research/todo-levels-product-2026-07-24.md` |
+| Session todos | Namespaced only: `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` `ask:*` — never wipe foreign prefixes. Product `todo_write` keeps unmentioned protected prefixes on `merge: false`; optional `priority` + `meta` (`kind` residual\|phase\|work\|child, `parentId`, `namespace`). Prefer `meta.kind`. Join: `doc/dev/research/todo-levels-product-2026-07-24.md` |
 | Child joins | Short on-disk notes (L2) |
 
 **Prefer no worktrees** for subagents unless isolation is required. Product

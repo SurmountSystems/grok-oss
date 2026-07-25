@@ -148,9 +148,11 @@ pub enum Action {
     /// identically to `SendPrompt` otherwise — same registry resolution,
     /// same effect outputs — but skips the `prompt.set_text("")` calls.
     SendSlashCommandPreservingDraft(String),
-    /// Send a mid-turn interjection without canceling the running turn.
-    /// Reserved for text that answers the running turn (plan-review comments,
-    /// permission follow-ups); user send-now takes [`Self::SendPromptNow`].
+    /// Soft mid-turn interjection: inject into the running turn without
+    /// canceling it. Primary path for the InterjectPrompt chord (Ctrl+Enter),
+    /// queue-row `[Interject]`, plan-review comments, and permission follow-ups.
+    /// Cancel is Esc/stop only — do not route mid-turn steer through
+    /// [`Self::SendPromptNow`].
     Interject {
         text: String,
         /// Pasted images riding along with the interjection. Empty for
@@ -159,8 +161,8 @@ pub enum Action {
     },
     /// Cancel-and-send: cancel the running turn (background tasks and queued
     /// rows survive shell-side) and run this text as the next prompt turn.
-    /// The send-now chord, empty-composer Enter on a queued local row, and
-    /// the deferred-paste re-issue produce this.
+    /// **Not** the primary mid-turn steer path — keep only for true send-now
+    /// call sites if any remain. User product is soft [`Self::Interject`].
     SendPromptNow {
         text: String,
         /// Pasted images riding along with the prompt.
@@ -233,13 +235,14 @@ pub enum Action {
     QueueReleaseEditShared {
         id: String,
     },
-    /// Interject a server-authoritative (shared) queued prompt into the running
-    /// turn: the agent atomically removes it from the queue and
-    /// merges its text into the in-flight turn. Routed as `x.ai/queue/interject`;
-    /// the `x.ai/session/interjection` + `x.ai/queue/changed` rebroadcasts are
-    /// the source of truth (no optimistic client-side block). Mirrors the local
-    /// "Send now" / `Ctrl+Enter` path, which uses [`Interject`](Self::Interject)
-    /// directly because the local queue is client-owned.
+    /// Soft-interject a server-authoritative (shared) queued prompt into the
+    /// running turn: the agent atomically removes it from the queue and
+    /// merges its text into the in-flight turn (never cancels). Routed as
+    /// `x.ai/queue/interject`; the `x.ai/session/interjection` +
+    /// `x.ai/queue/changed` rebroadcasts are the source of truth (no optimistic
+    /// client-side block). Mirrors the local `[Interject]` / `Ctrl+Enter` path,
+    /// which uses [`Interject`](Self::Interject) directly because the local
+    /// queue is client-owned.
     QueueInterjectShared {
         id: String,
         expected_version: u64,
@@ -596,7 +599,7 @@ pub enum Action {
     /// Commit auto-compact threshold: percent of window **or** absolute tokens.
     /// Persists `[session].auto_compact_threshold_percent` or
     /// `[session].auto_compact_threshold_tokens` (clearing the sibling field).
-    /// Restart-required — sessions resolve the threshold at build time.
+    /// Live-applied to open sessions via ACP after disk persist.
     SetAutoCompactThreshold(crate::settings::AutoCompactThresholdChoice),
     /// Commit `[ui.display_refresh].auto_cadence_enabled`. Restart-required —
     /// cadence is pinned once at startup.

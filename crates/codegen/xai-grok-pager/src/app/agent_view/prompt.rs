@@ -562,9 +562,9 @@ impl AgentView {
                     //  - slash_accepted_send: slash dropdown Enter accepted a no-arg
                     //    command and fell through — must send, not insert newline.
                     //  - bash mode: Enter should always send.
-                    //  - empty composer + mid-turn queue: force-send the top row
-                    //    (send-now discoverability). Inserting a blank line on an
-                    //    empty prompt is never useful here; same path as normal mode.
+                    //  - empty composer + mid-turn queue: soft-interject the top
+                    //    queued follow-up (never cancels). Inserting a blank line
+                    //    on an empty prompt is never useful here; same as normal.
                     if self.multiline_mode
                         && self.prompt_input_mode != PromptInputMode::Bash
                         && !slash_accepted_send
@@ -594,8 +594,9 @@ impl AgentView {
                         return InputOutcome::Action(action);
                     }
                     // Empty (or backslash continuation). Mid-turn + a queued
-                    // follow-up: bare Enter force-sends the top queue row so
-                    // users discover send-now without learning a chord.
+                    // follow-up: bare Enter soft-interjects the top queue row
+                    // (never cancels) so users discover Interject without a
+                    // chord. Historical helper name: try_send_now_queued_from_prompt.
                     // Skip while editing a queued row (edit-mode Enter is
                     // handled earlier for non-empty; empty must stay a no-op).
                     // Guard on an actually-empty composer: try_send() also
@@ -618,25 +619,25 @@ impl AgentView {
                     if let Some(outcome) = self.interject_editing_queued_intercept() {
                         return outcome;
                     }
-                    // Mid-turn send-now (cancel-and-send):
-                    // 1) Non-empty composer → cancel the running turn and send
-                    //    that text as the next prompt.
+                    // Soft interject (never cancels the running turn):
+                    // 1) Non-empty composer mid-turn → soft Interject into the
+                    //    running turn (buffers shell-side at the next safe point).
                     // 2) Empty composer + a visible follow-up in the queue →
-                    //    same as bare Enter: send the top row now.
+                    //    soft-interject the top row (same as bare empty Enter).
                     // 3) Idle + background subagents holding the queue → force
                     //    drain (or enqueue + force drain for non-empty text).
-                    // 4) Idle / nothing to send → toast (never silent no-op).
+                    // 4) Idle / nothing to interject → toast (never silent no-op).
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();
                     if !text.is_empty() {
                         if !turn_running {
                             // Parent idle with live background subagents: Enter
-                            // would only queue/hold. Send-now force-starts the
-                            // turn with this text.
+                            // would only queue/hold. Interject chord force-starts
+                            // the turn with this text (no cancel — nothing runs).
                             if self.holds_queue_for_background() {
                                 if self.paste_probe_in_flight > 0 {
                                     self.deferred_send = Some(AgentDeferredSend::Interject);
-                                    self.show_toast("Attaching image — send now when ready");
+                                    self.show_toast("Attaching image — interject when ready");
                                     return InputOutcome::Changed;
                                 }
                                 let images = self.prompt.drain_images();
@@ -658,7 +659,9 @@ impl AgentView {
                                 // `dispatch_force_drain_queue`.
                                 return InputOutcome::Action(Action::ForceDrainQueue);
                             }
-                            self.show_toast("Nothing running to interrupt — press Enter to send");
+                            self.show_toast(
+                                "Nothing running to interject into — press Enter to send",
+                            );
                             return InputOutcome::Changed;
                         }
                         // Paste-then-immediate-send: an image probe is still
@@ -666,29 +669,29 @@ impl AgentView {
                         // completion so the not-yet-attached chip isn't dropped.
                         if self.paste_probe_in_flight > 0 {
                             self.deferred_send = Some(AgentDeferredSend::Interject);
-                            self.show_toast("Attaching image — send now when ready");
+                            self.show_toast("Attaching image — interject when ready");
                             return InputOutcome::Changed;
                         }
                         // Drain images BEFORE set_text("") wipes the chip elements.
                         let images = self.prompt.drain_images();
                         self.prompt.set_text("");
-                        return InputOutcome::Action(Action::SendPromptNow { text, images });
+                        return InputOutcome::Action(Action::Interject { text, images });
                     }
                     if turn_running {
                         if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                             return outcome;
                         }
-                        self.show_toast("Nothing queued to send now");
+                        self.show_toast("Nothing queued to interject");
                         return InputOutcome::Changed;
                     }
                     // Idle + held for background subagents: force-drain the top
-                    // local row so send-now still works without a running turn.
+                    // local row so the chord still works without a running turn.
                     // Toast is chosen in `dispatch_force_drain_queue` after the
                     // drain result (success vs plan-approval / other hard gate).
                     if self.holds_queue_for_background() && self.has_held_user_queue() {
                         return InputOutcome::Action(Action::ForceDrainQueue);
                     }
-                    self.show_toast("Nothing running to interrupt — press Enter to send");
+                    self.show_toast("Nothing running to interject into — press Enter to send");
                     return InputOutcome::Changed;
                 }
                 ActionId::ToggleMultiline => {
@@ -1626,7 +1629,7 @@ mod send_now_key_tests {
     }
 
     #[test]
-    fn send_now_with_text_while_idle_toasts() {
+    fn interject_contract_with_text_while_idle_toasts() {
         let mut agent = make_agent();
         agent.session.state = AgentState::Idle;
         agent.prompt.set_text("please fix this");
@@ -1634,15 +1637,15 @@ mod send_now_key_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Nothing running to interrupt — press Enter to send")
+            Some("Nothing running to interject into — press Enter to send")
         );
         assert_eq!(agent.prompt.text(), "please fix this", "draft preserved");
     }
 
     #[test]
-    fn send_now_empty_while_running_with_empty_queue_toasts() {
+    fn interject_contract_empty_while_running_with_empty_queue_toasts() {
         let mut agent = make_running_agent();
-        // Drop local + shared queue so nothing is force-sendable.
+        // Drop local + shared queue so nothing is interjectable.
         agent.session.pending_prompts.clear();
         agent.shared_queue.clear();
         agent.queue.sync_from_merged(
@@ -1657,20 +1660,20 @@ mod send_now_key_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Nothing queued to send now")
+            Some("Nothing queued to interject")
         );
     }
 
     #[test]
-    fn send_now_with_text_while_running_emits_send_prompt_now() {
+    fn interject_contract_with_text_while_running_emits_interject() {
         let mut agent = make_running_agent();
         agent.prompt.set_text("steer left");
         let outcome = agent.handle_prompt_key_for_test(&ctrl_enter());
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "steer left");
             }
-            other => panic!("expected SendPromptNow, got {other:?}"),
+            other => panic!("expected Interject, got {other:?}"),
         }
         assert!(agent.prompt.text().is_empty());
     }

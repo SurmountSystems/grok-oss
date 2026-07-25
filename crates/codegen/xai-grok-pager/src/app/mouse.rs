@@ -1293,10 +1293,11 @@ mod tests {
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        let running = agent.session.state.is_turn_running();
+        let show_interject =
+            agent.session.state.is_turn_running() || agent.holds_queue_for_background();
         agent
             .queue
-            .render(area, &mut buf, true, &layout_cfg, None, running);
+            .render(area, &mut buf, true, &layout_cfg, None, show_interject);
         agent.pane_areas.queue = area;
         let mut found = None;
         'find: for row in area.y..area.y + area.height {
@@ -1339,11 +1340,11 @@ mod tests {
         let ids = agent.queue.entry_ids();
         let outcome = click_send_now(&mut agent, ids[1]);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
+            InputOutcome::Action(Action::Interject { text, images }) => {
                 assert_eq!(text, "local one");
-                assert_eq!(images.len(), 1, "row image must ride the send-now");
+                assert_eq!(images.len(), 1, "row image must ride the interject");
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert_eq!(agent.shared_queue.len(), 1);
@@ -1360,10 +1361,10 @@ mod tests {
         assert_eq!(ids.len(), 1);
         let outcome = click_send_now(&mut agent, ids[0]);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(!agent.queue.overlay.visible);
@@ -1371,8 +1372,9 @@ mod tests {
         assert_eq!(agent.active_pane, AgentPane::Scrollback);
     }
 
-    /// Clicking Send now after the turn has already gone idle must toast, not
-    /// silently no-op (race: button drawn while running, click arrives late).
+    /// Clicking Interject after the turn has already gone idle (no background
+    /// hold) must toast, not silently no-op (race: button drawn while running,
+    /// click arrives late).
     #[test]
     fn mouse_send_now_when_idle_toasts_instead_of_silent_noop() {
         let mut agent = running_agent_local_only();
@@ -1400,7 +1402,7 @@ mod tests {
                 }
             }
         }
-        let (col, row) = found.expect("Send now was painted while running");
+        let (col, row) = found.expect("Interject was painted while running");
         agent.session.state = AgentState::Idle;
         let outcome = agent.handle_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1410,13 +1412,31 @@ mod tests {
         });
         assert!(
             matches!(outcome, InputOutcome::Changed),
-            "idle send-now click must not emit an action, got {outcome:?}"
+            "idle Interject click must not emit an action, got {outcome:?}"
         );
         let toast = agent.toast.as_ref().map(|(m, _)| m.as_str());
         assert_eq!(
             toast,
             Some("No turn running — prompt will send when ready"),
-            "must toast why send-now did nothing"
+            "must toast why Interject did nothing"
+        );
+    }
+
+    /// Idle + background hold: `[Interject]` is painted and click force-drains.
+    #[test]
+    fn mouse_interject_when_idle_held_by_subagents_force_drains() {
+        use crate::app::agent_view::test_fixtures;
+        let mut agent = running_agent_local_only();
+        agent.session.state = AgentState::Idle;
+        agent.subagent_sessions.insert(
+            "bg-child".into(),
+            test_fixtures::running_subagent_info("bg-child"),
+        );
+        let ids = agent.queue.entry_ids();
+        let outcome = click_send_now(&mut agent, ids[0]);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::ForceDrainQueue)),
+            "held idle Interject click must ForceDrainQueue, got {outcome:?}"
         );
     }
     /// Send-now `[Interject]` on the lone local row while it is being
@@ -1444,10 +1464,10 @@ mod tests {
         agent.prompt.set_text("local one EDITED");
         let outcome = click_send_now(&mut agent, ids[0]);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));

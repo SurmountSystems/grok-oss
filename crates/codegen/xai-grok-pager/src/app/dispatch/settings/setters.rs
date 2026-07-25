@@ -2041,7 +2041,8 @@ pub(in crate::app::dispatch) fn set_max_thoughts_width(app: &mut AppView, new: i
 
 // ---------------------------------------------------------------------------
 // auto_compact_threshold — SHELL-OWNED dual preference (percent or tokens).
-// Restart-required (threshold resolved when a session is built).
+// Live-applied: PersistSetting writes disk, then ACP
+// `x.ai/auto_compact_threshold_changed` updates open session Cells.
 // ---------------------------------------------------------------------------
 
 /// State-only mutation for percent mode (clears tokens mirror).
@@ -2108,9 +2109,8 @@ pub(in crate::app::dispatch) fn set_auto_compact_threshold(
             }
         }
     };
-    app.show_toast(&format!(
-        "\u{2713} Auto-compact at: {toast_label} (restart to apply)"
-    ));
+    // Live-applied via ACP after disk persist — no restart toast.
+    app.show_toast(&format!("\u{2713} Auto-compact at: {toast_label}"));
     vec![Effect::PersistSetting {
         key: "auto_compact_threshold_percent",
         value: crate::settings::SettingValue::Enum(new_canonical),

@@ -28,7 +28,8 @@ Grok stores each session in its own directory, grouped by working directory. It 
   summary.json            # metadata: summary/title, timestamps, model ID, message counts
   updates.jsonl           # ACP session update stream (conversation + tool calls)
   chat_history.jsonl      # raw chat messages sent to the model
-  plan.json               # TODO/task list state
+  tool_state.json         # tool Resources snapshot (authoritative live TODO board)
+  plan.json               # TODO board mirror (snapshot; fallback on resume)
   rewind_points.jsonl     # file snapshots for /rewind undo
   signals.json            # session signals (token usage, tool/turn counters)
   feedback.jsonl          # user feedback and ratings
@@ -37,6 +38,16 @@ Grok stores each session in its own directory, grouped by working directory. It 
 ```
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
+
+### TODO board on disk (`tool_state.json` vs `plan.json`)
+
+| File | Role |
+|------|------|
+| **`tool_state.json`** | Source of truth for tool Resources, including the live session todo list (`todo_write` / `ask:*` seeds). Loaded when the session actor starts. |
+| **`plan.json`** | Snapshot mirror of the todo board (written on compact and when asks/todos are seeded). Used as a **fallback** on resume when `tool_state.json` is missing or empty. |
+| **ACP `Plan` events** in `updates.jsonl` | Drive the TUI todo pane during the session and on replay. Resume also re-emits `Plan` from durable state so the board survives load. |
+
+Do not treat `plan.json` alone as the full story: if both files disagree, prefer `tool_state.json`.
 
 ---
 

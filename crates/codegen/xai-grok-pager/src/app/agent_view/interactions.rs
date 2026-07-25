@@ -174,8 +174,13 @@ impl AgentView {
                 InputOutcome::Action(Action::CancelTurnChoice(choice))
             }
             KeyCode::Esc => {
-                self.suppress_rewind_arm(std::time::Instant::now());
-                InputOutcome::Action(Action::CancelTurnChoice(CancelTurnChoice::ContinueToRun))
+                // Neutral dismiss only: close the panel without cancelling the
+                // parent turn or stopping subagents. Cancel requires an explicit
+                // choice (Enter / 1–4 / click). Same spirit as steal-Esc on
+                // overlays — Esc must not be a destructive default.
+                self.cancel_turn_view = None;
+                self.cancel_turn_buttons.clear();
+                InputOutcome::Changed
             }
             _ => InputOutcome::Unchanged,
         }
@@ -1403,26 +1408,56 @@ mod cancel_turn_mouse_tests {
         assert!(matches!(outcome, InputOutcome::Unchanged));
     }
     #[test]
-    fn esc_confirm_refreshes_expired_rewind_grace() {
+    fn esc_dismisses_panel_without_cancelling_turn() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use std::time::Instant;
         let mut agent = make_agent();
         agent.session.state = AgentState::TurnRunning;
         setup_panel(&mut agent);
-        agent.rewind_suppress_deadline = Some(Instant::now());
         let outcome =
             agent.handle_cancel_turn_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            matches!(
-                outcome,
-                InputOutcome::Action(Action::CancelTurnChoice(CancelTurnChoice::ContinueToRun))
-            ),
-            "panel Esc must confirm the parent-turn cancel, got {outcome:?}"
+            matches!(outcome, InputOutcome::Changed),
+            "panel Esc must dismiss only (no CancelTurn / CancelTurnChoice), got {outcome:?}"
         );
         assert!(
-            agent.rewind_arm_suppressed(Instant::now()),
-            "the Esc-confirmed cancel must refresh the post-cancel grace"
+            agent.cancel_turn_view.is_none(),
+            "Esc must close the cancel-turn panel"
         );
+        assert!(
+            agent.cancel_turn_buttons.is_empty(),
+            "Esc must clear cancel-turn button hit targets"
+        );
+        assert!(
+            agent.session.state.is_turn_running(),
+            "Esc must not cancel the running parent turn"
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::CancelTurn)
+                    | InputOutcome::Action(Action::CancelTurnChoice(_))
+            ),
+            "Esc must not emit a cancel action"
+        );
+    }
+
+    #[test]
+    fn enter_on_stop_running_still_dispatches_cancel_choice() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut agent = make_agent();
+        agent.session.state = AgentState::TurnRunning;
+        setup_panel(&mut agent);
+        // active_idx 0 is StopRunning
+        let outcome =
+            agent.handle_cancel_turn_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match outcome {
+            InputOutcome::Action(Action::CancelTurnChoice(c)) => {
+                assert_eq!(c, CancelTurnChoice::StopRunning);
+            }
+            other => panic!("expected CancelTurnChoice(StopRunning), got {other:?}"),
+        }
+        // Panel stays until dispatch clears it; key handler only emits the action.
+        assert!(agent.cancel_turn_view.is_some());
     }
 }
 #[cfg(test)]

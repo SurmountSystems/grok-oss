@@ -1,5 +1,5 @@
 //! Tip after queuing a follow-up while a turn is running: advertise that
-//! bare Enter on an empty prompt force-sends the top queued item ("send now").
+//! bare Enter on an empty prompt soft-interjects the top queued item.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -7,7 +7,8 @@ use ratatui::text::{Line, Span};
 use super::EphemeralTip;
 use crate::theme::Theme;
 
-/// Ephemeral-tip dedup key for the queued-follow-up send-now hint.
+/// Ephemeral-tip dedup key for the queued-follow-up interject hint.
+/// Config / telemetry still use the historical `send_now` key names.
 pub(crate) const SEND_NOW_TIP_KEY: &str = "send_now_tip";
 
 /// Key into the per-session in-memory seen-count map for this tip.
@@ -16,11 +17,11 @@ pub(crate) const SEND_NOW_TIP_SEEN_KEY: &str = "send_now_tip_shown_count";
 /// Stop showing after this many shows within a single session.
 const SEND_NOW_TIP_SEEN_CAP: u32 = 3;
 
-/// Build "Queued · Enter to send now", seen-gated to
+/// Build "Queued · Enter to interject", seen-gated to
 /// [`SEND_NOW_TIP_SEEN_CAP`] shows per session (in-memory).
 ///
-/// After a mid-turn queue the composer is empty, so a second Enter force-sends
-/// the top queued follow-up without learning a special chord.
+/// After a mid-turn queue the composer is empty, so a second Enter soft-interjects
+/// the top queued follow-up without learning a special chord (never cancels).
 pub fn send_now_tip() -> EphemeralTip {
     let theme = Theme::current();
     let dim = Style::default().fg(theme.gray);
@@ -32,7 +33,7 @@ pub fn send_now_tip() -> EphemeralTip {
         Line::from(vec![
             Span::styled("Queued · ", dim),
             Span::styled("Enter", key_style),
-            Span::styled(" to send now", dim),
+            Span::styled(" to interject", dim),
         ]),
     )
     .with_session_seen_cap(SEND_NOW_TIP_SEEN_KEY, SEND_NOW_TIP_SEEN_CAP)
@@ -59,8 +60,8 @@ mod tests {
         let tip = send_now_tip();
         let text: String = tip.line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            text.contains("Enter") && text.contains("send now") && text.contains("Queued"),
-            "expected queued/send-now copy with Enter, got {text:?}"
+            text.contains("Enter") && text.contains("interject") && text.contains("Queued"),
+            "expected queued/interject copy with Enter, got {text:?}"
         );
     }
 }

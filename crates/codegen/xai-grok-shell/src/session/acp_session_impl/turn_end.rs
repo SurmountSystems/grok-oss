@@ -4,6 +4,97 @@
 use super::*;
 
 impl SessionActor {
+    /// On session resume: ensure Resources has the durable todo board and repaint
+    /// the client via ACP `Plan`.
+    ///
+    /// Prefers non-empty Resources (`tool_state.json`). When that is empty, seeds
+    /// from `plan.json` (`plan_state`). Also unions plan-only `ask:*` into a
+    /// non-empty tool board. When Resources change, flushes **both**
+    /// `tool_state.json` (SoT) and `plan.json` (mirror). Always re-emits `Plan`
+    /// when the effective board is non-empty so UI survives load even if
+    /// `updates.jsonl` Plan events are sparse.
+    pub(super) async fn restore_todo_board(
+        &self,
+        plan_state: Option<crate::tools::todo::TodoState>,
+    ) {
+        use crate::tools::todo::{
+            TodoState, effective_todo_state_on_resume, plan_entry_from_todo_item,
+        };
+        use xai_grok_tools::types::resources::State;
+
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let from_tool = bridge
+            .read_resource::<State<TodoState>>()
+            .await
+            .map(|s| s.0);
+        let Some((effective, need_tool_persist)) =
+            effective_todo_state_on_resume(from_tool, plan_state)
+        else {
+            return;
+        };
+
+        if need_tool_persist {
+            bridge.update_resource(State(effective.clone())).await;
+            // Flush tool_state.json (authoritative Resources snapshot).
+            let _ = bridge.toolset().save_and_flush_persistence().await;
+            // Mirror plan.json.
+            let _ = self.notifications.persistence_tx.send(
+                crate::session::persistence::PersistenceMsg::PlanState(effective.clone()),
+            );
+        }
+
+        let entries: Vec<_> = effective
+            .todo_items()
+            .cloned()
+            .map(plan_entry_from_todo_item)
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = entries.len(),
+            "resume: restoring todo board via Plan update"
+        );
+        self.send_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), None)
+            .await;
+    }
+
+    /// Auto-seed a protected `ask:<prompt_id>` todo for a real user turn.
+    ///
+    /// Merge-only; caps open asks. Updates Resources, flushes `tool_state.json`
+    /// (SoT) and `plan.json` (mirror), and emits Plan so the board is durable
+    /// without requiring the agent to call `todo_write`.
+    pub(super) async fn maybe_seed_ask_todo(&self, prompt_id: &str, text: &str) {
+        use crate::tools::todo::{TodoState, plan_entry_from_todo_item, seed_ask_todo};
+        use xai_grok_tools::types::resources::State;
+
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let mut state = bridge
+            .read_resource::<State<TodoState>>()
+            .await
+            .map(|s| s.0)
+            .unwrap_or_default();
+        if !seed_ask_todo(&mut state, prompt_id, text) {
+            return;
+        }
+        bridge.update_resource(State(state.clone())).await;
+        // Authoritative: tool_state.json via ResourcesPersistence.
+        let _ = bridge.toolset().save_and_flush_persistence().await;
+        // Mirror: plan.json (resume fallback + session-dir inspection).
+        let _ = self.notifications.persistence_tx.send(
+            crate::session::persistence::PersistenceMsg::PlanState(state.clone()),
+        );
+        let entries: Vec<_> = state
+            .todo_items()
+            .cloned()
+            .map(plan_entry_from_todo_item)
+            .collect();
+        if !entries.is_empty() {
+            self.send_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), None)
+                .await;
+        }
+    }
+
     /// Emit a cosmetic `Plan` update at turn end to clear stale spinners.
     ///
     /// When the model produces its final text response without a cleanup

@@ -588,6 +588,9 @@ pub(super) async fn run_session(
                                 s.resume_plan_approval(completion_tx).await;
                             });
                         }
+                        SessionCommand::RestoreTodoBoard { plan_state } => {
+                            session.restore_todo_board(plan_state).await;
+                        }
                         SessionCommand::GetToolOverrides { respond_to } => {
                             let _ = respond_to.send(session.effective_tool_overrides());
                         }
@@ -680,6 +683,15 @@ pub(super) async fn run_session(
                         SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, auto_compact_threshold_tokens, responds_to } => {
                             let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, auto_compact_threshold_tokens).await;
                             let _ = responds_to.send(updated_model_id);
+                        }
+                        SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent,
+                            auto_compact_threshold_tokens,
+                        } => {
+                            session.apply_auto_compact_threshold(
+                                auto_compact_threshold_percent,
+                                auto_compact_threshold_tokens,
+                            );
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;
@@ -956,11 +968,20 @@ pub(super) async fn run_session(
                             state.combine_edit_holds.remove(&id);
                         }
                         SessionCommand::InterjectQueuedPrompt { id, expected_version, owner, new_text } => {
-                            // Send-now: the handler promoted the row; cancel the running turn and start it.
-                            let cancel_for_send_now = session.handle_interject_queued_prompt(&id, expected_version, owner.as_deref(), new_text.as_deref()).await;
-                            if cancel_for_send_now {
-                                session.cancel_turn_for_send_now(&mut replay_buffer).await;
-                            }
+                            // Soft interject only: buffers into the running turn
+                            // (or no-ops). Never cancels — cancel is Esc/stop.
+                            let _never_cancels = session
+                                .handle_interject_queued_prompt(
+                                    &id,
+                                    expected_version,
+                                    owner.as_deref(),
+                                    new_text.as_deref(),
+                                )
+                                .await;
+                            debug_assert!(
+                                !_never_cancels,
+                                "queue soft-interject must never request cancel"
+                            );
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::Cancel {

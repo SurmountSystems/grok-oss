@@ -7725,8 +7725,8 @@ fn auto_compact_threshold_renders_under_session_category_shell_owned() {
         other => panic!("expected Enum kind for auto_compact_threshold_percent, got {other:?}"),
     }
     assert!(
-        meta.restart_required,
-        "auto-compact threshold is resolved at session build time"
+        !meta.restart_required,
+        "auto-compact threshold live-applies to open sessions (restart_required: false)"
     );
 }
 

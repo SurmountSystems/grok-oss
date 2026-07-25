@@ -81,7 +81,7 @@ remote_fetch = true                    # allow optional online model-catalog fet
 auto_compact_threshold_percent = 95    # auto-compact at this % of the *effective* context window
                                        # (0–100; settings UI offers 85 / 90 / 95 / 98;
                                        # default 95; stock Grok 4.5 catalog must not undercut
-                                       # this default; restart required for open sessions).
+                                       # this default; open sessions pick up Settings changes live).
                                        # With [ui] economic_mode = true the window is soft-capped
                                        # at 200k, so 95% ≈ 190k tokens.
                                        # The compaction banner shows usage % and the configured

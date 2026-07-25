@@ -998,7 +998,8 @@ pub fn build_hints(
                 } else if prompt.can_send() {
                     hints.push(HintItem::new(key, submit_label));
                 } else if is_turn_running && has_queued_follow_up {
-                    hints.push(HintItem::new(key, "send now"));
+                    // Empty Enter mid-turn soft-interjects the top queued row.
+                    hints.push(HintItem::new(key, "interject"));
                 }
             }
             if shift_enter_unavailable && !multiline_mode && prompt.can_send() {
@@ -1666,7 +1667,7 @@ mod tests {
         );
     }
     #[test]
-    fn prompt_running_submit_hint_is_queue_and_send_now() {
+    fn prompt_running_submit_hint_is_queue_and_interject() {
         let hints = prompt_hints_with_text_and_turn(false, false, true);
         let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
         assert!(
@@ -1678,14 +1679,14 @@ mod tests {
             "mid-turn must not mislabel Enter as send; got {labels:?}"
         );
         assert!(
-            labels.contains(&"send now"),
-            "mid-turn with composer text must advertise the send-now (interject) chord; got {labels:?}"
+            labels.contains(&"interject"),
+            "mid-turn with composer text must advertise the soft-interject chord; got {labels:?}"
         );
     }
-    /// Empty composer + mid-turn queue: bare Enter is send-now in both normal
+    /// Empty composer + mid-turn queue: bare Enter soft-interjects in both normal
     /// and multiline modes (multiline only inserts newline when there is text).
     #[test]
-    fn prompt_empty_mid_turn_queue_advertises_send_now_including_multiline() {
+    fn prompt_empty_mid_turn_queue_advertises_interject_including_multiline() {
         for multiline in [false, true] {
             let prompt = PromptWidget::default();
             let registry = ActionRegistry::defaults();
@@ -1717,8 +1718,8 @@ mod tests {
             );
             let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
             assert!(
-                labels.contains(&"send now"),
-                "empty composer mid-turn with queue must advertise Enter:send now \
+                labels.contains(&"interject"),
+                "empty composer mid-turn with queue must advertise Enter:interject \
                  (multiline={multiline}); got {labels:?}"
             );
         }

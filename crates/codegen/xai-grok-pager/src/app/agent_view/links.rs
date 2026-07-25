@@ -2304,7 +2304,7 @@ mod link_click_tests {
     /// (wrongly or historically) handed to `draw` at the same time. The
     /// session tip's bold `Tip: ` prefix used to underpaint the row and —
     /// because `Cell::set_style` merges modifiers — leak BOLD into the first
-    /// five cells of the ephemeral tip ("**Queue**d · Enter to send now").
+    /// five cells of the ephemeral tip ("**Queue**d · Enter to interject").
     #[test]
     fn ephemeral_tip_not_bolded_by_session_tip_underpaint() {
         use ratatui::style::Modifier;

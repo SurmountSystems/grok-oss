@@ -2919,13 +2919,15 @@ fn interject_before_paste_probe_keeps_image() {
     let sent_image = effects.iter().any(|e| {
         matches!(
             e,
-            Effect::SendPromptNow { blocks, .. }
-                if blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
+            Effect::SendInterject {
+                blocks: Some(blocks),
+                ..
+            } if blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
         )
     });
     assert!(
         sent_image,
-        "the re-issued send-now must carry the pasted image; effects = {effects:?}"
+        "the re-issued soft interject must carry the pasted image; effects = {effects:?}"
     );
     assert_eq!(
         app.agents[&id].prompt.text(),
@@ -3394,9 +3396,9 @@ fn plain_send_while_streaming_does_not_arm_expectation() {
     );
 }
 
-/// Queue-pane "Send now" of a server row arms the expectation (older-shell fallback).
+/// Soft queue interject never arms send-now cancel (cancel is Esc/stop only).
 #[test]
-fn queue_interject_shared_arms_expectation_while_running() {
+fn interject_contract_queue_shared_never_arms_cancel_while_running() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     dispatch(Action::SendPrompt("first".into()), &mut app);
@@ -3413,10 +3415,9 @@ fn queue_interject_shared_arms_expectation_while_running() {
         effects.as_slice(),
         [Effect::QueueInterject { .. }]
     ));
-    assert_eq!(
-        app.agents[&id].expect_send_now_cancel.as_deref(),
-        Some("srv-row-1"),
-        "server-row send-now must arm the cancel expectation"
+    assert!(
+        app.agents[&id].expect_send_now_cancel.is_none(),
+        "server-row soft interject must not arm the cancel expectation"
     );
 }
 

@@ -1867,7 +1867,8 @@ impl AgentView {
                 queue_focused,
                 layout_cfg,
                 Some(layout.scrollback),
-                self.session.state.is_turn_running(),
+                // Mid-turn soft interject, or idle force-drain while children hold.
+                self.session.state.is_turn_running() || self.holds_queue_for_background(),
             );
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,

@@ -1996,10 +1996,16 @@ pub(crate) fn execute(
                 );
         }
         Effect::PersistSetting { key, value, rollback_value } => {
+            let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     match persist_setting(key, value.clone()).await {
                         Ok(()) => {
+                            // Live-apply auto-compact threshold to open sessions
+                            // only after disk succeeds (same gating as permission mode).
+                            if key == "auto_compact_threshold_percent" {
+                                notify_auto_compact_threshold_changed(&tx, &value).await;
+                            }
                             TaskResult::SettingPersisted {
                                 key,
                                 value,

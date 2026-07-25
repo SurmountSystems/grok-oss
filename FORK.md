@@ -75,10 +75,14 @@ list when you ship fork work.
 - [x] **OpenRouter** — separate model option (`openrouter-grok-4.5`); login/logout; secret store; optional Zed credential probe (read-only)
 - [x] **Multi-key OpenRouter** — comma lists / failover keys for credit rotation
 - [x] **Economic mode** — soft-cap effective context at the Grok 4.5 long-context price cliff (~200k); `/economic-mode`; settings default on
-- [x] **Auto-compact default 95%** — stock Grok 4.5 catalog omits a per-model undercut (was 80); remote `models_cache` undercuts on stock models are dropped so the product default applies; user session/env still win; banner shows usage **and** configured threshold. Mid-session Settings changes still need restart until live-apply ships (see `RESIDUAL.md`). Detail: `docs/dev/research/rca-auto-compact-early-fire.md`
+- [x] **Auto-compact default 95% + live-apply** — stock Grok 4.5 catalog omits a per-model undercut (was 80); remote `models_cache` undercuts on stock models are dropped so the product default applies; user session/env still win; banner shows usage **and** configured threshold. Settings commit live-applies to open sessions (`restart_required: false`): disk persist → ACP `x.ai/auto_compact_threshold_changed` → `SessionCommand::SetAutoCompactThreshold` → CompactionConfig Cells (same write path as model switch). Live-apply pushes the **committed Settings value** (race-safe vs disk); env `GROK_AUTO_COMPACT_THRESHOLD_*` wins again on the next full resolve (spawn / model switch). Detail: `docs/dev/research/rca-auto-compact-early-fire.md`
 - [x] **Auto-run `/implement`** — after a successful turn, queue a follow-up implement block when present; **appends** after any already-queued prompts (does not drop them); economic mode can clamp implement `--effort`
 - [x] **Shared rate limits** — crate `grok-rate-limit` (Surmount name, not `xai-`); cooldowns under `~/.grok/rate_limits/`; optional `GROK_DISABLE_SHARED_RATE_LIMIT=1`
 - [x] **Updates** — no xAI auto-update channel by default (wrong product). `grok-oss update --check` compares to Surmount `main`. Escape hatch: `GROK_OSS_ENABLE_XAI_UPDATER=1`
+- [x] **Soft interject only** — mid-turn interject (Ctrl+Enter / terminal alts, queue `[Interject]`) injects into the **current** turn and **never cancels**. Cancel is Esc/stop only. Shell contracts: `interject_contract_*` tests. Do **not** re-unify user mid-turn steer on `SendPromptNow` (cancel-and-send). Idle + live background subagents holding the queue: status `… Interject to force`, queue row `[Interject]` force-drains (same as chord). User copy: tip/status say **Enter to interject** (not “send now”). Esc on cancel-turn panel dismisses only. **Parked sendable-wait exception (intentional):** while the agent is **blocked waiting** (task/subagent) **and the queue is empty**, plain Enter with text may still cancel-and-send to unblock immediately — not soft Interject; documented in user-guide `03-keyboard-shortcuts`. Detail: user-guide `03-keyboard-shortcuts` § during an active turn.
+- [x] **Todo board survives auto-compact** — pager no longer clears the UI todo list on `AutoCompactCompleted` (Resources still held the board; UI wipe was a lie). Contract: `auto_compact_completed_preserves_todo_board`.
+- [x] **plan.json honesty + resume board** — compact writes the **live** Resources `TodoState` to `plan.json` (no empty wipe). Resume loads `plan_state` again and re-emits ACP `Plan` from `tool_state.json` / `plan.json` fallback (`RestoreTodoBoard`). Real SoT: Resources + `tool_state.json`; `plan.json` is a mirror + resume fallback. User-guide `17-sessions` documents both.
+- [x] **Auto-seed user asks as todos** — real user turns seed protected `ask:<prompt_id>` (cap 20, truncated content); `ask:` is keep-unless-mentioned on `merge: false`. Helpers + tests in `xai-grok-tools` todo module.
 
 ### Packaging and build
 
@@ -106,7 +110,7 @@ list when you ship fork work.
 - [x] **Todo levels product surface** — `todo_write` accepts optional
   `priority` + `meta` (`kind`, `parentId`, `namespace`); `merge: false`
   keep-unless-mentioned for protected prefixes (`plan:`, `impl:`, `pr-`,
-  `recon:`, `residual:`). Light `[kind]` badge in todo pane. Join:
+  `recon:`, `residual:`, `ask:`). Light `[kind]` badge in todo pane. Join:
   `doc/dev/research/todo-levels-product-2026-07-24.md`
 - [x] **Session notes channel** — `/note` stores operator mid-session
   annotations that are **not** pending main-turn prompts (session-local

@@ -7481,9 +7481,8 @@ pub(crate) mod tests {
     /// Apple Terminal (interject = Ctrl+O), minimal mode: at idle the interject
     /// path would silently no-op, so Ctrl+O must open the transcript — this was
     /// the "Ctrl+O appears dead on Mac" report. With a running turn and text in
-    /// the composer the same key must send-now (cancel-and-send). With a running
-    /// turn, empty composer, and a queued follow-up it must force-send that row
-    /// (send-now).
+    /// the composer the same key soft-interjects (never cancels). With a running
+    /// turn, empty composer, and a queued follow-up it soft-interjects that row.
     #[test]
     fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() {
         let mut app = test_app_with_agent();
@@ -7502,8 +7501,8 @@ pub(crate) mod tests {
         }
         let out = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(
-            matches!(out, InputOutcome::Action(Action::SendPromptNow { ref text, .. }) if text == "steer it"),
-            "running Apple-Terminal Ctrl+O with payload must send-now, got {out:?}"
+            matches!(out, InputOutcome::Action(Action::Interject { ref text, .. }) if text == "steer it"),
+            "running Apple-Terminal Ctrl+O with payload must soft-interject, got {out:?}"
         );
         {
             let agent = app.agents.get_mut(&id).unwrap();
@@ -7514,14 +7513,14 @@ pub(crate) mod tests {
         assert!(
             matches!(
                 out,
-                InputOutcome::Action(Action::SendPromptNow { ref text, .. })
+                InputOutcome::Action(Action::Interject { ref text, .. })
                     if text == "queued follow-up"
             ),
-            "running + empty + queue: Apple-Terminal Ctrl+O must send-now, got {out:?}"
+            "running + empty + queue: Apple-Terminal Ctrl+O must soft-interject, got {out:?}"
         );
         assert!(
             app.agents[&id].session.pending_prompts.is_empty(),
-            "queued row must be consumed by prompt-path send-now"
+            "queued row must be consumed by prompt-path soft interject"
         );
     }
     fn assert_background_routing_for_mode(

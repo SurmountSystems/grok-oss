@@ -298,11 +298,8 @@ struct TodoUpdateArgs {
 /// Protected skill/session prefixes — must match `PROTECTED_TODO_PREFIXES`
 /// in `xai-grok-tools` todo write path (keep-unless-mentioned on replace).
 fn is_protected_todo_id(id: &str) -> bool {
-    id.starts_with("plan:")
-        || id.starts_with("impl:")
-        || id.starts_with("pr-")
-        || id.starts_with("recon:")
-        || id.starts_with("residual:")
+    // Prefer the product helper so offline reconstruct cannot drift.
+    xai_grok_tools::implementations::grok_build::todo::is_protected_todo_id(id)
 }
 
 /// `merge=false`: replace the state, preserving unmentioned protected-prefix
@@ -1495,6 +1492,48 @@ mod tests {
         assert_eq!(by_id["b"].content, "do B");
         assert_eq!(by_id["c"].status, TodoStatus::Pending);
         assert_eq!(by_id["c"].content, "do C");
+    }
+
+    /// `ask:*` is protected — merge:false that omits it must keep it (matches
+    /// product `PROTECTED_TODO_PREFIXES`).
+    #[test]
+    fn reconstruct_keeps_unmentioned_ask_on_merge_false() {
+        let items = vec![
+            assistant_with_tool_calls(vec![tc(
+                "c1",
+                "todo_write",
+                r#"{"merge":false,"todos":[
+                    {"id":"ask:user-1","content":"please track me","status":"pending"},
+                    {"id":"impl:1","content":"do work","status":"pending"}
+                ]}"#,
+            )]),
+            assistant_with_tool_calls(vec![tc(
+                "c2",
+                "todo_write",
+                r#"{"merge":false,"todos":[
+                    {"id":"impl:1","content":"do work","status":"completed"}
+                ]}"#,
+            )]),
+        ];
+        let state = reconstruct_todo_state(&items);
+        let ids: std::collections::HashSet<_> = state
+            .todo_items_with_ids()
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert!(
+            ids.contains("ask:user-1"),
+            "ask:* must survive merge:false replace: {ids:?}"
+        );
+        assert!(ids.contains("impl:1"));
+        assert_eq!(
+            state
+                .todo_items_with_ids()
+                .find(|(id, _)| *id == "impl:1")
+                .unwrap()
+                .1
+                .status,
+            TodoStatus::Completed
+        );
     }
 
     /// N4 follow-up: turn_3 of the cumulative synthetic fixture should

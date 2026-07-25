@@ -278,6 +278,21 @@ impl SessionActor {
         if !origin.is_synthetic() {
             self.cancel_pending_recap_for_new_prompt();
         }
+        // Real freeform user turns only: skip synthetic, direct bash, and
+        // slash-shaped prompts (builtins / skills seed their own boards).
+        if matches!(origin, super::super::PromptOrigin::User)
+            && Self::extract_bash_command(&prompt_blocks).is_none()
+        {
+            let ask_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
+                if let acp::ContentBlock::Text(t) = b {
+                    acc.push_str(&t.text);
+                }
+                acc
+            });
+            if !crate::tools::todo::is_slash_shaped_user_text(&ask_text) {
+                self.maybe_seed_ask_todo(prompt_id, &ask_text).await;
+            }
+        }
         *self.turn_start_prompt_mode.lock() = prompt_mode;
         *self.turn_prompt_mode.lock() = prompt_mode;
         self.signals_handle().increment_turn();
