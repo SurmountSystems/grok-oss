@@ -30,7 +30,7 @@ tree UI: write `priority` + `meta` through `todo_write`, and guard
 
 **Protected id prefixes** (`PROTECTED_TODO_PREFIXES`):
 
-`plan:`, `impl:`, `pr-`, `recon:`, `residual:`
+`plan:`, `impl:`, `pr-`, `recon:`, `residual:`, `ask:`, `feat:`
 
 On full replace, existing items with those prefixes that are **not** in the
 replace payload are re-attached after the new set. Unprotected unmentioned

@@ -110,7 +110,9 @@ list when you ship fork work.
 - [x] **Todo levels product surface** — `todo_write` accepts optional
   `priority` + `meta` (`kind`, `parentId`, `namespace`); `merge: false`
   keep-unless-mentioned for protected prefixes (`plan:`, `impl:`, `pr-`,
-  `recon:`, `residual:`, `ask:`). Light `[kind]` badge in todo pane. Join:
+  `recon:`, `residual:`, `ask:`, `feat:`). Feature suggestions use the
+  `feat:` protected namespace (session board; not durable residual unless
+  campaign-ranked). Light `[kind]` badge in todo pane. Join:
   `doc/dev/research/todo-levels-product-2026-07-24.md`
 - [x] **Session notes channel** — `/note` stores operator mid-session
   annotations that are **not** pending main-turn prompts (session-local

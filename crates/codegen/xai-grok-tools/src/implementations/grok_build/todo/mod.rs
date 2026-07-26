@@ -38,7 +38,7 @@ pub(crate) fn validate_no_duplicate_ids(updates: &[TodoUpdate]) -> Result<(), To
 /// items with these prefixes are **kept unless mentioned** in the replace
 /// payload (so a skill cannot silently wipe foreign namespaces).
 pub const PROTECTED_TODO_PREFIXES: &[&str] =
-    &["plan:", "impl:", "pr-", "recon:", "residual:", "ask:"];
+    &["plan:", "impl:", "pr-", "recon:", "residual:", "ask:", "feat:"];
 
 /// True when `id` starts with a protected skill/session namespace prefix.
 pub fn is_protected_todo_id(id: &str) -> bool {
@@ -228,7 +228,7 @@ fn item_from_update(u: &TodoUpdate) -> TodoItem {
 
 /// `merge=false`: the incoming list replaces the existing todo state, except
 /// **protected-prefix** items (`plan:`, `impl:`, `pr-`, `recon:`, `residual:`,
-/// `ask:`) that are **not** listed in `updates` are preserved
+/// `ask:`, `feat:`) that are **not** listed in `updates` are preserved
 /// (keep-unless-mentioned).
 /// If `content` is omitted for an item, the `id` is used as a fallback.
 /// If `status` is omitted, it defaults to `Pending`.
@@ -456,13 +456,14 @@ pub struct TodoWriteInput {
     /// list by id (partial updates are allowed — leave unchanged fields
     /// undefined). When explicitly set to false, the provided todos replace
     /// the existing list, except protected-prefix ids (`plan:`, `impl:`,
-    /// `pr-`, `recon:`, `residual:`, `ask:`) that are not mentioned are kept.
+    /// `pr-`, `recon:`, `residual:`, `ask:`, `feat:`) that are not mentioned
+    /// are kept.
     #[serde(
         default = "default_merge",
         deserialize_with = "crate::types::schema::deserialize_lenient_bool"
     )]
     #[schemars(
-        description = "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list. Protected-prefix ids (plan:, impl:, pr-, recon:, residual:, ask:) not mentioned in the replace set are preserved so foreign namespaces are not silently wiped."
+        description = "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list. Protected-prefix ids (plan:, impl:, pr-, recon:, residual:, ask:, feat:) not mentioned in the replace set are preserved so foreign namespaces are not silently wiped."
     )]
     pub merge: bool,
 
@@ -1321,7 +1322,7 @@ mod tests {
         let resources = Resources::new();
         let shared = resources.into_shared();
 
-        // Seed mixed board: plan + recon + plain.
+        // Seed mixed board: plan + recon + feat + plain.
         let seed = TodoWriteInput {
             merge: false,
             todos: vec![
@@ -1330,6 +1331,11 @@ mod tests {
                     "recon:inventory",
                     Some("Inventory crates"),
                     Some(TodoStatus::InProgress),
+                ),
+                make_update(
+                    "feat:my-idea",
+                    Some("Feature suggestion"),
+                    Some(TodoStatus::Pending),
                 ),
                 make_update("scratch", Some("Ephemeral"), Some(TodoStatus::Pending)),
             ],
@@ -1363,6 +1369,10 @@ mod tests {
             ids.contains(&"recon:inventory"),
             "recon:* must survive: {ids:?}"
         );
+        assert!(
+            ids.contains(&"feat:my-idea"),
+            "feat:* must survive: {ids:?}"
+        );
         assert!(ids.contains(&"impl:1"), "new impl item present: {ids:?}");
         assert!(
             !ids.contains(&"scratch"),
@@ -1372,6 +1382,10 @@ mod tests {
         assert_eq!(
             get_item(&output.state, "recon:inventory").content,
             "Inventory crates"
+        );
+        assert_eq!(
+            get_item(&output.state, "feat:my-idea").content,
+            "Feature suggestion"
         );
     }
 
@@ -1451,10 +1465,12 @@ mod tests {
         assert!(is_protected_todo_id("recon:map"));
         assert!(is_protected_todo_id("residual:open"));
         assert!(is_protected_todo_id("ask:turn-1"));
+        assert!(is_protected_todo_id("feat:my-idea"));
         assert!(!is_protected_todo_id("1"));
         assert!(!is_protected_todo_id("scratch"));
         assert!(!is_protected_todo_id("planning")); // not plan: prefix
         assert!(!is_protected_todo_id("asking")); // not ask: prefix
+        assert!(!is_protected_todo_id("feature")); // not feat: prefix
     }
 
     #[test]
