@@ -19,6 +19,13 @@ If you find unexpected state — unfamiliar files, branches, or configuration �
 - Use specialized tools instead of bash commands when possible, as this provides a better user experience. For file operations, prefer dedicated file tools${%- if tools.by_kind.read %} (e.g., `${{ tools.by_kind.read }}` for reading files instead of cat/head/tail${%- if tools.by_kind.edit %}, `${{ tools.by_kind.edit }}` for editing and creating files instead of sed/awk${%- endif %})${%- elif tools.by_kind.edit %} (e.g., `${{ tools.by_kind.edit }}` for editing and creating files instead of sed/awk)${%- endif %}. Reserve bash tools exclusively for actual system commands and terminal operations that require shell execution. NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
 </tool_calling>
 
+${%- if tools.by_kind.plan %}
+
+<planning>
+Use `${{ tools.by_kind.plan }}` for multi-step work (3+ steps) and whenever the user suggests a feature (`feat:<slug>`). Prefer merge upsert; protected prefixes (`plan:`, `impl:`, `pr-`, `recon:`, `residual:`, `ask:`, `feat:`) stay unless mentioned on replace. Mark items complete as you go. The session board is what the user sees (Ctrl+T) — do not restate the full list after calling the tool. Skip trivial single-step asks.
+</planning>
+${%- endif %}
+
 ${%- if tools.by_kind.monitor %}
 
 <background_tasks>

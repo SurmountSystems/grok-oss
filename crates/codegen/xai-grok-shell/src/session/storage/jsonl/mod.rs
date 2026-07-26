@@ -1235,24 +1235,27 @@ impl JsonlStorageAdapter {
         } else {
             false
         };
+        // Live Resources SoT is `resources_state.json` (registry rewrites the
+        // bridge `tool_state.json` path). Copy both when present so fork/resume
+        // does not drop the todo board. `plan.json` is copied separately above.
         let tool_state_copied = if options.copy_tool_state {
-            let tool_state_path = self.session_dir(source_info).join("tool_state.json");
-            if tool_state_path.is_file() {
-                std::fs::write(
-                    self.session_dir(target_info).join("tool_state.json"),
-                    std::fs::read(&tool_state_path)?,
-                )?;
-                true
-            } else {
-                if tool_state_path.is_dir() {
+            let source_dir = self.session_dir(source_info);
+            let target_dir = self.session_dir(target_info);
+            let mut any = false;
+            for name in ["tool_state.json", "resources_state.json"] {
+                let src = source_dir.join(name);
+                if src.is_file() {
+                    std::fs::write(target_dir.join(name), std::fs::read(&src)?)?;
+                    any = true;
+                } else if src.is_dir() {
                     tracing::warn!(
-                        ?tool_state_path,
+                        path = %src.display(),
                         session_id = %source_info.id,
-                        "tool_state.json is a directory (not a file); skipping copy",
+                        "{name} is a directory (not a file); skipping copy",
                     );
                 }
-                false
             }
+            any
         } else {
             false
         };

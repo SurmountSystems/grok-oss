@@ -2112,7 +2112,7 @@ impl acp::Agent for MvpAgent {
             if restored_awaiting_plan_approval {
                 let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
-            // Rehydrate todo board from tool_state / plan.json after load so the
+            // Rehydrate todo board from Resources / plan.json after load so the
             // UI Plan pane matches durable state (plan_state was previously discarded).
             let _ = handle.cmd_tx.send(SessionCommand::RestoreTodoBoard {
                 plan_state: restored_plan_state,

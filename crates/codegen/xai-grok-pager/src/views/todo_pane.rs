@@ -241,6 +241,9 @@ pub struct TodoPane {
     prev_counts: TodoCounts,
     /// When the badge flash animation expires (500ms after a count change).
     badge_flash_until: Option<Instant>,
+    /// One-shot discoverability: auto-open the pane the first time the board
+    /// goes empty → non-empty in this session (ask seed / first Plan).
+    did_auto_open: bool,
     /// Last theme kind seen — used to detect theme switches and restyle.
     last_theme: ThemeKind,
 }
@@ -273,10 +276,11 @@ impl TodoPane {
             style: TodoPaneStyle::default(),
             list_style: ListPaneStyle::default(),
             show_done: true,
-            // Starts hidden — auto-shows when items arrive via update_todos.
+            // Starts hidden; first 0→N Plan auto-opens once (see update_todos).
             overlay: OverlayState::hidden(),
             prev_counts: TodoCounts::default(),
             badge_flash_until: None,
+            did_auto_open: false,
             last_theme: crate::theme::Theme::current_kind(),
         }
     }
@@ -290,15 +294,23 @@ impl TodoPane {
 
     /// Replace all todo items (called from ACP Plan handler).
     ///
-    /// Does NOT auto-show the todo pane — the badge in the status bar is
-    /// the primary indicator. Users toggle the pane with Ctrl-T or by
-    /// clicking the badge.
+    /// On the first empty→non-empty transition, auto-opens the pane once so
+    /// ask-seed / first `todo_write` is discoverable (status badge also
+    /// flashes). Later updates keep the user's show/hide choice; toggle with
+    /// Ctrl+T or the badge.
     ///
     /// Triggers a badge flash when counts change (including first arrival).
     pub fn update_todos(&mut self, items: Vec<TodoItem>) {
         let new_counts = Self::compute_counts(&items);
+        let was_empty = self.prev_counts.total() == 0;
+        let now_nonempty = new_counts.total() > 0;
         if new_counts != self.prev_counts {
             self.badge_flash_until = Some(Instant::now() + BADGE_FLASH_DURATION);
+        }
+        // First paint only — match tasks_pane 0→N edge without re-opening every Plan.
+        if was_empty && now_nonempty && !self.did_auto_open {
+            self.overlay.show();
+            self.did_auto_open = true;
         }
         self.prev_counts = new_counts;
         self.todos = items;
@@ -614,5 +626,46 @@ mod tests {
             empty_placeholder_message(false, counts(0, 2)),
             "2 cancelled."
         );
+    }
+
+    fn sample_item(content: &str) -> TodoItem {
+        TodoItem {
+            content: content.into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::Pending,
+            meta: None,
+        }
+    }
+
+    #[test]
+    fn first_plan_with_items_auto_opens_pane_once() {
+        let mut pane = TodoPane::new();
+        assert!(!pane.is_visible(), "starts hidden");
+        assert_eq!(pane.counts().total(), 0);
+
+        pane.update_todos(vec![sample_item("First ask")]);
+        assert!(
+            pane.is_visible(),
+            "first 0→N Plan should auto-open the pane"
+        );
+        assert!(pane.badge_flash_active(), "badge should flash on first paint");
+        assert_eq!(pane.counts().total(), 1);
+
+        // User closes; later Plan must not force-reopen.
+        pane.overlay.hide();
+        pane.update_todos(vec![sample_item("First ask"), sample_item("Second")]);
+        assert!(
+            !pane.is_visible(),
+            "subsequent updates must respect user hide after first auto-open"
+        );
+        assert_eq!(pane.counts().total(), 2);
+    }
+
+    #[test]
+    fn empty_plan_does_not_auto_open() {
+        let mut pane = TodoPane::new();
+        pane.update_todos(vec![]);
+        assert!(!pane.is_visible());
+        assert_eq!(pane.counts().total(), 0);
     }
 }

@@ -1718,7 +1718,7 @@ impl SessionActor {
         }
         // Persist the live todo board to plan.json (honest snapshot). Historical
         // bug: always wrote empty TodoState, so session dirs lied after compact.
-        // Real SoT remains Resources + tool_state.json; plan.json is a mirror.
+        // Real SoT remains Resources + resources_state.json; plan.json is a mirror.
         {
             use crate::tools::todo::{TodoState, plan_json_snapshot_after_compact};
             use xai_grok_tools::types::resources::State;

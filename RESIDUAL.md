@@ -15,8 +15,10 @@ or code — not only here.
   `AutoCompactCompleted`. Test: `auto_compact_completed_preserves_todo_board`.
 - **plan.json honesty + resume board** — compact writes live Resources
   `TodoState` (not empty); resume `RestoreTodoBoard` seeds from
-  `tool_state.json` / `plan.json` and re-emits Plan. User-guide `17-sessions`
-  documents SoT. Helpers + unit tests in todo module.
+  `resources_state.json` / `plan.json` and re-emits Plan. User-guide
+  `17-sessions` documents SoT. Helpers + unit tests in todo module.
+- **Default agent todos usage** — base prompt Planning/`todo_write`; first
+  Plan auto-opens pane once; fork copies `resources_state.json`.
 - **`ask:*` auto-seed** — real user turns seed protected `ask:<prompt_id>`
   (cap 20); protected on `merge: false`. FORK + todo unit tests.
 - **Host bulk-replace MVP + C3 edit storm** — shell

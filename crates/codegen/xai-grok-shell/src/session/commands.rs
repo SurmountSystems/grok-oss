@@ -138,9 +138,10 @@ pub enum SessionCommand {
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval,
-    /// Resume hook: rehydrate the todo board from Resources (`tool_state.json`)
-    /// and fall back to `plan.json` when tool state is empty. Emits an ACP
-    /// `Plan` update so the UI board matches durable state after load.
+    /// Resume hook: rehydrate the todo board from Resources
+    /// (`resources_state.json`) and fall back to `plan.json` when tool state
+    /// is empty. Emits an ACP `Plan` update so the UI board matches durable
+    /// state after load.
     RestoreTodoBoard {
         plan_state: Option<crate::tools::todo::TodoState>,
     },

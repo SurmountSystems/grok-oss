@@ -175,14 +175,14 @@ pub fn plan_json_snapshot_after_compact(live: Option<&TodoState>) -> TodoState {
 
 /// Resolve durable todo state on session resume.
 ///
-/// Prefer non-empty Resources / `tool_state.json`. When tool state wins, still
-/// **union in** any `ask:*` items present only in `plan.json` (backstop when
-/// asks were mirrored to plan but not yet flushed to tool_state). Fall back to
-/// a non-empty `plan.json` when tool state is missing or empty.
+/// Prefer non-empty Resources / `resources_state.json`. When tool state wins,
+/// still **union in** any `ask:*` items present only in `plan.json` (backstop
+/// when asks were mirrored to plan but not yet flushed to Resources). Fall back
+/// to a non-empty `plan.json` when tool state is missing or empty.
 ///
 /// Returns `(state, needs_tool_state_persist)` — the bool is true when the
-/// caller should write Resources / `tool_state.json` (seed from plan or ask
-/// union changed the tool snapshot).
+/// caller should write Resources / `resources_state.json` (seed from plan or
+/// ask union changed the tool snapshot).
 pub fn effective_todo_state_on_resume(
     from_tool_state: Option<TodoState>,
     from_plan_json: Option<TodoState>,
