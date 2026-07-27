@@ -335,7 +335,15 @@ Report an issue or send feedback.
 
 ### `/btw`
 
-Send an aside to the agent without interrupting the current task. In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped. The side question and its answer aren't part of the main turn.
+Send an aside to the agent without interrupting the current task. The side question and its answer aren't part of the main turn.
+
+In the full TUI, a finished answer opens a **Done** panel:
+
+- **`y`** (when the panel is focused) — copy the **full thread** to the clipboard (`/btw <question>` plus the complete rendered answer, not just what is on screen). The chrome also shows a `[y]` control.
+- **`a`** — open a follow-up composer in the **same** btw session (prior Q/A is included for the model). You can keep asking without starting a new main turn.
+- **`Esc`** — dismiss the panel.
+
+In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped.
 
 ```
 /btw also check the error handling

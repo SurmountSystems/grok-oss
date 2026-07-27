@@ -2025,9 +2025,9 @@ mod link_click_tests {
     #[test]
     fn router_slash_blocked_while_btw_panel_open() {
         let (mut agent, reg) = make_search_agent();
-        agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
-            question: "q".into(),
-        });
+        agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::loading(
+            "q".into(),
+        ));
         route_slash(&mut agent, &reg);
         assert!(agent.scrollback_search.is_none());
     }

@@ -2026,6 +2026,9 @@ mod tests {
         SamplerConfig {
             api_key: Some("test-key".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             base_url: "https://example.test".to_string(),
             model: "test-model".to_string(),
             max_completion_tokens: None,
@@ -2049,6 +2052,8 @@ mod tests {
             client_version: None,
             attribution_callback: None,
             bearer_resolver: None,
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -2264,6 +2269,9 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("anthropic-key-abc123".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             ..minimal_config()
@@ -2283,6 +2291,9 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("bearer-key-abc123".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::Bearer,
             ..minimal_config()
@@ -2401,6 +2412,9 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("test-bearer-1234567890".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
@@ -2422,6 +2436,9 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("anthropic-key-abc123".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             ..minimal_config()
@@ -2441,6 +2458,9 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: None,
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
@@ -2453,9 +2473,14 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("stale-bearer".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::Bearer,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-bearer"))),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
@@ -2482,9 +2507,14 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("stale-bearer".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::Responses,
             auth_scheme: AuthScheme::Bearer,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-bearer"))),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
@@ -2511,9 +2541,14 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("stale-anthropic".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::Messages,
             auth_scheme: AuthScheme::XApiKey,
             bearer_resolver: Some(std::sync::Arc::new(StaticBearerResolver("fresh-anthropic"))),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
@@ -2537,6 +2572,9 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("abc".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
@@ -2556,9 +2594,14 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("the-bearer-1234567890-extra-tail".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::ChatCompletions,
             attribution_callback: Some(cb_dyn),
             bearer_resolver: None,
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
@@ -2594,6 +2637,8 @@ mod tests {
             api_key: Some("stale-seed-token".to_string()),
             api_backend: ApiBackend::Responses,
             bearer_resolver: Some(std::sync::Arc::new(EmptyResolver)),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
@@ -2621,6 +2666,8 @@ mod tests {
             api_key: Some("stale-token".to_string()),
             api_backend: ApiBackend::Responses,
             bearer_resolver: Some(std::sync::Arc::new(EmptyResolver)),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
@@ -2654,8 +2701,13 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("stale-token".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::Responses,
             bearer_resolver: Some(resolver),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
@@ -2688,9 +2740,14 @@ mod tests {
         let cfg = SamplerConfig {
             api_key: Some("bearer".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             api_backend: ApiBackend::ChatCompletions,
             attribution_callback: None,
             bearer_resolver: None,
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");

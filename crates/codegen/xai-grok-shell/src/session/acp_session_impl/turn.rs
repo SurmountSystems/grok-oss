@@ -2342,6 +2342,10 @@ impl SessionActor {
                 }
             }
             if let Some(text) = fallback_text {
+                // Fallback one-shots bypass the stream ChannelToken path —
+                // scrub here so UI matches stream/chat_state hygiene.
+                let text =
+                    crate::session::helpers::assistant_ascii_scrub::scrub_assistant_text(text);
                 tracing::warn!(
                     text_len = text.len(),
                     "emitting fallback AgentMessageChunk — no text chunks were streamed"

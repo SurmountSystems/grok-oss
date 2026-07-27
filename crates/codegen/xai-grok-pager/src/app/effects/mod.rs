@@ -3533,18 +3533,37 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
+        Effect::SendBtw {
+            agent_id,
+            session_id,
+            question,
+            btw_session_id,
+            prior_turns,
+            minimal_request_id,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let request = acp::ExtRequest::new(
-                        "x.ai/btw",
-                        serde_json::value::to_raw_value(
-                                &serde_json::json!({
+                    let prior_json: Vec<serde_json::Value> = prior_turns
+                        .into_iter()
+                        .map(|(q, a)| {
+                            serde_json::json!({
+                                "question": q,
+                                "answer": a,
+                            })
+                        })
+                        .collect();
+                    let mut params = serde_json::json!({
                         "sessionId": session_id.0.to_string(),
                         "question": question,
-                    }),
-                            )
+                        "priorTurns": prior_json,
+                    });
+                    if let Some(id) = btw_session_id {
+                        params["btwSessionId"] = serde_json::Value::String(id);
+                    }
+                    let request = acp::ExtRequest::new(
+                        "x.ai/btw",
+                        serde_json::value::to_raw_value(&params)
                             .expect("serialize btw params")
                             .into(),
                     );
@@ -3554,15 +3573,20 @@ pub(crate) fn execute(
                                     resp.0.get(),
                                 )
                                 .unwrap_or_default();
-                            let answer = parsed
-                                .get("result")
+                            let result_obj = parsed.get("result");
+                            let answer = result_obj
                                 .and_then(|r| r.get("answer"))
                                 .and_then(|a| a.as_str())
                                 .unwrap_or("No response")
                                 .to_string();
+                            let returned_session_id = result_obj
+                                .and_then(|r| r.get("btwSessionId"))
+                                .and_then(|s| s.as_str())
+                                .map(str::to_string);
                             TaskResult::BtwResponse {
                                 agent_id,
                                 result: Ok(answer),
+                                btw_session_id: returned_session_id,
                                 minimal_request_id,
                             }
                         }
@@ -3572,6 +3596,7 @@ pub(crate) fn execute(
                                 result: Err(
                                     sanitize_user_error(&format!("side question failed: {e}")),
                                 ),
+                                btw_session_id: None,
                                 minimal_request_id,
                             }
                         }

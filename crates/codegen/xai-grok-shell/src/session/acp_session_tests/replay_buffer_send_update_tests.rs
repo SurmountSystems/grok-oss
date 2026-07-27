@@ -1267,3 +1267,129 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
         })
         .await;
 }
+
+/// Serialize env mutations for the ASCII-scrub stream tests in this file.
+static ASCII_SCRUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// S1: Text channel tokens are scrubbed before streaming capture (and the
+/// AgentMessageChunk that `send_update` builds from the same string) when
+/// ASCII scrub is on (default).
+#[tokio::test(flavor = "current_thread")]
+async fn channel_token_text_scrubs_curly_punctuation_when_on() {
+    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
+    use xai_grok_tools::util::ascii_scrub::ENV_SCRUB_ASCII_PUNCT;
+
+    let _lock = ASCII_SCRUB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        std::env::remove_var(ENV_SCRUB_ASCII_PUNCT);
+    }
+    crate::session::helpers::assistant_ascii_scrub::set_config_enabled(true);
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let ReplaySendUpdateFixture {
+                actor,
+                mut event_rx,
+                sent,
+                ..
+            } = make_replay_send_update_fixture().await;
+            let actor = Arc::new(actor);
+            let req = RequestId::random();
+            actor
+                .handle_sampling_event(SamplingEvent::StreamStarted {
+                    request_id: req.clone(),
+                    timestamp_ms: 1,
+                })
+                .await;
+            actor
+                .handle_sampling_event(SamplingEvent::ChannelToken {
+                    request_id: req,
+                    channel: SamplingChannel::Text,
+                    text: "She said \u{201C}go\u{201D}\u{2014}now".to_string(),
+                    chunk_index: 0,
+                })
+                .await;
+
+            let cap = actor.streaming_turn_capture.lock().clone();
+            assert_eq!(
+                cap.response_text, "She said \"go\"--now",
+                "streaming capture must store scrubbed assistant text"
+            );
+
+            // Flush buffered stream chunk(s) so gateway sees the same scrubbed text.
+            let mut replay_buffer = ReplayBuffer::new(actor.buffering_settings.clone());
+            while let Ok(event) = event_rx.try_recv() {
+                let SessionEvent::Notification(notification) = event else {
+                    continue;
+                };
+                let _ = replay_buffer.consume_chunk(notification);
+            }
+            if let Some(flushed) = replay_buffer.flush() {
+                actor.emit_buffered(flushed).await;
+            }
+            tokio::task::yield_now().await;
+            let sent_msgs = sent.lock().await.clone();
+            let texts: Vec<String> = sent_msgs.iter().filter_map(extract_text).collect();
+            assert!(
+                texts.iter().any(|t| t == "She said \"go\"--now"),
+                "AgentMessageChunk must be scrubbed; got {texts:?}"
+            );
+        })
+        .await;
+
+    crate::session::helpers::assistant_ascii_scrub::set_config_enabled(true);
+}
+
+/// S2: When scrub is off (env kill-switch), curly punctuation is preserved
+/// through the stream path.
+#[tokio::test(flavor = "current_thread")]
+async fn channel_token_text_preserves_unicode_when_scrub_off() {
+    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
+    use xai_grok_tools::util::ascii_scrub::ENV_SCRUB_ASCII_PUNCT;
+
+    let _lock = ASCII_SCRUB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        std::env::set_var(ENV_SCRUB_ASCII_PUNCT, "0");
+    }
+    crate::session::helpers::assistant_ascii_scrub::set_config_enabled(true);
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let fixture = make_replay_send_update_fixture().await;
+            let actor = Arc::new(fixture.actor);
+            let req = RequestId::random();
+            let raw = "She said \u{201C}go\u{201D}\u{2014}now".to_string();
+            actor
+                .handle_sampling_event(SamplingEvent::StreamStarted {
+                    request_id: req.clone(),
+                    timestamp_ms: 1,
+                })
+                .await;
+            actor
+                .handle_sampling_event(SamplingEvent::ChannelToken {
+                    request_id: req,
+                    channel: SamplingChannel::Text,
+                    text: raw.clone(),
+                    chunk_index: 0,
+                })
+                .await;
+
+            let cap = actor.streaming_turn_capture.lock().clone();
+            assert_eq!(
+                cap.response_text, raw,
+                "when scrub is off, streaming capture must keep original Unicode"
+            );
+        })
+        .await;
+
+    unsafe {
+        std::env::remove_var(ENV_SCRUB_ASCII_PUNCT);
+    }
+    crate::session::helpers::assistant_ascii_scrub::set_config_enabled(true);
+}

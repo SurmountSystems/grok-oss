@@ -367,8 +367,10 @@ pub fn render_completion_output_delivery(
         }
         None => match disk_pointer_footer {
             Some(footer) => {
+                // Densify structured JSON before truncate so TOON can avoid the cap.
+                let densified = crate::util::toon::densify_structured_text(output);
                 let (output, _) = truncate_with_preview(
-                    output,
+                    densified.as_str(),
                     MAX_INLINE_COMPLETION_BYTES,
                     PREVIEW_SIZE,
                     Some(footer),
@@ -376,7 +378,9 @@ pub fn render_completion_output_delivery(
                 let _ = write!(buf, "response:\n{output}");
             }
             None => {
-                let _ = write!(buf, "response:\n{output}");
+                // T5: inline subagent handoff — densify pure structured JSON only.
+                let densified = crate::util::toon::densify_structured_text(output);
+                let _ = write!(buf, "response:\n{densified}");
             }
         },
     }
@@ -1675,6 +1679,45 @@ mod tests {
         assert!(
             msg.contains("response:\noutput for sub-abc"),
             "must inline the subagent's output text: {msg}"
+        );
+    }
+
+    /// T5: inline handoff densifies pure structured JSON under auto policy.
+    #[test]
+    fn format_subagent_completion_densifies_structured_json_handoff() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // auto
+
+        let mut c = make_subagent_completion("sub-json", true);
+        let body = serde_json::json!({
+            "hits": [
+                {"path": "a.rs", "line": 1, "text": "x"},
+                {"path": "b.rs", "line": 2, "text": "y"},
+                {"path": "c.rs", "line": 3, "text": "z"},
+            ]
+        });
+        let pretty = serde_json::to_string_pretty(&body).unwrap();
+        c.output = std::sync::Arc::from(pretty.as_str());
+        let msg = format_subagent_completion(&c, None);
+        assert!(
+            msg.contains("hits[") && msg.contains('{'),
+            "structured JSON handoff densified to TOON: {msg}"
+        );
+        assert!(
+            !msg.contains("\"path\": \"a.rs\""),
+            "pretty JSON should not remain: {msg}"
+        );
+        // Free-text still inline as-is.
+        let free = make_subagent_completion("sub-free", true);
+        let free_msg = format_subagent_completion(&free, None);
+        assert!(
+            free_msg.contains("response:\noutput for sub-free"),
+            "free text handoff unchanged: {free_msg}"
         );
     }
     #[test]

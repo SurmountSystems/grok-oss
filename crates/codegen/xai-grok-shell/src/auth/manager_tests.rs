@@ -3633,6 +3633,8 @@ async fn shared_api_key_provider_resolves_live_bearer() {
 async fn shared_api_key_provider_static_fallthrough() {
     use xai_grok_test_support::EnvGuard;
 
+    // store_api_key dual-writes credentials_store; avoid OS keyring D-Bus hangs.
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
     let provider = shared_api_key_provider(mgr.clone());
@@ -3802,6 +3804,8 @@ async fn shared_api_key_provider_sync_buffered_session_beats_static() {
 async fn shared_api_key_provider_disk_memo_follows_rewrites() {
     use xai_grok_test_support::EnvGuard;
 
+    // store_api_key dual-writes credentials_store; avoid OS keyring D-Bus hangs.
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
     let _xai = EnvGuard::unset("XAI_API_KEY");
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let dir = tempfile::tempdir().unwrap();
@@ -3867,6 +3871,8 @@ async fn process_key_from_model_env_key() {
 async fn process_key_precedence() {
     use xai_grok_test_support::EnvGuard;
 
+    // store_api_key dual-writes credentials_store; avoid OS keyring D-Bus hangs.
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
     let _xai = EnvGuard::unset("XAI_API_KEY");
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let dir = tempfile::tempdir().unwrap();

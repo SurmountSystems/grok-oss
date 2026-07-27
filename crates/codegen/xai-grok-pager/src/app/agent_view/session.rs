@@ -273,6 +273,7 @@ impl AgentView {
             permission_stashed_pane: None,
             plan_approval_view: None,
             latest_inline_plan_content: None,
+            plan_card_committed_id: None,
             plan_comments: Vec::new(),
             plan_next_comment_id: 0,
             casual_commenting_range: None,
@@ -1445,7 +1446,8 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             old_request,
-            Ok("old answer".into())
+            Ok("old answer".into()),
+            None,
         ));
         assert!(agent.btw_state.is_none());
         let replay_request =
@@ -1456,7 +1458,8 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             replay_request,
-            Ok("pre-replay answer".into())
+            Ok("pre-replay answer".into()),
+            None,
         ));
         assert!(agent.btw_state.is_none());
     }

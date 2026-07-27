@@ -144,6 +144,7 @@ fn ensure_plan_mode_tools(tool_config: &mut xai_grok_tools::registry::types::Too
     let missing_enter = !existing.contains("GrokBuild:enter_plan_mode");
     let missing_exit = !existing.contains("GrokBuild:exit_plan_mode");
     let missing_ask = !existing.contains("GrokBuild:ask_user_question");
+    let missing_scrub = !existing.contains("GrokBuild:disable_ascii_scrub");
     drop(existing);
     if missing_enter {
         tool_config
@@ -159,6 +160,12 @@ fn ensure_plan_mode_tools(tool_config: &mut xai_grok_tools::registry::types::Too
         tool_config
             .tools
             .push((&grok_build::AskUserQuestionTool).into());
+    }
+    // S3: agent can request scrub off only via permission UX (tool path).
+    if missing_scrub {
+        tool_config
+            .tools
+            .push((&grok_build::DisableAsciiScrubTool).into());
     }
 }
 /// Merge a shell-resolved params map into every matching tool's

@@ -1301,9 +1301,17 @@ pub(crate) async fn run(
         config.show_timeline = show_timeline;
         app.set_appearance(config);
     }
+    // Seed hide_header from disk UiConfig into live appearance.
+    if app.appearance.hide_header != app.current_ui.hide_header {
+        let mut config = app.appearance.clone();
+        config.hide_header = app.current_ui.hide_header;
+        app.set_appearance(config);
+    }
     // Single-key load so a malformed unrelated `[ui]` field cannot wipe this.
     let page_flip_on_send = crate::appearance::cache::load_page_flip_on_send();
     app.current_ui.page_flip_on_send = Some(page_flip_on_send);
+    let scrub_ascii_punct = crate::appearance::cache::load_scrub_ascii_punct();
+    app.current_ui.scrub_ascii_punct = Some(scrub_ascii_punct);
     // Disk load replaces `current_ui`. Assign one policy-clamped resolved
     // launch mode unconditionally (CLI > TOML > remote > Ask) so disk Auto
     // cannot win over `--permission-mode ask`, and a policy-clamped remote

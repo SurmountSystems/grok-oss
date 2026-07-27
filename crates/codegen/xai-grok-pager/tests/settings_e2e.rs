@@ -29,10 +29,12 @@ use xai_grok_shell::agent::config::UiConfig;
 /// `SettingsRegistry::defaults().all()`.
 const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compact_mode",
+    "hide_header",
     "screen_mode",
     "show_timestamps",
     "show_timeline",
     "page_flip_on_send",
+    "scrub_ascii_punct",
     "combine_queued_prompts",
     "simple_mode",
     "vim_mode",
@@ -55,6 +57,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "coding_data_sharing",
     "default_selected_permission",
     "plan_mode",
+    "plan_approval_park",
     "show_tips",
     "auto_update",
     "fork_secondary_model",
@@ -215,6 +218,9 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         ("compact_mode", Action::SetCompactMode(b)) => {
             assert_eq!(b, expected, "SetCompactMode value differs from expected")
         }
+        ("hide_header", Action::SetHideHeader(b)) => {
+            assert_eq!(b, expected, "SetHideHeader value differs from expected")
+        }
         ("show_timestamps", Action::SetTimestamps(b)) => {
             assert_eq!(b, expected, "SetTimestamps value differs from expected")
         }
@@ -223,6 +229,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("page_flip_on_send", Action::SetPageFlipOnSend(b)) => {
             assert_eq!(b, expected, "SetPageFlipOnSend value differs from expected")
+        }
+        ("scrub_ascii_punct", Action::SetScrubAsciiPunct(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetScrubAsciiPunct value differs from expected"
+            )
         }
         ("combine_queued_prompts", Action::SetCombineQueuedPrompts(b)) => {
             assert_eq!(
@@ -413,6 +425,15 @@ fn space_on_page_flip_on_send_dispatches_typed_setter() {
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     let default_on = UiConfig::default().page_flip_on_send_enabled();
     assert_set_bool_action(outcome, "page_flip_on_send", !default_on);
+}
+
+#[test]
+fn space_on_scrub_ascii_punct_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "scrub_ascii_punct");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    let default_on = UiConfig::default().scrub_ascii_punct_enabled();
+    assert_set_bool_action(outcome, "scrub_ascii_punct", !default_on);
 }
 
 #[test]
@@ -671,6 +692,21 @@ fn mouse_click_on_page_flip_on_send_indicator_toggles_in_one_click() {
     );
     let default_on = UiConfig::default().page_flip_on_send_enabled();
     assert_set_bool_action(outcome, "page_flip_on_send", !default_on);
+}
+
+#[test]
+fn mouse_click_on_scrub_ascii_punct_indicator_toggles_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "scrub_ascii_punct") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    let default_on = UiConfig::default().scrub_ascii_punct_enabled();
+    assert_set_bool_action(outcome, "scrub_ascii_punct", !default_on);
 }
 
 #[test]
@@ -1143,10 +1179,9 @@ fn filter_with_multiple_matches_navigates_between_settings() {
     assert_eq!(s.selected, simple_idx);
 
     // Drop the second keyword (Backspace x8 to remove "minimal" — 7
-    // chars + 1 space). Now "ascii" alone still matches only
-    // simple_mode but we're back to a single-keyword filter that
-    // doesn't ambiguously broaden. Asserts the "filter still narrows
-    // correctly when one keyword drops out" property.
+    // chars + 1 space). "ascii" alone matches both simple_mode and
+    // scrub_ascii_punct (both declare the keyword). Asserts the filter
+    // broadens correctly when one AND keyword drops out.
     for _ in 0..8 {
         let _ = handle_settings_key(&mut s, &press(KeyCode::Backspace));
     }
@@ -1159,7 +1194,7 @@ fn filter_with_multiple_matches_navigates_between_settings() {
             _ => None,
         })
         .collect();
-    assert_eq!(after_pop_keys, vec!["simple_mode"]);
+    assert_eq!(after_pop_keys, vec!["scrub_ascii_punct", "simple_mode"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1540,11 +1575,12 @@ fn filter_multi_word_with_one_unmatched_word_shows_zero_settings() {
 #[test]
 fn filter_and_semantics_narrow_strictly() {
     let reg = SettingsRegistry::defaults();
-    // "ascii" matches only simple_mode (keyword).
+    // "ascii" matches simple_mode and scrub_ascii_punct (both keywords).
     let single = reg.search("ascii");
-    assert_eq!(single.len(), 1);
-    assert_eq!(single[0].key, "simple_mode");
-    // "ascii minimal" — both simple_mode keywords. Still 1 match.
+    assert_eq!(single.len(), 2);
+    let single_keys: Vec<&str> = single.iter().map(|m| m.key).collect();
+    assert_eq!(single_keys, vec!["scrub_ascii_punct", "simple_mode"]);
+    // "ascii minimal" — conjunction keeps only simple_mode.
     let conjunction = reg.search("ascii minimal");
     assert_eq!(conjunction.len(), 1);
     assert_eq!(conjunction[0].key, "simple_mode");
@@ -1804,6 +1840,7 @@ fn registry_kind_membership_through_pr_14() {
         bool_keys,
         vec![
             "compact_mode",
+            "hide_header",
             "group_tool_verbs",
             "collapsed_edit_blocks",
             "invert_scroll",
@@ -1817,6 +1854,7 @@ fn registry_kind_membership_through_pr_14() {
             "show_timeline",
             "show_timestamps",
             "page_flip_on_send",
+            "scrub_ascii_punct",
             "combine_queued_prompts",
             "simple_mode",
             "vim_mode",
@@ -1854,6 +1892,7 @@ fn registry_kind_membership_through_pr_14() {
             "hunk_tracker_mode",
             "keep_text_selection",
             "permission_mode",
+            "plan_approval_park",
             "plan_mode",
             "render_mermaid",
             "screen_mode",
@@ -1924,6 +1963,7 @@ fn enum_settings_membership_through_pr_14() {
             "hunk_tracker_mode",
             "keep_text_selection",
             "permission_mode",
+            "plan_approval_park",
             "plan_mode",
             "render_mermaid",
             "screen_mode",
@@ -1954,6 +1994,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_auto_run_implement(true);
     xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
     xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
+    xai_grok_pager::appearance::cache::set_scrub_ascii_punct(true);
     xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
     xai_grok_pager::appearance::cache::set_scroll_mode(
         xai_grok_pager::appearance::ScrollMode::Auto,
@@ -1969,10 +2010,12 @@ fn defaults_round_trip_through_registry() {
     let expected = |key: &str| -> SettingValue {
         match key {
             "compact_mode" => SettingValue::Bool(false),
+            "hide_header" => SettingValue::Bool(false),
             "screen_mode" => SettingValue::Enum("fullscreen"),
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),
+            "scrub_ascii_punct" => SettingValue::Bool(true),
             "combine_queued_prompts" => SettingValue::Bool(false),
             "simple_mode" => SettingValue::Bool(true),
             "vim_mode" => SettingValue::Bool(false),
@@ -1999,6 +2042,7 @@ fn defaults_round_trip_through_registry() {
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
             "plan_mode" => SettingValue::Enum("off"),
+            "plan_approval_park" => SettingValue::Enum("soft"),
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
             "fork_secondary_model" => SettingValue::String(String::new()),
@@ -2073,9 +2117,11 @@ fn settings_value_payload_matches_kind() {
         let outcome = handle_settings_key(&mut state, &press(KeyCode::Char(' ')));
         match outcome {
             SettingsKeyOutcome::Action(Action::SetCompactMode(_))
+            | SettingsKeyOutcome::Action(Action::SetHideHeader(_))
             | SettingsKeyOutcome::Action(Action::SetTimestamps(_))
             | SettingsKeyOutcome::Action(Action::SetTimeline(_))
             | SettingsKeyOutcome::Action(Action::SetPageFlipOnSend(_))
+            | SettingsKeyOutcome::Action(Action::SetScrubAsciiPunct(_))
             | SettingsKeyOutcome::Action(Action::SetCombineQueuedPrompts(_))
             | SettingsKeyOutcome::Action(Action::SetSimpleMode(_))
             | SettingsKeyOutcome::Action(Action::SetMultilineMode(_))
@@ -2180,10 +2226,10 @@ fn repeat_j_navigation_is_processed() {
     };
     let outcome = handle_settings_key(&mut s, &key);
     // From the initial state (compact_mode), Repeat j advances to the next
-    // Appearance row: screen_mode.
+    // Appearance row: hide_header.
     assert!(matches!(outcome, SettingsKeyOutcome::Changed));
     match &s.rows[s.selected] {
-        RowEntry::Setting { key, .. } => assert_eq!(*key, "screen_mode"),
+        RowEntry::Setting { key, .. } => assert_eq!(*key, "hide_header"),
         _ => panic!("expected setting row after Repeat j"),
     }
 }
@@ -8105,4 +8151,65 @@ fn collapsed_edit_blocks_renders_under_appearance_category_shell_owned() {
         "collapsed_edit_blocks must be immediately below group_tool_verbs; \
          Appearance order: {keys:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// hide_header — SHARED Bool (Appearance, default false)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hide_header_space_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "hide_header");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "hide_header", true);
+}
+
+#[test]
+fn hide_header_enter_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "hide_header");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert_set_bool_action(outcome, "hide_header", true);
+}
+
+#[test]
+fn hide_header_mouse_click_two_stage_toggles() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "hide_header") as u16;
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click on a different row body should only select, got: {outcome:?}"
+    );
+    assert_eq!(s.selected, row_y as usize);
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "hide_header", true);
+}
+
+#[test]
+fn hide_header_renders_under_appearance_category_shared() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("hide_header")
+        .expect("hide_header must be registered");
+    assert_eq!(meta.category, SettingCategory::Appearance);
+    assert_eq!(meta.owner, SettingOwner::Shared);
+    match &meta.kind {
+        SettingKind::Bool { default } => assert!(!*default, "default must be false"),
+        other => panic!("expected Bool kind for hide_header, got {other:?}"),
+    }
 }

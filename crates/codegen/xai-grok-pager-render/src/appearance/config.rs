@@ -35,6 +35,9 @@ pub struct AppearanceConfig {
     pub show_timestamps: bool,
     /// Timeline sidebar (per-turn tick rail). Toggled via `/timeline`.
     pub show_timeline: bool,
+    /// Hide chrome headers (agent status bar, welcome top bar, dashboard
+    /// location header). From `[ui].hide_header`.
+    pub hide_header: bool,
     /// Whether hooks & plugins UI is disabled (hides /hooks, /plugins commands
     /// and scrollback annotations). `false` by default (plugins enabled).
     pub disable_plugins: bool,
@@ -1429,6 +1432,7 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
             show_timestamps: true, // runtime-only, loaded from config.toml via persist
             // Single source: UiConfig::SHOW_TIMELINE_DEFAULT (loaded from config.toml via persist).
             show_timeline: UiConfig::SHOW_TIMELINE_DEFAULT,
+            hide_header: false, // runtime-only; seeded from UiConfig::hide_header at startup
             disable_plugins: raw.disable_plugins,
             show_plan_chip: raw.show_plan_chip,
             alt_screen: raw.terminal.alt_screen.into(),

@@ -851,6 +851,7 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
 pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
     match key {
         "compact_mode" => Some(Action::SetCompactMode(new)),
+        "hide_header" => Some(Action::SetHideHeader(new)),
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),
@@ -874,6 +875,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
+        "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
@@ -897,6 +899,7 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "permission_mode" => None,
         "coding_data_sharing" => None,
         "plan_mode" => None,
+        "plan_approval_park" => None,
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
@@ -939,6 +942,10 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "plan_mode" => match choice {
             "on" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::On)),
             "off" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off)),
+            _ => None,
+        },
+        "plan_approval_park" => match choice {
+            "soft" | "modal" => Some(Action::SetPlanApprovalPark(choice.to_string())),
             _ => None,
         },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),

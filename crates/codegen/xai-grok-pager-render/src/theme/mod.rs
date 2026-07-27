@@ -12,6 +12,7 @@
 
 pub mod cache;
 pub mod color_support;
+pub mod doge;
 mod grokday;
 mod groknight;
 pub mod md_style;
@@ -23,6 +24,10 @@ mod terminal_default;
 pub mod tokyonight;
 
 pub use color_support::quantize;
+pub use doge::{
+    PALETTE as DOGE_PALETTE, PALETTE_HEX as DOGE_PALETTE_HEX, floyd_steinberg_quantise,
+    hard_threshold_channel, index_of_rgb, nearest_rgb, quantise_color, quantise_rgb,
+};
 pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
 
 /// Available theme variants.
@@ -33,6 +38,11 @@ pub enum ThemeKind {
     TokyoNight = 2,
     RosePineMoon = 3,
     OscuraMidnight = 5,
+    /// DOGE: pure `#000`/`#fff` + classic 8 pure ANSI primaries
+    /// (OLED-friendly design intent; no power claims).
+    /// Canonical id `"doge"` only. Discriminant 6 — keep existing
+    /// Auto/Oscura values stable.
+    Doge = 6,
     /// Meta-variant: follow system dark/light appearance.
     ///
     /// Never stored in `cache::CURRENT` — resolved to a concrete
@@ -51,6 +61,7 @@ impl ThemeKind {
         ThemeKind::TokyoNight,
         ThemeKind::RosePineMoon,
         ThemeKind::OscuraMidnight,
+        ThemeKind::Doge,
     ];
 
     /// Theme kinds available on the current terminal.
@@ -61,7 +72,8 @@ impl ThemeKind {
         // Two possible results — pick the right const slice based on
         // the detected color level. No heap allocation needed.
         const ALL: &[ThemeKind] = ThemeKind::ALL;
-        const NO_TRUECOLOR: &[ThemeKind] = &[ThemeKind::GrokNight, ThemeKind::GrokDay];
+        const NO_TRUECOLOR: &[ThemeKind] =
+            &[ThemeKind::GrokNight, ThemeKind::GrokDay, ThemeKind::Doge];
 
         if color_support::detect().has_truecolor() {
             ALL
@@ -78,6 +90,7 @@ impl ThemeKind {
             Self::GrokDay => "grokday",
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
+            Self::Doge => "doge",
             Self::Auto => "auto",
         }
     }
@@ -86,7 +99,8 @@ impl ThemeKind {
     ///
     /// TokyoNight uses blue-tinted backgrounds that lose their character
     /// when quantized to 256 or 16 colors. GrokNight uses neutral grays
-    /// that survive quantization cleanly.
+    /// that survive quantization cleanly. DOGE uses pure 8-colour
+    /// primaries that quantize cleanly to ANSI16.
     pub fn requires_truecolor(self) -> bool {
         match self {
             Self::GrokNight => false,
@@ -94,6 +108,7 @@ impl ThemeKind {
             Self::GrokDay => false,
             Self::RosePineMoon => true,
             Self::OscuraMidnight => true,
+            Self::Doge => false,
             // Auto is resolved to a concrete theme before rendering.
             Self::Auto => false,
         }
@@ -112,6 +127,8 @@ impl ThemeKind {
                 Some(Self::RosePineMoon)
             }
             "oscura" | "oscura-midnight" => Some(Self::OscuraMidnight),
+            // DOGE only — no ansi-8 / tty / oled / ecma-doge / rgbcmykw aliases.
+            "doge" => Some(Self::Doge),
             _ => None,
         }
     }
@@ -147,6 +164,8 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "grokday" => "Grok Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
+        "oscura-midnight" => "Oscura Midnight",
+        "doge" => "DOGE",
         other => other,
     }
 }
@@ -269,12 +288,14 @@ impl Theme {
         if cache::terminal_native_locked() {
             return Self::terminal_default().quantized(level);
         }
-        let base = match cache::current_kind() {
+        let kind = cache::current_kind();
+        let base = match kind {
             ThemeKind::GrokNight => Self::groknight(),
             ThemeKind::TokyoNight => Self::tokyonight(),
             ThemeKind::GrokDay => Self::grokday(),
             ThemeKind::RosePineMoon => Self::rosepine_moon(),
             ThemeKind::OscuraMidnight => Self::oscura_midnight(),
+            ThemeKind::Doge => Self::doge(),
             // Auto is resolved to a concrete theme before being stored;
             // if reached, fall back to GrokNight.
             ThemeKind::Auto => Self::groknight(),
@@ -283,28 +304,44 @@ impl Theme {
         // land on a named/indexed entry whose luminance is host-palette-
         // dependent.
         let dark = base.is_dark();
-        let adapted = if cfg!(target_os = "windows") {
+        // DOGE is a flat pure-black canvas: Windows contrast boost would
+        // invent charcoal elevation from black==black slots, and ANSI16
+        // chrome overrides pin elevated surfaces to DarkGray — both read
+        // as LCD-style light-bleed on true black. Skip both for DOGE.
+        let is_doge = matches!(kind, ThemeKind::Doge);
+        let adapted = if cfg!(target_os = "windows") && !is_doge {
             base.windows_contrast_boost(dark)
         } else {
             base
         };
         let adapted = adapted.quantized(level);
-        // ANSI16 chrome fallback — fires in two cases:
-        //   1. Any terminal that only advertises 16-color support
-        //      (e.g., `TERM=xterm`, `TERM=ansi`, or `GROK_FORCE_COLOR_LEVEL=basic`),
-        //      where naive quantization collapses every dark RGB onto `Color::Black`.
-        //   2. Legacy Windows ConHost below TrueColor, kept for parity with the
-        //      glyph fallback path also gated on `is_legacy_windows_console()`.
-        //
-        // Both arms require `has_color()` so that `NO_COLOR` (which produces
-        // `ColorLevel::None`) keeps suppressing all SGR output. Without the
-        // explicit gate on the legacy-Windows arm, `ansi16_chrome_overrides`
-        // would repaint `Color::Reset` slots with named ANSI colors and
-        // partially defeat the user's opt-out on ConHost.
-        if level.has_color()
+        if is_doge {
+            // Re-pin every background slot to Rgb(0,0,0). Basic quantize
+            // maps pure black to named `Color::Black`, which many terminal
+            // profiles paint as charcoal (not emissive pure black). Keep
+            // truecolor pure black so DOGE never washes the canvas.
+            // Under NO_COLOR, quantized slots are already Reset — leave them.
+            if level.has_color() {
+                adapted.pin_doge_pure_black_backgrounds()
+            } else {
+                adapted
+            }
+        } else if level.has_color()
             && (level == color_support::ColorLevel::Basic
                 || (crate::glyphs::is_legacy_windows_console() && !level.has_truecolor()))
         {
+            // ANSI16 chrome fallback — fires in two cases:
+            //   1. Any terminal that only advertises 16-color support
+            //      (e.g., `TERM=xterm`, `TERM=ansi`, or `GROK_FORCE_COLOR_LEVEL=basic`),
+            //      where naive quantization collapses every dark RGB onto `Color::Black`.
+            //   2. Legacy Windows ConHost below TrueColor, kept for parity with the
+            //      glyph fallback path also gated on `is_legacy_windows_console()`.
+            //
+            // Both arms require `has_color()` so that `NO_COLOR` (which produces
+            // `ColorLevel::None`) keeps suppressing all SGR output. Without the
+            // explicit gate on the legacy-Windows arm, `ansi16_chrome_overrides`
+            // would repaint `Color::Reset` slots with named ANSI colors and
+            // partially defeat the user's opt-out on ConHost.
             adapted.ansi16_chrome_overrides(dark)
         } else {
             adapted
@@ -364,7 +401,9 @@ impl Theme {
         use ratatui::style::Color;
 
         /// Move `color` `amount` levels per channel further from `base`.
-        /// Returns `color` unchanged when either side isn't RGB.
+        /// Returns `color` unchanged when either side isn't RGB, or when
+        /// `color` already matches `base` (do not invent elevation — that
+        /// turns pure black into charcoal wash / light-bleed).
         fn push_away(base: Color, color: Color, amount: i16) -> Color {
             let Color::Rgb(br, b_green, bb) = base else {
                 return color;
@@ -372,6 +411,9 @@ impl Theme {
             let Color::Rgb(cr, cg, cb) = color else {
                 return color;
             };
+            if cr == br && cg == b_green && cb == bb {
+                return color;
+            }
             let base_lum = br as i16 + b_green as i16 + bb as i16;
             let color_lum = cr as i16 + cg as i16 + cb as i16;
             let sign: i16 = if color_lum >= base_lum { 1 } else { -1 };
@@ -418,6 +460,33 @@ impl Theme {
         };
         crate::theme::osc11::classify_luminance(r, g, b)
             == crate::theme::system_appearance::SystemAppearance::Dark
+    }
+
+    /// Force every DOGE canvas / sunken background slot to pure
+    /// [`Color::Rgb(0, 0, 0)`].
+    ///
+    /// DOGE design is a flat emissive-black canvas with no elevated
+    /// surface, gray ramp, or semi-transparent panel wash. Call after
+    /// quantization so named `Color::Black` (ANSI palette — often
+    /// charcoal in host profiles) cannot reintroduce light-bleed.
+    fn pin_doge_pure_black_backgrounds(self) -> Self {
+        use ratatui::style::Color;
+        const BLACK: Color = Color::Rgb(0, 0, 0);
+        Self {
+            bg_base: BLACK,
+            bg_light: BLACK,
+            bg_dark: BLACK,
+            bg_highlight: BLACK,
+            bg_hover: BLACK,
+            bg_terminal: BLACK,
+            scrollbar_bg: BLACK,
+            diff_delete_bg: BLACK,
+            diff_insert_bg: BLACK,
+            bg_visual: BLACK,
+            paste_bg: BLACK,
+            md_code_bg: BLACK,
+            ..self
+        }
     }
 
     /// Pin chrome and semantic-accent colors to ANSI-named entries so
@@ -649,6 +718,44 @@ pub fn reset_cursor_color() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_name_doge_only() {
+        for name in ["doge", "DOGE", "Doge"] {
+            assert_eq!(
+                ThemeKind::from_name(name),
+                Some(ThemeKind::Doge),
+                "name {name}"
+            );
+        }
+        // No compat or ECMA-branded aliases — those ids are rejected.
+        for dead in [
+            "ansi-8",
+            "ansi8",
+            "ansi",
+            "tty",
+            "oled",
+            "oled-ansi",
+            "ANSI-8",
+            "ecma-doge",
+            "ECMA-DOGE",
+            "rgbcmykw",
+            "Ecma-Doge",
+        ] {
+            assert_eq!(
+                ThemeKind::from_name(dead),
+                None,
+                "compat/ecma alias {dead} must not resolve"
+            );
+        }
+        assert_eq!(ThemeKind::Doge.display_name(), "doge");
+        assert_eq!(canonical_name("doge"), Some("doge"));
+        assert_eq!(canonical_name("ansi-8"), None);
+        assert_eq!(canonical_name("ecma-doge"), None);
+        assert!(!ThemeKind::Doge.requires_truecolor());
+        assert_eq!(display_name_for_canonical("doge"), "DOGE");
+        assert_eq!(display_name_for_canonical("ansi-8"), "ansi-8"); // passthrough unknown
+    }
 
     #[test]
     fn from_name_auto() {
@@ -985,6 +1092,7 @@ mod tests {
                 ThemeKind::TokyoNight => Theme::tokyonight(),
                 ThemeKind::RosePineMoon => Theme::rosepine_moon(),
                 ThemeKind::OscuraMidnight => Theme::oscura_midnight(),
+                ThemeKind::Doge => Theme::doge(),
                 ThemeKind::Auto => unreachable!("ALL excludes Auto"),
             };
             let track = lum(theme.scrollbar_bg, "scrollbar_bg", kind);
@@ -1032,6 +1140,92 @@ mod tests {
                 Color::Black,
                 "{name} should collapse to Black without the override"
             );
+        }
+    }
+
+    /// Root-cause ratchet: ANSI16 chrome elevates dark surfaces to DarkGray
+    /// (the light-bleed the operator reported). DOGE must not use this path.
+    #[test]
+    fn ansi16_chrome_overrides_elevate_doge_surfaces_to_dark_gray() {
+        use ratatui::style::Color;
+        let elevated = Theme::doge().ansi16_chrome_overrides(true);
+        assert_eq!(elevated.bg_light, Color::DarkGray);
+        assert_eq!(elevated.bg_highlight, Color::DarkGray);
+        assert_eq!(elevated.bg_hover, Color::DarkGray);
+        assert_eq!(elevated.bg_visual, Color::DarkGray);
+    }
+
+    /// Pin undoes ANSI16 elevation — pure Rgb(0,0,0) canvas, no charcoal.
+    #[test]
+    fn doge_pin_pure_black_backgrounds_undoes_ansi16_elevation() {
+        use ratatui::style::Color;
+        let pure = Color::Rgb(0, 0, 0);
+        let pinned = Theme::doge()
+            .ansi16_chrome_overrides(true)
+            .pin_doge_pure_black_backgrounds();
+        for (name, c) in [
+            ("bg_base", pinned.bg_base),
+            ("bg_light", pinned.bg_light),
+            ("bg_dark", pinned.bg_dark),
+            ("bg_highlight", pinned.bg_highlight),
+            ("bg_hover", pinned.bg_hover),
+            ("bg_terminal", pinned.bg_terminal),
+            ("scrollbar_bg", pinned.scrollbar_bg),
+            ("diff_delete_bg", pinned.diff_delete_bg),
+            ("diff_insert_bg", pinned.diff_insert_bg),
+            ("bg_visual", pinned.bg_visual),
+            ("paste_bg", pinned.paste_bg),
+            ("md_code_bg", pinned.md_code_bg),
+        ] {
+            assert_eq!(c, pure, "{name} must be pure black after pin");
+        }
+    }
+
+    /// Windows contrast boost must not invent charcoal when a slot already
+    /// matches the canvas (DOGE flat pure-black case).
+    #[test]
+    fn windows_contrast_boost_identity_black_stays_pure_black() {
+        use ratatui::style::Color;
+        let pure = Color::Rgb(0, 0, 0);
+        let boosted = Theme::doge().windows_contrast_boost(true);
+        for (name, c) in [
+            ("bg_base", boosted.bg_base),
+            ("bg_light", boosted.bg_light),
+            ("bg_dark", boosted.bg_dark),
+            ("bg_highlight", boosted.bg_highlight),
+            ("bg_hover", boosted.bg_hover),
+            ("bg_visual", boosted.bg_visual),
+            ("scrollbar_bg", boosted.scrollbar_bg),
+            ("md_code_bg", boosted.md_code_bg),
+        ] {
+            assert_eq!(c, pure, "{name} must stay pure black (no charcoal push)");
+        }
+    }
+
+    /// After Basic quantize + DOGE pin (the path `Theme::current` takes for
+    /// DOGE), every background is pure Rgb(0,0,0) — never named Black or
+    /// DarkGray that host profiles wash into charcoal.
+    #[test]
+    fn doge_basic_quantize_then_pin_keeps_pure_black_canvas() {
+        use ratatui::style::Color;
+        let pure = Color::Rgb(0, 0, 0);
+        let t = Theme::doge()
+            .quantized(color_support::ColorLevel::Basic)
+            .pin_doge_pure_black_backgrounds();
+        for (name, c) in [
+            ("bg_base", t.bg_base),
+            ("bg_light", t.bg_light),
+            ("bg_dark", t.bg_dark),
+            ("bg_highlight", t.bg_highlight),
+            ("bg_hover", t.bg_hover),
+            ("bg_terminal", t.bg_terminal),
+            ("scrollbar_bg", t.scrollbar_bg),
+            ("bg_visual", t.bg_visual),
+            ("md_code_bg", t.md_code_bg),
+            ("paste_bg", t.paste_bg),
+        ] {
+            assert_eq!(c, pure, "{name}");
+            assert_ne!(c, Color::DarkGray, "{name} must not be elevated");
         }
     }
 

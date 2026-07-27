@@ -73,13 +73,21 @@ tokio-util = { workspace = true, features = ["compat"] }
 tonic = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+ulid = { workspace = true }
+sha2 = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 wildmatch = { workspace = true }
 xai-grok-env = { workspace = true }
 serde_yaml = { workspace = true }
 shellexpand = "3.1"
 tempfile = { workspace = true }
+# Official TOON Rust port (SPEC-ish goldens). default-features off avoids the
+# CLI binary deps (clap/ratatui/tiktoken/…) — library encode/decode only.
+toon-format = { version = "0.5.0", default-features = false }
 which = { workspace = true }
+# session_reader Codex/Cursor SQLite discovery + read (readonly, fail closed).
+rusqlite = { version = "0.37", features = ["bundled"] }
+md5 = { workspace = true }
 
 chrono = { workspace = true }
 futures-util = { workspace = true }

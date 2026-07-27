@@ -127,15 +127,20 @@ pub(crate) fn handle_ask_user_question(
 
 /// Handle an `x.ai/exit_plan_mode` ext_method request.
 ///
-/// Creates a `PlanApprovalViewState` overlay for interactive approval.
+/// Soft-parks a durable `PlanApprovalViewState` (option A): status chrome +
+/// toast, **no** hard modal takeover. The full approval surface opens on
+/// demand via `/view-plan`, status click, or `ShowPlan` / `reopen_plan_approval`.
 ///
-/// Follows the `handle_ask_user_question` pattern: parse → guard → cancel old
-/// → stash prompt → create state → clear prompt → return true.
+/// Parse → cancel old (if any) → park state → toast → return whether the
+/// active view needs a redraw.
 pub(super) fn handle_exit_plan_mode(
     ext: xai_acp_lib::AcpArgs<acp::ExtRequest>,
     app: &mut AppView,
 ) -> bool {
-    use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
+    use crate::views::plan_approval_view::{
+        ExitPlanModeExtRequest, PLAN_PARKED_TOAST, PlanApprovalViewState,
+    };
+    use crate::views::prompt_widget::StashedPrompt;
 
     // 1. Parse typed request from raw JSON params.
     let params: ExitPlanModeExtRequest = match serde_json::from_str(ext.request.params.get()) {
@@ -167,6 +172,8 @@ pub(super) fn handle_exit_plan_mode(
         return false;
     };
     let is_active = is_matched_agent_active(app, id);
+    // Read UI config before borrowing the agent (option D force-modal).
+    let force_modal = app.current_ui.plan_approval_force_modal();
     let Some(agent) = app.agents.get_mut(&id) else {
         // `interaction_target_agent` only returns ids that exist; defensive.
         tracing::warn!("exit_plan_mode: agent {id:?} not found");
@@ -182,32 +189,40 @@ pub(super) fn handle_exit_plan_mode(
         );
         old.send_stale_cancel();
         agent.plan_next_comment_id = old.next_comment_id;
-        agent.prompt.restore(old.stashed_prompt);
+        // Soft-park uses an empty stash until the user opens the modal
+        // (`reopen_plan_approval` stashes then). Restoring an empty soft-park
+        // stash would wipe in-progress prompt text — only restore when the
+        // previous engagement captured a real stash.
+        let had_real_stash = !old.stashed_prompt.text.is_empty()
+            || !old.stashed_prompt.images.is_empty()
+            || !old.stashed_prompt.chip_elements.is_empty();
+        if had_real_stash {
+            agent.prompt.restore(old.stashed_prompt);
+        }
         agent.line_viewer = None;
     }
 
-    // Dismiss competing overlays so plan approval owns the screen.
-    // - active_modal: draw returns before line_viewer (plan never paints);
-    //   keys still route to the invisible plan viewer.
-    // - block_viewer: draw returns on line_viewer (plan visible) but
-    //   handle_scroll prefers block_viewer, so wheel hits the hidden Edit pane.
-    agent.active_modal = None;
-    agent.block_viewer = None;
+    // Soft park does **not** dismiss competing overlays or open the line
+    // viewer — that hard takeover is what jars when plan mode was unexpected.
+    // `reopen_plan_approval` dismisses overlays when the user engages.
 
     let source = plan_review_source_for_tool(&params.tool_call_id, agent);
 
     // If the user was mid-casual-comment when this new plan-approval
-    // request arrived, restore the pre-comment prompt first so the
-    // upcoming `stash()` captures the user's original text rather
-    // than the in-progress comment draft. Also clears the now-stale
-    // `casual_stashed_prompt` so it doesn't dangle into the next
-    // casual entry.
+    // request arrived, restore the pre-comment prompt so soft-park leaves
+    // them where they were (and clears the now-stale casual draft fields).
     if let Some(stashed) = agent.casual_stashed_prompt.take() {
         agent.prompt.restore(stashed);
     }
 
-    let stashed = agent.prompt.stash();
-    let state = PlanApprovalViewState::with_source(params, source, stashed, ext.response_tx);
+    // Soft park: do not stash/clear the live prompt. Empty stash is filled
+    // when the user opens the approval surface via reopen.
+    let state = PlanApprovalViewState::with_source(
+        params,
+        source,
+        StashedPrompt::default(),
+        ext.response_tx,
+    );
 
     agent.plan_comments.clear();
     agent.plan_next_comment_id = 0;
@@ -218,25 +233,34 @@ pub(super) fn handle_exit_plan_mode(
         agent.latest_inline_plan_content = None;
     }
     agent.plan_approval_view = Some(state);
-    agent.prompt.set_text("");
 
     agent.casual_commenting_range = None;
     agent.casual_editing_comment_id = None;
 
-    agent.show_plan_preview_if_available();
-
-    if agent.line_viewer.is_some() {
+    // Option D: force-modal opens the line-viewer immediately (fullscreen);
+    // default soft park is toast + status + inline transcript card (option A/C),
+    // with side-panel review on demand (option B via /view-plan / status).
+    if force_modal {
+        agent.reopen_plan_approval();
+        // reopen opens the side panel by default; force-modal upgrades to
+        // full takeover so the historical modal setting still hard-opens.
         if let Some(ref mut viewer) = agent.line_viewer {
-            viewer.plan_mut().feedback_active = true;
+            viewer.fullscreen = true;
+            viewer.side_panel = false;
         }
-    } else if let Some(ref mut pav) = agent.plan_approval_view {
-        pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        tracing::info!(
+            target_active = is_active,
+            "Force-modal plan approval from ext_method ([ui] plan_approval_park=modal)"
+        );
+    } else {
+        // Non-blocking status chrome: toast + status label + transcript card.
+        agent.commit_parked_plan_card();
+        agent.show_toast(PLAN_PARKED_TOAST);
+        tracing::info!(
+            target_active = is_active,
+            "Soft-parked plan approval from ext_method (side panel on demand)"
+        );
     }
-
-    tracing::info!(
-        target_active = is_active,
-        "Opened plan approval view from ext_method"
-    );
 
     // Background-parked approval renders when the user switches to the session;
     // only the active view needs an immediate redraw.

@@ -617,11 +617,15 @@ fn rows_contain_categories_and_settings_through_pr_14() {
         vec![
             // Booleans.
             "compact_mode",
+            // SHARED hide_header (Appearance; default off).
+            "hide_header",
             "screen_mode",
             "show_timestamps",
             "show_timeline",
             // PAGER-owned page_flip_on_send (Appearance).
             "page_flip_on_send",
+            // SHARED scrub_ascii_punct (Appearance; default ON).
+            "scrub_ascii_punct",
             "simple_mode",
             // PAGER-owned vim_mode (Appearance,
             // paired with simple_mode).
@@ -678,6 +682,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // PAGER-owned plan_mode (Agent category).
             "plan_mode",
+            // SHARED plan_approval_park (Agent; after plan_mode — soft toast
+            // vs force modal on exit_plan_mode park).
+            "plan_approval_park",
             // SHELL-owned auto_run_implement (Agent category; after plan_mode).
             "auto_run_implement",
             // SHELL-owned economic_mode (Agent; after auto_run_implement).
@@ -6697,6 +6704,7 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         // Resolved via `Theme::current()` rather than a constructor
         // because `theme::oscura` is a private module.
         crate::theme::ThemeKind::OscuraMidnight => crate::theme::Theme::current(),
+        crate::theme::ThemeKind::Doge => crate::theme::Theme::doge(),
         crate::theme::ThemeKind::Auto => crate::theme::Theme::groknight(),
     };
     assert_ne!(

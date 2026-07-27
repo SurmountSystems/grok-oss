@@ -9008,6 +9008,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9025,6 +9036,16 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50a0e551c1e27e1731aba276dbeaeac73f53c7cd34d1bda485d02bd1e0f36844"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11210,6 +11231,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "toon-format"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f89570c1a68d73941f728cca32a4345b2ffca36667ad921af336c60309a3e7e"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11639,6 +11672,16 @@ dependencies = [
  "memoffset",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ulid"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
+dependencies = [
+ "rand 0.9.5",
+ "web-time",
 ]
 
 [[package]]
@@ -14057,6 +14100,7 @@ dependencies = [
  "reqwest 0.12.28",
  "reqwest-middleware 0.4.2",
  "ring",
+ "rpassword",
  "rsa",
  "rusqlite",
  "rustls",
@@ -14313,6 +14357,7 @@ dependencies = [
  "indexmap",
  "infer 0.19.0",
  "libc",
+ "md5",
  "minijinja",
  "nix 0.30.1",
  "parking_lot",
@@ -14321,12 +14366,14 @@ dependencies = [
  "quick-xml 0.38.4",
  "regex",
  "reqwest 0.12.28",
+ "rusqlite",
  "schemars 1.2.1",
  "scraper",
  "serde",
  "serde_json",
  "serde_path_to_error",
  "serde_yaml",
+ "sha2 0.10.9",
  "shellexpand",
  "similar",
  "strip-ansi-escapes",
@@ -14337,8 +14384,10 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "toon-format",
  "tracing",
  "tracing-subscriber",
+ "ulid",
  "url",
  "uuid",
  "which",

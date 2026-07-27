@@ -114,11 +114,14 @@ pub enum AuthType {
 /// These are fields from the shell's full `Config` that aren't part of
 /// `xai_grok_sampling_types::SamplingConfig` (which is secret-free).
 /// The actor just stores and returns them — it never interprets them.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// [`Debug`] redacts secret fields so logs never dump raw keys.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Credentials {
     /// API key for authentication.
     pub api_key: Option<String>,
-    /// Additional API keys for credit-exhaustion failover (opaque to chat-state).
+    /// Additional API keys for credit-exhaustion and rate-limit failover
+    /// (opaque to chat-state; sampler owns hop policy).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failover_api_keys: Vec<String>,
     /// Whether this is a session token (refreshable) or user-provided api key.
@@ -128,6 +131,40 @@ pub struct Credentials {
     pub alpha_test_key: Option<String>,
     /// Client version string.
     pub client_version: Option<String>,
+    /// Dual-auth: console API host for identity hop (e.g. `https://api.x.ai/v1`) when
+    /// primary is session on cli-chat-proxy. Opaque to chat-state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover_base_url: Option<String>,
+    /// Dual-auth: session host restored when hopping back to session JWT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_base_url: Option<String>,
+    /// Dual-auth: exact session JWT among failover keys (hop-to-session detection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_identity_key: Option<String>,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "failover_api_keys",
+                &format_args!("[{} redacted]", self.failover_api_keys.len()),
+            )
+            .field("auth_type", &self.auth_type)
+            .field(
+                "alpha_test_key",
+                &self.alpha_test_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("client_version", &self.client_version)
+            .field("failover_base_url", &self.failover_base_url)
+            .field("session_base_url", &self.session_base_url)
+            .field(
+                "session_identity_key",
+                &self.session_identity_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// The messages captured during a single conversation turn.

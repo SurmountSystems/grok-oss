@@ -9,11 +9,11 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
-use crate::views::plan_approval_view::{PlanApprovalFocus, PlanComment, PlanReviewSource};
+use crate::views::plan_approval_view::{
+    PlanApprovalFocus, PlanComment, PlanPromptIntent, PlanReviewSource,
+};
 use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
-#[cfg(test)]
-use crossterm::event::KeyModifiers;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 impl AgentView {
     /// Resolve the absolute path to the plan file for this session.
     fn plan_file_path(&self) -> Option<std::path::PathBuf> {
@@ -79,7 +79,7 @@ impl AgentView {
     /// the shell-read file body), then falls back to the on-disk plan file.
     /// Request body first keeps file-backed previews working when the path
     /// resolution fails or the file disappears between intercept and open.
-    fn plan_body_for_preview(&self) -> Option<String> {
+    pub(super) fn plan_body_for_preview(&self) -> Option<String> {
         if let Some(content) = self
             .plan_approval_view
             .as_ref()
@@ -139,7 +139,17 @@ impl AgentView {
         } else {
             "plan.md".to_string()
         });
-        viewer.fullscreen = true;
+        // Plan approval opens as a right-hand side panel (option B) so chat
+        // stays visible; casual plan preview keeps the full overlay. Force-
+        // modal (`plan_approval_park=modal`) upgrades to fullscreen after
+        // reopen in `handle_exit_plan_mode`.
+        if self.plan_approval_view.is_some() {
+            viewer.side_panel = true;
+            viewer.fullscreen = false;
+        } else {
+            viewer.side_panel = false;
+            viewer.fullscreen = true;
+        }
         {
             let plan = viewer.plan_mut();
             plan.show_action_buttons = self.plan_approval_view.is_none();
@@ -180,14 +190,19 @@ impl AgentView {
         // does not swallow an unsaved line comment or freeform note.
         // Mirrors question-view submit_question_answers → swap_question_freeform.
         self.flush_plan_composer_before_approve();
+        // Strip image-chip placeholders so screenshots-only approve does not
+        // invent freeform notes like "[Image #1]" (images ride separately).
         let freeform = {
-            let text = self.prompt.text().to_string();
+            let text = self.prompt.text_without_image_chips();
             if text.trim().is_empty() {
                 None
             } else {
                 Some(text)
             }
         };
+        // Drain screenshots before restore — plan-mode attach rides the same
+        // Interject path as review notes (P3).
+        let images = self.prompt.drain_images();
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
@@ -219,9 +234,14 @@ impl AgentView {
             });
         }
         if let Some(text) = review_comments {
+            return InputOutcome::Action(Action::Interject { text, images });
+        }
+        // Screenshots without text notes still ride with approve so the agent
+        // sees visual context on the implement turn.
+        if !images.is_empty() {
             return InputOutcome::Action(Action::Interject {
-                text,
-                images: vec![],
+                text: "Screenshot(s) attached with plan approval.".to_owned(),
+                images,
             });
         }
         // Approve continues implement shell-side (mid-turn or resume). Local
@@ -294,11 +314,31 @@ impl AgentView {
             InputOutcome::Changed
         }
     }
-    fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
+    /// Capture the plan line selection to attach to revise/clarify feedback.
+    ///
+    /// Prefers the live line-viewer selection (cursor or visual range), then
+    /// any in-progress `commenting_range` if the viewer is already closed.
+    fn plan_selection_for_feedback(&self) -> Option<std::ops::Range<usize>> {
+        if let Some(range) = self
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.selected_line_range())
+        {
+            return Some(range);
+        }
+        self.plan_approval_view
+            .as_ref()
+            .and_then(|p| p.commenting_range.clone())
+    }
+
+    pub(crate) fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
+        let selection = self.plan_selection_for_feedback();
+        // Drain screenshots before restore so they ride with revise (P3).
+        let images = self.prompt.drain_images();
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
-        let formatted = pav.format_feedback(feedback.as_deref());
+        let formatted = pav.format_feedback_with_selection(feedback.as_deref(), selection.as_ref());
         let to_send = if formatted.trim().is_empty() {
             feedback
         } else {
@@ -326,11 +366,79 @@ impl AgentView {
                 action: "revise".to_string(),
             });
         }
+        // Text feedback already went over ACP; screenshots ride as multimodal
+        // Interject on the same revise turn (same pattern as approve notes).
+        if !images.is_empty() {
+            return InputOutcome::Action(Action::Interject {
+                text: "Screenshot(s) attached for plan feedback.".to_owned(),
+                images,
+            });
+        }
         // Revise continues plan mode shell-side — do not drain held follow-ups
         // into a competing turn.
         InputOutcome::Changed
     }
+
+    /// Submit a clarifying question (ACP `"questions"`) — not a plan rewrite.
+    pub(crate) fn send_plan_questions(&mut self, feedback: Option<String>) -> InputOutcome {
+        let selection = self.plan_selection_for_feedback();
+        // Drain screenshots before restore so they ride with clarify (P3).
+        let images = self.prompt.drain_images();
+        let Some(mut pav) = self.plan_approval_view.take() else {
+            return InputOutcome::Changed;
+        };
+        let formatted = pav.format_feedback_with_selection(feedback.as_deref(), selection.as_ref());
+        let to_send = if formatted.trim().is_empty() {
+            feedback
+        } else {
+            Some(formatted)
+        };
+        if crate::app::minimal_mode_active()
+            && let Some(msg) = to_send.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        {
+            self.scrollback
+                .push_block(crate::scrollback::RenderBlock::user_prompt(msg.to_string()));
+        }
+        pav.send_questions(to_send);
+        if pav.source == PlanReviewSource::Inline {
+            self.latest_inline_plan_content = None;
+        }
+        self.plan_next_comment_id = pav.next_comment_id;
+        self.prompt.restore(pav.stashed_prompt);
+        self.line_viewer = None;
+        self.prompt.textarea.cancel_undo_group();
+        self.show_toast("Clarifying question sent.");
+        {
+            use xai_grok_telemetry::events::PlanSubmit;
+            use xai_grok_telemetry::session_ctx::log_event;
+            log_event(PlanSubmit {
+                action: "question".to_string(),
+            });
+        }
+        if !images.is_empty() {
+            return InputOutcome::Action(Action::Interject {
+                text: "Screenshot(s) attached for plan feedback.".to_owned(),
+                images,
+            });
+        }
+        // Clarify/questions stay in plan mode shell-side — same queue gate as revise.
+        InputOutcome::Changed
+    }
+
+    /// Focus the plan-approval prompt with a specific freeform intent.
+    pub(crate) fn focus_plan_prompt(&mut self, intent: PlanPromptIntent) -> InputOutcome {
+        if let Some(ref mut pav) = self.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = intent;
+        }
+        InputOutcome::Changed
+    }
     pub(crate) fn reopen_plan_approval(&mut self) {
+        // Engaging the plan surface: dismiss competing overlays so the plan
+        // paints and input routes to the line viewer (soft park left them
+        // alone). Opens as a right-hand side panel by default (option B).
+        self.active_modal = None;
+        self.block_viewer = None;
         if let Some(ref mut pav) = self.plan_approval_view {
             pav.stashed_prompt = self.prompt.stash();
             pav.focus = PlanApprovalFocus::Preview;
@@ -344,6 +452,24 @@ impl AgentView {
         } else if let Some(ref mut viewer) = self.line_viewer {
             viewer.plan_mut().feedback_active = true;
         }
+    }
+
+    /// Push a soft-park plan card into the transcript once per `tool_call_id`
+    /// (option C). Body is truncated with CTAs; chat stays usable and the side
+    /// panel remains on demand via `/view-plan`.
+    pub(crate) fn commit_parked_plan_card(&mut self) {
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return;
+        };
+        let tool_call_id = pav.tool_call_id.clone();
+        if self.plan_card_committed_id.as_deref() == Some(tool_call_id.as_str()) {
+            return;
+        }
+        let body =
+            crate::views::plan_approval_view::format_parked_plan_card(pav.plan_content.as_deref());
+        self.scrollback
+            .push_block(crate::scrollback::block::RenderBlock::agent_message(body));
+        self.plan_card_committed_id = Some(tool_call_id);
     }
     /// Discard an in-progress comment draft: clear the prompt text and
     /// drop the selected line range + pending edit + stashed feedback.
@@ -362,6 +488,36 @@ impl AgentView {
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
+        // Soft-park / card CTAs (no line viewer open): when Preview focus and
+        // the prompt is empty, a/A/s/?/q act without opening the side panel.
+        // A non-empty draft keeps character input so typing is never stolen.
+        let soft_preview = self.line_viewer.is_none()
+            && !is_commenting
+            && self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview)
+            && self.prompt.text().trim().is_empty()
+            && self.prompt.images.is_empty();
+        if soft_preview {
+            if key.code == KeyCode::Char('a') && key.modifiers.is_empty() {
+                return self.approve_plan();
+            }
+            if key.code == KeyCode::Char('A')
+                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            {
+                return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
+            }
+            if key.code == KeyCode::Char('s') && key.modifiers.is_empty() {
+                return self.focus_plan_prompt(PlanPromptIntent::Revise);
+            }
+            if key.code == KeyCode::Char('?') && key.modifiers.is_empty() {
+                return self.focus_plan_prompt(PlanPromptIntent::Questions);
+            }
+            if key.code == KeyCode::Char('q') && key.modifiers.is_empty() {
+                return self.abandon_plan();
+            }
+        }
         if key.code == KeyCode::Tab && key.modifiers.is_empty() {
             let focus = self.plan_approval_view.as_ref().map(|p| p.focus);
             match focus {
@@ -420,17 +576,23 @@ impl AgentView {
                 if is_commenting {
                     return self.save_plan_comment();
                 }
-                let text = self.prompt.text().to_string();
+                // Ignore image-chip placeholders when judging empty freeform /
+                // building text feedback — chips ride as multimodal images.
+                let text = self.prompt.text_without_image_chips();
                 let has_comments = self
                     .plan_approval_view
                     .as_ref()
                     .is_some_and(|pav| !pav.comments.is_empty());
+                let has_images = !self.prompt.images.is_empty();
                 let prompt_focused = self
                     .plan_approval_view
                     .as_ref()
                     .is_some_and(|pav| pav.focus == PlanApprovalFocus::Prompt);
                 if prompt_focused {
-                    if text.trim().is_empty() && !has_comments {
+                    // Empty Enter still approves — but screenshots alone (or
+                    // comments) mean the user is submitting content under the
+                    // current intent, not empty-approve.
+                    if text.trim().is_empty() && !has_comments && !has_images {
                         return self.approve_plan();
                     }
                     let freeform = if text.trim().is_empty() {
@@ -438,7 +600,18 @@ impl AgentView {
                     } else {
                         Some(text)
                     };
-                    return self.send_plan_feedback(freeform);
+                    let intent = self
+                        .plan_approval_view
+                        .as_ref()
+                        .map(|p| p.prompt_intent)
+                        .unwrap_or(PlanPromptIntent::Revise);
+                    return match intent {
+                        PlanPromptIntent::Questions => self.send_plan_questions(freeform),
+                        PlanPromptIntent::Revise => self.send_plan_feedback(freeform),
+                        // Freeform stays in the prompt; approve_plan folds it
+                        // into the approved + notes Interject path.
+                        PlanPromptIntent::ApproveNotes => self.approve_plan(),
+                    };
                 }
                 return InputOutcome::Changed;
             }
@@ -743,7 +916,7 @@ impl AgentView {
 mod approve_plan_flush_tests {
     use super::*;
     use crate::views::plan_approval_view::{
-        ExitPlanModeExtRequest, PlanApprovalFocus, PlanApprovalViewState,
+        ExitPlanModeExtRequest, PlanApprovalFocus, PlanApprovalViewState, PlanPromptIntent,
     };
     use crate::views::prompt_widget::StashedPrompt;
     use agent_client_protocol as acp;
@@ -916,6 +1089,704 @@ mod approve_plan_flush_tests {
         }
         assert!(agent.plan_comments.is_empty());
         assert!(agent.casual_commenting_range.is_none());
+    }
+
+    fn parse_outcome(
+        mut rx: tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>>,
+    ) -> serde_json::Value {
+        let resp = rx
+            .try_recv()
+            .expect("should receive exit_plan_mode response");
+        let raw = resp.expect("should be Ok");
+        serde_json::from_str(raw.0.get()).expect("should be valid JSON")
+    }
+
+    /// Questions intent + freeform Enter → ACP `"questions"` (not revise).
+    #[test]
+    fn send_plan_questions_submits_questions_outcome() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nUse Redis");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Questions;
+        }
+        agent.prompt.set_text("Why Redis instead of in-memory?");
+
+        // Drive the same path as Prompt Enter with questions intent.
+        let freeform = Some(agent.prompt.text().to_string());
+        let _ = agent.send_plan_questions(freeform);
+
+        assert!(agent.plan_approval_view.is_none());
+        let parsed = parse_outcome(rx);
+        assert_eq!(parsed["outcome"], "questions");
+        assert!(
+            parsed["feedback"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Why Redis"),
+            "feedback must carry the question; got {:?}",
+            parsed["feedback"]
+        );
+    }
+
+    /// Request-changes path still submits `"cancelled"` (regression).
+    #[test]
+    fn send_plan_feedback_still_submits_cancelled() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nUse Redis");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text("drop Redis");
+
+        let freeform = Some(agent.prompt.text().to_string());
+        let _ = agent.send_plan_feedback(freeform);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(parsed["outcome"], "cancelled");
+        assert!(
+            parsed["feedback"]
+                .as_str()
+                .unwrap_or("")
+                .contains("drop Redis")
+        );
+    }
+
+    /// P1: freeform revise with a plan line selected must deliver path,
+    /// line number, and line text to the agent (not freeform alone).
+    #[test]
+    fn send_plan_feedback_includes_viewer_selection_path_line_text() {
+        let mut agent = make_agent();
+        // Line 4 is "Use Redis for sessions" (1-based source lines).
+        let plan_body = "# Plan\n\n## Step 1\nUse Redis for sessions\n## Step 2\nShip it";
+        let rx = install_plan_approval(&mut agent, plan_body);
+        // File-backed is the default exit_plan_mode path.
+        agent.plan_approval_view.as_mut().unwrap().source = PlanReviewSource::FileBacked;
+        agent.show_plan_preview();
+        {
+            let viewer = agent
+                .line_viewer
+                .as_mut()
+                .expect("plan preview must open a line viewer");
+            viewer.prepare_layout(80, 20);
+            viewer.set_initial_selection(4..5);
+            viewer.prepare_layout(80, 20);
+            assert_eq!(
+                viewer.selected_line_range(),
+                Some(4..5),
+                "fixture must leave line 4 selected"
+            );
+        }
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text("rewrite this line");
+
+        let freeform = Some(agent.prompt.text().to_string());
+        let _ = agent.send_plan_feedback(freeform);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(parsed["outcome"], "cancelled");
+        let feedback = parsed["feedback"].as_str().unwrap_or("");
+        assert!(
+            feedback.contains("@plan.md:4"),
+            "feedback must include plan path + line; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("Use Redis for sessions"),
+            "feedback must quote selected line text; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("rewrite this line"),
+            "feedback must keep freeform; got {feedback:?}"
+        );
+    }
+
+    /// P1: saved line comment on file-backed plan includes path + line text.
+    #[test]
+    fn send_plan_feedback_file_backed_comment_includes_line_text() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "alpha\nbravo\ncharlie");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.source = PlanReviewSource::FileBacked;
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+            pav.comments.push(PlanComment {
+                id: 0,
+                line_range: 2..3,
+                text: "make this stronger".into(),
+            });
+            pav.next_comment_id = 1;
+        }
+
+        let _ = agent.send_plan_feedback(None);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(parsed["outcome"], "cancelled");
+        let feedback = parsed["feedback"].as_str().unwrap_or("");
+        assert!(
+            feedback.contains("@plan.md:2"),
+            "must anchor path+line; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("> bravo"),
+            "must quote line text; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("make this stronger"),
+            "must keep comment; got {feedback:?}"
+        );
+    }
+
+    /// P2: multi-line viewer highlight freeform revise delivers start–end + all
+    /// quoted lines (not just the cursor line).
+    #[test]
+    fn send_plan_feedback_includes_viewer_multiline_selection() {
+        let mut agent = make_agent();
+        let plan_body =
+            "# Plan\n\n## Step 1\nUse Redis for sessions\n## Step 2\nShip it\n## Step 3\nDone";
+        let rx = install_plan_approval(&mut agent, plan_body);
+        agent.plan_approval_view.as_mut().unwrap().source = PlanReviewSource::FileBacked;
+        agent.show_plan_preview();
+        {
+            let viewer = agent
+                .line_viewer
+                .as_mut()
+                .expect("plan preview must open a line viewer");
+            viewer.prepare_layout(80, 20);
+            // Lines 4–6 (half-open 4..7): Redis / Step 2 / Ship it
+            viewer.set_initial_selection(4..7);
+            viewer.prepare_layout(80, 20);
+            assert_eq!(
+                viewer.selected_line_range(),
+                Some(4..7),
+                "fixture must leave multi-line range selected"
+            );
+        }
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text("collapse this block");
+
+        let freeform = Some(agent.prompt.text().to_string());
+        let _ = agent.send_plan_feedback(freeform);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(parsed["outcome"], "cancelled");
+        let feedback = parsed["feedback"].as_str().unwrap_or("");
+        assert!(
+            feedback.contains("@plan.md:4-6"),
+            "feedback must include multi-line range loc; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("Use Redis for sessions"),
+            "must quote first selected line; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("## Step 2"),
+            "must quote middle selected line; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("Ship it"),
+            "must quote last selected line; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("collapse this block"),
+            "must keep freeform; got {feedback:?}"
+        );
+    }
+
+    /// Select-to-copy: `Y` on plan preview copies the whole plan body (not title).
+    #[test]
+    fn plan_preview_shift_y_copies_whole_plan_body() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut agent = make_agent();
+        let plan_body = "# Plan\n\n## Step 1\nUse Redis for sessions\n## Step 2\nShip it";
+        let _rx = install_plan_approval(&mut agent, plan_body);
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.is_some(),
+            "plan preview must open line viewer"
+        );
+        let y = KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT);
+        let outcome = agent.handle_line_viewer_key(&y);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Y must be consumed on plan surface; got {outcome:?}"
+        );
+        let toast = agent.toast.as_ref().map(|(m, _)| m.as_str());
+        assert!(
+            toast.is_some(),
+            "Y must trigger copy toast (clipboard or file fallback)"
+        );
+        // CTAs still available after copy.
+        assert!(agent.plan_approval_view.is_some());
+        assert!(agent.line_viewer.is_some());
+    }
+
+    /// Select-to-copy: `y` on a selected plan line copies that line only.
+    #[test]
+    fn plan_preview_y_copies_selected_line() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut agent = make_agent();
+        let plan_body = "# Plan\n\n## Step 1\nUse Redis for sessions\n## Step 2\nShip it";
+        let _rx = install_plan_approval(&mut agent, plan_body);
+        agent.show_plan_preview();
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan preview");
+            viewer.prepare_layout(80, 20);
+            viewer.set_initial_selection(4..5);
+            viewer.prepare_layout(80, 20);
+        }
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        let outcome = agent.handle_line_viewer_key(&y);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "y must be consumed; got {outcome:?}"
+        );
+        assert!(
+            agent.toast.is_some(),
+            "y must trigger copy toast for selected line"
+        );
+        // Does not dismiss approval or close viewer.
+        assert!(agent.plan_approval_view.is_some());
+        assert!(agent.line_viewer.is_some());
+    }
+
+    /// Option B: plan approval opens as a right-hand side panel (not fullscreen).
+    #[test]
+    fn plan_approval_opens_as_side_panel_not_fullscreen() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Side panel plan\n\nDo the thing");
+        agent.reopen_plan_approval();
+        let viewer = agent.line_viewer.as_ref().expect("side panel viewer");
+        assert!(viewer.side_panel, "approval reopen must dock as side panel");
+        assert!(
+            !viewer.fullscreen,
+            "approval reopen must not hard-takeover fullscreen"
+        );
+        assert!(
+            viewer.plan_ref().is_some_and(|p| p.feedback_active),
+            "side panel must expose approval CTAs"
+        );
+        // CTAs still work.
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let outcome = agent.handle_line_viewer_key(&a);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "a approve must fire from side panel; got {outcome:?}"
+        );
+        assert!(agent.plan_approval_view.is_none());
+    }
+
+    /// Option B: Ctrl+F enlarges side panel to fullscreen and back.
+    #[test]
+    fn plan_side_panel_ctrl_f_toggles_fullscreen() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Toggle plan");
+        agent.reopen_plan_approval();
+        assert!(agent.line_viewer.as_ref().is_some_and(|v| v.side_panel));
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        let _ = agent.handle_line_viewer_key(&ctrl_f);
+        {
+            let v = agent.line_viewer.as_ref().unwrap();
+            assert!(v.fullscreen);
+            assert!(!v.side_panel);
+        }
+        let _ = agent.handle_line_viewer_key(&ctrl_f);
+        {
+            let v = agent.line_viewer.as_ref().unwrap();
+            assert!(!v.fullscreen);
+            assert!(
+                v.side_panel,
+                "leaving fullscreen must restore plan side panel"
+            );
+        }
+    }
+
+    /// Option C: soft-park commits a transcript card once per tool_call_id.
+    #[test]
+    fn commit_parked_plan_card_pushes_once_with_ctas() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Card Plan\n\n## Step 1\nDo it");
+        assert_eq!(agent.scrollback.len(), 0);
+        agent.commit_parked_plan_card();
+        assert_eq!(agent.scrollback.len(), 1);
+        agent.commit_parked_plan_card(); // dedupe
+        assert_eq!(agent.scrollback.len(), 1);
+        let text = match &agent.scrollback.entry(0).unwrap().block {
+            crate::scrollback::block::RenderBlock::AgentMessage(b) => b.text().to_owned(),
+            other => panic!("expected agent message card, got {other:?}"),
+        };
+        assert!(
+            text.contains(crate::views::plan_approval_view::PLAN_CARD_HEADER),
+            "card header missing: {text:?}"
+        );
+        assert!(
+            text.contains("# Card Plan") && text.contains("Do it"),
+            "card must embed plan preview: {text:?}"
+        );
+        assert!(
+            text.contains(crate::views::plan_approval_view::PLAN_CARD_CTAS),
+            "card must list CTAs: {text:?}"
+        );
+        assert_eq!(
+            agent.plan_card_committed_id.as_deref(),
+            Some("call-approve-flush")
+        );
+    }
+
+    /// Option C: soft-park CTAs (empty prompt, no viewer) approve without modal.
+    #[test]
+    fn soft_park_cta_a_approves_without_line_viewer() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Soft CTAs");
+        assert!(agent.line_viewer.is_none());
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&a);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "soft-park a must approve; got {outcome:?}"
+        );
+        assert!(agent.plan_approval_view.is_none());
+        assert_outcome_approved(rx);
+    }
+
+    /// Soft-park CTA keys do not steal input when the prompt has draft text.
+    #[test]
+    fn soft_park_cta_does_not_steal_when_prompt_has_draft() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Draft guard");
+        let before = "still drafting a note";
+        agent.prompt.set_text(before);
+        // Pin cursor at end so the typed char has a deterministic insert site
+        // (set_text does not move the caret).
+        agent.prompt.set_cursor(before.len());
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&a);
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "must not approve while draft is non-empty"
+        );
+        // Exact equality — not a false-green contains on seed text that
+        // already has 'a' / "drafting".
+        assert_eq!(
+            agent.prompt.text(),
+            format!("{before}a"),
+            "typed char must append to draft; soft CTA must not swallow key"
+        );
+    }
+
+    /// Soft-park non-approve CTA: `q` abandons without opening the line viewer.
+    #[test]
+    fn soft_park_cta_q_abandons_without_line_viewer() {
+        let mut agent = make_agent();
+        let mut rx = install_plan_approval(&mut agent, "# Soft quit");
+        assert!(agent.line_viewer.is_none());
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&q);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "soft-park q must abandon; got {outcome:?}"
+        );
+        assert!(agent.plan_approval_view.is_none());
+        let resp = rx
+            .try_recv()
+            .expect("should receive exit_plan_mode response");
+        let raw = resp.expect("should be Ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw.0.get()).expect("should be valid JSON");
+        assert_eq!(parsed["outcome"], "abandoned");
+    }
+
+    /// Soft-park non-approve CTA: `s` focuses revise prompt without line viewer.
+    #[test]
+    fn soft_park_cta_s_focuses_revise_without_line_viewer() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Soft revise");
+        assert!(agent.line_viewer.is_none());
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&s);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "soft-park s must focus revise; got {outcome:?}"
+        );
+        assert!(agent.plan_approval_view.is_some());
+        assert!(agent.line_viewer.is_none());
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Revise);
+    }
+
+    /// P3: revise with a screenshot attached drains the image and returns
+    /// Interject so multimodal content rides the same turn as the ACP feedback.
+    #[test]
+    fn send_plan_feedback_with_screenshot_returns_interject_images() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nDo the thing");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text("see screenshot");
+        agent
+            .prompt
+            .insert_image(test_fixtures::test_pasted_image())
+            .expect("insert screenshot");
+
+        let freeform = Some(agent.prompt.text().to_string());
+        let outcome = agent.send_plan_feedback(freeform);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(parsed["outcome"], "cancelled");
+        assert!(
+            parsed["feedback"]
+                .as_str()
+                .unwrap_or("")
+                .contains("see screenshot"),
+            "text feedback still goes over ACP; got {:?}",
+            parsed["feedback"]
+        );
+        match outcome {
+            InputOutcome::Action(Action::Interject { images, text }) => {
+                assert_eq!(images.len(), 1, "screenshot must ride Interject");
+                assert!(
+                    text.contains("Screenshot"),
+                    "interject caption should mark the attachment; got {text:?}"
+                );
+            }
+            other => panic!("expected Interject with screenshot, got {other:?}"),
+        }
+        assert!(
+            agent.prompt.images.is_empty(),
+            "composer images must be drained on submit"
+        );
+        // Stashed chat restored (not the revise draft).
+        assert_eq!(agent.prompt.text(), "original chat");
+    }
+
+    /// P3: clarify with screenshot also drains images onto Interject.
+    #[test]
+    fn send_plan_questions_with_screenshot_returns_interject_images() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nUse Redis");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Questions;
+        }
+        agent.prompt.set_text("why this shape?");
+        agent
+            .prompt
+            .insert_image(test_fixtures::test_pasted_image())
+            .expect("insert screenshot");
+
+        let freeform = Some(agent.prompt.text().to_string());
+        let outcome = agent.send_plan_questions(freeform);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(parsed["outcome"], "questions");
+        match outcome {
+            InputOutcome::Action(Action::Interject { images, .. }) => {
+                assert_eq!(images.len(), 1);
+            }
+            other => panic!("expected Interject with screenshot, got {other:?}"),
+        }
+    }
+
+    /// P3: approve with notes + screenshot carries images on the notes Interject.
+    #[test]
+    fn approve_plan_with_screenshot_carries_images_on_interject() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nShip it");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::ApproveNotes;
+        }
+        agent.prompt.set_text("watch the race");
+        agent
+            .prompt
+            .insert_image(test_fixtures::test_pasted_image())
+            .expect("insert screenshot");
+
+        let outcome = agent.approve_plan();
+
+        assert_outcome_approved(rx);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, images }) => {
+                assert!(
+                    text.contains("watch the race"),
+                    "notes must still ride; got {text:?}"
+                );
+                assert_eq!(images.len(), 1, "screenshot must ride approve Interject");
+            }
+            other => panic!("expected Interject with notes+screenshot, got {other:?}"),
+        }
+        assert!(agent.prompt.images.is_empty());
+    }
+
+    /// P3: images-only approve (no freeform, no comments) uses the dedicated
+    /// caption branch so visual context still rides the implement turn.
+    #[test]
+    fn approve_plan_images_only_uses_screenshot_caption() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nShip it");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::ApproveNotes;
+        }
+        agent.prompt.set_text("");
+        agent
+            .prompt
+            .insert_image(test_fixtures::test_pasted_image())
+            .expect("insert screenshot");
+
+        let outcome = agent.approve_plan();
+
+        assert_outcome_approved(rx);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, images }) => {
+                assert_eq!(
+                    text, "Screenshot(s) attached with plan approval.",
+                    "images-only approve must use the dedicated caption; got {text:?}"
+                );
+                assert_eq!(images.len(), 1);
+            }
+            other => panic!("expected Interject with images-only caption, got {other:?}"),
+        }
+        assert!(agent.prompt.images.is_empty());
+    }
+
+    /// P3: empty Enter on the Prompt with an image chip under Revise must not
+    /// plain-approve — it submits revise and drains the chip onto Interject.
+    #[test]
+    fn empty_enter_with_image_chip_under_revise_does_not_plain_approve() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nDo the thing");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text("");
+        agent
+            .prompt
+            .insert_image(test_fixtures::test_pasted_image())
+            .expect("insert screenshot");
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&enter);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(
+            parsed["outcome"], "cancelled",
+            "empty Enter + image under Revise must revise, not plain-approve; got {parsed:?}"
+        );
+        match outcome {
+            InputOutcome::Action(Action::Interject { images, .. }) => {
+                assert_eq!(images.len(), 1, "image chip must drain onto Interject");
+            }
+            other => panic!("expected Interject with drained image, got {other:?}"),
+        }
+        assert!(agent.prompt.images.is_empty());
+        assert!(agent.plan_approval_view.is_none());
+    }
+
+    /// `?` / `A` / `s` focus Prompt with the matching freeform intent.
+    #[test]
+    fn focus_plan_prompt_sets_intent() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Plan");
+        let _ = agent.focus_plan_prompt(PlanPromptIntent::Questions);
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().focus,
+            PlanApprovalFocus::Prompt
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::Questions
+        );
+        let _ = agent.focus_plan_prompt(PlanPromptIntent::Revise);
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::Revise
+        );
+        let _ = agent.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().focus,
+            PlanApprovalFocus::Prompt
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::ApproveNotes
+        );
+    }
+
+    /// Empty Prompt Enter still approves even when intent was Questions.
+    #[test]
+    fn empty_enter_still_approves_under_questions_intent() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nempty questions path");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Questions;
+        }
+        agent.prompt.set_text("");
+
+        // Mirror handle_plan_feedback_key empty+prompt path.
+        let outcome = agent.approve_plan();
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_outcome_approved(rx);
+    }
+
+    /// `A` path: ApproveNotes intent + non-empty freeform → approved + notes Interject.
+    #[test]
+    fn approve_notes_intent_submits_approved_with_notes() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nShip it");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::ApproveNotes;
+        }
+        agent.prompt.set_text("watch the race in auth");
+
+        // Mirror handle_plan_feedback_key non-empty + ApproveNotes.
+        let outcome = agent.approve_plan();
+
+        assert!(agent.plan_approval_view.is_none());
+        assert_outcome_approved(rx);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains("watch the race in auth"),
+                    "approve w/ comment must attach freeform notes; got {text:?}"
+                );
+                assert!(
+                    text.contains("approved the plan with the following review comments"),
+                    "must use approve-with-comments framing; got {text:?}"
+                );
+            }
+            other => panic!("expected Interject with notes, got {other:?}"),
+        }
+        assert_eq!(agent.prompt.text(), "original chat");
     }
 }
 #[cfg(test)]

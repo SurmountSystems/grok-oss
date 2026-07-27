@@ -99,9 +99,39 @@ pub fn default_breakpoints(theme: &Theme) -> Vec<ColorBreakpoint> {
 }
 
 /// Blend between breakpoints for a given percentage.
+///
+/// Default themes lerp between neighbouring breakpoints. DOGE themes use
+/// solid steps only (no mid-segment lerp) so intermediate usage never
+/// invents off-palette grays — see [`blend_color_with_mode`].
 pub fn blend_color(pct: f64, breakpoints: &[ColorBreakpoint]) -> Color {
+    blend_color_with_mode(pct, breakpoints, false)
+}
+
+/// Like [`blend_color`], but when `solid_steps` is true the colour jumps at
+/// breakpoints instead of lerping (DOGE pure 8-colour palette stays pure).
+///
+/// Solid mode is a **right-closed step function**: at an exact breakpoint
+/// percentage the colour of that breakpoint is used (e.g. 95% → error red).
+/// Between breakpoints the lower step is held until the next threshold.
+pub fn blend_color_with_mode(
+    pct: f64,
+    breakpoints: &[ColorBreakpoint],
+    solid_steps: bool,
+) -> Color {
     if breakpoints.is_empty() {
         return Color::Reset;
+    }
+    if solid_steps {
+        // Last breakpoint with `pct >= bp.pct` (breakpoints are ascending).
+        let mut color = breakpoints[0].color;
+        for bp in breakpoints {
+            if pct >= bp.pct {
+                color = bp.color;
+            } else {
+                break;
+            }
+        }
+        return color;
     }
     if pct <= breakpoints[0].pct {
         return breakpoints[0].color;
@@ -113,6 +143,90 @@ pub fn blend_color(pct: f64, breakpoints: &[ColorBreakpoint]) -> Color {
         }
     }
     breakpoints.last().unwrap().color
+}
+
+/// Whether the context bar should use solid DOGE steps (no mid-segment lerp).
+///
+/// **Kind-first** for the live path: production paints with
+/// `Theme::current()` which is always quantized (`Indexed` / named ANSI on
+/// low-color terminals), so an RGB-only fingerprint would silently fall back
+/// to lerp and invent mid-cube pastels — the failure DOGE targets.
+///
+/// Structural pure-primary fingerprint is a **fallback** for unit tests that
+/// build `Theme::doge()` (raw or quantized) without setting the kind cache.
+/// Slot contract must stay aligned with `Theme::doge()`:
+/// `bg_base=black`, `text_primary=white`, `gray=white`, `warning=yellow`,
+/// `accent_error=red`, `accent_assistant=magenta`, `path=cyan`.
+fn uses_solid_context_steps(theme: &Theme) -> bool {
+    if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
+        return true;
+    }
+    is_doge_theme_structural(theme)
+}
+
+/// Structural DOGE pure-palette fingerprint via resolved RGB (works for pure
+/// `Rgb`, pure cube `Indexed`, and named ANSI / Light* after Basic quantize).
+///
+/// Not the production gate — see [`uses_solid_context_steps`]. Keep in sync
+/// with the semantic mapping on `Theme::doge()`.
+fn is_doge_theme_structural(theme: &Theme) -> bool {
+    let rgb = |c: Color| crate::render::color::resolve_to_rgb(c);
+    matches!(
+        (
+            rgb(theme.bg_base),
+            rgb(theme.text_primary),
+            rgb(theme.gray),
+            rgb(theme.warning),
+            rgb(theme.accent_error),
+            rgb(theme.accent_assistant),
+            rgb(theme.path),
+        ),
+        (
+            Some((0, 0, 0)),
+            Some((255, 255, 255)),
+            Some((255, 255, 255)),
+            Some((255, 255, 0)),
+            Some((255, 0, 0)),
+            Some((255, 0, 255)),
+            Some((0, 255, 255)),
+        )
+    )
+}
+
+/// True when `c` resolves to a DOGE pure primary (or is a named ANSI colour
+/// that maps to one after resolve). Used by solid-step tests.
+#[cfg(test)]
+fn is_doge_primary_color(c: Color) -> bool {
+    if let Some((r, g, b)) = crate::render::color::resolve_to_rgb(c) {
+        return matches!(
+            (r, g, b),
+            (0, 0, 0)
+                | (255, 0, 0)
+                | (0, 255, 0)
+                | (255, 255, 0)
+                | (0, 0, 255)
+                | (255, 0, 255)
+                | (0, 255, 255)
+                | (255, 255, 255)
+        );
+    }
+    matches!(
+        c,
+        Color::Black
+            | Color::Red
+            | Color::Green
+            | Color::Yellow
+            | Color::Blue
+            | Color::Magenta
+            | Color::Cyan
+            | Color::White
+            | Color::LightRed
+            | Color::LightGreen
+            | Color::LightYellow
+            | Color::LightBlue
+            | Color::LightMagenta
+            | Color::LightCyan
+    )
 }
 
 /// Linear interpolation between two colors.
@@ -219,8 +333,10 @@ pub fn context_bar_line_for_session(
 
     // Urgency color shared by both branches so the default still surfaces
     // high-usage warnings without requiring the user to hover.
+    // DOGE: solid pure-palette steps only (no lerp mid-grays).
     let breakpoints = default_breakpoints(theme);
-    let color = crate::theme::quantize(blend_color(pct, &breakpoints));
+    let solid_steps = uses_solid_context_steps(theme);
+    let color = crate::theme::quantize(blend_color_with_mode(pct, &breakpoints, solid_steps));
 
     if hovered {
         // Bar fills the space the default tokens would occupy, minus the gap
@@ -324,6 +440,243 @@ mod tests {
         // At 95%, should be theme.accent_error
         let c95 = blend_color(95.0, &bps);
         assert_eq!(c95, theme.accent_error);
+    }
+
+    /// Colour-distinct solid-step fixture (not DOGE white=white) so equality
+    /// at 0 / 50 / 75 / 95 / 100 is meaningful.
+    fn distinct_step_breakpoints() -> Vec<ColorBreakpoint> {
+        vec![
+            ColorBreakpoint {
+                pct: 0.0,
+                color: Color::Rgb(0, 255, 0), // green
+            },
+            ColorBreakpoint {
+                pct: 50.0,
+                color: Color::Rgb(255, 255, 0), // yellow
+            },
+            ColorBreakpoint {
+                pct: 75.0,
+                color: Color::Rgb(255, 0, 255), // magenta
+            },
+            ColorBreakpoint {
+                pct: 95.0,
+                color: Color::Rgb(255, 0, 0), // red
+            },
+        ]
+    }
+
+    #[test]
+    fn solid_steps_right_closed_at_exact_breakpoints() {
+        let bps = distinct_step_breakpoints();
+        assert_eq!(
+            blend_color_with_mode(0.0, &bps, true),
+            Color::Rgb(0, 255, 0)
+        );
+        assert_eq!(
+            blend_color_with_mode(50.0, &bps, true),
+            Color::Rgb(255, 255, 0),
+            "exact 50% takes the 50% breakpoint colour"
+        );
+        assert_eq!(
+            blend_color_with_mode(75.0, &bps, true),
+            Color::Rgb(255, 0, 255)
+        );
+        assert_eq!(
+            blend_color_with_mode(95.0, &bps, true),
+            Color::Rgb(255, 0, 0),
+            "exact 95% is error red, not the prior yellow/magenta hold"
+        );
+        assert_eq!(
+            blend_color_with_mode(100.0, &bps, true),
+            Color::Rgb(255, 0, 0)
+        );
+        // Just below a threshold holds the previous step.
+        assert_eq!(
+            blend_color_with_mode(94.9, &bps, true),
+            Color::Rgb(255, 0, 255)
+        );
+        assert_eq!(
+            blend_color_with_mode(95.1, &bps, true),
+            Color::Rgb(255, 0, 0)
+        );
+        // Mid-segment holds lower (no lerp pastels).
+        assert_eq!(
+            blend_color_with_mode(60.0, &bps, true),
+            Color::Rgb(255, 255, 0)
+        );
+    }
+
+    #[test]
+    fn doge_context_bar_solid_steps_at_0_50_100() {
+        let theme = Theme::doge();
+        assert!(uses_solid_context_steps(&theme));
+        let bps = default_breakpoints(&theme);
+
+        // Right-closed: 0% white, 50% accent_user (also white on DOGE),
+        // 95%+ error red, 100% error red.
+        let c0 = blend_color_with_mode(0.0, &bps, true);
+        let c50 = blend_color_with_mode(50.0, &bps, true);
+        let c95 = blend_color_with_mode(95.0, &bps, true);
+        let c100 = blend_color_with_mode(100.0, &bps, true);
+        assert_eq!(c0, theme.text_primary, "0% step");
+        assert_eq!(c50, theme.accent_user, "50% step (right-closed)");
+        assert_eq!(c95, theme.accent_error, "exact 95% is error");
+        assert_eq!(c100, theme.accent_error, "100% holds last breakpoint");
+        assert!(is_doge_primary_color(c0));
+        assert!(is_doge_primary_color(c50));
+        assert!(is_doge_primary_color(c95));
+        assert!(is_doge_primary_color(c100));
+    }
+
+    #[test]
+    fn doge_context_bar_mid_segment_holds_lower_not_lerp_gray() {
+        let theme = Theme::doge();
+        let bps = default_breakpoints(&theme);
+        // Between 65% (accent_user/white) and 75% (warning/yellow): solid
+        // holds white. Lerp would invent pale yellow / off-palette midtones.
+        let c70 = blend_color_with_mode(70.0, &bps, true);
+        assert_eq!(c70, theme.accent_user);
+        assert!(is_doge_primary_color(c70));
+        // Between 85% (warning) and 95% (error): hold yellow; exact 95 is red.
+        let c90 = blend_color_with_mode(90.0, &bps, true);
+        assert_eq!(c90, theme.warning);
+        assert!(is_doge_primary_color(c90));
+        assert_eq!(blend_color_with_mode(95.0, &bps, true), theme.accent_error);
+    }
+
+    #[test]
+    fn doge_context_bar_line_usage_colors_are_doge_only() {
+        let theme = Theme::doge();
+        // 0%, 50%, 100% of a 1M window — solid-step path before quantize.
+        // (quantize may map pure white → Reset under some color levels; that
+        // is still not an off-palette mid-gray.)
+        for (used, total, expect_step) in [
+            (0u64, 1_000_000u64, theme.text_primary),
+            (500_000, 1_000_000, theme.accent_user),
+            (1_000_000, 1_000_000, theme.accent_error),
+        ] {
+            let pct = xai_token_estimation::usage_percentage(used, total);
+            let bps = default_breakpoints(&theme);
+            let solid = blend_color_with_mode(pct, &bps, true);
+            assert_eq!(solid, expect_step, "usage {used}/{total} step");
+            assert!(is_doge_primary_color(solid));
+            // Live path must still produce a line (and not invent mid-gray RGB).
+            let line =
+                context_bar_line(Some(used), Some(total), false, &theme).expect("token data");
+            for span in &line.spans {
+                if let Some(fg) = span.style.fg {
+                    if matches!(fg, Color::Reset) {
+                        continue;
+                    }
+                    assert!(
+                        is_doge_primary_color(fg),
+                        "usage {used}/{total} painted off-palette {fg:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn doge_quantized_themes_still_use_solid_steps() {
+        // Production path: Theme::current() is always quantized. Solid steps
+        // must not depend on raw Color::Rgb fingerprints alone.
+        use crate::theme::color_support::ColorLevel;
+        use crate::theme::{ThemeKind, cache as theme_cache};
+
+        let _guard = theme_cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        theme_cache::reset_for_test();
+        theme_cache::set(ThemeKind::Doge);
+        assert_eq!(Theme::current_kind(), ThemeKind::Doge);
+
+        for level in [
+            ColorLevel::TrueColor,
+            ColorLevel::Ansi256,
+            ColorLevel::Basic,
+        ] {
+            let theme = Theme::doge().quantized(level);
+            assert!(
+                uses_solid_context_steps(&theme),
+                "kind=Doge must enable solid steps after {level:?} quantize"
+            );
+            // Structural fingerprint also survives pure-primary quantize
+            // (defense in depth when kind is set — and for kind-less tests).
+            if level != ColorLevel::None {
+                assert!(
+                    is_doge_theme_structural(&theme),
+                    "structural DOGE fingerprint should hold after {level:?}"
+                );
+            }
+
+            let bps = default_breakpoints(&theme);
+            // Mid white→yellow segment must not lerp to a non-primary.
+            let c70 = blend_color_with_mode(70.0, &bps, true);
+            assert!(
+                is_doge_primary_color(c70),
+                "70% solid step off-palette after {level:?}: {c70:?}"
+            );
+            // Live line path: no mid-tone RGB/Indexed pastels in span fg.
+            let line = context_bar_line(Some(700_000), Some(1_000_000), false, &theme)
+                .expect("token data");
+            for span in &line.spans {
+                if let Some(fg) = span.style.fg {
+                    if matches!(fg, Color::Reset) {
+                        continue;
+                    }
+                    // After a second global quantize the fg may be Indexed;
+                    // resolve and require pure DOGE RGB.
+                    if let Some((r, g, b)) = crate::render::color::resolve_to_rgb(fg) {
+                        assert!(
+                            is_doge_primary_color(Color::Rgb(r, g, b)),
+                            "quantized live path {level:?} painted mid-tone {fg:?} → ({r},{g},{b})"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Without kind cache, quantized structural still enables solid steps.
+        theme_cache::set(ThemeKind::GrokNight);
+        let q256 = Theme::doge().quantized(ColorLevel::Ansi256);
+        assert!(
+            uses_solid_context_steps(&q256),
+            "quantized pure-primary theme must still solid-step without Doge kind"
+        );
+        theme_cache::reset_for_test();
+    }
+
+    #[test]
+    fn non_doge_theme_still_lerps_between_breakpoints() {
+        // Default (GrokNight) must keep the smooth gradient between
+        // neighbouring breakpoints — solid-steps is DOGE-only.
+        // Hold the theme test lock so a parallel Doge kind set cannot
+        // flip uses_solid_context_steps via current_kind().
+        use crate::theme::{ThemeKind, cache as theme_cache};
+        let _guard = theme_cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        theme_cache::reset_for_test();
+        theme_cache::set(ThemeKind::GrokNight);
+
+        let theme = Theme::default();
+        assert!(!uses_solid_context_steps(&theme));
+        assert!(!is_doge_theme_structural(&theme));
+        let bps = default_breakpoints(&theme);
+        // 70% sits between 65% (accent_user) and 75% (warning).
+        let solid = blend_color_with_mode(70.0, &bps, true);
+        let lerped = blend_color_with_mode(70.0, &bps, false);
+        assert_eq!(solid, theme.accent_user);
+        // Lerp should differ from either endpoint when the endpoints differ.
+        if theme.accent_user != theme.warning {
+            assert_ne!(
+                lerped, theme.accent_user,
+                "expected mid-segment lerp, not solid hold"
+            );
+            assert_ne!(lerped, theme.warning);
+        }
+        theme_cache::reset_for_test();
     }
 
     /// Concatenate all span content into one string for assertions.

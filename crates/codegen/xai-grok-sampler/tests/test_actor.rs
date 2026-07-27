@@ -72,6 +72,9 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
     SamplerConfig {
         api_key: Some("test-key".into()),
         failover_api_keys: Vec::new(),
+        failover_base_url: None,
+        session_base_url: None,
+        session_identity_key: None,
         base_url,
         model: model.into(),
         max_completion_tokens: Some(1024),
@@ -96,6 +99,8 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         client_version: None,
         attribution_callback: None,
         bearer_resolver: None,
+        stashed_bearer_resolver: None,
+        session_bearer_resolver: None,
         supports_backend_search: false,
         compactions_remaining: None,
         compaction_at_tokens: None,
@@ -493,6 +498,212 @@ async fn rate_limit_exhausts_when_policy_caps_retries() {
     let hits = counter.load(Ordering::SeqCst);
     // max_retries=2 → stop after two attempts (first + one retry).
     assert!((1..=3).contains(&hits), "expected 1-3 hits, got {hits}");
+}
+
+// ---------------------------------------------------------------------------
+// Multi-identity failover: plain 429 hops; credit hops; bare 401 does not
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_429_with_failover_hops_to_next_identity() {
+    // Memo policy (no 1h sticky) is unit-tested; process-global memo races across
+    // parallel integration tests, so this test asserts hop reason + success only.
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap| {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let key = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .unwrap_or("")
+                    .to_owned();
+                if key == "primary-key" {
+                    return Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        json!({ "error": { "message": "Rate limit exceeded" } }).to_string(),
+                    ));
+                }
+                assert_eq!(key, "backup-key", "expected hop to backup key, got {key}");
+                let events = sse::chat_completion_events("hopped-ok", "test-model");
+                Ok(Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                )))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some("primary-key".into());
+    cfg.failover_api_keys = vec!["backup-key".into()];
+    // Cap same-key budget so a failed hop would not hang forever.
+    let policy = RetryPolicy {
+        max_retries: 3,
+        rate_limit_retry_threshold: 3,
+        retry_only_before_output: false,
+    };
+    let handle = SamplerActor::spawn(cfg, policy, event_tx);
+
+    let rid = RequestId::from("req-rl-hop");
+    handle.submit(rid.clone(), user_request("hi"));
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    let hop_reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        hop_reasons
+            .iter()
+            .any(|r| r.contains("rate limited") && r.contains("console key")),
+        "expected rate-limit hop toast reason, got {hop_reasons:?}"
+    );
+    assert!(
+        hop_reasons.iter().all(|r| !r.contains("credit exhausted")),
+        "must not claim credit hop: {hop_reasons:?}"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            if let Some(a) = response.assistant() {
+                assert_eq!(a.content.as_ref(), "hopped-ok");
+            }
+        }
+        other => panic!("expected Completed after rate-limit hop, got {other:?}"),
+    }
+    assert!(
+        counter.load(Ordering::SeqCst) >= 2,
+        "primary 429 + backup success"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_exhausted_with_failover_still_hops() {
+    // Sticky credit memo is unit-tested under with_memo_lock; here assert hop chrome.
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap| {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let key = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .unwrap_or("")
+                    .to_owned();
+                if key == "credit-dead" {
+                    return Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::PAYMENT_REQUIRED,
+                        json!({ "error": { "message": "out of credits" } }).to_string(),
+                    ));
+                }
+                assert_eq!(key, "credit-live", "expected hop to live key, got {key}");
+                let events = sse::chat_completion_events("credit-hop-ok", "test-model");
+                Ok(Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                )))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some("credit-dead".into());
+    cfg.failover_api_keys = vec!["credit-live".into()];
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(RequestId::from("req-credit-hop"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    let hop_reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        hop_reasons.iter().any(|r| r.contains("credit exhausted")),
+        "expected credit hop reason, got {hop_reasons:?}"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            if let Some(a) = response.assistant() {
+                assert_eq!(a.content.as_ref(), "credit-hop-ok");
+            }
+        }
+        other => panic!("expected Completed after credit hop, got {other:?}"),
+    }
+    assert!(
+        counter.load(Ordering::SeqCst) >= 2,
+        "dead key + live key after credit hop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bare_401_with_failover_does_not_hop() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<
+                    Sse<
+                        futures_util::stream::Iter<
+                            std::vec::IntoIter<Result<Event, std::convert::Infallible>>,
+                        >,
+                    >,
+                    (StatusCode, String),
+                >((StatusCode::UNAUTHORIZED, "unauthorized".to_string()))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some("bad-key".into());
+    cfg.failover_api_keys = vec!["other-key".into()];
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(RequestId::from("req-401-no-hop"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(5)).await;
+    server.shutdown();
+
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            SamplingEvent::Retrying { reason, .. }
+                if xai_grok_sampler::is_credential_hop_reason(reason)
+        )),
+        "401 must not trigger identity hop"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind, SamplingErrorKind::Auth);
+        }
+        other => panic!("expected Failed(Auth), got {other:?}"),
+    }
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "401 must not retry or hop to second key"
+    );
 }
 
 // ---------------------------------------------------------------------------

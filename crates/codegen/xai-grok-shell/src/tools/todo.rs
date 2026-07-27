@@ -41,6 +41,14 @@ pub fn todo_item_from_plan_entry(entry: acp::PlanEntry) -> TodoItem {
         // TODO(acp-0.10): `PlanEntryStatus` is #[non_exhaustive].
         _ => TodoStatus::Pending,
     };
+    let meta = entry.meta.map(serde_json::Value::Object);
+    // Recover first-class size from meta when ACP Plan carried it.
+    let size = meta
+        .as_ref()
+        .and_then(|m| m.get("size"))
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u8::try_from(n).ok())
+        .filter(|n| *n == 1 || *n == 2);
     TodoItem {
         content: entry.content,
         priority: match entry.priority {
@@ -51,14 +59,23 @@ pub fn todo_item_from_plan_entry(entry: acp::PlanEntry) -> TodoItem {
             _ => TodoPriority::Medium,
         },
         status,
-        meta: entry.meta.map(serde_json::Value::Object),
+        meta,
+        size,
     }
 }
 
 /// Convert a `TodoItem` to an ACP `PlanEntry`.
 ///
 /// Cancelled items become `Completed` with `{"cancelled": true}` in meta.
+/// Prefer [`plan_entry_from_todo`] when the board id is known so the client
+/// can resolve `parentId` for leaf-only progress badges.
 pub fn plan_entry_from_todo_item(item: TodoItem) -> acp::PlanEntry {
+    plan_entry_from_todo(None, item)
+}
+
+/// Convert a board `(id, item)` to an ACP `PlanEntry`, stamping `meta.id`
+/// so the pager can exclude parents from point totals (same graph as the tool).
+pub fn plan_entry_from_todo(id: Option<&str>, item: TodoItem) -> acp::PlanEntry {
     let status = match item.status {
         TodoStatus::Pending => acp::PlanEntryStatus::Pending,
         TodoStatus::InProgress => acp::PlanEntryStatus::InProgress,
@@ -66,6 +83,22 @@ pub fn plan_entry_from_todo_item(item: TodoItem) -> acp::PlanEntry {
         TodoStatus::Cancelled => acp::PlanEntryStatus::Completed,
     };
     let mut meta = item.meta;
+    // Stamp board id for parentId leaf detection on the client.
+    if let Some(id) = id {
+        let mut m = meta.unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = m.as_object_mut() {
+            obj.insert("id".into(), serde_json::json!(id));
+        }
+        meta = Some(m);
+    }
+    // Preserve size across ACP Plan (no first-class size on PlanEntry).
+    if let Some(sz) = item.size {
+        let mut m = meta.unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = m.as_object_mut() {
+            obj.insert("size".into(), serde_json::json!(sz));
+        }
+        meta = Some(m);
+    }
     if item.status == TodoStatus::Cancelled {
         let mut m = meta.unwrap_or_else(|| serde_json::json!({}));
         if let Some(obj) = m.as_object_mut() {

@@ -90,6 +90,7 @@ It is important to remember:
 - You must include a header with your intended action (Add/Delete/Update)
 - You must prefix new lines with `+` even when creating a new file
 - File references can only be relative, NEVER ABSOLUTE.
+- Trailing spaces/tabs on each written line are stripped by default (disable with env `GROK_STRIP_TRAILING_WHITESPACE=0`).
 "#;
 
 // ─── Input ───────────────────────────────────────────────────────────
@@ -164,7 +165,8 @@ async fn compute_all_changes(
                 let resolved = cwd.join(path);
                 changes.push(FileChange::Add {
                     path: resolved,
-                    content: contents.clone(),
+                    // Post-edit trailing-ws strip (default ON; env override).
+                    content: crate::util::trailing_ws::prepare_for_write(contents.clone()),
                 });
             }
             Hunk::DeleteFile { path } => {
@@ -192,6 +194,8 @@ async fn compute_all_changes(
                         ApplyPatchError::ComputeReplacements(msg) => msg,
                         other => other.to_string(),
                     })?;
+                // Post-edit trailing-ws strip (default ON; env override).
+                let new_content = crate::util::trailing_ws::prepare_for_write(new_content);
 
                 if let Some(dest) = move_path {
                     let resolved_dest = cwd.join(dest);

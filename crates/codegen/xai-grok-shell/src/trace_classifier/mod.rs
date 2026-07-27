@@ -335,6 +335,7 @@ fn apply_merge(state: &mut TodoState, updates: Vec<TodoUpdateArgs>) {
             u.status,
             u.priority,
             u.meta.clone(),
+            None, // size omit — offline reconstruct does not track fib size
         ) {
             continue;
         }
@@ -361,6 +362,7 @@ fn push_new(state: &mut TodoState, u: TodoUpdateArgs) {
             priority: priority.unwrap_or_default(),
             status,
             meta,
+            size: None,
         },
     );
 }
@@ -1058,9 +1060,14 @@ pub fn parse_trace_file(path: &Path) -> Result<Vec<TurnRecord>> {
         .with_context(|| format!("parse trace {} as Vec<TurnRecord>", path.display()))
 }
 
-/// Resolve the API key from `--api-key` → `$XAI_API_KEY` →
-/// non-interactive `auth.json` (with silent OIDC refresh) → error.
-/// Empty or whitespace-only values at every layer fall through.
+/// Resolve the API key from an already-materialized explicit key →
+/// `$XAI_API_KEY` → non-interactive `auth.json` (with silent OIDC
+/// refresh) → error.
+///
+/// Callers that take CLI input must refuse argv secrets first (see
+/// [`crate::auth::materialize_cli_api_key`]); `explicit` is only for
+/// env/prompt/stdin/library paths. Empty or whitespace-only values at
+/// every layer fall through.
 ///
 /// The auth.json branch routes through the same `AuthManager` code
 /// path the shell uses (see [`crate::auth::try_ensure_fresh_auth`]):
@@ -1083,9 +1090,10 @@ pub async fn resolve_api_key(explicit: Option<&str>, grok_home: &Path) -> Result
         return Ok(key);
     }
     Err(anyhow!(
-        "no API key: pass --api-key, set XAI_API_KEY, or run `grok login` to populate \
-         <grok-home>/auth.json. An expired OIDC token is auto-refreshed when a refresh_token \
-         is present; if not, re-login is required."
+        "no API key: set XAI_API_KEY, run `grok login` to populate <grok-home>/auth.json, \
+         or pass `trace_classify --api-key` (no-echo prompt; never put the secret on argv). \
+         An expired OIDC token is auto-refreshed when a refresh_token is present; if not, \
+         re-login is required."
     ))
 }
 
@@ -1128,7 +1136,7 @@ async fn non_interactive_auth_key(grok_home: &Path) -> Result<Option<String>> {
         Err(AuthError::NotLoggedIn) => Ok(None),
         Err(e) => Err(anyhow!(
             "auth.json refresh failed: {e}. Run `grok login` to re-authenticate, \
-             or pass --api-key / set $XAI_API_KEY to bypass auth.json."
+             or set $XAI_API_KEY / use `trace_classify --api-key` (no-echo) to bypass auth.json."
         )),
     }
 }
@@ -1155,6 +1163,9 @@ async fn build_sampler_client(
     let config = xai_grok_sampler::SamplerConfig {
         api_key: Some(resolved),
         failover_api_keys: Vec::new(),
+        failover_base_url: None,
+        session_base_url: None,
+        session_identity_key: None,
         base_url,
         model,
         max_completion_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
@@ -1606,6 +1617,7 @@ mod tests {
                     priority: TodoPriority::default(),
                     status,
                     meta: None,
+                    size: None,
                 },
             );
         }
@@ -1628,6 +1640,7 @@ mod tests {
                 priority: TodoPriority::default(),
                 status: TodoStatus::InProgress,
                 meta: None,
+                size: None,
             },
         );
         let view = partition_todos(&state, 5);

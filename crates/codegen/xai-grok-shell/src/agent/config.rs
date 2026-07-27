@@ -4892,6 +4892,12 @@ pub struct ResolvedCredentials {
     pub base_url: String,
     pub auth_type: xai_chat_state::AuthType,
     pub auth_scheme: AuthScheme,
+    /// Dual-auth: console API host when split from session `base_url` (hop-to-key).
+    pub failover_base_url: Option<String>,
+    /// Dual-auth: session host when primary is console key (hop-to-session).
+    pub session_base_url: Option<String>,
+    /// Dual-auth: exact session JWT for hop detection / bearer reinstall.
+    pub session_identity_key: Option<String>,
 }
 /// First usable BYOK credential: a non-empty (trimmed) api_key, else the first
 /// set, non-empty env_key value. Single source of truth for has_own_credentials,
@@ -4954,29 +4960,102 @@ fn split_primary_failover(keys: Vec<String>) -> (Option<String>, Vec<String>) {
     (primary, iter.collect())
 }
 
-/// Resolve credentials for a model.
-/// Priority: model api_key/env_key/secret-store > cached auth-provider token >
-/// session token > XAI_API_KEY.
+/// Ordered unique first-party console / Business API keys for dual-auth failover.
 ///
-/// When `env_key` lists multiple names (or values contain comma-separated
-/// keys), the first is primary and the rest are credit-failover keys.
-/// OpenRouter base URLs never fall through to xAI session / `XAI_API_KEY`
-/// (would send the wrong credential to a third-party host).
+/// Order: `XAI_API_KEY` (comma-list) → credentials store (`grok-build` keyring /
+/// `provider_credentials.json`) → `auth.json` `xai::api_key`. Never logs raw keys.
+pub(crate) fn collect_xai_console_api_keys() -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(raw) = crate::agent::auth_method::read_xai_api_key_env() {
+        for part in split_api_key_list(&raw) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    // Secret store (S1) — same service as OpenRouter (`grok-build`).
+    let store = crate::auth::credentials_store::CredentialsStore::default_store();
+    let url = crate::auth::xai_console::credential_url(None);
+    if let Ok(Some((_, secret))) = store.read(&url) {
+        for part in split_api_key_list(&secret) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    // auth.json from `grok login --api-key` / desktop set-key.
+    let home = crate::util::grok_home::grok_home();
+    if let Some(disk) = crate::auth::read_api_key(&home) {
+        for part in split_api_key_list(&disk) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    keys
+}
+
+/// Env-only console keys (legacy path for non-first-party hosts without a session).
+fn collect_xai_api_key_env_list() -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(raw) = crate::agent::auth_method::read_xai_api_key_env() {
+        for part in split_api_key_list(&raw) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    keys
+}
+
+/// Resolve credentials for a model (session-first when both session + console key).
+///
+/// See [`resolve_credentials_preferring`] for dual-auth ordering.
 pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
+    resolve_credentials_preferring(model, session_key, None)
+}
+
+/// Resolve credentials with optional dual-auth primary pin.
+///
+/// Priority: model api_key/env_key/secret-store > cached auth-provider token >
+/// then dual-auth merge of session + first-party console keys, else whichever
+/// single identity is present.
+///
+/// When both an OAuth/session token and console API key(s) are available on a
+/// **first-party xAI** host:
+/// - `preferred = None` or `Some(Oidc)` → session primary, console keys failover
+/// - `preferred = Some(ApiKey)` → first console key primary, remaining keys then
+///   session JWT as failover (exclusive pin still refuses session-only when no
+///   console key exists)
+///
+/// OpenRouter never receives an xAI session. Enterprise
+/// [`enforce_disable_api_key_auth`] clears console-key failover.
+pub fn resolve_credentials_preferring(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+) -> ResolvedCredentials {
     let info = model.info();
     let is_openrouter = crate::auth::openrouter::is_openrouter_base_url(&info.base_url);
+    let first_party = crate::util::is_xai_api_url(&info.base_url);
+    let prefer_api_key_primary =
+        matches!(preferred, Some(crate::auth::PreferredAuthMethod::ApiKey));
     let own = collect_own_credentials(
         model.api_key.as_deref(),
         model.env_key.as_ref(),
         is_openrouter,
     );
-    let (api_key, failover_api_keys, base_url, auth_type) = if !own.is_empty() {
+    // (api_key, failover, base_url, auth_type, failover_base_url, session_base_url, session_identity)
+    let (
+        api_key,
+        failover_api_keys,
+        base_url,
+        auth_type,
+        failover_base_url,
+        session_base_url,
+        session_identity_key,
+    ) = if !own.is_empty() {
         let (primary, failover) = split_primary_failover(own);
         (
             primary,
             failover,
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
+            None,
+            None,
+            None,
         )
     } else if is_openrouter {
         // Own credential already checked env + secret store. Do not use
@@ -4991,6 +5070,9 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             Vec::new(),
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
+            None,
+            None,
+            None,
         )
     } else if let Some(provider) = model.auth_provider.as_ref() {
         debug_assert!(model.effective_auth_provider().is_some());
@@ -4999,49 +5081,181 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             Vec::new(),
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
+            None,
+            None,
+            None,
         )
-    } else if let Some(key) = session_key {
-        (
-            Some(key.to_owned()),
-            Vec::new(),
-            info.base_url.clone(),
-            xai_chat_state::AuthType::SessionToken,
-        )
-    } else if let Ok(key) = crate::agent::auth_method::read_xai_api_key_env() {
-        let url = model
+    } else {
+        let session = session_key
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let console_keys = if first_party {
+            collect_xai_console_api_keys()
+        } else {
+            // Non-xAI hosts: only the historical env fallthrough (no session dual).
+            Vec::new()
+        };
+        let env_only_keys = if !first_party {
+            collect_xai_api_key_env_list()
+        } else {
+            Vec::new()
+        };
+        let session_host = info.base_url.clone();
+        let console_host = model
             .api_base_url
             .clone()
             .unwrap_or_else(|| info.base_url.clone());
-        // XAI_API_KEY may also be a comma-list for multi-account BYOK.
-        let mut keys = Vec::new();
-        for part in split_api_key_list(&key) {
-            push_unique_key(&mut keys, part);
+        let split_hosts = session_host.trim_end_matches('/') != console_host.trim_end_matches('/');
+
+        match (session.as_deref(), !console_keys.is_empty(), first_party) {
+            // Dual-auth: session + console key(s) on first-party xAI.
+            (Some(sess), true, true) if prefer_api_key_primary => {
+                let mut keys = console_keys;
+                keys.retain(|k| k.trim() != sess);
+                if keys.is_empty() {
+                    // preferred_method=api_key exclusive: retained-away all keys.
+                    (
+                        None,
+                        Vec::new(),
+                        session_host,
+                        xai_chat_state::AuthType::ApiKey,
+                        None,
+                        None,
+                        None,
+                    )
+                } else {
+                    let (primary, mut failover) = split_primary_failover(keys);
+                    failover.push(sess.to_owned());
+                    (
+                        primary,
+                        failover,
+                        console_host.clone(),
+                        xai_chat_state::AuthType::ApiKey,
+                        if split_hosts {
+                            Some(console_host.clone())
+                        } else {
+                            None
+                        },
+                        if split_hosts {
+                            Some(session_host)
+                        } else {
+                            None
+                        },
+                        Some(sess.to_owned()),
+                    )
+                }
+            }
+            (Some(sess), true, true) => {
+                let mut keys = console_keys;
+                keys.retain(|k| k.trim() != sess);
+                (
+                    Some(sess.to_owned()),
+                    keys,
+                    session_host.clone(),
+                    xai_chat_state::AuthType::SessionToken,
+                    if split_hosts {
+                        Some(console_host)
+                    } else {
+                        None
+                    },
+                    if split_hosts {
+                        Some(session_host)
+                    } else {
+                        None
+                    },
+                    Some(sess.to_owned()),
+                )
+            }
+            // preferred_method=api_key exclusive: no console key → do not fall
+            // through to session (parity with prepare_sampling_config).
+            (Some(_), false, _) if prefer_api_key_primary => {
+                if let Some(ref env_keys) = model.env_key
+                    && !env_keys.is_empty()
+                {
+                    tracing::warn!(
+                        model = %info.model,
+                        env_key = %env_keys,
+                        "model has env_key configured but none of the environment variables are set — \
+                         requests will have no API key",
+                    );
+                }
+                (
+                    None,
+                    Vec::new(),
+                    info.base_url.clone(),
+                    xai_chat_state::AuthType::ApiKey,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            (Some(sess), _, _) => (
+                Some(sess.to_owned()),
+                Vec::new(),
+                info.base_url.clone(),
+                xai_chat_state::AuthType::SessionToken,
+                None,
+                None,
+                None,
+            ),
+            (None, true, true) => {
+                let (primary, failover) = split_primary_failover(console_keys);
+                (
+                    primary,
+                    failover,
+                    console_host,
+                    xai_chat_state::AuthType::ApiKey,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            (None, _, false) if !env_only_keys.is_empty() => {
+                let url = model
+                    .api_base_url
+                    .clone()
+                    .unwrap_or_else(|| info.base_url.clone());
+                let (primary, failover) = split_primary_failover(env_only_keys);
+                (
+                    primary,
+                    failover,
+                    url,
+                    xai_chat_state::AuthType::ApiKey,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            (None, _, _) => {
+                if let Some(ref env_keys) = model.env_key
+                    && !env_keys.is_empty()
+                {
+                    tracing::warn!(
+                        model = %info.model,
+                        env_key = %env_keys,
+                        "model has env_key configured but none of the environment variables are set — \
+                         requests will have no API key",
+                    );
+                }
+                (
+                    None,
+                    Vec::new(),
+                    info.base_url.clone(),
+                    xai_chat_state::AuthType::ApiKey,
+                    None,
+                    None,
+                    None,
+                )
+            }
         }
-        let (primary, failover) = split_primary_failover(keys);
-        (primary, failover, url, xai_chat_state::AuthType::ApiKey)
-    } else {
-        if let Some(ref env_keys) = model.env_key
-            && !env_keys.is_empty()
-        {
-            tracing::warn!(
-                model = %info.model,
-                env_key = %env_keys,
-                "model has env_key configured but none of the environment variables are set — \
-                 requests will have no API key",
-            );
-        }
-        (
-            None,
-            Vec::new(),
-            info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
-        )
     };
     let auth_scheme = info.auth_scheme;
     tracing::debug!(
         model = %info.model,
         auth_type = ?auth_type,
         failover_keys = failover_api_keys.len(),
+        has_failover_base = failover_base_url.is_some(),
         "resolved credentials"
     );
     ResolvedCredentials {
@@ -5050,24 +5264,30 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
         base_url,
         auth_type,
         auth_scheme,
+        failover_base_url,
+        session_base_url,
+        session_identity_key,
     }
 }
 /// `disable_api_key_auth` at the credential seam: swap a first-party xAI API
 /// key for the IdP session (absent => request fails => forces login). BYOK
 /// (non-xAI `base_url`) is untouched; no-op when the switch is off.
+///
+/// Always clears console-key failover on first-party hosts under the kill
+/// switch (enterprise single-identity), including when primary is already a
+/// session token with dual-auth failover keys.
 pub fn enforce_disable_api_key_auth(
     creds: &mut ResolvedCredentials,
     disable_api_key_auth: bool,
     session_key: Option<&str>,
 ) {
-    if disable_api_key_auth
-        && creds.auth_type == xai_chat_state::AuthType::ApiKey
-        && crate::util::is_xai_api_url(&creds.base_url)
-    {
+    if !disable_api_key_auth || !crate::util::is_xai_api_url(&creds.base_url) {
+        return;
+    }
+    let was_api_key = creds.auth_type == xai_chat_state::AuthType::ApiKey;
+    if was_api_key {
         creds.auth_type = xai_chat_state::AuthType::SessionToken;
         creds.api_key = session_key.map(str::to_owned);
-        // Session tokens are single-identity; drop BYOK failover keys.
-        creds.failover_api_keys.clear();
         xai_grok_telemetry::unified_log::debug(
             "auth: kill switch blocked a first-party API key at the credential seam",
             None,
@@ -5076,6 +5296,24 @@ pub fn enforce_disable_api_key_auth(
                 "base_url": creds.base_url,
             })),
         );
+    }
+    // Single-identity: drop console-key failover under enterprise kill-switch.
+    if !creds.failover_api_keys.is_empty()
+        || creds.failover_base_url.is_some()
+        || creds.session_base_url.is_some()
+        || creds.session_identity_key.is_some()
+    {
+        creds.failover_api_keys.clear();
+        creds.failover_base_url = None;
+        creds.session_base_url = None;
+        creds.session_identity_key = None;
+        if !was_api_key {
+            xai_grok_telemetry::unified_log::debug(
+                "auth: kill switch cleared first-party API key failover list",
+                None,
+                Some(serde_json::json!({ "base_url": creds.base_url })),
+            );
+        }
     }
 }
 /// Resolve credentials for an auxiliary sampling path (web search, image
@@ -5086,7 +5324,18 @@ fn resolve_credentials_enforced(
     session_key: Option<&str>,
     disable_api_key_auth: bool,
 ) -> ResolvedCredentials {
-    let mut credentials = resolve_credentials(entry, session_key);
+    resolve_credentials_enforced_preferring(entry, session_key, disable_api_key_auth, None)
+}
+
+/// Like [`resolve_credentials_enforced`] but honors `[auth] preferred_method`
+/// for dual-auth ordering (main chat + aux paths).
+pub fn resolve_credentials_enforced_preferring(
+    entry: &ModelEntry,
+    session_key: Option<&str>,
+    disable_api_key_auth: bool,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+) -> ResolvedCredentials {
+    let mut credentials = resolve_credentials_preferring(entry, session_key, preferred);
     enforce_disable_api_key_auth(&mut credentials, disable_api_key_auth, session_key);
     credentials
 }
@@ -5107,13 +5356,12 @@ pub fn try_resolve_model_credentials(
         .ok()?;
     let models = resolve_model_list(&cfg, None);
     let entry = find_model_by_id(&models, model_id)?;
-    let mut credentials = resolve_credentials(entry, session_key);
-    enforce_disable_api_key_auth(
-        &mut credentials,
-        cfg.grok_com_config.api_key_auth_disabled(),
+    Some(resolve_credentials_enforced_preferring(
+        entry,
         session_key,
-    );
-    Some(credentials)
+        cfg.grok_com_config.api_key_auth_disabled(),
+        cfg.grok_com_config.preferred_method,
+    ))
 }
 /// Per-model auth facts (BYOK status + auth scheme) from one effective-config
 /// load, memoized by the session actor.
@@ -5199,9 +5447,38 @@ pub fn resolve_aux_model_sampling_config(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
 ) -> Option<SamplerConfig> {
+    resolve_aux_model_sampling_config_preferring(
+        model_id,
+        models,
+        endpoints,
+        session_key,
+        disable_api_key_auth,
+        alpha_test_key,
+        client_version,
+        None,
+    )
+}
+
+/// Like [`resolve_aux_model_sampling_config`] with dual-auth
+/// `[auth] preferred_method` ordering.
+pub fn resolve_aux_model_sampling_config_preferring(
+    model_id: &str,
+    models: &IndexMap<String, ModelEntry>,
+    endpoints: &EndpointsConfig,
+    session_key: Option<&str>,
+    disable_api_key_auth: bool,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+    preferred_method: Option<crate::auth::PreferredAuthMethod>,
+) -> Option<SamplerConfig> {
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
-        let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
+        let credentials = resolve_credentials_enforced_preferring(
+            entry,
+            session_key,
+            disable_api_key_auth,
+            preferred_method,
+        );
         let sampler = sampling_config_for_model(
             entry,
             credentials,
@@ -5268,7 +5545,12 @@ pub fn resolve_aux_model_sampling_config(
             auth_provider: None,
             api_base_url: None,
         };
-        let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
+        let credentials = resolve_credentials_enforced_preferring(
+            &entry,
+            session_key,
+            disable_api_key_auth,
+            preferred_method,
+        );
         let sampler = sampling_config_for_model(
             &entry,
             credentials,
@@ -5303,6 +5585,8 @@ pub fn stamp_session_local_sampler_fields(
     cfg.attribution_callback = active_session_config.attribution_callback.clone();
     if crate::util::is_xai_api_bearer_url(&cfg.base_url) {
         cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
+        // Durable hop-to-session re-bind (no prior stash required on aux samplers).
+        cfg.session_bearer_resolver = active_session_config.session_bearer_resolver.clone();
     }
     cfg.max_retries = max_retries;
 }
@@ -5372,6 +5656,9 @@ pub fn sampling_config_for_model(
     SamplerConfig {
         api_key: credentials.api_key,
         failover_api_keys: credentials.failover_api_keys,
+        failover_base_url: credentials.failover_base_url,
+        session_base_url: credentials.session_base_url,
+        session_identity_key: credentials.session_identity_key,
         model: model_name,
         base_url: credentials.base_url,
         max_completion_tokens,
@@ -5395,6 +5682,8 @@ pub fn sampling_config_for_model(
         origin_client: None,
         attribution_callback: None,
         bearer_resolver: None,
+        stashed_bearer_resolver: None,
+        session_bearer_resolver: None,
         supports_backend_search: info.supports_backend_search,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
@@ -5480,6 +5769,7 @@ fn resolve_hidden_default_web_search_sampling_config(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     endpoints: &EndpointsConfig,
+    preferred_method: Option<crate::auth::PreferredAuthMethod>,
 ) -> SamplerConfig {
     let entry = ModelEntry {
         info: ModelInfo {
@@ -5521,7 +5811,12 @@ fn resolve_hidden_default_web_search_sampling_config(
         auth_provider: None,
         api_base_url: None,
     };
-    let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
+    let credentials = resolve_credentials_enforced_preferring(
+        &entry,
+        session_key,
+        disable_api_key_auth,
+        preferred_method,
+    );
     sampling_config_for_model(
         &entry,
         credentials,
@@ -5540,8 +5835,36 @@ pub fn resolve_web_search_sampling_config(
     client_version: Option<String>,
     endpoints: &EndpointsConfig,
 ) -> Option<SamplerConfig> {
+    resolve_web_search_sampling_config_preferring(
+        model_id,
+        models,
+        session_key,
+        disable_api_key_auth,
+        alpha_test_key,
+        client_version,
+        endpoints,
+        None,
+    )
+}
+
+/// Like [`resolve_web_search_sampling_config`] with dual-auth preferred_method.
+pub fn resolve_web_search_sampling_config_preferring(
+    model_id: &str,
+    models: &IndexMap<String, ModelEntry>,
+    session_key: Option<&str>,
+    disable_api_key_auth: bool,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+    endpoints: &EndpointsConfig,
+    preferred_method: Option<crate::auth::PreferredAuthMethod>,
+) -> Option<SamplerConfig> {
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
-        let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
+        let credentials = resolve_credentials_enforced_preferring(
+            &entry,
+            session_key,
+            disable_api_key_auth,
+            preferred_method,
+        );
         if credentials.api_key.is_none() && entry.effective_auth_provider().is_some() {
             tracing::warn!(
                 web_search_model = %model_id,
@@ -5565,6 +5888,7 @@ pub fn resolve_web_search_sampling_config(
             alpha_test_key,
             client_version,
             endpoints,
+            preferred_method,
         ))
     } else {
         None
@@ -6153,7 +6477,7 @@ reasoning_effort = "low"
     }
     /// The session bearer resolver must never be stamped onto a third-party
     /// sampler: the sampler substitutes the resolver's bearer at request
-    /// time.
+    /// time. First-party aux gets both live bearer and durable hop re-bind.
     #[test]
     fn session_resolver_is_not_stamped_onto_third_party_samplers() {
         #[derive(Debug)]
@@ -6163,8 +6487,11 @@ reasoning_effort = "low"
                 Some("session-jwt".into())
             }
         }
+        let live: xai_grok_sampler::SharedBearerResolver = std::sync::Arc::new(SessionResolver);
         let session_cfg = SamplerConfig {
-            bearer_resolver: Some(std::sync::Arc::new(SessionResolver)),
+            bearer_resolver: Some(live.clone()),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: Some(live),
             ..SamplerConfig::default()
         };
         let mut third_party = SamplerConfig {
@@ -6176,6 +6503,10 @@ reasoning_effort = "low"
             third_party.bearer_resolver.is_none(),
             "a third-party endpoint must keep its resolved credential"
         );
+        assert!(
+            third_party.session_bearer_resolver.is_none(),
+            "third-party must not receive durable session hop re-bind"
+        );
         let mut first_party = SamplerConfig {
             base_url: EndpointsConfig::default().resolve_inference_base_url(),
             ..SamplerConfig::default()
@@ -6184,6 +6515,10 @@ reasoning_effort = "low"
         assert!(
             first_party.bearer_resolver.is_some(),
             "first-party aux samplers keep the session refresh behavior"
+        );
+        assert!(
+            first_party.session_bearer_resolver.is_some(),
+            "first-party aux keep durable hop-to-session re-bind without prior stash"
         );
     }
     /// A cold cache disables web search rather than sending an
@@ -6764,6 +7099,9 @@ reasoning_effort = "low"
                 base_url: model.info().base_url.clone(),
                 auth_type: xai_chat_state::AuthType::ApiKey,
                 auth_scheme: AuthScheme::Bearer,
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: None,
             },
             None,
             None,
@@ -6794,6 +7132,9 @@ reasoning_effort = "low"
                     .unwrap_or(entry.info().base_url.clone()),
                 auth_type: xai_chat_state::AuthType::ApiKey,
                 auth_scheme: AuthScheme::Bearer,
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: None,
             };
             assert_eq!(
                 api_key_creds.base_url, endpoints.xai_api_base_url,
@@ -7039,6 +7380,193 @@ reasoning_effort = "low"
         let creds = resolve_credentials(&byok, Some("tok"));
         assert_eq!(creds.auth_type, AuthType::ApiKey);
     }
+
+    /// Dual-host: session on cli-chat-proxy + console key queues api.x.ai for hop.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_session_primary_sets_console_failover_base_url() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-biz-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+        let mut model = test_model_entry("m", proxy, None, None, Some("https://api.x.ai/v1"));
+        // first_party via cli-chat-proxy
+        assert!(crate::util::is_xai_api_url(proxy));
+        let creds = resolve_credentials(&model, Some("session-jwt-proxy"));
+        assert_eq!(creds.auth_type, AuthType::SessionToken);
+        assert_eq!(creds.api_key.as_deref(), Some("session-jwt-proxy"));
+        assert_eq!(creds.base_url, proxy);
+        assert_eq!(creds.failover_api_keys, vec!["console-biz-key".to_string()]);
+        assert_eq!(
+            creds.failover_base_url.as_deref(),
+            Some("https://api.x.ai/v1"),
+            "console hop must target api_base_url"
+        );
+        assert_eq!(creds.session_base_url.as_deref(), Some(proxy));
+        assert_eq!(
+            creds.session_identity_key.as_deref(),
+            Some("session-jwt-proxy")
+        );
+        let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(sampling.base_url, proxy);
+        assert_eq!(
+            sampling.failover_base_url.as_deref(),
+            Some("https://api.x.ai/v1")
+        );
+        assert!(
+            sampling.extra_headers.contains_key("X-XAI-Token-Auth"),
+            "session host should carry proxy headers"
+        );
+        let _ = model; // keep mut for clarity if we extend
+    }
+
+    /// preferred_method=api_key dual with empty keys after retain → exclusive empty.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_api_key_preferred_empty_after_retain_is_exclusive() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::PreferredAuthMethod;
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        // Console key identical to session JWT — retained away.
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "same-as-session");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        let creds = resolve_credentials_preferring(
+            &model,
+            Some("same-as-session"),
+            Some(PreferredAuthMethod::ApiKey),
+        );
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        assert!(creds.api_key.is_none());
+        assert!(creds.failover_api_keys.is_empty());
+    }
+
+    /// OpenRouter + session + XAI_API_KEY must never use xAI session dual-auth.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_openrouter_dual_auth_never_queues_xai_session() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let _or = EnvGuard::set(crate::auth::openrouter::OPENROUTER_API_KEY_ENV, "sk-or-own");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-console-should-not-appear");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let entry = ModelEntry::from_config_entry(&openrouter_grok_45_default_entry());
+        let creds = resolve_credentials(&entry, Some("session-jwt"));
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        assert_eq!(creds.api_key.as_deref(), Some("sk-or-own"));
+        assert!(
+            !creds
+                .failover_api_keys
+                .iter()
+                .any(|k| k == "session-jwt" || k == "xai-console-should-not-appear"),
+            "OpenRouter must not queue xAI session or XAI_API_KEY dual-auth"
+        );
+        assert!(creds.failover_base_url.is_none());
+        assert!(creds.session_identity_key.is_none());
+    }
+
+    /// D1 dual-auth: SuperGrok session primary + console API key failover on first-party xAI.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_session_primary_has_console_key_failover() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-biz-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        let creds = resolve_credentials(&model, Some("session-jwt-abc"));
+        assert_eq!(creds.auth_type, AuthType::SessionToken);
+        assert_eq!(creds.api_key.as_deref(), Some("session-jwt-abc"));
+        assert_eq!(
+            creds.failover_api_keys,
+            vec!["console-biz-key".to_string()],
+            "console key must be credit-failover when session is primary"
+        );
+    }
+
+    /// D1 dual-auth reverse pin: preferred_method=api_key → console primary, session failover.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_api_key_primary_session_failover_when_preferred() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::PreferredAuthMethod;
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-primary");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        let creds = resolve_credentials_preferring(
+            &model,
+            Some("session-jwt-xyz"),
+            Some(PreferredAuthMethod::ApiKey),
+        );
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        assert_eq!(creds.api_key.as_deref(), Some("console-primary"));
+        assert_eq!(
+            creds.failover_api_keys,
+            vec!["session-jwt-xyz".to_string()],
+            "session JWT must be failover under preferred_method=api_key dual-auth"
+        );
+    }
+
+    /// Dual-auth is first-party only: non-xAI host with session must not queue XAI_API_KEY.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_non_xai_session_does_not_queue_console_key() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "should-not-failover");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry("m", "https://example.com/v1", None, None, None);
+        let creds = resolve_credentials(&model, Some("session-jwt"));
+        assert_eq!(creds.auth_type, AuthType::SessionToken);
+        assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
+        assert!(
+            creds.failover_api_keys.is_empty(),
+            "must not attach xAI console key to non-xAI hosts"
+        );
+    }
+
+    /// Kill-switch clears dual-auth console failover even when primary is already session.
+    #[test]
+    fn enforce_disable_api_key_auth_clears_session_primary_failover() {
+        use xai_chat_state::AuthType;
+        let mut creds = ResolvedCredentials {
+            api_key: Some("session-jwt".to_string()),
+            failover_api_keys: vec!["console-key".to_string()],
+            base_url: "https://api.x.ai/v1".to_string(),
+            auth_type: AuthType::SessionToken,
+            auth_scheme: Default::default(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
+        };
+        enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
+        assert_eq!(creds.auth_type, AuthType::SessionToken);
+        assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
+        assert!(
+            creds.failover_api_keys.is_empty(),
+            "enterprise single-identity must clear console-key failover"
+        );
+    }
     /// Regression: BYOK env-var auth must stay ApiKey even when signed in,
     /// otherwise the bearer resolver overwrites the BYOK key with a session JWT.
     #[test]
@@ -7256,6 +7784,9 @@ reasoning_effort = "low"
             base_url: base_url.to_string(),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: Default::default(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
         }
     }
     /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).

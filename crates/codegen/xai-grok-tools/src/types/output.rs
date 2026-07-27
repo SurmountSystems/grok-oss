@@ -754,7 +754,16 @@ impl ToolOutput {
                 String::from_utf8_lossy(&grep_search_output.stdout).into_owned()
             }
             ToolOutput::Todo(todo_output) => match todo_output {
-                TodoWriteOutput::TodosUpdated(success) => success.summary_for_prompt.to_owned(),
+                TodoWriteOutput::TodosUpdated(success) => {
+                    let mut s = success.summary_for_prompt.clone();
+                    if let Some(ref w) = success.warning {
+                        if !s.is_empty() && !s.ends_with('\n') {
+                            s.push('\n');
+                        }
+                        s.push_str(w);
+                    }
+                    s
+                }
                 TodoWriteOutput::DuplicateId(msg) => msg.to_owned(),
                 TodoWriteOutput::InvalidArgument(msg) => msg.to_owned(),
             },
@@ -816,7 +825,8 @@ impl ToolOutput {
                     if r.output.is_empty() {
                         lines.push("(no output yet)".to_string());
                     } else {
-                        lines.push(r.output.clone());
+                        // T5: densify structured JSON handoff bodies only.
+                        lines.push(crate::util::toon::densify_structured_text(&r.output));
                     }
                     if r.truncated {
                         lines.push(r.truncation_hint.clone());
@@ -835,7 +845,7 @@ impl ToolOutput {
                             lines.push(format!("Exit Code: {code}"));
                         }
                         if !r.output.is_empty() {
-                            lines.push(r.output.clone());
+                            lines.push(crate::util::toon::densify_structured_text(&r.output));
                         }
                     }
                     lines.push(format!("\n{}", mr.summary));
@@ -865,9 +875,11 @@ impl ToolOutput {
                     msg.clone()
                 }
             },
-            ToolOutput::SearchTool(out) => out.content.clone(),
+            // T5: SearchTool content is often pretty JSON — densify when structured.
+            ToolOutput::SearchTool(out) => crate::util::toon::densify_structured_text(&out.content),
             ToolOutput::SubagentCompleted(sub) => {
-                let mut text = sub.output.clone();
+                // T5: densify structured JSON handoff body; free text + footer unchanged.
+                let mut text = crate::util::toon::densify_structured_text(&sub.output);
                 if let Some(ref wt) = sub.worktree_path {
                     text.push_str(&format!("\n\n<worktree_path>{wt}</worktree_path>"));
                 }
@@ -975,13 +987,21 @@ impl ToolOutput {
                 if o.tasks.is_empty() {
                     "No scheduled tasks.".into()
                 } else {
-                    serde_json::to_string_pretty(&o.tasks).unwrap_or_default()
+                    // T5: densify structured task list via shared TOON policy.
+                    match serde_json::to_value(&o.tasks) {
+                        Ok(v) => crate::util::toon::maybe_encode_for_llm_from_env(&v),
+                        Err(_) => serde_json::to_string_pretty(&o.tasks).unwrap_or_default(),
+                    }
                 }
             }
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
             ToolOutput::Workflow(o) => o.message.clone(),
-            ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
-            ToolOutput::Text(text) => text.text.clone(),
+            // Structured Value → model text: TOON when policy says so (before any
+            // downstream size caps on the rendered string). Free-text variants
+            // above are unchanged. Env: GROK_TOOL_RESULT_FORMAT=toon|json|auto.
+            ToolOutput::Dynamic(v) => crate::util::toon::maybe_encode_for_llm_from_env(&v.value),
+            // T5: pure structured JSON text blobs densify; free text unchanged.
+            ToolOutput::Text(text) => crate::util::toon::densify_structured_text(&text.text),
             ToolOutput::ImageGen(m) => m.prompt_text("Image generated"),
             ToolOutput::ImageToVideo(m) => m.prompt_text("Video generated"),
             ToolOutput::ReferenceToVideo(m) => m.prompt_text("Video generated"),
@@ -996,6 +1016,12 @@ pub struct TodoWriteSuccess {
     /// Full state snapshot for consumer persistence/restoration.
     #[schemars(skip)]
     pub state: TodoState,
+    /// Leaf-weighted progress (points when sizes present; else item counts).
+    #[serde(default)]
+    pub progress: crate::implementations::grok_build::todo::TodoProgress,
+    /// Soft warning (e.g. merge:false archived unprotected items).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 /// Output from the TodoWrite tool.
 ///
@@ -1748,8 +1774,11 @@ mod tests {
                     priority: TodoPriority::Medium,
                     status: TodoStatus::Pending,
                     meta: None,
+                    size: None,
                 }],
                 state: TodoState::default(),
+                progress: Default::default(),
+                warning: None,
             })
             .into(),
         );
@@ -1798,8 +1827,11 @@ mod tests {
                 priority: TodoPriority::High,
                 status: TodoStatus::InProgress,
                 meta: None,
+                size: None,
             }],
             state: TodoState::default(),
+            progress: Default::default(),
+            warning: None,
         });
         let serialized = serde_json::to_value(&original).unwrap();
         let deserialized: TodoWriteOutput = serde_json::from_value(serialized).unwrap();
@@ -2475,6 +2507,231 @@ mod tests {
             "kept-cco",
             0,
             false,
+        );
+    }
+
+    /// Uniform array Dynamic result under default/auto → tabular TOON (not pretty JSON).
+    #[test]
+    fn dynamic_to_prompt_auto_emits_toon_for_tabular() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // default auto
+
+        let value = json!({
+            "matches": [
+                {"path": "a.rs", "line": 1, "text": "fn main"},
+                {"path": "b.rs", "line": 2, "text": "fn other"},
+                {"path": "c.rs", "line": 3, "text": "fn third"},
+            ]
+        });
+        let output = ToolOutput::Dynamic(value.into());
+        let prompt = output.to_prompt_format();
+        assert!(
+            prompt.contains("matches[") && prompt.contains('{'),
+            "auto Dynamic should be tabular TOON, got: {prompt}"
+        );
+        assert!(
+            !prompt.trim_start().starts_with('{'),
+            "must not be pretty JSON object: {prompt}"
+        );
+        assert!(prompt.contains("a.rs") && prompt.contains("b.rs"));
+    }
+
+    /// `GROK_TOOL_RESULT_FORMAT=json` keeps compact JSON for Dynamic.
+    #[test]
+    fn dynamic_to_prompt_json_policy_is_compact_json() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, Some("json"))]);
+
+        let value = json!({
+            "users": [
+                {"id": 1, "name": "Alice"},
+                {"id": 2, "name": "Bob"}
+            ]
+        });
+        let output = ToolOutput::Dynamic(value.clone().into());
+        let prompt = output.to_prompt_format();
+        assert_eq!(prompt, serde_json::to_string(&value).unwrap());
+        assert!(prompt.starts_with('{'));
+        assert!(!prompt.contains('\n'));
+    }
+
+    /// Free-text tool results are never rewritten by TOON policy.
+    #[test]
+    fn free_text_to_prompt_unchanged_under_toon_policy() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, Some("toon"))]);
+
+        let text = "hello world\nnot json at all";
+        let output = ToolOutput::Text(text.into());
+        assert_eq!(output.to_prompt_format(), text);
+
+        let mut bash = sample_bash(0, b"plain stdout", false);
+        bash.output_for_prompt = "plain stdout".into();
+        let prompt = ToolOutput::Bash(bash).to_prompt_format();
+        assert_eq!(prompt, "plain stdout");
+    }
+
+    /// T5: TaskOutput handoff body densifies structured JSON; free text body unchanged.
+    #[test]
+    fn task_output_handoff_densifies_structured_json() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // auto
+
+        let json_body = serde_json::json!({
+            "hits": [
+                {"path": "a.rs", "line": 1, "text": "fn main"},
+                {"path": "b.rs", "line": 2, "text": "fn other"},
+                {"path": "c.rs", "line": 3, "text": "fn third"},
+            ]
+        });
+        let pretty = serde_json::to_string_pretty(&json_body).unwrap();
+        let pretty_len = pretty.len();
+        let result = xai_tool_types::TaskOutputResult {
+            task_id: "t1".into(),
+            command: "explore".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            started: "now".into(),
+            ended: Some("later".into()),
+            duration_secs: 1.0,
+            output: pretty,
+            output_file: "/tmp/out".into(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: pretty_len,
+        };
+        let prompt = ToolOutput::TaskOutput(TaskOutputOutput::Result(result)).to_prompt_format();
+        assert!(
+            prompt.contains("=== Output ==="),
+            "headers preserved: {prompt}"
+        );
+        assert!(
+            prompt.contains("hits[") && prompt.contains('{'),
+            "structured handoff body densified to TOON: {prompt}"
+        );
+        assert!(
+            !prompt.contains("\"path\": \"a.rs\""),
+            "pretty JSON keys should not remain: {prompt}"
+        );
+
+        // Free-text body unchanged.
+        let free = xai_tool_types::TaskOutputResult {
+            task_id: "t2".into(),
+            command: "bash".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            started: "now".into(),
+            ended: None,
+            duration_secs: 0.5,
+            output: "plain free text handoff".into(),
+            output_file: "/tmp/out2".into(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 22,
+        };
+        let free_prompt = ToolOutput::TaskOutput(TaskOutputOutput::Result(free)).to_prompt_format();
+        assert!(
+            free_prompt.contains("plain free text handoff"),
+            "free text handoff unchanged: {free_prompt}"
+        );
+    }
+
+    /// T5: SubagentCompleted densifies structured output body; footer stays.
+    #[test]
+    fn subagent_completed_handoff_densifies_structured_json() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // auto
+
+        let json_body = serde_json::json!({
+            "files": [
+                {"path": "x.rs", "status": "ok"},
+                {"path": "y.rs", "status": "ok"},
+                {"path": "z.rs", "status": "ok"},
+            ]
+        });
+        let pretty = serde_json::to_string_pretty(&json_body).unwrap();
+        let output = ToolOutput::SubagentCompleted(SubagentCompletedOutput {
+            output: pretty,
+            subagent_id: "sid-1".into(),
+            subagent_type: "explore".into(),
+            tool_calls: 2,
+            turns: 1,
+            duration_ms: 1000,
+            worktree_path: None,
+            persona: None,
+            resume_from_hint: "sid-1".into(),
+            persona_hint: None,
+        });
+        let rendered = output.to_prompt_format();
+        assert!(
+            rendered.contains("files[") && rendered.contains('{'),
+            "structured subagent body densified: {rendered}"
+        );
+        assert!(
+            rendered.contains("<subagent_result>") && rendered.contains("resume_from=\"sid-1\""),
+            "resume footer preserved: {rendered}"
+        );
+        assert!(
+            !rendered.contains("\"path\": \"x.rs\""),
+            "pretty JSON should not remain in body: {rendered}"
+        );
+    }
+
+    /// T5: Text pure-JSON densifies; free text unchanged (fail-open).
+    #[test]
+    fn text_structured_json_densifies_free_text_unchanged() {
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]);
+
+        let v = serde_json::json!({
+            "rows": [
+                {"a": 1, "b": 2},
+                {"a": 3, "b": 4},
+                {"a": 5, "b": 6},
+            ]
+        });
+        let pretty = serde_json::to_string_pretty(&v).unwrap();
+        let densified = ToolOutput::Text(pretty.into()).to_prompt_format();
+        assert!(
+            densified.contains("rows[") && densified.contains('{'),
+            "pure JSON Text densified: {densified}"
+        );
+
+        let junk = "{not valid";
+        assert_eq!(
+            ToolOutput::Text(junk.into()).to_prompt_format(),
+            junk,
+            "invalid JSON fail-open"
         );
     }
 }

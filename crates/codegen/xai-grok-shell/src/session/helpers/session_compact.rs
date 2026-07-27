@@ -1723,6 +1723,9 @@ mod reasoning_compaction_regression_tests {
         SamplerConfig {
             api_key: Some("test-api-key".to_string()),
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             base_url: base_url.to_string(),
             model: "test-model".to_string(),
             max_completion_tokens: Some(1000),
@@ -1746,6 +1749,8 @@ mod reasoning_compaction_regression_tests {
             origin_client: None,
             attribution_callback: None,
             bearer_resolver: None,
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -1958,6 +1963,7 @@ mod reasoning_compaction_regression_tests {
         config.api_backend = ApiBackend::Responses;
         config
     }
+
     #[tokio::test]
     async fn responses_compaction_attaches_tools_with_tool_choice_auto() {
         use std::sync::{Arc, Mutex};

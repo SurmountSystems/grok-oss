@@ -459,6 +459,7 @@ mod tests {
                     priority: TodoPriority::High,
                     status: TodoStatus::InProgress,
                     meta: None,
+                    size: None,
                 },
             );
             assert!(seed_ask_todo(

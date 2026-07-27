@@ -540,12 +540,18 @@ pub enum Action {
     ToggleCompactMode,
     /// Set compact mode (reduce user message padding).
     SetCompactMode(bool),
+    /// Hide the top agent status bar (`[ui].hide_header`).
+    SetHideHeader(bool),
     /// Set timestamp display on messages.
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).
     SetTimeline(bool),
     /// Set `[ui].page_flip_on_send` (default ON). Persists via `Effect::PersistSetting`.
     SetPageFlipOnSend(bool),
+    /// Set `[ui].scrub_ascii_punct` (default ON). Persists via `Effect::PersistSetting`.
+    SetScrubAsciiPunct(bool),
+    /// Set `[ui].plan_approval_park` (`soft` | `modal`). Persists via `Effect::PersistSetting`.
+    SetPlanApprovalPark(String),
     /// Set whether the drain call site merges the run of leading queued
     /// `Prompt` entries into one turn instead of sending them one by one.
     /// SHARED-owned: updates the process-wide cache mirror (read by the
@@ -735,7 +741,11 @@ pub enum Action {
     /// Save the currently displayed remember note from the review modal.
     SaveRememberNoteFromModal,
     /// Send a /btw side question (bypasses queue, works while agent is busy).
+    /// First-shot or slash-command path (no prior turns).
     SendBtw(String),
+    /// Follow-up in the open btw panel (reuses `btw_session_id` + prior turns
+    /// from overlay state). Empty string uses the in-panel composer draft.
+    SendBtwFollowUp(String),
     /// Request a session recap ("where was I" summary). `auto` is `true` for
     /// the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).
@@ -1958,6 +1968,10 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         question: String,
+        /// Reuse on follow-up turns; `None` mints a new shell-side session id.
+        btw_session_id: Option<String>,
+        /// Completed prior Q/A turns (oldest first) for multi-turn context.
+        prior_turns: Vec<(String, String)>,
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
     },
@@ -2679,6 +2693,8 @@ pub enum TaskResult {
     BtwResponse {
         agent_id: AgentId,
         result: Result<String, String>,
+        /// Shell-issued (or reused) btw thread id for follow-ups + history.
+        btw_session_id: Option<String>,
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
     },

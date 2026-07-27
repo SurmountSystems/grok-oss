@@ -1,0 +1,591 @@
+//! DOGE theme + pure 8-colour palette / quantisation.
+//!
+//! Canonical theme id: **`doge`** (`ThemeKind::Doge`, display “DOGE”).
+//! No parse aliases (`ecma-doge`, `rgbcmykw`, `ansi-8`, … are rejected).
+//!
+//! Palette rules: `doc/dev/specs/doge-pure-8-colour-2026-07-26.md`
+//! (project internal note — not an ECMA standard). Pure primaries,
+//! hard-threshold quantisation (channel ≥ 128 → 255), optional
+//! Floyd–Steinberg helper for image buffers.
+//!
+//! Design intent: OLED-friendly true black canvas with only the classic
+//! 3-bit primary set (Black Red Green Yellow Blue Magenta Cyan White),
+//! matching ANSI / ECMA-48 / ISO 6429 SGR *names* and index order. No
+//! mid-gray hex; dim roles use white (callers may apply `Modifier::DIM`).
+//! Blue is reserved for sparse chrome — never long body text.
+//! Do **not** claim measured power savings in product docs.
+
+use ratatui::style::{Color, Modifier};
+
+use super::tokyonight::Theme;
+
+/// Hard-threshold: channel ≥ 128 → 255, else 0.
+#[inline]
+pub const fn hard_threshold_channel(channel: u8) -> u8 {
+    if channel >= 128 { 255 } else { 0 }
+}
+
+/// Quantise one RGB triple to a DOGE pure primary (hard-threshold).
+#[inline]
+pub const fn quantise_rgb(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    (
+        hard_threshold_channel(r),
+        hard_threshold_channel(g),
+        hard_threshold_channel(b),
+    )
+}
+
+/// Quantise a [`Color::Rgb`] to DOGE pure primary RGB; other variants pass through.
+pub fn quantise_color(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => {
+            let (r, g, b) = quantise_rgb(r, g, b);
+            Color::Rgb(r, g, b)
+        }
+        other => other,
+    }
+}
+
+/// DOGE pure 8-colour palette in ANSI SGR index order (0…7).
+pub const PALETTE: [(u8, u8, u8); 8] = [
+    (0, 0, 0),       // 0 Black
+    (255, 0, 0),     // 1 Red
+    (0, 255, 0),     // 2 Green
+    (255, 255, 0),   // 3 Yellow
+    (0, 0, 255),     // 4 Blue
+    (255, 0, 255),   // 5 Magenta
+    (0, 255, 255),   // 6 Cyan
+    (255, 255, 255), // 7 White
+];
+
+/// Hex strings for each DOGE pure colour (uppercase, with `#`).
+pub const PALETTE_HEX: [&str; 8] = [
+    "#000000", "#FF0000", "#00FF00", "#FFFF00", "#0000FF", "#FF00FF", "#00FFFF", "#FFFFFF",
+];
+
+/// ANSI / ECMA-48 SGR names for indices 0…7 (real standard name order).
+pub const PALETTE_NAMES: [&str; 8] = [
+    "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
+];
+
+/// Index `0…7` from pure primary RGB via `R + 2·G + 4·B` (channels in `{0,255}`).
+///
+/// Non-pure inputs are hard-thresholded first.
+#[inline]
+pub const fn index_of_rgb(r: u8, g: u8, b: u8) -> u8 {
+    let (r, g, b) = quantise_rgb(r, g, b);
+    (r / 255) + 2 * (g / 255) + 4 * (b / 255)
+}
+
+/// Nearest DOGE pure colour by squared Euclidean distance in RGB space.
+pub fn nearest_rgb(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let mut best = PALETTE[0];
+    let mut best_d = u32::MAX;
+    for &(pr, pg, pb) in &PALETTE {
+        let dr = r as i32 - pr as i32;
+        let dg = g as i32 - pg as i32;
+        let db = b as i32 - pb as i32;
+        let d = (dr * dr + dg * dg + db * db) as u32;
+        if d < best_d {
+            best_d = d;
+            best = (pr, pg, pb);
+        }
+    }
+    best
+}
+
+/// Format pure RGB as `#RRGGBB` (uppercase).
+pub fn hex_of_rgb(r: u8, g: u8, b: u8) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+// ── Optional: Floyd–Steinberg on a packed RGB buffer ─────────────────────
+
+/// Apply Floyd–Steinberg error diffusion, quantising each pixel with hard-threshold.
+///
+/// `pixels` is a flat row-major buffer of `(R,G,B)` length `width * height`.
+/// No-op when `width == 0` or the buffer is shorter than one row.
+///
+/// Optional helper for image buffers. Hard-threshold alone is sufficient
+/// for theme / single-colour DOGE purity.
+pub fn floyd_steinberg_quantise(pixels: &mut [(u8, u8, u8)], width: usize) {
+    if width == 0 || pixels.is_empty() {
+        return;
+    }
+    let height = pixels.len() / width;
+    if height == 0 {
+        return;
+    }
+
+    // Working buffer in i16 so error diffusion can undershoot/overshoot.
+    let mut work: Vec<(i16, i16, i16)> = pixels
+        .iter()
+        .take(width * height)
+        .map(|&(r, g, b)| (r as i16, g as i16, b as i16))
+        .collect();
+
+    for y in 0..height {
+        for x in 0..width {
+            let i = y * width + x;
+            let (or, og, ob) = work[i];
+            let r = or.clamp(0, 255) as u8;
+            let g = og.clamp(0, 255) as u8;
+            let b = ob.clamp(0, 255) as u8;
+            let (nr, ng, nb) = quantise_rgb(r, g, b);
+            work[i] = (nr as i16, ng as i16, nb as i16);
+            pixels[i] = (nr, ng, nb);
+
+            let er = or - nr as i16;
+            let eg = og - ng as i16;
+            let eb = ob - nb as i16;
+
+            // Classic FS weights: right 7/16, below-left 3/16, below 5/16, below-right 1/16.
+            let distribute = |work: &mut [(i16, i16, i16)], idx: usize, num: i16| {
+                let (wr, wg, wb) = work[idx];
+                work[idx] = (wr + er * num / 16, wg + eg * num / 16, wb + eb * num / 16);
+            };
+
+            if x + 1 < width {
+                distribute(&mut work, i + 1, 7);
+            }
+            if y + 1 < height {
+                if x > 0 {
+                    distribute(&mut work, i + width - 1, 3);
+                }
+                distribute(&mut work, i + width, 5);
+                if x + 1 < width {
+                    distribute(&mut work, i + width + 1, 1);
+                }
+            }
+        }
+    }
+}
+
+// ── Named palette colours as ratatui::Color ──────────────────────────────
+
+/// Helper for concise const `Color::Rgb` definitions.
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+/// Classic 8 DOGE / ANSI primaries (pure RGBCMYKW set).
+///
+/// “ANSI” here means classic 3-bit SGR colour *names*, not a product theme id.
+#[allow(dead_code)]
+pub mod palette {
+    use super::*;
+
+    pub const BLACK: Color = rgb(0, 0, 0);
+    pub const RED: Color = rgb(255, 0, 0);
+    pub const GREEN: Color = rgb(0, 255, 0);
+    pub const YELLOW: Color = rgb(255, 255, 0);
+    pub const BLUE: Color = rgb(0, 0, 255);
+    pub const MAGENTA: Color = rgb(255, 0, 255);
+    pub const CYAN: Color = rgb(0, 255, 255);
+    pub const WHITE: Color = rgb(255, 255, 255);
+}
+
+impl Theme {
+    /// DOGE — pure `#000` bg, `#fff` text/lines, pure 8-colour primaries only.
+    ///
+    /// Colors are defined in RGB. Call [`Theme::quantized`] to downgrade
+    /// them to the terminal's supported color level before rendering.
+    /// `requires_truecolor` is false: pure primaries quantize cleanly.
+    ///
+    /// **Context-bar solid-step contract** (keep in sync with
+    /// `xai-grok-pager::views::context_bar` structural fingerprint fallback):
+    /// `bg_base=black`, `text_primary=white`, `gray=white`, `warning=yellow`,
+    /// `accent_error=red`, `accent_assistant=magenta`, `path=cyan`. Production
+    /// gating is `ThemeKind::Doge` first; the fingerprint is a unit-test
+    /// fallback for raw/quantized themes without a kind cache set.
+    pub const fn doge() -> Self {
+        use palette::*;
+        Self {
+            // All backgrounds pure black (no gray ramp).
+            bg_base: BLACK,
+            bg_light: BLACK,
+            bg_dark: BLACK,
+            bg_highlight: BLACK,
+            bg_hover: BLACK,
+            bg_terminal: BLACK,
+
+            accent_user: WHITE,
+            accent_assistant: MAGENTA,
+            accent_thinking: MAGENTA,
+            accent_tool: WHITE,
+            accent_system: BLUE, // sparse chrome only
+            accent_error: RED,
+            accent_success: GREEN,
+            accent_running: MAGENTA,
+            accent_skill: BLUE,
+
+            text_primary: WHITE,
+            text_secondary: WHITE,
+
+            // No mid-gray hex — white; Theme::dim / muted may apply DIM.
+            gray_dim: WHITE,
+            gray: WHITE,
+            gray_bright: WHITE,
+
+            command: YELLOW,
+            path: CYAN,
+            running: CYAN,
+            warning: YELLOW,
+
+            fuzzy_accent: CYAN,
+
+            accent_plan: YELLOW,
+            accent_verify: MAGENTA,
+            accent_feedback: CYAN,
+            accent_remember: GREEN,
+
+            // Bright borders/lines = white on black.
+            selection_border: WHITE,
+            prompt_border: WHITE,
+            prompt_border_active: WHITE,
+            hover_border: WHITE,
+
+            accent_model: CYAN,
+
+            scrollbar_bg: BLACK,
+            scrollbar_fg: WHITE,
+
+            // Line-fg diff mode (bg black + solid red/green fg).
+            diff_delete_bg: BLACK,
+            diff_delete_fg: RED,
+            diff_insert_bg: BLACK,
+            diff_insert_fg: GREEN,
+            diff_equal_fg: WHITE,
+            diff_gutter_fg: WHITE,
+
+            bg_visual: BLACK,
+
+            paste_bg: BLACK,
+            paste_fg: WHITE,
+            paste_dim: WHITE,
+
+            md_heading_h1: CYAN,
+            md_heading_h1_mod: Modifier::BOLD,
+            md_heading_h2: MAGENTA,
+            md_heading_h2_mod: Modifier::BOLD,
+            md_heading_h3: YELLOW,
+            md_heading_h3_mod: Modifier::BOLD,
+            md_heading_h4: WHITE,
+            md_heading_h4_mod: Modifier::BOLD,
+            md_heading_h5: WHITE,
+            md_heading_h5_mod: Modifier::BOLD,
+            md_heading_h6: WHITE,
+            md_heading_h6_mod: Modifier::empty(),
+            md_code: CYAN,
+            md_task_checked: GREEN,
+            md_task_unchecked: WHITE,
+            md_muted: WHITE,
+            md_code_bg: BLACK,
+            md_text: WHITE,
+            // Prefer cyan over pure blue for links (contrast on black).
+            link_fg: CYAN,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_doge_primary(c: Color) -> bool {
+        matches!(
+            c,
+            Color::Rgb(0, 0, 0)
+                | Color::Rgb(255, 0, 0)
+                | Color::Rgb(0, 255, 0)
+                | Color::Rgb(255, 255, 0)
+                | Color::Rgb(0, 0, 255)
+                | Color::Rgb(255, 0, 255)
+                | Color::Rgb(0, 255, 255)
+                | Color::Rgb(255, 255, 255)
+        )
+    }
+
+    fn theme_colors(t: &Theme) -> [Color; 59] {
+        [
+            t.bg_base,
+            t.bg_light,
+            t.bg_dark,
+            t.bg_highlight,
+            t.bg_hover,
+            t.bg_terminal,
+            t.accent_user,
+            t.accent_assistant,
+            t.accent_thinking,
+            t.accent_tool,
+            t.accent_system,
+            t.accent_error,
+            t.accent_success,
+            t.accent_running,
+            t.accent_skill,
+            t.text_primary,
+            t.text_secondary,
+            t.gray_dim,
+            t.gray,
+            t.gray_bright,
+            t.command,
+            t.path,
+            t.running,
+            t.warning,
+            t.fuzzy_accent,
+            t.accent_plan,
+            t.accent_verify,
+            t.accent_feedback,
+            t.accent_remember,
+            t.selection_border,
+            t.hover_border,
+            t.prompt_border,
+            t.prompt_border_active,
+            t.accent_model,
+            t.scrollbar_bg,
+            t.scrollbar_fg,
+            t.diff_delete_bg,
+            t.diff_delete_fg,
+            t.diff_insert_bg,
+            t.diff_insert_fg,
+            t.diff_equal_fg,
+            t.diff_gutter_fg,
+            t.bg_visual,
+            t.paste_bg,
+            t.paste_fg,
+            t.paste_dim,
+            t.md_heading_h1,
+            t.md_heading_h2,
+            t.md_heading_h3,
+            t.md_heading_h4,
+            t.md_heading_h5,
+            t.md_heading_h6,
+            t.md_code,
+            t.md_task_checked,
+            t.md_task_unchecked,
+            t.md_muted,
+            t.md_code_bg,
+            t.md_text,
+            t.link_fg,
+        ]
+    }
+
+    #[test]
+    fn doge_uses_only_pure_primaries() {
+        let t = Theme::doge();
+        for c in theme_colors(&t) {
+            assert!(is_doge_primary(c), "off-palette color: {c:?}");
+        }
+    }
+
+    #[test]
+    fn doge_pure_black_bg_white_body_and_primaries() {
+        let t = Theme::doge();
+        assert_eq!(t.bg_base, Color::Rgb(0, 0, 0));
+        assert_eq!(t.bg_terminal, Color::Rgb(0, 0, 0));
+        assert_eq!(t.md_code_bg, Color::Rgb(0, 0, 0));
+        assert_eq!(t.text_primary, Color::Rgb(255, 255, 255));
+        assert_eq!(t.selection_border, Color::Rgb(255, 255, 255));
+        assert_eq!(t.accent_error, Color::Rgb(255, 0, 0));
+        assert_eq!(t.accent_success, Color::Rgb(0, 255, 0));
+        assert_eq!(t.command, Color::Rgb(255, 255, 0));
+        assert_eq!(t.accent_system, Color::Rgb(0, 0, 255));
+        assert_eq!(t.accent_assistant, Color::Rgb(255, 0, 255));
+        assert_eq!(t.path, Color::Rgb(0, 255, 255));
+        // No blue long body text.
+        assert_ne!(t.text_primary, Color::Rgb(0, 0, 255));
+        assert_ne!(t.md_text, Color::Rgb(0, 0, 255));
+    }
+
+    /// Every canvas / sunken / elevated background slot is pure black —
+    /// no charcoal wash, no gray ramp, no "light-bleed" elevation.
+    #[test]
+    fn doge_all_background_slots_are_pure_black() {
+        let t = Theme::doge();
+        let pure_black = Color::Rgb(0, 0, 0);
+        let slots = [
+            ("bg_base", t.bg_base),
+            ("bg_light", t.bg_light),
+            ("bg_dark", t.bg_dark),
+            ("bg_highlight", t.bg_highlight),
+            ("bg_hover", t.bg_hover),
+            ("bg_terminal", t.bg_terminal),
+            ("scrollbar_bg", t.scrollbar_bg),
+            ("diff_delete_bg", t.diff_delete_bg),
+            ("diff_insert_bg", t.diff_insert_bg),
+            ("bg_visual", t.bg_visual),
+            ("paste_bg", t.paste_bg),
+            ("md_code_bg", t.md_code_bg),
+        ];
+        for (name, c) in slots {
+            assert_eq!(c, pure_black, "{name} must be pure black #000000");
+            if let Color::Rgb(r, g, b) = c {
+                assert_eq!((r, g, b), (0, 0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn quantise_pure_black_stays_pure_black() {
+        assert_eq!(quantise_rgb(0, 0, 0), (0, 0, 0));
+        assert_eq!(quantise_color(Color::Rgb(0, 0, 0)), Color::Rgb(0, 0, 0));
+        // Sub-threshold near-blacks collapse to pure black (no charcoal).
+        assert_eq!(quantise_rgb(1, 1, 1), (0, 0, 0));
+        assert_eq!(quantise_rgb(127, 0, 0), (0, 0, 0));
+        assert_eq!(quantise_rgb(127, 127, 127), (0, 0, 0));
+        assert_eq!(quantise_color(Color::Rgb(40, 40, 40)), Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn quantize_color_pure_black_never_lifts_to_near_black() {
+        use crate::render::color::indexed_to_rgb;
+        use crate::theme::color_support::{ColorLevel, quantize_color};
+
+        for level in [
+            ColorLevel::TrueColor,
+            ColorLevel::Ansi256,
+            ColorLevel::Basic,
+        ] {
+            let q = quantize_color(Color::Rgb(0, 0, 0), level);
+            match q {
+                Color::Rgb(0, 0, 0) | Color::Black => {}
+                Color::Indexed(n) => {
+                    assert_eq!(
+                        indexed_to_rgb(n),
+                        (0, 0, 0),
+                        "indexed {n} at {level:?} must resolve to pure black"
+                    );
+                }
+                other => panic!("pure black must not quantize to {other:?} at {level:?}"),
+            }
+            // Never DarkGray / silver — those are the light-bleed slots.
+            assert_ne!(q, Color::DarkGray, "at {level:?}");
+            assert_ne!(q, Color::Gray, "at {level:?}");
+        }
+    }
+
+    #[test]
+    fn palette_black_constant_is_pure_rgb_zero() {
+        assert_eq!(PALETTE[0], (0, 0, 0));
+        assert_eq!(PALETTE_HEX[0], "#000000");
+        assert_eq!(palette::BLACK, Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn doge_fixture_matches_palette_hex() {
+        let t = Theme::doge();
+        let pairs = [
+            (t.bg_base, "#000000"),
+            (t.text_primary, "#FFFFFF"),
+            (t.accent_error, "#FF0000"),
+            (t.accent_success, "#00FF00"),
+            (t.command, "#FFFF00"),
+            (t.accent_system, "#0000FF"),
+            (t.accent_assistant, "#FF00FF"),
+            (t.path, "#00FFFF"),
+        ];
+        for (color, hex) in pairs {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("expected Rgb, got {color:?}");
+            };
+            assert_eq!(
+                format!("#{r:02X}{g:02X}{b:02X}"),
+                hex,
+                "theme slot hex mismatch"
+            );
+            assert!(PALETTE_HEX.contains(&hex), "{hex} not in DOGE PALETTE_HEX");
+            assert!(PALETTE.contains(&(r, g, b)));
+        }
+    }
+
+    #[test]
+    fn doge_slots_are_hard_threshold_fixed_points() {
+        let t = Theme::doge();
+        for c in theme_colors(&t) {
+            let Color::Rgb(r, g, b) = c else {
+                panic!("expected Rgb, got {c:?}");
+            };
+            assert_eq!(
+                quantise_rgb(r, g, b),
+                (r, g, b),
+                "not a hard-threshold fixed point"
+            );
+        }
+    }
+
+    #[test]
+    fn palette_hex_matches_rgb() {
+        for (i, &(r, g, b)) in PALETTE.iter().enumerate() {
+            assert_eq!(hex_of_rgb(r, g, b), PALETTE_HEX[i], "index {i}");
+            assert_eq!(index_of_rgb(r, g, b), i as u8, "index formula {i}");
+        }
+    }
+
+    #[test]
+    fn palette_exact_channel_values() {
+        assert_eq!(PALETTE[0], (0, 0, 0));
+        assert_eq!(PALETTE[1], (255, 0, 0));
+        assert_eq!(PALETTE[2], (0, 255, 0));
+        assert_eq!(PALETTE[3], (255, 255, 0));
+        assert_eq!(PALETTE[4], (0, 0, 255));
+        assert_eq!(PALETTE[5], (255, 0, 255));
+        assert_eq!(PALETTE[6], (0, 255, 255));
+        assert_eq!(PALETTE[7], (255, 255, 255));
+    }
+
+    #[test]
+    fn hard_threshold_channel_goldens() {
+        assert_eq!(hard_threshold_channel(0), 0);
+        assert_eq!(hard_threshold_channel(127), 0);
+        assert_eq!(hard_threshold_channel(128), 255);
+        assert_eq!(hard_threshold_channel(255), 255);
+    }
+
+    #[test]
+    fn hard_threshold_rgb_goldens() {
+        assert_eq!(quantise_rgb(0, 0, 0), (0, 0, 0));
+        assert_eq!(quantise_rgb(127, 127, 127), (0, 0, 0));
+        assert_eq!(quantise_rgb(128, 128, 128), (255, 255, 255));
+        assert_eq!(quantise_rgb(255, 255, 255), (255, 255, 255));
+        assert_eq!(quantise_rgb(200, 10, 10), (255, 0, 0));
+        assert_eq!(quantise_rgb(10, 200, 10), (0, 255, 0));
+        assert_eq!(quantise_rgb(10, 10, 200), (0, 0, 255));
+        assert_eq!(quantise_rgb(200, 200, 10), (255, 255, 0));
+        assert_eq!(quantise_rgb(200, 10, 200), (255, 0, 255));
+        assert_eq!(quantise_rgb(10, 200, 200), (0, 255, 255));
+    }
+
+    #[test]
+    fn quantise_preserves_named_colors() {
+        assert_eq!(quantise_color(Color::Red), Color::Red);
+        assert_eq!(
+            quantise_color(Color::Rgb(200, 10, 10)),
+            Color::Rgb(255, 0, 0)
+        );
+    }
+
+    #[test]
+    fn nearest_matches_hard_threshold_on_primaries() {
+        for &(r, g, b) in &PALETTE {
+            assert_eq!(nearest_rgb(r, g, b), (r, g, b));
+        }
+        // Mid gray → equal distance to black/white; implementation picks first
+        // minimum (black). Hard threshold at 127 → black as well.
+        assert_eq!(nearest_rgb(127, 127, 127), (0, 0, 0));
+        assert_eq!(quantise_rgb(127, 127, 127), (0, 0, 0));
+    }
+
+    #[test]
+    fn floyd_steinberg_solid_stays_primary() {
+        let mut px = vec![(255, 0, 0); 4];
+        floyd_steinberg_quantise(&mut px, 2);
+        assert!(px.iter().all(|&c| c == (255, 0, 0)));
+    }
+
+    #[test]
+    fn floyd_steinberg_empty_noop() {
+        let mut px: Vec<(u8, u8, u8)> = vec![];
+        floyd_steinberg_quantise(&mut px, 0);
+        assert!(px.is_empty());
+    }
+}

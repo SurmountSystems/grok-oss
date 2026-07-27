@@ -23,6 +23,8 @@ pub mod commands;
 pub mod config;
 pub mod doom_loop;
 pub mod events;
+/// Process-local credit-exhausted credential fingerprints (dual-auth D3).
+pub mod exhausted_identity;
 pub mod handle;
 pub mod metrics;
 pub mod retry;
@@ -43,6 +45,10 @@ pub use config::{
 };
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
+pub use exhausted_identity::{
+    CredentialLabel, HopCause, format_credential_hop_reason, format_hop_reason,
+    format_rate_limit_hop_reason, is_credential_hop_reason, is_exhausted, mark_exhausted,
+};
 pub use handle::SamplerHandle;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use retry::{

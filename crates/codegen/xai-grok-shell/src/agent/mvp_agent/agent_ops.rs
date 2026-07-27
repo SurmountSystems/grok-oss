@@ -69,15 +69,16 @@ impl MvpAgent {
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
-        let (disable_api_key_auth, alpha_test_key, client_version) = {
+        let (disable_api_key_auth, alpha_test_key, client_version, preferred_method) = {
             let cfg = self.cfg.borrow();
             (
                 cfg.grok_com_config.api_key_auth_disabled(),
                 cfg.endpoints.alpha_test_key.clone(),
                 cfg.client_version.clone(),
+                cfg.grok_com_config.preferred_method,
             )
         };
-        let config = match crate::agent::config::resolve_aux_model_sampling_config(
+        let config = match crate::agent::config::resolve_aux_model_sampling_config_preferring(
             &slug,
             &models,
             &endpoints,
@@ -85,6 +86,7 @@ impl MvpAgent {
             disable_api_key_auth,
             alpha_test_key,
             client_version,
+            preferred_method,
         ) {
             Some(mut cfg) => {
                 crate::agent::config::stamp_session_local_sampler_fields(
@@ -1224,20 +1226,24 @@ impl MvpAgent {
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
-        let session = match preferred {
-            Some(crate::auth::PreferredAuthMethod::ApiKey) => None,
-            _ if self.is_session_based_auth() => self.auth_manager.current_or_expired(),
-            _ => None,
-        };
+        // Always surface a live/expired session when present so dual-auth
+        // resolve can place console keys in failover (or session in failover
+        // under preferred_method=api_key). Exclusive api_key pin with *no*
+        // console key is still fail-closed inside resolve_credentials_preferring.
+        let session = self.auth_manager.current_or_expired();
         let has_session_key = session.is_some();
-        let mut credentials = resolve_credentials(
+        let mut credentials = crate::agent::config::resolve_credentials_preferring(
             model,
             session.as_ref().map(|a| a.key.as_str()),
+            preferred,
         );
         if matches!(preferred, Some(crate::auth::PreferredAuthMethod::Oidc))
             && !model.has_own_credentials()
             && credentials.auth_type == xai_chat_state::AuthType::ApiKey
+            && credentials.failover_api_keys.is_empty()
         {
+            // OIDC pin with only a static key and no dual-auth failover:
+            // force session identity (historical exclusive behavior).
             credentials.api_key = None;
             credentials.auth_type = xai_chat_state::AuthType::SessionToken;
         }
@@ -1471,16 +1477,25 @@ impl MvpAgent {
         let model_id = self.cfg.borrow().web_search_model.clone();
         let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
-        let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
-        let client_version = self.cfg.borrow().client_version.clone();
-        let mut cfg = config::resolve_web_search_sampling_config(
+        let (disable_api_key_auth, alpha_test_key, client_version, preferred_method, endpoints) = {
+            let cfg = self.cfg.borrow();
+            (
+                cfg.grok_com_config.api_key_auth_disabled(),
+                cfg.endpoints.alpha_test_key.clone(),
+                cfg.client_version.clone(),
+                cfg.grok_com_config.preferred_method,
+                cfg.endpoints.clone(),
+            )
+        };
+        let mut cfg = config::resolve_web_search_sampling_config_preferring(
             &model_id,
             &models,
             session.as_ref().map(|a| a.key.as_str()),
-            self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
+            disable_api_key_auth,
             alpha_test_key.clone(),
             client_version,
-            &self.cfg.borrow().endpoints,
+            &endpoints,
+            preferred_method,
         )?;
         inject_proxy_headers(
             &mut cfg.extra_headers,
@@ -3604,6 +3619,9 @@ impl MvpAgent {
                 ),
                 alpha_test_key: self.alpha_test_key(),
                 client_version: sampling_config.client_version.clone(),
+                failover_base_url: sampling_config.failover_base_url.clone(),
+                session_base_url: sampling_config.session_base_url.clone(),
+                session_identity_key: sampling_config.session_identity_key.clone(),
             };
             let attribution_callback: Option<
                 xai_grok_sampler::SharedAttributionCallback,

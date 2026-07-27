@@ -83,6 +83,9 @@ mod tests {
         SamplerConfig {
             api_key: None,
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             base_url: "https://example.test".into(),
             model: "test-model".into(),
             max_completion_tokens: None,
@@ -106,6 +109,8 @@ mod tests {
             client_version: None,
             attribution_callback: None,
             bearer_resolver: None,
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,

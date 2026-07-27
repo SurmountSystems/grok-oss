@@ -8,7 +8,7 @@
 //!       [--output out.jsonl] \
 //!       [--model grok-4.5] \
 //!       [--api-base-url https://api.x.ai/v1] \
-//!       [--api-key <key> | $XAI_API_KEY | <grok-home>/auth.json] \
+//!       [--api-key | --api-key - | $XAI_API_KEY | <grok-home>/auth.json] \
 //!       [--min-confidence 0.7] \
 //!       [--include-reasoning true] \
 //!       [--grok-home <path>]
@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use xai_grok_shell::trace_classifier::{RunArgs, run, validate_min_confidence};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(
     name = "trace_classify",
     about = "Replay a session trace against the TodoGate + Laziness classifier"
@@ -51,10 +51,11 @@ struct Cli {
     #[arg(long, default_value = "https://api.x.ai/v1")]
     api_base_url: String,
 
-    /// API key. Overrides `$XAI_API_KEY` when set; falls back to
-    /// `$XAI_API_KEY`, then `<grok-home>/auth.json` (`xai::api_key`
-    /// scope) when absent or empty.
-    #[arg(long)]
+    /// API key entry (secure). Flag only → no-echo prompt; `-` → one
+    /// non-TTY stdin line (TTY stdin refused). A non-empty argv value is
+    /// **refused** (shell history / process lists). Prefer `$XAI_API_KEY`
+    /// or auth.json.
+    #[arg(long = "api-key", num_args = 0..=1, default_missing_value = "", value_name = "VALUE")]
     api_key: Option<String>,
 
     /// Override the LazinessDetector min-confidence threshold (default
@@ -81,6 +82,27 @@ struct Cli {
     grok_home: Option<PathBuf>,
 }
 
+impl std::fmt::Debug for Cli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never dump raw api_key (even on refuse path after parse).
+        let api_key_dbg = self.api_key.as_deref().map(|v| match v {
+            "" => "\"\"",
+            "-" => "\"-\"",
+            _ => "\"<redacted>\"",
+        });
+        f.debug_struct("Cli")
+            .field("trace", &self.trace)
+            .field("output", &self.output)
+            .field("model", &self.model)
+            .field("api_base_url", &self.api_base_url)
+            .field("api_key", &api_key_dbg)
+            .field("min_confidence", &self.min_confidence)
+            .field("include_reasoning", &self.include_reasoning)
+            .field("grok_home", &self.grok_home)
+            .finish()
+    }
+}
+
 /// `current_thread` flavour: the replay is strictly sequential
 /// (one turn at a time), and a multi-threaded runtime would force
 /// every writer (including `StdoutLock`) to be `Send` — which it
@@ -89,12 +111,25 @@ struct Cli {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Same argv policy as `grok login --api-key`: never accept secrets as args.
+    let api_key = if cli.api_key.is_none() {
+        None
+    } else {
+        match xai_grok_shell::auth::materialize_cli_api_key(cli.api_key.as_deref()) {
+            Ok(None) => Some(
+                xai_grok_shell::auth::prompt_api_key_no_echo("Enter API key: ")
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+            ),
+            Ok(Some(k)) => Some(k),
+            Err(e) => return Err(anyhow::anyhow!("{e}")),
+        }
+    };
     let args = RunArgs {
         trace: cli.trace,
         output: cli.output,
         model_id: cli.model,
         api_base_url: cli.api_base_url,
-        api_key: cli.api_key,
+        api_key,
         min_confidence: cli.min_confidence,
         include_reasoning: cli.include_reasoning,
         grok_home: cli.grok_home,
@@ -121,6 +156,24 @@ mod tests {
         assert!(cli.min_confidence.is_none());
         assert!(cli.include_reasoning.is_none());
         assert!(cli.grok_home.is_none());
+    }
+
+    #[test]
+    fn cli_debug_redacts_api_key_value() {
+        let cli = Cli::try_parse_from([
+            "trace_classify",
+            "--trace",
+            "foo.json",
+            "--api-key",
+            "xai-secret-value",
+        ])
+        .expect("parse");
+        let dbg = format!("{cli:?}");
+        assert!(
+            !dbg.contains("xai-secret-value"),
+            "Debug must not dump argv secret: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "expected redacted Debug: {dbg}");
     }
 
     /// Per-model knob (mirrored as a CLI override on the offline tool):

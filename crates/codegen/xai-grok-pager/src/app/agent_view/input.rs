@@ -387,6 +387,16 @@ impl AgentView {
             && key.modifiers.is_empty()
             && self.btw_state.is_some()
         {
+            if self
+                .btw_state
+                .as_ref()
+                .is_some_and(|s| s.follow_up_composing())
+            {
+                if let Some(btw) = self.btw_state.as_mut() {
+                    btw.set_follow_up_composing(false);
+                }
+                return Handled(Box::new(InputOutcome::Changed));
+            }
             return Handled(Box::new(self.dismiss_btw_panel()));
         }
         if self.active_pane != AgentPane::Prompt
@@ -395,10 +405,66 @@ impl AgentView {
         {
             return Delegate;
         }
+        // Follow-up composer (parity with full agent surface).
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.modifiers.is_empty()
+            && let Some(btw) = self.btw_state.as_mut()
+            && matches!(btw, crate::views::btw_overlay::BtwOverlayState::Done { .. })
+        {
+            if btw.follow_up_composing() {
+                match key.code {
+                    KeyCode::Enter => {
+                        if let Some((q, _, _)) = btw.take_follow_up_send() {
+                            return Handled(Box::new(InputOutcome::Action(
+                                Action::SendBtwFollowUp(q),
+                            )));
+                        }
+                        return Handled(Box::new(InputOutcome::Changed));
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(draft) = btw.follow_up_draft_mut() {
+                            draft.pop();
+                        }
+                        return Handled(Box::new(InputOutcome::Changed));
+                    }
+                    KeyCode::Char(c) if !c.is_control() => {
+                        if let Some(draft) = btw.follow_up_draft_mut() {
+                            draft.push(c);
+                        }
+                        return Handled(Box::new(InputOutcome::Changed));
+                    }
+                    _ => {}
+                }
+            } else if key.code == KeyCode::Char('a') {
+                btw.set_follow_up_composing(true);
+                return Handled(Box::new(InputOutcome::Changed));
+            }
+        }
+        // Copy entire Done contents (same as full agent surface).
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.modifiers.is_empty()
+            && key.code == KeyCode::Char('y')
+            && !self
+                .btw_state
+                .as_ref()
+                .is_some_and(|s| s.follow_up_composing())
+            && let Some(text) = self.btw_state.as_ref().and_then(|s| s.full_copy_text())
+            && !text.is_empty()
+        {
+            self.copy_to_clipboard(&text);
+            return Handled(Box::new(InputOutcome::Changed));
+        }
         let Some(btw_scroll_max) = self.btw_state.as_ref().and_then(|btw| {
             matches!(btw, crate::views::btw_overlay::BtwOverlayState::Done { .. }).then(|| {
                 let content_width = self.last_btw_area.width.saturating_sub(4) as usize;
-                let max_body = self.last_btw_area.height.saturating_sub(2) as usize;
+                let max_body = self
+                    .last_btw_area
+                    .height
+                    .saturating_sub(2)
+                    .saturating_sub(crate::views::btw_overlay::FOLLOW_UP_COMPOSER_ROWS)
+                    as usize;
                 btw.max_scroll_offset(content_width, max_body)
             })
         }) else {
@@ -413,7 +479,12 @@ impl AgentView {
         if key.kind == KeyEventKind::Release || !key.modifiers.is_empty() {
             return Delegate;
         }
-        let page = self.last_btw_area.height.saturating_sub(2).max(1) as usize;
+        let page = self
+            .last_btw_area
+            .height
+            .saturating_sub(2)
+            .saturating_sub(crate::views::btw_overlay::FOLLOW_UP_COMPOSER_ROWS)
+            .max(1) as usize;
         let Some(btw) = self.btw_state.as_mut() else {
             return Delegate;
         };
@@ -613,7 +684,77 @@ impl AgentView {
             && key.code == KeyCode::Esc
             && key.modifiers.is_empty()
         {
+            // Esc cancels in-panel follow-up compose first; second Esc dismisses.
+            if self
+                .btw_state
+                .as_ref()
+                .is_some_and(|s| s.follow_up_composing())
+            {
+                if let Some(btw) = self.btw_state.as_mut() {
+                    btw.set_follow_up_composing(false);
+                }
+                return InputOutcome::Changed;
+            }
             return self.dismiss_btw_panel();
+        }
+        // In-panel follow-up composer (Done + focused): `a` starts, typing fills
+        // draft, Enter sends SendBtwFollowUp, Esc cancels (handled above).
+        if self.active_pane == AgentPane::Prompt
+            && self.btw_focused
+            && let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.modifiers.is_empty()
+            && let Some(btw) = self.btw_state.as_mut()
+            && matches!(btw, crate::views::btw_overlay::BtwOverlayState::Done { .. })
+        {
+            if btw.follow_up_composing() {
+                match key.code {
+                    KeyCode::Enter => {
+                        if let Some((q, _, _)) = btw.take_follow_up_send() {
+                            // Non-empty question: dispatch reads prior turns +
+                            // session id from the still-open Done state.
+                            return InputOutcome::Action(Action::SendBtwFollowUp(q));
+                        }
+                        return InputOutcome::Changed;
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(draft) = btw.follow_up_draft_mut() {
+                            draft.pop();
+                        }
+                        return InputOutcome::Changed;
+                    }
+                    KeyCode::Char(c) if !c.is_control() => {
+                        if let Some(draft) = btw.follow_up_draft_mut() {
+                            draft.push(c);
+                        }
+                        return InputOutcome::Changed;
+                    }
+                    _ => {}
+                }
+            } else if key.code == KeyCode::Char('a') {
+                btw.set_follow_up_composing(true);
+                return InputOutcome::Changed;
+            }
+        }
+        // Copy entire Done btw body (question + full answer, not viewport-only)
+        // when the panel is focused. `y` matches scrollback block-copy; must
+        // run before typing-returns-focus so Char('y') is not inserted.
+        // Disabled while composing so `y` can appear in the follow-up draft.
+        if self.active_pane == AgentPane::Prompt
+            && self.btw_focused
+            && !self
+                .btw_state
+                .as_ref()
+                .is_some_and(|s| s.follow_up_composing())
+            && let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.modifiers.is_empty()
+            && key.code == KeyCode::Char('y')
+            && let Some(text) = self.btw_state.as_ref().and_then(|s| s.full_copy_text())
+            && !text.is_empty()
+        {
+            self.copy_to_clipboard(&text);
+            return InputOutcome::Changed;
         }
         if self.btw_state.is_some()
             && let Event::Mouse(mouse) = ev
@@ -631,11 +772,21 @@ impl AgentView {
         }
         let btw_scroll_max = if self.active_pane == AgentPane::Prompt
             && self.btw_focused
+            && !self
+                .btw_state
+                .as_ref()
+                .is_some_and(|s| s.follow_up_composing())
             && let Some(btw) = self.btw_state.as_ref()
             && matches!(btw, crate::views::btw_overlay::BtwOverlayState::Done { .. })
         {
             let content_width = self.last_btw_area.width.saturating_sub(4) as usize;
-            let max_body = self.last_btw_area.height.saturating_sub(2) as usize;
+            // Done reserves one row for the follow-up composer.
+            let max_body = self
+                .last_btw_area
+                .height
+                .saturating_sub(2)
+                .saturating_sub(crate::views::btw_overlay::FOLLOW_UP_COMPOSER_ROWS)
+                as usize;
             btw.max_scroll_offset(content_width, max_body)
         } else {
             0
@@ -646,7 +797,12 @@ impl AgentView {
             && key.modifiers.is_empty()
             && let Some(btw) = self.btw_state.as_mut()
         {
-            let page = self.last_btw_area.height.saturating_sub(2).max(1) as usize;
+            let page = self
+                .last_btw_area
+                .height
+                .saturating_sub(2)
+                .saturating_sub(crate::views::btw_overlay::FOLLOW_UP_COMPOSER_ROWS)
+                .max(1) as usize;
             match key.code {
                 KeyCode::Up => {
                     btw.scroll_up(1);
@@ -1740,7 +1896,8 @@ mod btw_focus_tests {
         assert!(crate::minimal_api::finish_minimal_btw(
             &mut agent,
             request_id,
-            Ok(long_btw_answer())
+            Ok(long_btw_answer()),
+            Some("btw-minimal-test".into()),
         ));
         agent
     }
@@ -1877,6 +2034,60 @@ mod btw_focus_tests {
         agent.handle_input(&key(KeyCode::Esc), &reg);
         assert!(agent.btw_state.is_none(), "Esc dismisses the /btw panel");
         assert!(!agent.btw_focused, "dismissing the panel clears its focus");
+    }
+    /// Focused Done panel: `y` copies full Q/A (including scrolled-out lines)
+    /// and does not insert into the prompt.
+    #[test]
+    fn focused_y_copies_entire_btw_without_prompt_insert() {
+        let mut agent = prompt_focused_agent();
+        let reg = ActionRegistry::defaults();
+        let answer = long_btw_answer();
+        agent.btw_state = Some(BtwOverlayState::done("sky color?".into(), answer.clone()));
+        agent.btw_focused = true;
+        // Scroll down so the first lines leave the viewport — copy must still
+        // include them via full_copy_text, not the selection viewport model.
+        if let Some(btw) = agent.btw_state.as_mut() {
+            btw.scroll_down(10, 100);
+        }
+        let expected = agent
+            .btw_state
+            .as_ref()
+            .and_then(|s| s.full_copy_text())
+            .expect("Done is copyable");
+        assert!(expected.contains("line00"));
+        assert!(expected.contains("line39"));
+        assert!(expected.starts_with("/btw sky color?\n\n"));
+
+        let outcome = agent.handle_input(&key(KeyCode::Char('y')), &reg);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "y should be handled as copy, got {outcome:?}"
+        );
+        assert!(
+            agent.btw_focused,
+            "copy must leave the panel focused (not hand keys to the prompt)"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "",
+            "y must not type into the prompt when btw is focused"
+        );
+        // full_copy_text contract is the clipboard payload; we do not assert
+        // host clipboard here (flaky in CI) — the path is copy_to_clipboard.
+        let _ = expected;
+    }
+    #[test]
+    fn unfocused_y_types_into_prompt() {
+        let mut agent = prompt_focused_agent();
+        let reg = ActionRegistry::defaults();
+        agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
+        agent.btw_focused = false;
+        agent.handle_input(&key(KeyCode::Char('y')), &reg);
+        assert_eq!(
+            agent.prompt.text(),
+            "y",
+            "unfocused btw must not steal y from the prompt"
+        );
     }
     #[test]
     fn minimal_permission_owns_esc_over_hidden_btw() {

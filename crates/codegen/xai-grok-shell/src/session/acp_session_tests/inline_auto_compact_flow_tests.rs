@@ -1437,6 +1437,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 auth_type: Default::default(),
                 alpha_test_key: None,
                 client_version: None,
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: None,
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {

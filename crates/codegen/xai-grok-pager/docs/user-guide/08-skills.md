@@ -6,7 +6,7 @@ Skills are reusable prompt packages that extend Grok with task-specific instruct
 
 ## What Are Skills?
 
-A skill is a directory that contains a `SKILL.md` file. Its markdown body tells Grok how to handle a specific type of task: step-by-step instructions, conventions, and tool-usage patterns.
+A skill is a directory that contains a `SKILL.md` file. Its markdown text tells Grok how to handle a specific type of task: step-by-step instructions, conventions, and tool-usage patterns.
 
 Use a skill for a repeatable procedure that's too specific for AGENTS.md but too long to retype. Grok activates a skill only when it applies to your current task.
 
@@ -15,7 +15,7 @@ Use a skill for a repeatable procedure that's too specific for AGENTS.md but too
 ## Skill Locations
 
 Skills are **multi-source**. Grok owns discovery and load order in the product;
-skill *bodies* may live in the project, your home directory, a network-synced
+skill packs may live in the project, your home directory, a network-synced
 bundle cache, config paths, server inject, or plugins. Same-named skills shadow
 by scope (local/repo beat user; user beats bundled).
 
@@ -104,7 +104,7 @@ Review staged changes and create a commit with a clear, conventional message.
 | Field | Description |
 |-------|-------------|
 | `name` | Skill identifier. Use lowercase letters, digits, and hyphens, up to 64 characters. Grok normalizes spaces and underscores to hyphens. If you omit `name`, Grok uses the skill's directory name. |
-| `description` | What the skill does and when to use it. Grok reads this to decide whether to invoke the skill. If you omit it, Grok uses the first paragraph of the body. |
+| `description` | What the skill does and when to use it. Grok reads this to decide whether to invoke the skill. If you omit it, Grok uses the first paragraph of the skill text. |
 
 Write a specific `description`. It determines when Grok invokes the skill automatically. Name the trigger phrases and use cases.
 
@@ -141,7 +141,7 @@ When you run `/create-skill`, Grok:
 
 3. **Creates the skill directory.** Grok creates the `<scope>/.grok/skills/<name>/` directory, plus `scripts/` or `references/` subdirectories when the skill needs them.
 
-4. **Writes SKILL.md.** Grok writes the frontmatter (`name` and `description`) and a markdown body of instructions, along with any supporting files.
+4. **Writes SKILL.md.** Grok writes the frontmatter (`name` and `description`) and markdown instructions, along with any supporting files.
 
 5. **Verifies and confirms.** Grok reads the file back, confirms it wrote correctly, and tells you how to run the skill.
 

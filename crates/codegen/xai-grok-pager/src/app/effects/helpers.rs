@@ -813,6 +813,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "hide_header" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("hide_header", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_hide_header(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "show_timestamps" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_timestamps", "Bool", &value));
@@ -826,6 +834,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("page_flip_on_send", "Bool", &value));
             };
             xai_grok_shell::util::config::set_page_flip_on_send(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "scrub_ascii_punct" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("scrub_ascii_punct", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_scrub_ascii_punct(b)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1111,6 +1127,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("render_mermaid", "Enum", &value));
             };
             xai_grok_shell::util::config::set_render_mermaid(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "plan_approval_park" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("plan_approval_park", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_plan_approval_park(s.to_string())
                 .await
                 .map_err(|e| e.to_string())
         }

@@ -738,6 +738,9 @@ pub(super) async fn run_session(
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
+                                        failover_base_url: r.failover_base_url,
+                                        session_base_url: r.session_base_url,
+                                        session_identity_key: r.session_identity_key,
                                     });
                                 }
                                 // Credentials changed under a possibly-unchanged model id.
@@ -1906,10 +1909,21 @@ pub(super) async fn run_session(
                             let agent_type = session.active_agent_type.lock().clone();
                             let _ = responds_to.send(agent_type);
                         }
-                        SessionCommand::SideQuestion { question, respond_to } => {
+                        SessionCommand::SideQuestion {
+                            question,
+                            btw_session_id,
+                            prior_turns,
+                            respond_to,
+                        } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s.handle_side_question(&question).await;
+                                let result = s
+                                    .handle_side_question(
+                                        &question,
+                                        btw_session_id,
+                                        prior_turns,
+                                    )
+                                    .await;
                                 let _ = respond_to.send(result);
                             });
                         }

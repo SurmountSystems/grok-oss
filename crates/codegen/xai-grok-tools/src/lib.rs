@@ -13,7 +13,16 @@ pub const DEFAULT_TOOL_OUTPUT_CHARS: usize = 20_000;
 /// MCP inline tool-result cap (`MCP_MAX_OUTPUT_BYTES` and host/env helpers).
 pub use util::mcp_truncate::{
     ENV_GROK_MAX_MCP_OUTPUT_BYTES, ENV_MAX_MCP_OUTPUT_BYTES, MCP_MAX_OUTPUT_BYTES,
-    mcp_max_output_bytes, mcp_max_output_bytes_from_env, set_mcp_max_output_bytes,
+    densify_mcp_result_text, mcp_max_output_bytes, mcp_max_output_bytes_from_env,
+    set_mcp_max_output_bytes,
+};
+
+/// JSON ↔ TOON for model-facing structured results (`GROK_TOOL_RESULT_FORMAT`).
+pub use util::toon::{
+    ENV_TOOL_RESULT_FORMAT, ToolResultFormat, compact_json, decode as toon_decode,
+    densify_structured_text, densify_structured_text_in_place, encode as toon_encode,
+    is_tabular_eligible, maybe_encode_for_llm, maybe_encode_for_llm_from_env,
+    tool_result_format_from_env,
 };
 
 pub mod attribution;

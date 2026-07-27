@@ -56,7 +56,11 @@ impl crate::types::tool_metadata::ToolMetadata for EnterPlanModeTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"Use this tool when a task has ambiguity about the right approach or when the user asks you to write a plan. This tool enables a read-only plan mode where you explore the codebase and create an implementation plan for the user."#
+        // Explicit plan-mode intent only. Casual English ("we should plan to…",
+        // "plan the migration next week") must NOT trigger this tool — that was
+        // a false-positive entry path. Prefer `/plan` or clear phrases such as
+        // "enter plan mode" / "write an implementation plan and wait for approval".
+        r#"Use this tool only when the user explicitly wants plan mode — for example they ran /plan, said "enter plan mode", or asked you to write an implementation plan and wait for their approval before coding. Do not use this tool for casual mentions of planning (e.g. "we should plan to…", "let's plan the migration") or ordinary task discussion that merely uses the word plan. This tool enables a read-only plan mode where you explore the codebase and create an implementation plan for the user to approve."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -284,6 +288,32 @@ mod tests {
         );
         let desc = crate::types::tool_metadata::ToolMetadata::description_template(&tool);
         assert!(desc.contains("plan mode"));
+    }
+
+    /// Contract: description requires **explicit** plan-mode intent and rejects
+    /// incidental "plan" language (false-entry residual B3).
+    #[test]
+    fn enter_plan_mode_description_requires_explicit_intent() {
+        let tool = EnterPlanModeTool;
+        let desc = crate::types::tool_metadata::ToolMetadata::description_template(&tool);
+        let lower = desc.to_ascii_lowercase();
+        assert!(
+            lower.contains("explicitly") || lower.contains("explicit"),
+            "description must require explicit plan-mode intent, got: {desc}"
+        );
+        assert!(
+            lower.contains("/plan") || desc.contains("/plan"),
+            "description should cite /plan as a valid trigger, got: {desc}"
+        );
+        assert!(
+            lower.contains("do not use") || lower.contains("not") && lower.contains("casual"),
+            "description must discourage casual 'plan' language, got: {desc}"
+        );
+        // Must not retain the old eager phrasing that fired on any "write a plan".
+        assert!(
+            !desc.contains("when the user asks you to write a plan. This tool enables"),
+            "old eager description must not remain: {desc}"
+        );
     }
 
     #[test]

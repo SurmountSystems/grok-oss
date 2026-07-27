@@ -174,12 +174,23 @@ use super::overlay::OverlayState;
 ///
 /// Used by the status bar badge to show plan progress at a glance.
 /// Counts ALL items regardless of `show_done` filter.
+///
+/// When any non-cancelled **leaf** has a Fibonacci `size` (1|2),
+/// `points_mode` is true and the badge uses `completed_points` /
+/// `total_points` instead of item counts. Parents (ids referenced as
+/// `meta.parentId`) never contribute points even if size is set.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TodoCounts {
     pub in_progress: usize,
     pub pending: usize,
     pub completed: usize,
     pub cancelled: usize,
+    /// Sum of leaf sizes for completed leaves (points mode only).
+    pub completed_points: usize,
+    /// Sum of leaf sizes for non-cancelled sized leaves (points mode only).
+    pub total_points: usize,
+    /// True when at least one non-cancelled leaf has an explicit size.
+    pub points_mode: bool,
 }
 
 impl TodoCounts {
@@ -317,7 +328,25 @@ impl TodoPane {
     }
 
     /// Compute status counts from a list of items.
+    ///
+    /// Derives leaf-point totals matching tool `compute_leaf_progress`: any id
+    /// referenced as `meta.parentId` is a parent and never contributes points.
+    /// Item identity for that graph is `meta.id` when present (ACP Plan stamps
+    /// it; fixtures/tests may set it directly).
     fn compute_counts(items: &[TodoItem]) -> TodoCounts {
+        use std::collections::HashSet;
+
+        // Same rule as the tool: any id used as someone's parentId is a parent.
+        let parent_ids: HashSet<&str> = items
+            .iter()
+            .filter_map(|item| {
+                item.meta
+                    .as_ref()
+                    .and_then(|m| m.get("parentId"))
+                    .and_then(|v| v.as_str())
+            })
+            .collect();
+
         let mut c = TodoCounts::default();
         for item in items {
             match item.status {
@@ -325,6 +354,25 @@ impl TodoPane {
                 TodoStatus::Pending => c.pending += 1,
                 TodoStatus::Completed => c.completed += 1,
                 TodoStatus::Cancelled => c.cancelled += 1,
+            }
+            if matches!(item.status, TodoStatus::Cancelled) {
+                continue;
+            }
+            // Parents never count toward points (even if size is still set).
+            let item_id = item
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("id"))
+                .and_then(|v| v.as_str());
+            if item_id.is_some_and(|id| parent_ids.contains(id)) {
+                continue;
+            }
+            if let Some(sz) = item.size {
+                c.points_mode = true;
+                c.total_points += usize::from(sz);
+                if matches!(item.status, TodoStatus::Completed) {
+                    c.completed_points += usize::from(sz);
+                }
             }
         }
         c
@@ -560,8 +608,72 @@ mod tests {
         TodoCounts {
             completed,
             cancelled,
-            ..TodoCounts::default()
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn compute_counts_points_mode_from_sizes() {
+        let items = vec![
+            TodoItem {
+                content: "a".into(),
+                priority: TodoPriority::default(),
+                status: TodoStatus::Completed,
+                meta: None,
+                size: Some(2),
+            },
+            TodoItem {
+                content: "b".into(),
+                priority: TodoPriority::default(),
+                status: TodoStatus::Pending,
+                meta: None,
+                size: Some(1),
+            },
+            TodoItem {
+                content: "phase".into(),
+                priority: TodoPriority::default(),
+                status: TodoStatus::Pending,
+                meta: Some(serde_json::json!({"kind": "phase"})),
+                size: None,
+            },
+        ];
+        let c = TodoPane::compute_counts(&items);
+        assert!(c.points_mode);
+        assert_eq!(c.completed_points, 2);
+        assert_eq!(c.total_points, 3);
+        assert_eq!(c.completed, 1);
+        assert_eq!(c.pending, 2);
+    }
+
+    /// Sized item that later gains a child (zombie parent size) must not
+    /// contribute badge points — only leaf sizes count (mirrors tool).
+    #[test]
+    fn compute_counts_excludes_parent_size_when_child_references_parent_id() {
+        let items = vec![
+            // Was a sized leaf; then gained a child. Size may still be set
+            // (ACP / pre-clear state). Parent id is in meta.id for the graph.
+            TodoItem {
+                content: "Parent phase".into(),
+                priority: TodoPriority::default(),
+                status: TodoStatus::Completed,
+                meta: Some(serde_json::json!({"id": "parent", "kind": "phase"})),
+                size: Some(2),
+            },
+            TodoItem {
+                content: "Child leaf".into(),
+                priority: TodoPriority::default(),
+                status: TodoStatus::Completed,
+                meta: Some(serde_json::json!({"parentId": "parent", "id": "child"})),
+                size: Some(1),
+            },
+        ];
+        let c = TodoPane::compute_counts(&items);
+        assert!(c.points_mode);
+        // Parent size=2 ignored; only child size=1.
+        assert_eq!(c.total_points, 1);
+        assert_eq!(c.completed_points, 1);
+        // Status counts still include both items.
+        assert_eq!(c.completed, 2);
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -584,6 +696,7 @@ mod tests {
             priority: TodoPriority::default(),
             status: TodoStatus::Pending,
             meta: Some(serde_json::json!({"kind": "phase", "namespace": "impl"})),
+            size: None,
         };
         let entry = TodoListEntry::new(0, item, &style);
         let text = line_text(entry.content());
@@ -602,6 +715,7 @@ mod tests {
             priority: TodoPriority::default(),
             status: TodoStatus::Pending,
             meta: None,
+            size: None,
         };
         let entry = TodoListEntry::new(0, item, &style);
         assert_eq!(line_text(entry.content()), "Plain task");
@@ -634,6 +748,7 @@ mod tests {
             priority: TodoPriority::default(),
             status: TodoStatus::Pending,
             meta: None,
+            size: None,
         }
     }
 
@@ -648,7 +763,10 @@ mod tests {
             pane.is_visible(),
             "first 0→N Plan should auto-open the pane"
         );
-        assert!(pane.badge_flash_active(), "badge should flash on first paint");
+        assert!(
+            pane.badge_flash_active(),
+            "badge should flash on first paint"
+        );
         assert_eq!(pane.counts().total(), 1);
 
         // User closes; later Plan must not force-reopen.

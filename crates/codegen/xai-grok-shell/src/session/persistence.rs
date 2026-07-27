@@ -52,17 +52,21 @@ use serde::{Deserialize, Serialize};
 
 // /btw side question persistence types
 
-/// A single /btw side question entry persisted to `btw_history.jsonl`.
+/// A single /btw side-question **turn** persisted to `btw_history.jsonl`.
+///
+/// Multi-turn follow-ups reuse the same `btw_session_id` and append another
+/// line (multi-entry history, ordered by `asked_at`). There is no nested
+/// turns array — each JSONL row is one Q/A.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BtwEntry {
-    /// Unique ID for this side question.
+    /// Stable id for the btw thread (shared across follow-up turns).
     pub btw_session_id: String,
     /// The parent session ID.
     pub parent_session_id: String,
-    /// When the question was asked.
+    /// When this turn's question was asked.
     pub asked_at: DateTime<Utc>,
-    /// The user's question.
+    /// The user's question for this turn.
     pub question: String,
     /// The model's response (empty if failed).
     pub answer: String,

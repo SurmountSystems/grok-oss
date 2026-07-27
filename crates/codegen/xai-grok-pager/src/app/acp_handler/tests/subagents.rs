@@ -881,12 +881,14 @@
                     priority: Default::default(),
                     status: xai_grok_shell::tools::TodoStatus::InProgress,
                     meta: None,
+                    size: None,
                 },
                 xai_grok_shell::tools::TodoItem {
                     content: "impl: verify gates".into(),
                     priority: Default::default(),
                     status: xai_grok_shell::tools::TodoStatus::Pending,
                     meta: None,
+                    size: None,
                 },
             ]);
             assert_eq!(agent.todo.todos().len(), 2);

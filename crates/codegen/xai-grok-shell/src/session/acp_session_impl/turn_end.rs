@@ -17,9 +17,7 @@ impl SessionActor {
         &self,
         plan_state: Option<crate::tools::todo::TodoState>,
     ) {
-        use crate::tools::todo::{
-            TodoState, effective_todo_state_on_resume, plan_entry_from_todo_item,
-        };
+        use crate::tools::todo::{TodoState, effective_todo_state_on_resume, plan_entry_from_todo};
         use xai_grok_tools::types::resources::State;
 
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -44,9 +42,8 @@ impl SessionActor {
         }
 
         let entries: Vec<_> = effective
-            .todo_items()
-            .cloned()
-            .map(plan_entry_from_todo_item)
+            .todo_items_with_ids()
+            .map(|(id, item)| plan_entry_from_todo(Some(id.as_str()), item.clone()))
             .collect();
         if entries.is_empty() {
             return;
@@ -65,7 +62,7 @@ impl SessionActor {
     /// `resources_state.json` (SoT) and `plan.json` (mirror), and emits Plan so
     /// the board is durable without requiring the agent to call `todo_write`.
     pub(super) async fn maybe_seed_ask_todo(&self, prompt_id: &str, text: &str) {
-        use crate::tools::todo::{TodoState, plan_entry_from_todo_item, seed_ask_todo};
+        use crate::tools::todo::{TodoState, plan_entry_from_todo, seed_ask_todo};
         use xai_grok_tools::types::resources::State;
 
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -85,9 +82,8 @@ impl SessionActor {
             crate::session::persistence::PersistenceMsg::PlanState(state.clone()),
         );
         let entries: Vec<_> = state
-            .todo_items()
-            .cloned()
-            .map(plan_entry_from_todo_item)
+            .todo_items_with_ids()
+            .map(|(id, item)| plan_entry_from_todo(Some(id.as_str()), item.clone()))
             .collect();
         if !entries.is_empty() {
             self.send_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), None)
@@ -107,12 +103,12 @@ impl SessionActor {
     /// notification where `in_progress` entries are mapped to `completed`
     /// for display.
     ///
-    /// Uses the canonical `plan_entry_from_todo_item` helper to preserve
-    /// cancelled metadata, priorities, and other semantics.
+    /// Uses the canonical `plan_entry_from_todo` helper to preserve
+    /// cancelled metadata, priorities, board ids, and other semantics.
     ///
     /// No-op if no `in_progress` items exist.
     pub(super) async fn emit_turn_end_plan_cleanup(&self) {
-        use crate::tools::todo::{TodoState, TodoStatus, plan_entry_from_todo_item};
+        use crate::tools::todo::{TodoState, TodoStatus, plan_entry_from_todo};
         use xai_grok_tools::types::resources::State;
 
         // Read the current TodoState (no mutation).
@@ -137,13 +133,12 @@ impl SessionActor {
             }
 
             // Build plan entries with in_progress → completed for display.
-            // Uses the canonical `plan_entry_from_todo_item` helper to
-            // preserve cancelled metadata, priority, and other semantics.
+            // Stamp meta.id so leaf-only badge math matches the tool graph.
             let entries: Vec<_> = state
                 .0
-                .todo_items()
-                .map(|item| {
-                    let mut entry = plan_entry_from_todo_item(item.clone());
+                .todo_items_with_ids()
+                .map(|(id, item)| {
+                    let mut entry = plan_entry_from_todo(Some(id.as_str()), item.clone());
                     if item.status == TodoStatus::InProgress {
                         entry.status = acp::PlanEntryStatus::Completed;
                     }

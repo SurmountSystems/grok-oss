@@ -406,6 +406,9 @@ pub(crate) async fn spawn_session_actor(
                 .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
         });
     let economic_mode = crate::util::config::economic_mode_from_disk();
+    // Seed assistant ASCII-scrub config preference from `[ui] scrub_ascii_punct`
+    // (default ON). Env `GROK_SCRUB_ASCII_PUNCT=0` still force-disables.
+    crate::session::helpers::assistant_ascii_scrub::seed_from_effective_config();
     let effective_context_window = context_window_override.unwrap_or_else(|| {
         let capped = crate::util::config::apply_economic_context_cap(
             baseline_context_window.get(),

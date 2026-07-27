@@ -1344,6 +1344,10 @@ pub struct AgentView {
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
     pub(crate) latest_inline_plan_content: Option<String>,
+    /// `tool_call_id` of the last plan-approval card pushed into scrollback
+    /// (option C soft park). Dedupes so a re-draw / second soft park of the
+    /// same request does not spam the transcript.
+    pub(crate) plan_card_committed_id: Option<String>,
     pub(crate) plan_comments: Vec<PlanComment>,
     /// Monotonic counter for casual plan comment IDs.
     pub(crate) plan_next_comment_id: u64,

@@ -4325,6 +4325,7 @@ impl AppView {
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
                             upgrade_cta: hero_cta.map(|(_owner, label, _)| label),
                             privacy_banner,
+                            hide_header: self.appearance.hide_header,
                         };
                         let result = crate::views::welcome::render_welcome(
                             view_area,
@@ -4643,17 +4644,19 @@ impl AppView {
                                     caption: crate::views::announcements::usable_cta_caption(owner),
                                 },
                             );
-                            let dash_cursor = crate::views::dashboard::render_dashboard(
-                                f.buffer_mut(),
-                                view_area,
-                                dashboard,
-                                agents,
-                                registry,
-                                pending_hint,
-                                dashboard_roster,
-                                self.dashboard_sessions_loading,
-                                dash_upgrade_cta,
-                            );
+                            let dash_cursor =
+                                crate::views::dashboard::render_dashboard_with_hide_header(
+                                    f.buffer_mut(),
+                                    view_area,
+                                    dashboard,
+                                    agents,
+                                    registry,
+                                    pending_hint,
+                                    dashboard_roster,
+                                    self.dashboard_sessions_loading,
+                                    dash_upgrade_cta,
+                                    self.appearance.hide_header,
+                                );
                             let (popup_cursor, popup_post_flush, drawn_popup_agent) =
                                 if let Some(agent_id) = dashboard.attached_agent {
                                     let theme = crate::theme::Theme::current();
@@ -6148,9 +6151,14 @@ pub(crate) mod tests {
             app.needs_animation(),
             "an open prompt history overlay must request animation ticks"
         );
+        // Do not gate on `tick()`'s bool return: activate may already have
+        // grabbed a fast daemon snapshot (poll then no-ops, tick returns
+        // false) while still leaving result_count == 2. Match the
+        // scrollback-search delivery loop — tick, then check results.
         let mut delivered = false;
         for _ in 0..1000 {
-            if app.tick() && app.agents[&id].prompt.history_search.result_count() == 2 {
+            let _ = app.tick();
+            if app.agents[&id].prompt.history_search.result_count() == 2 {
                 delivered = true;
                 break;
             }
@@ -6746,9 +6754,8 @@ pub(crate) mod tests {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         assert!(!app.needs_animation());
-        app.agents.get_mut(&id).unwrap().btw_state = Some(BtwOverlayState::Loading {
-            question: "what is X?".into(),
-        });
+        app.agents.get_mut(&id).unwrap().btw_state =
+            Some(BtwOverlayState::loading("what is X?".into()));
         assert!(app.needs_animation());
         let saw_redraw = (0..SPINNER_DIVISOR).any(|_| app.tick());
         assert!(
@@ -6761,6 +6768,8 @@ pub(crate) mod tests {
         app.agents.get_mut(&id).unwrap().btw_state = Some(BtwOverlayState::Error {
             question: "what is X?".into(),
             error: "boom".into(),
+            prior_turns: Vec::new(),
+            btw_session_id: None,
         });
         assert!(!app.needs_animation());
     }
@@ -6778,6 +6787,7 @@ pub(crate) mod tests {
                 priority: Default::default(),
                 status: xai_grok_shell::tools::TodoStatus::InProgress,
                 meta: None,
+                size: None,
             }]);
         assert!(
             app.agents[&id].todo.badge_needs_tick(),
@@ -11181,10 +11191,10 @@ pub(crate) mod tests {
         );
     }
     /// Install a plan-approval overlay showing the plan in the line
-    /// viewer (`Preview` focus) — the default shape when the plan has
-    /// content (`acp_handler` opens the preview). This is the state the
-    /// user reported as stuck: `Esc` / `Left` are dead no-ops in the
-    /// plan line viewer.
+    /// viewer (`Preview` focus) — the engaged-modal shape after soft park
+    /// (user reopened via `/view-plan` / status / `ShowPlan`). This is the
+    /// state the user reported as stuck: `Esc` / `Left` are dead no-ops in
+    /// the plan line viewer.
     fn install_plan_preview_overlay(app: &mut AppView, id: super::super::agent::AgentId) {
         let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "s".into(),

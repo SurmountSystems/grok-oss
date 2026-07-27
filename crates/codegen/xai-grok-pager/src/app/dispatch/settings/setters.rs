@@ -957,6 +957,34 @@ pub(in crate::app::dispatch) fn set_compact_mode(app: &mut AppView, new: bool) -
     }]
 }
 
+/// State-only mutation for `hide_header`. Updates `current_ui` + appearance.
+pub(super) fn set_hide_header_inner(app: &mut AppView, new: bool) {
+    app.current_ui.hide_header = new;
+    if app.appearance.hide_header == new {
+        return;
+    }
+    let mut config = app.appearance.clone();
+    config.hide_header = new;
+    app.set_appearance(config);
+}
+
+/// Set hide-header. Idempotent: skips if `new == prev`.
+pub(in crate::app::dispatch) fn set_hide_header(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = app.current_ui.hide_header;
+    if prev == new {
+        return vec![];
+    }
+    set_hide_header_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "hide_header", value = new, "setting changed");
+    app.show_toast(&save_success_toast("Hide header", new));
+    vec![Effect::PersistSetting {
+        key: "hide_header",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 /// State-only mutation for `show_timestamps`. Idempotent fast path
 /// mirrors `set_compact_mode_inner`.
 pub(super) fn set_timestamps_inner(app: &mut AppView, new: bool) {
@@ -1040,6 +1068,62 @@ pub(in crate::app::dispatch) fn set_page_flip_on_send(app: &mut AppView, new: bo
         key: "page_flip_on_send",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_scrub_ascii_punct_inner(app: &mut AppView, new: bool) {
+    app.current_ui.scrub_ascii_punct = Some(new);
+    crate::appearance::cache::set_scrub_ascii_punct(new);
+}
+
+/// SHARED: cache + `[ui].scrub_ascii_punct` via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_scrub_ascii_punct(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_scrub_ascii_punct();
+    if prev == new {
+        return vec![];
+    }
+    set_scrub_ascii_punct_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "scrub_ascii_punct", value = new, "setting changed");
+    app.show_toast(&save_success_toast("ASCII-safe assistant punctuation", new));
+    vec![Effect::PersistSetting {
+        key: "scrub_ascii_punct",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// SHARED: `[ui].plan_approval_park` (`soft` | `modal`) via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_plan_approval_park(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let canonical: &'static str = match new.trim() {
+        "modal" => "modal",
+        _ => "soft",
+    };
+    let prev = app.current_ui.plan_approval_park_mode();
+    if prev == canonical {
+        return vec![];
+    }
+    app.current_ui.plan_approval_park = Some(canonical.to_owned());
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "plan_approval_park",
+        value = canonical,
+        "setting changed"
+    );
+    let label = if canonical == "modal" {
+        "Plan approval park: modal"
+    } else {
+        "Plan approval park: soft (toast)"
+    };
+    app.show_toast(label);
+    vec![Effect::PersistSetting {
+        key: "plan_approval_park",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
     }]
 }
 

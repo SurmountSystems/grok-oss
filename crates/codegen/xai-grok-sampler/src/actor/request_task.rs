@@ -197,6 +197,27 @@ pub(crate) async fn run_request_task(
     let mut doom_retry_count: u32 = 0;
     let output_observed = Arc::new(AtomicBool::new(false));
 
+    // D3: if a prior turn already memoized this primary as credit-exhausted,
+    // hop to the next live credential before burning an HTTP attempt.
+    if let Some(hop_reason) = try_skip_memoized_exhausted_primary(&mut config, &mut client) {
+        tracing::info!(
+            target: crate::sampling_log::TARGET,
+            %hop_reason,
+            "skipped memoized exhausted primary before first attempt"
+        );
+        // Status chrome for preemptive hop (no raw keys). Use attempt 1 so
+        // UIs that show attempt/max do not render a confusing "0 / N".
+        let _ = event_tx.send(SamplingEvent::Retrying {
+            request_id: request_id.clone(),
+            attempt: 1,
+            max_retries,
+            kind: SamplingErrorKind::Api,
+            reason: hop_reason,
+            doom_loop_triggers: None,
+            doom_loop_aborted_at_chunk: None,
+        });
+    }
+
     loop {
         if cancel_token.is_cancelled() {
             handle_cancellation(&event_tx, &request_id, &mut completion_tx);
@@ -383,51 +404,221 @@ pub(crate) async fn run_request_task(
     }
 }
 
+/// Cli-chat-proxy header names injected by the shell for session hosts.
+/// Stripped when hopping to the public console API; re-added for session host.
+const CLI_CHAT_PROXY_HEADER_NAMES: &[&str] = &[
+    "X-XAI-Token-Auth",
+    "x-authenticateresponse",
+    "x-grok-client-mode",
+];
+
+fn looks_like_cli_chat_proxy_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("cli-chat-proxy") || lower.contains("cli_chat_proxy")
+}
+
+fn strip_cli_chat_proxy_headers(headers: &mut indexmap::IndexMap<String, String>) {
+    headers.retain(|k, _| {
+        !CLI_CHAT_PROXY_HEADER_NAMES
+            .iter()
+            .any(|n| k.eq_ignore_ascii_case(n))
+    });
+}
+
+fn ensure_cli_chat_proxy_headers(headers: &mut indexmap::IndexMap<String, String>) {
+    headers
+        .entry("X-XAI-Token-Auth".to_string())
+        .or_insert_with(|| "xai-grok-cli".to_string());
+    headers
+        .entry("x-authenticateresponse".to_string())
+        .or_insert_with(|| "authenticate-response".to_string());
+    headers
+        .entry("x-grok-client-mode".to_string())
+        .or_insert_with(|| "interactive".to_string());
+}
+
+fn apply_dual_auth_host_switch(config: &mut SamplerConfig, new_base_url: &str) {
+    let prev = config.base_url.clone();
+    if prev.trim_end_matches('/') == new_base_url.trim_end_matches('/') {
+        return;
+    }
+    config.base_url = new_base_url.to_owned();
+    strip_cli_chat_proxy_headers(&mut config.extra_headers);
+    if looks_like_cli_chat_proxy_url(new_base_url) {
+        ensure_cli_chat_proxy_headers(&mut config.extra_headers);
+    }
+    tracing::info!(
+        target: crate::sampling_log::TARGET,
+        from_host = %prev,
+        to_host = %new_base_url,
+        "credit failover dual-auth host switch"
+    );
+}
+
+fn is_session_identity(config: &SamplerConfig, token: &str) -> bool {
+    config
+        .session_identity_key
+        .as_deref()
+        .is_some_and(|s| s.trim() == token.trim())
+}
+
+/// Label for hop status/toast: session JWT vs console API key (no secrets).
+fn credential_label(
+    config: &SamplerConfig,
+    token: &str,
+    is_session_side: bool,
+) -> crate::exhausted_identity::CredentialLabel {
+    use crate::exhausted_identity::CredentialLabel;
+    if is_session_side || is_session_identity(config, token) {
+        CredentialLabel::SuperGrokSession
+    } else {
+        CredentialLabel::ConsoleKey
+    }
+}
+
 /// Pop the next distinct failover key and rebuild the client to use it.
 ///
-/// Returns `true` when a key was applied. The exhausted active key (and any
-/// duplicates of it) are dropped from the failover list so they are not
-/// retried for this request.
-fn try_rotate_to_failover_key(config: &mut SamplerConfig, client: &mut SamplingClient) -> bool {
+/// Returns `Some(hop_reason)` when a key was applied (status/toast copy; no
+/// secrets). For [`HopCause::CreditExhausted`], the active key is memoized
+/// process-locally (1h) and dropped from the failover list so later turns
+/// skip it. For [`HopCause::RateLimited`], the credit memo is **not** used
+/// (throttle is temporary; shared `grok-rate-limit` cooldown covers the left
+/// identity).
+///
+/// Dual-auth (SuperGrok session ↔ console key): when
+/// [`SamplerConfig::failover_base_url`] / [`SamplerConfig::session_base_url`]
+/// are set, also switches `base_url` and cli-chat-proxy headers. Hop-to-key
+/// clears the live bearer (stash for reverse hop); hop-to-session reinstalls
+/// a stashed resolver when present, else **live re-binds**
+/// [`SamplerConfig::session_bearer_resolver`] (no prior stash required).
+fn try_rotate_to_failover_key(
+    config: &mut SamplerConfig,
+    client: &mut SamplingClient,
+    cause: crate::exhausted_identity::HopCause,
+) -> Option<String> {
+    use crate::exhausted_identity::HopCause;
+
     let active = config.api_key.as_deref().unwrap_or("").trim().to_owned();
-    // Drop exhausted primary + blanks so we never re-select them.
+    let active_fp = if active.is_empty() {
+        String::new()
+    } else {
+        fingerprint_secret(&active)
+    };
+    // Process-local credit memo: do not re-select keys already known dead.
+    // Drop blanks + active duplicate + memoized fingerprints.
     config.failover_api_keys.retain(|k| {
         let t = k.trim();
-        !t.is_empty() && t != active
+        if t.is_empty() || t == active {
+            return false;
+        }
+        !crate::exhausted_identity::is_exhausted(&fingerprint_secret(t))
     });
-    let Some(next_key) = config.failover_api_keys.first().cloned() else {
-        return false;
-    };
+    let next_key = config.failover_api_keys.first().cloned()?;
     config.failover_api_keys.remove(0);
     // Also drop any further duplicates of the key we are switching to.
     let next_trim = next_key.trim().to_owned();
     config.failover_api_keys.retain(|k| k.trim() != next_trim);
     let prev_fp = fingerprint_secret(&active);
     let next_fp = fingerprint_secret(&next_key);
+    let next_is_session = is_session_identity(config, &next_trim);
+    let active_is_session =
+        is_session_identity(config, &active) || config.bearer_resolver.is_some();
+    let log_msg = match cause {
+        HopCause::CreditExhausted => {
+            "credit exhausted on active API key; failing over to next credential"
+        }
+        HopCause::RateLimited => "rate limited on active API key; failing over to next credential",
+    };
     tracing::info!(
         target: crate::sampling_log::TARGET,
         from_key = %prev_fp,
         to_key = %next_fp,
         remaining_failover = config.failover_api_keys.len(),
-        "credit exhausted on active API key; failing over to next credential"
+        next_is_session,
+        ?cause,
+        "{log_msg}"
     );
     config.api_key = Some(next_key);
-    // Live resolvers would re-inject the exhausted primary; clear so the
-    // rotated key is what goes on the wire.
-    config.bearer_resolver = None;
+
+    if next_is_session {
+        // Key → session: restore session host + live bearer when available.
+        if let Some(url) = config.session_base_url.clone() {
+            apply_dual_auth_host_switch(config, &url);
+        }
+        if let Some(resolver) = config.stashed_bearer_resolver.take() {
+            config.bearer_resolver = Some(resolver);
+        } else if let Some(resolver) = config.session_bearer_resolver.clone() {
+            // Live re-bind without prior stash (key-primary mid-hop / next turn).
+            config.bearer_resolver = Some(resolver);
+        } else {
+            // No live resolver available; wire the session JWT as a static key.
+            config.bearer_resolver = None;
+        }
+    } else {
+        // Session → key (or key → key): never re-inject exhausted session JWT.
+        if config.bearer_resolver.is_some() {
+            config.stashed_bearer_resolver = config.bearer_resolver.take();
+        }
+        config.bearer_resolver = None;
+        // Hop onto console host when dual-auth split hosts are configured.
+        if active_is_session || is_session_identity(config, &active) {
+            if let Some(url) = config.failover_base_url.clone() {
+                apply_dual_auth_host_switch(config, &url);
+            }
+        } else if let Some(url) = config.failover_base_url.clone() {
+            // Console→console stays on console host; if somehow still on session host, fix.
+            if looks_like_cli_chat_proxy_url(&config.base_url)
+                && !looks_like_cli_chat_proxy_url(&url)
+            {
+                apply_dual_auth_host_switch(config, &url);
+            }
+        }
+    }
+
+    let from_label = credential_label(config, &active, active_is_session);
+    let to_label = credential_label(config, &next_trim, next_is_session);
+    let hop_reason = crate::exhausted_identity::format_hop_reason(from_label, to_label, cause);
+
     match SamplingClient::new(config.clone()) {
         Ok(fresh) => {
             *client = fresh;
-            true
+            // Credit only: sticky 1h memo so subsequent turns skip dead keys.
+            // Rate-limit hops rely on shared cooldown, not this memo.
+            if matches!(cause, HopCause::CreditExhausted) && !active_fp.is_empty() {
+                crate::exhausted_identity::mark_exhausted(&active_fp);
+            }
+            Some(hop_reason)
         }
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "failed to rebuild sampling client after key failover"
             );
-            false
+            None
         }
     }
+}
+
+/// If the configured primary credential is already memoized exhausted and a
+/// live failover remains, hop immediately so a subsequent turn does not re-hit
+/// a dead key. Returns hop reason when a preemptive rotate applied.
+fn try_skip_memoized_exhausted_primary(
+    config: &mut SamplerConfig,
+    client: &mut SamplingClient,
+) -> Option<String> {
+    let active = config.api_key.as_deref().unwrap_or("").trim();
+    if active.is_empty() {
+        return None;
+    }
+    let fp = fingerprint_secret(active);
+    if !crate::exhausted_identity::is_exhausted(&fp) {
+        return None;
+    }
+    try_rotate_to_failover_key(
+        config,
+        client,
+        crate::exhausted_identity::HopCause::CreditExhausted,
+    )
 }
 
 /// Apply a [`RetryDecision`]. Returns `true` if the loop should
@@ -452,10 +643,63 @@ async fn apply_retry_decision(
     // Credit exhaustion is fatal for one account but not for the request if
     // another key with balance is configured. Rotate before classify so we
     // do not surface a billing failure while failover keys remain.
-    if err.is_credit_exhausted() && try_rotate_to_failover_key(config, client) {
+    // Credit-worded 429 is also is_rate_limited(); credit path runs first.
+    if err.is_credit_exhausted()
+        && let Some(hop_reason) = try_rotate_to_failover_key(
+            config,
+            client,
+            crate::exhausted_identity::HopCause::CreditExhausted,
+        )
+    {
         *retry_count += 1;
-        emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+        emit_retrying_with_reason(
+            event_tx,
+            request_id,
+            *retry_count,
+            max_retries,
+            err,
+            config,
+            hop_reason,
+        );
         return true;
+    }
+
+    // Plain HTTP 429: hop to the next configured identity first (when any),
+    // instead of sleeping forever on the same key. Observe shared cooldown
+    // for the identity we leave so peers wait; do not sticky-memo as credit-dead.
+    if err.is_rate_limited() {
+        let left_key = provider_key_for_config(config);
+        let local_backoff = retry_mod::retry_backoff_with_jitter(*retry_count);
+        if let Some(hop_reason) = try_rotate_to_failover_key(
+            config,
+            client,
+            crate::exhausted_identity::HopCause::RateLimited,
+        ) {
+            // Observe the identity we left (config already points at next).
+            let store = SharedRateLimitStore::process_default();
+            let wait = err
+                .retry_after()
+                .map(Duration::from_secs)
+                .unwrap_or(local_backoff);
+            let meta = RateLimitMeta {
+                status: Some(429),
+                reason: Some(err.to_string()),
+            };
+            if let Err(e) = store.observe(&left_key, wait, meta) {
+                tracing::debug!(error = %e, "shared rate limit observe on hop failed");
+            }
+            *retry_count += 1;
+            emit_retrying_with_reason(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                hop_reason,
+            );
+            return true;
+        }
     }
 
     let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
@@ -941,13 +1185,38 @@ fn emit_retrying(
             reason = format!("{reason} · coordinating with other grok-oss sessions");
         }
     }
+    emit_retrying_reason(event_tx, request_id, attempt, max_retries, &info, reason);
+}
+
+/// Identity-failover hop: surface dual-auth status chrome (no raw keys).
+fn emit_retrying_with_reason(
+    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    request_id: &RequestId,
+    attempt: u32,
+    max_retries: u32,
+    err: &SamplingError,
+    _config: &SamplerConfig,
+    reason: String,
+) {
+    let info = SamplingErrorInfo::from(err);
+    emit_retrying_reason(event_tx, request_id, attempt, max_retries, &info, reason);
+}
+
+fn emit_retrying_reason(
+    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    request_id: &RequestId,
+    attempt: u32,
+    max_retries: u32,
+    info: &SamplingErrorInfo,
+    reason: String,
+) {
     let _ = event_tx.send(SamplingEvent::Retrying {
         request_id: request_id.clone(),
         attempt,
         max_retries,
         kind: info.kind,
         reason,
-        doom_loop_triggers: info.doom_loop_triggers,
+        doom_loop_triggers: info.doom_loop_triggers.clone(),
         doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
     });
 }
@@ -1161,35 +1430,434 @@ mod tests {
 
     #[test]
     fn rotate_failover_key_pops_next_distinct_key() {
-        let mut config = SamplerConfig {
-            api_key: Some("key-a".into()),
-            failover_api_keys: vec!["key-a".into(), "key-b".into(), "key-c".into()],
-            base_url: "https://openrouter.ai/api/v1".into(),
-            model: "x-ai/grok-4.5".into(),
-            ..Default::default()
-        };
-        let mut client = SamplingClient::new(config.clone()).expect("client");
-        assert!(try_rotate_to_failover_key(&mut config, &mut client));
-        assert_eq!(config.api_key.as_deref(), Some("key-b"));
-        // Exhausted primary duplicate dropped; only key-c remains.
-        assert_eq!(config.failover_api_keys, vec!["key-c".to_string()]);
-        assert!(try_rotate_to_failover_key(&mut config, &mut client));
-        assert_eq!(config.api_key.as_deref(), Some("key-c"));
-        assert!(config.failover_api_keys.is_empty());
-        assert!(!try_rotate_to_failover_key(&mut config, &mut client));
+        crate::exhausted_identity::with_memo_lock(|| {
+            let mut config = SamplerConfig {
+                api_key: Some("key-a".into()),
+                failover_api_keys: vec!["key-a".into(), "key-b".into(), "key-c".into()],
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: None,
+                base_url: "https://openrouter.ai/api/v1".into(),
+                model: "x-ai/grok-4.5".into(),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            assert!(
+                try_rotate_to_failover_key(
+                    &mut config,
+                    &mut client,
+                    crate::exhausted_identity::HopCause::CreditExhausted,
+                )
+                .is_some()
+            );
+            assert_eq!(config.api_key.as_deref(), Some("key-b"));
+            // Exhausted primary duplicate dropped; only key-c remains.
+            assert_eq!(config.failover_api_keys, vec!["key-c".to_string()]);
+            assert!(
+                try_rotate_to_failover_key(
+                    &mut config,
+                    &mut client,
+                    crate::exhausted_identity::HopCause::CreditExhausted,
+                )
+                .is_some()
+            );
+            assert_eq!(config.api_key.as_deref(), Some("key-c"));
+            assert!(config.failover_api_keys.is_empty());
+            assert!(
+                try_rotate_to_failover_key(
+                    &mut config,
+                    &mut client,
+                    crate::exhausted_identity::HopCause::CreditExhausted,
+                )
+                .is_none()
+            );
+        });
     }
 
     #[test]
     fn credit_exhausted_without_failover_does_not_rotate() {
-        let mut config = SamplerConfig {
-            api_key: Some("only".into()),
-            failover_api_keys: vec![],
-            base_url: "https://openrouter.ai/api/v1".into(),
-            model: "x-ai/grok-4.5".into(),
-            ..Default::default()
-        };
-        let mut client = SamplingClient::new(config.clone()).expect("client");
-        assert!(!try_rotate_to_failover_key(&mut config, &mut client));
-        assert_eq!(config.api_key.as_deref(), Some("only"));
+        crate::exhausted_identity::with_memo_lock(|| {
+            let mut config = SamplerConfig {
+                api_key: Some("only".into()),
+                failover_api_keys: vec![],
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: None,
+                base_url: "https://openrouter.ai/api/v1".into(),
+                model: "x-ai/grok-4.5".into(),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            assert!(
+                try_rotate_to_failover_key(
+                    &mut config,
+                    &mut client,
+                    crate::exhausted_identity::HopCause::CreditExhausted,
+                )
+                .is_none()
+            );
+            assert_eq!(config.api_key.as_deref(), Some("only"));
+        });
+    }
+
+    /// D2: session → console key hop clears live bearer so AuthManager cannot re-inject
+    /// the exhausted SuperGrok JWT mid-request.
+    #[test]
+    fn rotate_session_to_console_key_clears_bearer_resolver() {
+        use crate::config::{BearerResolver, SharedBearerResolver};
+        use std::sync::Arc;
+
+        crate::exhausted_identity::with_memo_lock(|| {
+            #[derive(Debug)]
+            struct StaticBearer(&'static str);
+            impl BearerResolver for StaticBearer {
+                fn current_bearer(&self) -> Option<String> {
+                    Some(self.0.to_owned())
+                }
+            }
+
+            let mut config = SamplerConfig {
+                api_key: Some("session-jwt".into()),
+                failover_api_keys: vec!["console-biz-key".into()],
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: Some("session-jwt".into()),
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4".into(),
+                bearer_resolver: Some(Arc::new(StaticBearer("session-jwt")) as SharedBearerResolver),
+                stashed_bearer_resolver: None,
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            let reason = try_rotate_to_failover_key(
+                &mut config,
+                &mut client,
+                crate::exhausted_identity::HopCause::CreditExhausted,
+            )
+            .expect("session→key hop");
+            assert_eq!(config.api_key.as_deref(), Some("console-biz-key"));
+            assert!(
+                config.bearer_resolver.is_none(),
+                "hop session→key must clear bearer_resolver"
+            );
+            assert!(config.failover_api_keys.is_empty());
+            assert!(
+                reason.contains("SuperGrok session") && reason.contains("console key"),
+                "hop reason labels session→key: {reason}"
+            );
+            assert!(reason.contains("credit exhausted"), "credit hop: {reason}");
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&reason));
+        });
+    }
+
+    /// D2: console key → session JWT string hop (key-primary dual-auth ordering).
+    #[test]
+    fn rotate_console_key_to_session_jwt() {
+        crate::exhausted_identity::with_memo_lock(|| {
+            let mut config = SamplerConfig {
+                api_key: Some("console-biz-key".into()),
+                failover_api_keys: vec!["session-jwt".into()],
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: Some("session-jwt".into()),
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4".into(),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            let reason = try_rotate_to_failover_key(
+                &mut config,
+                &mut client,
+                crate::exhausted_identity::HopCause::CreditExhausted,
+            )
+            .expect("key→session hop");
+            assert_eq!(config.api_key.as_deref(), Some("session-jwt"));
+            assert!(config.failover_api_keys.is_empty());
+            assert!(config.bearer_resolver.is_none());
+            assert!(
+                reason.contains("console key") && reason.contains("SuperGrok session"),
+                "hop reason labels key→session: {reason}"
+            );
+        });
+    }
+
+    /// Dual-host: session on cli-chat-proxy → console key switches to api.x.ai and drops proxy headers.
+    #[test]
+    fn rotate_session_to_console_key_switches_host_and_headers() {
+        use crate::config::{BearerResolver, SharedBearerResolver};
+        use indexmap::IndexMap;
+        use std::sync::Arc;
+
+        crate::exhausted_identity::with_memo_lock(|| {
+            #[derive(Debug)]
+            struct StaticBearer(&'static str);
+            impl BearerResolver for StaticBearer {
+                fn current_bearer(&self) -> Option<String> {
+                    Some(self.0.to_owned())
+                }
+            }
+
+            let proxy = "https://cli-chat-proxy.example.x.ai/v1";
+            let console = "https://api.x.ai/v1";
+            let mut headers = IndexMap::new();
+            headers.insert("X-XAI-Token-Auth".into(), "xai-grok-cli".into());
+            headers.insert(
+                "x-authenticateresponse".into(),
+                "authenticate-response".into(),
+            );
+            headers.insert("x-grok-client-mode".into(), "interactive".into());
+            headers.insert("X-Custom".into(), "keep-me".into());
+
+            let mut config = SamplerConfig {
+                api_key: Some("session-jwt".into()),
+                failover_api_keys: vec!["console-biz-key".into()],
+                failover_base_url: Some(console.into()),
+                session_base_url: Some(proxy.into()),
+                session_identity_key: Some("session-jwt".into()),
+                base_url: proxy.into(),
+                model: "grok-4".into(),
+                extra_headers: headers,
+                bearer_resolver: Some(Arc::new(StaticBearer("session-jwt")) as SharedBearerResolver),
+                stashed_bearer_resolver: None,
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            assert!(
+                try_rotate_to_failover_key(
+                    &mut config,
+                    &mut client,
+                    crate::exhausted_identity::HopCause::CreditExhausted,
+                )
+                .is_some()
+            );
+            assert_eq!(config.api_key.as_deref(), Some("console-biz-key"));
+            assert_eq!(config.base_url, console);
+            assert!(config.bearer_resolver.is_none());
+            assert!(config.stashed_bearer_resolver.is_some());
+            assert!(!config.extra_headers.contains_key("X-XAI-Token-Auth"));
+            assert_eq!(
+                config.extra_headers.get("X-Custom").map(String::as_str),
+                Some("keep-me"),
+                "non-proxy headers must survive host switch"
+            );
+        });
+    }
+
+    /// Dual-host reverse: console → session restores proxy host, proxy headers, and stashed bearer.
+    #[test]
+    fn rotate_console_key_to_session_restores_host_headers_and_bearer() {
+        use crate::config::{BearerResolver, SharedBearerResolver};
+        use std::sync::Arc;
+
+        crate::exhausted_identity::with_memo_lock(|| {
+            #[derive(Debug)]
+            struct StaticBearer(&'static str);
+            impl BearerResolver for StaticBearer {
+                fn current_bearer(&self) -> Option<String> {
+                    Some(self.0.to_owned())
+                }
+            }
+
+            let proxy = "https://cli-chat-proxy.example.x.ai/v1";
+            let console = "https://api.x.ai/v1";
+            let resolver: SharedBearerResolver = Arc::new(StaticBearer("session-jwt"));
+
+            let mut config = SamplerConfig {
+                api_key: Some("console-biz-key".into()),
+                failover_api_keys: vec!["session-jwt".into()],
+                failover_base_url: Some(console.into()),
+                session_base_url: Some(proxy.into()),
+                session_identity_key: Some("session-jwt".into()),
+                base_url: console.into(),
+                model: "grok-4".into(),
+                stashed_bearer_resolver: Some(resolver),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            assert!(
+                try_rotate_to_failover_key(
+                    &mut config,
+                    &mut client,
+                    crate::exhausted_identity::HopCause::CreditExhausted,
+                )
+                .is_some()
+            );
+            assert_eq!(config.api_key.as_deref(), Some("session-jwt"));
+            assert_eq!(config.base_url, proxy);
+            assert!(config.bearer_resolver.is_some());
+            assert!(config.stashed_bearer_resolver.is_none());
+            assert_eq!(
+                config
+                    .extra_headers
+                    .get("X-XAI-Token-Auth")
+                    .map(String::as_str),
+                Some("xai-grok-cli")
+            );
+        });
+    }
+
+    /// Live re-bind hop-to-session without prior stash (key-primary dual-auth).
+    #[test]
+    fn rotate_console_key_to_session_live_rebinds_without_prior_stash() {
+        use crate::config::{BearerResolver, SharedBearerResolver};
+        use std::sync::Arc;
+
+        crate::exhausted_identity::with_memo_lock(|| {
+            #[derive(Debug)]
+            struct LiveSessionBearer;
+            impl BearerResolver for LiveSessionBearer {
+                fn current_bearer(&self) -> Option<String> {
+                    Some("session-jwt-live".into())
+                }
+            }
+
+            let live: SharedBearerResolver = Arc::new(LiveSessionBearer);
+            let mut config = SamplerConfig {
+                api_key: Some("console-biz-key".into()),
+                failover_api_keys: vec!["session-jwt-live".into()],
+                session_identity_key: Some("session-jwt-live".into()),
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4".into(),
+                stashed_bearer_resolver: None,
+                session_bearer_resolver: Some(live),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            let reason = try_rotate_to_failover_key(
+                &mut config,
+                &mut client,
+                crate::exhausted_identity::HopCause::CreditExhausted,
+            )
+            .expect("key→session hop");
+            assert_eq!(config.api_key.as_deref(), Some("session-jwt-live"));
+            assert!(
+                config.bearer_resolver.is_some(),
+                "must live re-bind session_bearer_resolver without prior stash"
+            );
+            assert_eq!(
+                config
+                    .bearer_resolver
+                    .as_ref()
+                    .and_then(|r| r.current_bearer())
+                    .as_deref(),
+                Some("session-jwt-live")
+            );
+            assert!(
+                config.stashed_bearer_resolver.is_none(),
+                "stash remains empty when hop used durable live re-bind"
+            );
+            assert!(
+                config.session_bearer_resolver.is_some(),
+                "durable session resolver is not consumed"
+            );
+            assert!(
+                reason.contains("console key") && reason.contains("SuperGrok session"),
+                "hop reason: {reason}"
+            );
+        });
+    }
+
+    /// D3: after a hop, exhausted primary fingerprint is memoized so a later
+    /// rotate skips re-selecting it (and preemptive skip hops without API fail).
+    #[test]
+    fn rotate_memos_exhausted_fingerprint_and_skips_on_next_turn() {
+        crate::exhausted_identity::with_memo_lock(|| {
+            let mut config = SamplerConfig {
+                api_key: Some("dead-key".into()),
+                failover_api_keys: vec!["live-key".into(), "also-live".into()],
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: None,
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4".into(),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            let reason = try_rotate_to_failover_key(
+                &mut config,
+                &mut client,
+                crate::exhausted_identity::HopCause::CreditExhausted,
+            )
+            .expect("hop");
+            assert_eq!(config.api_key.as_deref(), Some("live-key"));
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&reason));
+            assert!(reason.contains("credit exhausted"), "{reason}");
+            let dead_fp = fingerprint_secret("dead-key");
+            assert!(
+                crate::exhausted_identity::is_exhausted(&dead_fp),
+                "exhausted primary must be memoized"
+            );
+
+            // Simulate next turn: resolve rebuilds list with dead primary first.
+            config.api_key = Some("dead-key".into());
+            config.failover_api_keys = vec!["live-key".into(), "also-live".into()];
+            let hop = try_skip_memoized_exhausted_primary(&mut config, &mut client)
+                .expect("preemptive skip of memoized dead key");
+            assert_eq!(config.api_key.as_deref(), Some("live-key"));
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&hop));
+
+            // Memoized dead key must not be re-selected from failover either.
+            config.api_key = Some("live-key".into());
+            config.failover_api_keys = vec!["dead-key".into(), "also-live".into()];
+            // Mark live-key exhausted and hop — must skip dead-key in list.
+            crate::exhausted_identity::mark_exhausted(&fingerprint_secret("live-key"));
+            let hop2 = try_rotate_to_failover_key(
+                &mut config,
+                &mut client,
+                crate::exhausted_identity::HopCause::CreditExhausted,
+            )
+            .expect("skip dead");
+            assert_eq!(
+                config.api_key.as_deref(),
+                Some("also-live"),
+                "memoized dead-key must be skipped in failover list"
+            );
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&hop2));
+        });
+    }
+
+    /// Rate-limit hop reuses rotate mechanics but does **not** sticky-memo
+    /// the left identity as credit-dead (return-to-primary when cool).
+    #[test]
+    fn rate_limit_rotate_does_not_memoize_credit_exhausted() {
+        crate::exhausted_identity::with_memo_lock(|| {
+            let mut config = SamplerConfig {
+                api_key: Some("throttled-key".into()),
+                failover_api_keys: vec!["backup-key".into()],
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4".into(),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            let reason = try_rotate_to_failover_key(
+                &mut config,
+                &mut client,
+                crate::exhausted_identity::HopCause::RateLimited,
+            )
+            .expect("rate-limit hop");
+            assert_eq!(config.api_key.as_deref(), Some("backup-key"));
+            assert!(
+                reason.contains("rate limited"),
+                "distinct hop reason: {reason}"
+            );
+            assert!(
+                !reason.contains("credit exhausted"),
+                "must not claim credits: {reason}"
+            );
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&reason));
+            let left_fp = fingerprint_secret("throttled-key");
+            assert!(
+                !crate::exhausted_identity::is_exhausted(&left_fp),
+                "rate-limit hop must not use 1h credit memo"
+            );
+            // Preemptive credit skip must not fire for a rate-limited-only hop.
+            config.api_key = Some("throttled-key".into());
+            config.failover_api_keys = vec!["backup-key".into()];
+            assert!(
+                try_skip_memoized_exhausted_primary(&mut config, &mut client).is_none(),
+                "no credit memo → no preemptive skip"
+            );
+            assert_eq!(config.api_key.as_deref(), Some("throttled-key"));
+        });
     }
 }

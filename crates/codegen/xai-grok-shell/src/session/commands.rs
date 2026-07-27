@@ -688,11 +688,19 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<Option<String>>,
     },
     /// Ask a side question without interrupting the current turn.
-    /// The session snapshots the conversation context, makes a single
-    /// tool-free model call, and returns the response text.
+    /// The session snapshots the conversation context, makes a tool-free
+    /// model call, and returns the answer + `btw_session_id`. Follow-up
+    /// turns reuse `btw_session_id` and pass `prior_turns` so the model
+    /// sees the full side-thread.
     SideQuestion {
         question: String,
-        respond_to: oneshot::Sender<Result<String, String>>,
+        /// When set, continue this btw thread (same id for telemetry + history).
+        btw_session_id: Option<String>,
+        /// Completed prior Q/A turns in this btw thread (oldest first).
+        prior_turns: Vec<crate::session::helpers::side_question::BtwPriorTurn>,
+        respond_to: oneshot::Sender<
+            Result<crate::session::helpers::side_question::SideQuestionResult, String>,
+        >,
     },
     /// Generate a session recap (a short "where was I" summary) and broadcast
     /// it to clients via `SessionUpdate::SessionRecap`.

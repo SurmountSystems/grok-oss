@@ -27,15 +27,15 @@ Also: **upstream-export-import** skill rewritten off stale `MODE=overlay` /
 
 | Path | Edit |
 |------|------|
-| `/home/hunter/.grok/AGENTS.md` | HITL UX under Hard stop; § Never assume; § Skills & process pins (host overlay + dual-pin) |
-| `/home/hunter/.agents/skills/shared/references/subagent-token-strategy.md` | Required pins row B; HITL under Hard stop; § Never assume; anti-pattern + author item 7 |
-| `/home/hunter/.agents/skills/_SKILL_RULES-read-first-pls.md` | Standing 15–16; token-efficiency never-assume row; author 9–10; § dual-pin; reconciliations line |
-| `/home/hunter/.agents/skills/skill-maintenance/SKILL.md` | Quality 4c/4d; Required pins A–D table; product pins ≠ agents↔bundled |
-| `/home/hunter/.agents/skills/skill-maintenance/test-required-pins.sh` | Assert Hard stop, HITL, never-assume, dual-pin (+ prior regression pins) |
-| `/home/hunter/.agents/skills/implement/SKILL.md` | Light never-assume under Hard stop |
-| `/home/hunter/.agents/skills/pr-babysit/SKILL.md` | Light never-assume under Hard stop |
-| `/home/hunter/.agents/skills/create-skill/SKILL.md` | Author bar rows D/B/C |
-| `/home/hunter/.agents/skills/upstream-export-import/SKILL.md` | Kill MODE=overlay; cherry-pick + FORCE=1 + join-main; process pin survival; HITL spawn-first |
+| `~/.grok/AGENTS.md` | HITL UX under Hard stop; § Never assume; § Skills & process pins (host overlay + dual-pin) |
+| `~/.agents/skills/shared/references/subagent-token-strategy.md` | Required pins row B; HITL under Hard stop; § Never assume; anti-pattern + author item 7 |
+| `~/.agents/skills/_SKILL_RULES-read-first-pls.md` | Standing 15–16; token-efficiency never-assume row; author 9–10; § dual-pin; reconciliations line |
+| `~/.agents/skills/skill-maintenance/SKILL.md` | Quality 4c/4d; Required pins A–D table; product pins ≠ agents↔bundled |
+| `~/.agents/skills/skill-maintenance/test-required-pins.sh` | Assert Hard stop, HITL, never-assume, dual-pin (+ prior regression pins) |
+| `~/.agents/skills/implement/SKILL.md` | Light never-assume under Hard stop |
+| `~/.agents/skills/pr-babysit/SKILL.md` | Light never-assume under Hard stop |
+| `~/.agents/skills/create-skill/SKILL.md` | Author bar rows D/B/C |
+| `~/.agents/skills/upstream-export-import/SKILL.md` | Kill MODE=overlay; cherry-pick + FORCE=1 + join-main; process pin survival; HITL spawn-first |
 | `doc/dev/research/host-skills-process-pin-2026-07-24.md` | This join |
 
 ---

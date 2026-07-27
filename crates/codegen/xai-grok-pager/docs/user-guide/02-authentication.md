@@ -50,7 +50,52 @@ export XAI_API_KEY="xai-..."
 grok
 ```
 
-Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `grok logout` or delete `~/.grok/auth.json`.
+You can also store console / Business API keys under `$GROK_HOME` (OS keyring service `grok-build`, with `provider_credentials.json` mode `0600` as fallback) so they are not required in the environment. When `XAI_API_KEY` is set, the environment value wins and is not written to the store.
+
+### Store console keys (multi-add)
+
+Never pass the secret as a command-line argument — it lands in shell history,
+process lists, and some audit logs. Grok **refuses** argv secrets.
+
+```bash
+# Interactive: flag only, then type the key at the no-echo prompt
+grok login --api-key
+
+# Dual-auth status: session present? N store keys (fingerprints)? env wins?
+# Never prints raw keys or tokens
+grok login --list-api-keys
+```
+
+`grok login --list-api-keys` and human `grok doctor` both show dual-auth
+discoverability (counts and fingerprints only): SuperGrok session yes/no,
+console key store count + fingerprints, whether `XAI_API_KEY` env wins, preferred
+method, and whether session+console failover is ready.
+
+Prefer `XAI_API_KEY` for CI/automation (env wins; the store is not written when
+env is set). Advanced: `grok login --api-key -` reads one line from **non-TTY**
+process stdin only (not argv; a TTY stdin is refused — use bare `--api-key` for
+the no-echo prompt). Do not put secrets in shell history. Stored multi-keys
+become dual-auth failover candidates alongside SuperGrok OAuth.
+
+### SuperGrok session + console key (identity failover)
+
+On first-party xAI models you may use **both** a consumer SuperGrok OAuth session (`grok login`) and a console / Business API key at once:
+
+| Primary | Failover | When |
+|---------|----------|------|
+| Session (default) | Console key(s) from env, secret store, or `auth.json` | Both available; SuperGrok daily + Business when needed |
+| Console key | Session JWT | `[auth] preferred_method = "api_key"` and both available |
+
+Mid-request hop uses the next configured identity when:
+
+| Trigger | Behavior |
+|---------|----------|
+| **Credit / spending-limit** (HTTP 402, or credit-worded 403/429/400) | Hop immediately; sticky-skip the dead identity (~1h process-local memo) |
+| **Plain rate-limit 429** (no credit wording) | Hop immediately when another identity remains; temporary shared cooldown on the left key (not the credit memo) so the primary can be tried again when cool |
+
+Without a failover list, plain 429 still waits and retries on the same credential. OpenRouter and other BYOK hosts never receive the xAI session token. Enterprise `disable_api_key_auth` forces a single session identity and clears console-key failover.
+
+See [Custom Models → Identity failover](11-custom-models.md#credit-failover-multi-account).
 
 ---
 

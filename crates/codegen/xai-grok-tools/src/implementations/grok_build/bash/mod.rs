@@ -1996,6 +1996,85 @@ impl xai_tool_runtime::Tool for BashTool {
             ));
         }
 
+        // --- Skill-script intercepts (embedded Rust; never spawn python) ---
+        // Known allowlisted host skill scripts are handled in-process.
+        // Unknown python still shells.
+        let embedded: Option<(String, String, i32)> = if let Some(hit) =
+            crate::util::implement_memory::try_parse_memory_intercept(&input.command)
+        {
+            let h = crate::util::implement_memory::execute_intercept(&hit, &cwd, None);
+            Some((h.stdout, h.stderr, h.exit_code))
+        } else if let Some(hit) =
+            crate::util::plan_validate::try_parse_plan_validate_intercept(&input.command)
+        {
+            let h = crate::util::plan_validate::execute_intercept(&hit, &cwd);
+            Some((h.stdout, h.stderr, h.exit_code))
+        } else if let Some(hit) =
+            crate::util::session_reader::try_parse_session_reader_intercept(&input.command)
+        {
+            let h = crate::util::session_reader::execute_intercept(&hit, &cwd);
+            Some((h.stdout, h.stderr, h.exit_code))
+        } else {
+            None
+        };
+
+        if let Some((stdout, stderr, exit_code)) = embedded {
+            let output_file = session_folder
+                .join("terminal")
+                .join(format!("{}.log", tool_call_id.as_str()));
+            // Combined output like a shell capturing stdout+stderr.
+            let combined = if stderr.is_empty() {
+                stdout.clone()
+            } else if stdout.is_empty() {
+                format!("{}\n", stderr.trim_end())
+            } else {
+                format!("{stdout}{stderr}")
+            };
+            let total_bytes = combined.len();
+            // Best-effort write of the session log (same path shape as real bash).
+            if let Some(parent) = output_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&output_file, combined.as_bytes());
+
+            let base = BashNotificationBase {
+                tool_call_id: tool_call_id.as_str().to_owned(),
+                command: input.command.clone(),
+                output: combined.as_bytes().to_vec(),
+                total_bytes,
+                truncated: false,
+                cwd: cwd.clone(),
+            };
+            notification_handle.send_complete(BashExecutionComplete {
+                base,
+                exit_code: Some(exit_code),
+                signal: None,
+            });
+
+            let mut bash = BashOutput {
+                output_for_prompt: BashOutput::make_output_for_prompt(&combined),
+                output: combined.into_bytes(),
+                exit_code,
+                command: input.command,
+                truncated: false,
+                signal: None,
+                timed_out: false,
+                description: Some(input.description).filter(|d| !d.trim().is_empty()),
+                current_dir: cwd.to_string_lossy().to_string(),
+                output_file: output_file.to_string_lossy().to_string(),
+                total_bytes,
+                output_delta: None,
+                was_bare_echo: false,
+            };
+            let append_noop_reminder = resources
+                .lock()
+                .await
+                .get::<crate::types::resources::SystemRemindersEnabled>()
+                .is_none_or(|e| e.0);
+            bash.output_for_prompt = format_default_prompt(&bash, append_noop_reminder);
+            return Ok(BashToolOutput::Foreground(bash));
+        }
+
         // --- Prefix ---
         let command = Self::get_prefixed_command(&params.cmd_prefix, &input.command);
 
@@ -5077,6 +5156,237 @@ mod tests {
             assert!(!unix.contains("'&&' is not supported"));
             assert!(pwsh.contains("are NOT available in this shell"));
             assert!(pwsh.contains("'&&' is not supported in this shell"));
+        }
+    }
+
+    // ─── Implement-memory intercept (A2) ───
+
+    /// Terminal backend that records whether the real shell path was used.
+    struct TrackingTerminal {
+        called: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        inner: MockTerminal,
+    }
+
+    #[async_trait::async_trait]
+    impl TerminalBackend for TrackingTerminal {
+        async fn run(
+            &self,
+            request: TerminalRunRequest,
+        ) -> Result<TerminalRunResult, ComputerError> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.inner.run(request).await
+        }
+
+        async fn run_background(
+            &self,
+            request: TerminalRunRequest,
+        ) -> Result<BackgroundHandle, ComputerError> {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.inner.run_background(request).await
+        }
+
+        async fn get_task(&self, task_id: &str) -> Option<TaskSnapshot> {
+            self.inner.get_task(task_id).await
+        }
+
+        async fn kill_task(&self, task_id: &str) -> KillOutcome {
+            self.inner.kill_task(task_id).await
+        }
+
+        async fn wait_for_completion(
+            &self,
+            task_id: &str,
+            timeout: Option<Duration>,
+        ) -> Option<TaskSnapshot> {
+            self.inner.wait_for_completion(task_id, timeout).await
+        }
+
+        async fn list_tasks(&self) -> Vec<TaskSnapshot> {
+            self.inner.list_tasks().await
+        }
+    }
+
+    fn make_tracking_resources() -> (Resources, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock = TrackingTerminal {
+            called: called.clone(),
+            // If shell is wrongly used for memory.py, surface a distinctive error.
+            inner: MockTerminal::failing(),
+        };
+        let mut resources = Resources::new();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
+        resources.insert(Terminal(backend));
+        resources.insert(Cwd(PathBuf::from("/tmp")));
+        resources.insert(SessionFolder(PathBuf::from("/tmp/session")));
+        resources.insert(SessionEnv(Arc::new(HashMap::new())));
+        resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
+        resources.insert(Params(BashParams::default()));
+        let execute_params =
+            HashMap::from([("is_background".to_string(), "is_background".to_string())]);
+        let bg_params = HashMap::from([("task_id".to_string(), "task_id".to_string())]);
+        resources.insert(TemplateRenderer::new(
+            HashMap::from([(
+                ToolKind::BackgroundTaskAction,
+                "get_task_output".to_string(),
+            )]),
+            HashMap::from([
+                (ToolKind::Execute, execute_params),
+                (ToolKind::BackgroundTaskAction, bg_params),
+            ]),
+        ));
+        (resources, called)
+    }
+
+    #[tokio::test]
+    async fn implement_memory_snapshot_intercept_does_not_spawn_shell() {
+        let (resources, called) = make_tracking_resources();
+        let tool = BashTool;
+        let cmd = "python3 /home/u/.agents/skills/implement/scripts/memory.py snapshot";
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(cmd))
+                .await
+                .expect("intercept should succeed as a tool result");
+
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "known memory.py must not reach TerminalBackend"
+        );
+        match result {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0, "output={}", bash.output_for_prompt);
+                assert_eq!(bash.command, cmd);
+                let text = String::from_utf8_lossy(&bash.output);
+                let v: serde_json::Value =
+                    serde_json::from_str(text.trim()).expect("snapshot JSON");
+                assert!(v.get("exists").is_some());
+                assert!(v.get("common_issues").is_some());
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
+    #[tokio::test]
+    async fn implement_memory_path_and_read_intercept() {
+        let (resources, called) = make_tracking_resources();
+        let tool = BashTool;
+        let cmd = "python3 /home/u/.grok/bundled/skills/implement/scripts/memory.py path";
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(cmd))
+                .await
+                .unwrap();
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        match result {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0);
+                let path = String::from_utf8_lossy(&bash.output);
+                assert!(path.contains("implement-memory"), "path output: {path:?}");
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_python_still_reaches_shell() {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock = TrackingTerminal {
+            called: called.clone(),
+            inner: MockTerminal::success("from-shell\n", 0),
+        };
+        let mut resources = Resources::new();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
+        resources.insert(Terminal(backend));
+        resources.insert(Cwd(PathBuf::from("/tmp")));
+        resources.insert(SessionFolder(PathBuf::from("/tmp/session")));
+        resources.insert(SessionEnv(Arc::new(HashMap::new())));
+        resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
+        resources.insert(Params(BashParams::default()));
+        resources.insert(TemplateRenderer::new(HashMap::new(), HashMap::new()));
+
+        let tool = BashTool;
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("python3 /home/u/myproject/foo.py"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "unknown python must still shell"
+        );
+        match result {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0);
+                assert_eq!(String::from_utf8_lossy(&bash.output), "from-shell\n");
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_validate_intercept_does_not_spawn_shell() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        write!(
+            tmp,
+            r#"
+## PR Plan
+
+### PR 1: Solo
+- **Dependencies:** None
+- **Description:** only
+"#
+        )
+        .unwrap();
+        let (resources, called) = make_tracking_resources();
+        let tool = BashTool;
+        let cmd = format!(
+            "python3 /home/u/.agents/skills/execute-plan/scripts/validate-plan.py {}",
+            tmp.path().display()
+        );
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(&cmd))
+                .await
+                .expect("intercept should succeed");
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "known validate-plan.py must not reach TerminalBackend"
+        );
+        match result {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0, "output={}", bash.output_for_prompt);
+                let text = String::from_utf8_lossy(&bash.output);
+                let v: serde_json::Value =
+                    serde_json::from_str(text.trim()).expect("validate JSON");
+                assert_eq!(v["valid"], true);
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reader_list_intercept_does_not_spawn_shell() {
+        let (resources, called) = make_tracking_resources();
+        let tool = BashTool;
+        let cmd = "python3 /home/u/.agents/skills/shared/resume-session/session_reader.py claude list --cwd /tmp --json";
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(cmd))
+                .await
+                .expect("intercept should succeed");
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "known session_reader.py must not reach TerminalBackend"
+        );
+        match result {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0, "output={}", bash.output_for_prompt);
+                let text = String::from_utf8_lossy(&bash.output);
+                let v: serde_json::Value = serde_json::from_str(text.trim()).expect("list JSON");
+                assert_eq!(v["tool"], "claude");
+                assert!(v["sessions"].is_array());
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
         }
     }
 }

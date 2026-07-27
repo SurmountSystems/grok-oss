@@ -44,11 +44,20 @@ pub enum CredentialsStoreError {
 }
 
 /// One stored credential: URL → (username, secret).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct StoredCredential {
     username: String,
     /// Secret as a UTF-8 string (API keys are always text).
     secret: String,
+}
+
+impl std::fmt::Debug for StoredCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredCredential")
+            .field("username", &self.username)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -269,6 +278,17 @@ mod tests {
         let got = store.read(url).unwrap().expect("key present");
         assert_eq!(got.0, BEARER_USERNAME);
         assert_eq!(got.1, "sk-or-test");
+    }
+
+    #[test]
+    fn stored_credential_debug_redacts_secret() {
+        let cred = StoredCredential {
+            username: BEARER_USERNAME.to_owned(),
+            secret: "super-secret-key-value".to_owned(),
+        };
+        let dbg = format!("{cred:?}");
+        assert!(!dbg.contains("super-secret-key-value"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
     }
 
     #[test]

@@ -64,32 +64,96 @@ The plan file contains:
 
 ## Plan Approval
 
-When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool reads the plan file from disk, and the TUI opens a scrollable preview of the plan with an action bar along the bottom.
+When the agent finishes planning, it calls the `exit_plan_mode` tool. By default the TUI **soft-parks** the plan:
 
-If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, request changes (send the agent back to planning), or quit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
+- Toast + status chip (“Plan parked — press `/view-plan`…”) without taking over the screen
+- An **inline plan card** in the transcript (preview + CTA legend)
+- With an empty prompt, **`a` / `A` / `?` / `s` / `q`** work from the soft-park surface (no modal required)
+
+Open the full review surface on demand with **`/view-plan`**, the status chip, or **`ShowPlan`**. That opens a **side panel** beside chat (CTAs in the panel footer). **Ctrl+F** enlarges the panel to fullscreen and back.
+
+To open a full-screen plan modal immediately every time, set:
+
+```toml
+[ui]
+plan_approval_park = "modal"   # default is "soft"
+```
+
+(Settings UI: **Plan approval park** — Soft (toast) vs Modal.)
+
+If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens (on demand, or immediately when modal is configured) with a clear empty-state message so you can approve and start implementing, clarify, revise (send the agent back to planning), or quit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
 
 ### Reviewing the Plan
 
-Scroll the plan with the arrow keys or `j`/`k`. The action bar shows these shortcuts:
+Scroll the plan with the arrow keys or `j`/`k`. Copy like conversation scrollback: **`y`** copies the selected line (or visual range); **`Y`** copies the whole plan body. CTAs and revise→agent selection are unchanged.
+
+The action bar shows these shortcuts:
 
 | Shortcut | Action                                                                                               |
 | -------- | ---------------------------------------------------------------------------------------------------- |
-| `a`      | Approve the plan and start building. With pending comments, this reads `approve w/ comments` and sends them alongside the approval. |
-| `s`      | Request changes. Focus moves to the prompt so you can type revision notes; press `Enter` to send them. |
-| `c`      | Comment on the selected line or line range.                                                          |
-| `q`      | Quit plan -- abandon the plan without approving and turn plan mode off.                              |
+| `a`      | **Approve** — leave plan mode and start building immediately (no notes required). Pending line notes, if any, still ride along. |
+| `A`      | **Approve w/ comment** — focus the prompt for overall notes; `Enter` with text approves and attaches those notes. |
+| `?`      | **Clarify** — ask about the plan without rewriting it. Focus moves to the prompt; type your question and press `Enter`. Plan mode stays active; the agent answers read-only and should call `exit_plan_mode` again so approval reappears. |
+| `s`      | **Revise** — ask the agent to rewrite the plan. Focus moves to the prompt; type revision notes and press `Enter`. Plan mode stays active while the agent revises. |
+| `q`      | **Quit** — abandon the plan without approving and turn plan mode off. |
 
-Press `Tab` to move focus between the plan preview and the prompt.
+There is **no primary Comment button**. You can still attach line-level notes with `Enter` on a selected line (or double-click); those notes go with Approve / Clarify / Revise when you submit.
+
+Press `Tab` to move focus between the plan preview and the prompt. **Empty `Enter` on the prompt still approves** (same as `a`), even if you opened the prompt with `A`, `?`, or `s`.
+
+### Clarify vs Revise vs Approve
+
+| Path | Intent | What the agent does |
+| ---- | ------ | ------------------- |
+| **Approve** (`a` / empty Enter) | Build it | Leave plan mode and implement |
+| **Approve w/ comment** (`A` + notes + Enter) | Build it, with notes | Leave plan mode; notes are attached as review comments |
+| **Clarify** (`?`) | Understand the plan | Answer from the plan and research; **do not** rewrite `plan.md` unless you explicitly ask to change it; re-present approval when done |
+| **Revise** (`s`) | Change the plan | Revise `plan.md` from your notes; stay in plan mode; re-present when ready |
+| **Quit** (`q`) | Abort | Leave plan mode; no implement |
 
 ### Providing Feedback
 
 The approval view has three focus states:
 
-- **Preview**: Scroll the plan and select lines to comment on.
-- **Commenting**: Add an inline comment to the selected line range (press `c`, or `Enter` on a line).
-- **Prompt**: Type freeform revision notes.
+- **Preview**: Scroll the plan and use the primary CTAs above.
+- **Commenting** (secondary): Add an inline note on a selected line range (`Enter` on a line, or double-click). Not a primary CTA.
+- **Prompt**: Type freeform notes. What Enter does depends on how you opened the prompt (`A` approve w/ comment, `?` clarify, or `s` revise). Line notes attach to whichever action submits them.
 
-Press `Tab` to switch between the preview and the prompt. When you send feedback -- inline comments, freeform notes, or both -- the agent receives it and revises the plan. Plan mode stays active so you can iterate.
+Press `Tab` to switch between the preview and the prompt. After Clarify or Revise, plan mode stays active so you can iterate.
+
+### Line selection and multi-line highlight
+
+When you revise or clarify with a plan line selected, the agent receives the
+selection context — not just your freeform words:
+
+- **Path + line**: `@plan.md:N` for a single line, or `@plan.md:N-M` for a range
+- **Quoted text**: each selected source line, prefixed with `>`
+- **Your notes**: freeform prompt text and/or saved line comments
+
+**Single line:** move the cursor to a line (or click it), focus the prompt with
+`s` / `?` / `A`, type notes, press `Enter`. The agent sees that line’s text.
+
+**Multi-line highlight:** start a visual selection over several plan lines
+(same motion as multi-line select elsewhere in the line viewer), then submit
+revise/clarify or attach a line comment with `Enter`. The agent gets the full
+range and every quoted line in that range.
+
+Saved line comments already store their range; freeform revise/clarify also
+picks up the live viewer selection when you have not saved a comment yet.
+
+### Screenshots in plan mode
+
+You can paste or attach **screenshots** (and other images) on the plan-approval
+prompt the same way as the normal chat composer. On submit:
+
+| Action | What happens |
+| ------ | ------------ |
+| **Revise** (`s`) / **Clarify** (`?`) | Text feedback goes with the plan decision; screenshots ride as multimodal content on the same turn |
+| **Approve w/ comment** (`A`) | Notes + screenshots ride together on the approve path |
+| **Approve** with only screenshots | Screenshots still attach so the implement turn has visual context |
+
+Image chips clear after submit. Empty `Enter` with no text, comments, or images
+still means plain approve.
 
 ### Leaving the Approval View
 

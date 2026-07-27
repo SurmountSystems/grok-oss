@@ -596,11 +596,15 @@ pub fn current_value_for(
     match key {
         // SHARED — UiConfig source of truth, pager keeps a cache.
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
+        "hide_header" => Some(SettingValue::Bool(ui.hide_header)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
         // Cache is the send-path source of truth (same pattern as group_tool_verbs).
         "page_flip_on_send" => Some(SettingValue::Bool(
             crate::appearance::cache::load_page_flip_on_send(),
+        )),
+        "scrub_ascii_punct" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_scrub_ascii_punct(),
         )),
         // Cache is the drain-path source of truth (same pattern as page_flip_on_send).
         "combine_queued_prompts" => Some(SettingValue::Bool(
@@ -614,6 +618,7 @@ pub fn current_value_for(
         "contextual_hints.plan_mode" => Some(SettingValue::Bool(
             ui.contextual_hints.plan_mode.unwrap_or(true),
         )),
+        "plan_approval_park" => Some(SettingValue::Enum(ui.plan_approval_park_mode())),
         "contextual_hints.image_input" => Some(SettingValue::Bool(
             ui.contextual_hints.image_input.unwrap_or(true),
         )),
@@ -854,6 +859,12 @@ mod tests {
                         "compact_mode default drifts from UiConfig::default()"
                     );
                 }
+                ("hide_header", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.hide_header,
+                        "hide_header default drifts from UiConfig::default()"
+                    );
+                }
                 // Per-tip contextual hints: `None` (inherit) → default ON.
                 ("contextual_hints.undo", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -925,6 +936,13 @@ mod tests {
                         *default,
                         ui.page_flip_on_send_enabled(),
                         "page_flip_on_send default drifts from UiConfig::default()"
+                    );
+                }
+                ("scrub_ascii_punct", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.scrub_ascii_punct_enabled(),
+                        "scrub_ascii_punct default drifts from UiConfig::default()"
                     );
                 }
                 ("combine_queued_prompts", SettingKind::Bool { default }) => {
@@ -999,6 +1017,18 @@ mod tests {
                         *default, expected,
                         "permission_mode default drifts from UiConfig::default()'s \
                          None → 'ask' fallback (load_permission_mode contract)",
+                    );
+                }
+                ("plan_approval_park", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        UiConfig::PLAN_APPROVAL_PARK_DEFAULT,
+                        "plan_approval_park default drifts from UiConfig::PLAN_APPROVAL_PARK_DEFAULT"
+                    );
+                    assert_eq!(
+                        *default,
+                        ui.plan_approval_park_mode(),
+                        "plan_approval_park default drifts from UiConfig::default()"
                     );
                 }
                 // default_model: no UiConfig mirror, resolved dynamically.

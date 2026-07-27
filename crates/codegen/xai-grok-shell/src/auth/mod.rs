@@ -6,6 +6,7 @@ pub mod credentials_store;
 #[path = "devbox_login_stub.rs"]
 pub(crate) mod devbox_login;
 pub mod device_code;
+pub mod dual_auth_status;
 pub mod error;
 mod external_auth;
 mod flow;
@@ -17,10 +18,12 @@ pub mod oidc;
 pub mod openrouter;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
+pub mod secret_entry;
 pub(crate) mod single_flight;
 mod storage;
 mod token_output;
 pub(crate) mod token_type;
+pub mod xai_console;
 pub use auth_provider::{AuthProviderConfig, AuthProviderRef};
 pub(crate) use auth_provider::{
     PROVIDER_TIMEOUT_CEILING_SECS, PROVIDER_TOKEN_EXPIRY_SKEW_SECS, ProviderRefreshOutcome,
@@ -44,6 +47,9 @@ pub use flow::{
 };
 pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
 mod meta;
+pub use dual_auth_status::{
+    DualAuthStatus, collect_dual_auth_status, collect_dual_auth_status_with,
+};
 pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
 pub use harness_secrets::{
     DISABLE_SHARED_HARNESS_ENV, GROK_ZED_CONFIG_DIR_ENV, SharedKeySource,
@@ -65,6 +71,16 @@ pub use openrouter::{
     store_openrouter_api_key, usd_to_cents,
 };
 pub(crate) use refresh::DiagnosticUploader;
+pub use secret_entry::{
+    API_KEY_STDIN_SENTINEL, CliApiKeyError, is_argv_api_key_secret, materialize_cli_api_key,
+    materialize_cli_api_key_with, prompt_api_key_no_echo, read_api_key_from_stdin,
+};
 pub use storage::{
     clear_api_key, read_api_key, read_auth_json, read_token_by_scope, store_api_key,
+};
+pub use xai_console::{
+    XAI_CONSOLE_API_URL, XaiConsoleAuthError, add_console_api_key, clear_console_api_key,
+    credential_url as xai_console_credential_url, fingerprint_console_key,
+    list_console_api_key_fingerprints, load_stored_console_api_key, load_stored_console_api_keys,
+    run_list_console_api_keys, run_xai_console_login, store_console_api_key,
 };

@@ -57,6 +57,8 @@ collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat s
 page_flip_on_send = true               # pin a just-sent prompt at the top of the viewport so the
                                        # response starts on a fresh page (default: true); set false
                                        # so sending never moves the scroll position
+scrub_ascii_punct = true               # scrub fancy punctuation in assistant AI text to ASCII-safe
+                                       # forms (default: true); set false to keep curly quotes / dashes
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
 auto_run_implement = true              # after a successful turn, auto-queue a full multi-line
@@ -165,6 +167,33 @@ A CLI flag always wins over the config value for that invocation.
 #### Snap prompt to top on send
 
 By default, sending a prompt scrolls it to the top of the viewport so the response starts on a fresh page. Set `[ui] page_flip_on_send = false` (or toggle **Snap prompt to top on send** in `/settings` → Appearance) to leave the scroll position alone when you send. It takes effect on the next send — no restart.
+
+#### ASCII-safe assistant punctuation
+
+By default, assistant AI text is scrubbed so fancy punctuation is terminal-safe:
+
+| Input | Output |
+|-------|--------|
+| Em dash (—) | `--` |
+| En dash (–) | `-` |
+| Smart double quotes | `"` |
+| Smart apostrophes / single quotes | `'` |
+| Zero-width / invisible format chars | stripped |
+| Non-breaking / exotic spaces | ASCII space |
+
+User messages, tool I/O, and reasoning blocks are **not** scrubbed.
+
+**Turn it off (durable):**
+
+| Layer | How |
+|-------|-----|
+| Settings | `/settings` → Appearance → **ASCII-safe assistant punctuation** |
+| Config | `[ui] scrub_ascii_punct = false` in `~/.grok/config.toml` |
+| Env (ops kill-switch) | `GROK_SCRUB_ASCII_PUNCT=0` (also `false` / `off` / `no` / `n`) |
+
+Either config or env off disables scrub. Env is the process-level kill-switch.
+
+**Agent override:** the agent cannot silently disable scrub. To leave curly quotes alone, the agent calls the `disable_ascii_scrub` tool, which always goes through the session permission prompt (Allow once / Allow always / Reject) — never a silent flip. Reject keeps scrub on; Allow once turns it off for the rest of the session; Allow always also writes the durable setting `[ui] scrub_ascii_punct = false` (same path as the Appearance setting).
 
 #### Scrolling
 
@@ -776,6 +805,13 @@ The key ones. See the README for the complete list.
 |----------|-------------|
 | `GROK_HOME` | Override config directory (default: `~/.grok`) |
 | `GROK_RESPECT_GITIGNORE` | Force gitignore filtering on (`1`) or off (`0`); overrides `[tools] respect_gitignore` |
+
+### UI / hygiene
+
+| Variable | Description |
+|----------|-------------|
+| `GROK_SCRUB_ASCII_PUNCT` | Assistant-text ASCII scrub (default on when unset). Disable with `0` / `false` / `off` / `no` / `n`. See [ASCII-safe assistant punctuation](#ascii-safe-assistant-punctuation). |
+| `GROK_STRIP_TRAILING_WHITESPACE` | Strip trailing spaces/tabs after product file edits (default on). Disable with `0` / `false` / `off` / `no` / `n`. |
 
 ### Telemetry
 

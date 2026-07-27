@@ -6,20 +6,31 @@ use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 
 impl SessionActor {
-    /// Handle a /btw side question — single-turn model call using the
-    /// parent session's full context.
+    /// Handle a /btw side question — model call using the parent session's
+    /// full context, optionally continuing a multi-turn btw thread.
     ///
     /// Approach:
     /// - Keeps the parent's system prompt (conversation[0]) intact
     /// - Passes the full conversation history (including tool calls/results)
     /// - Includes tool definitions so the model knows capabilities
-    /// - Wraps the question in a `<system-reminder>` block in a user message
-    /// - Single turn, no tool execution
+    /// - Wraps the new question in a `<system-reminder>` user message
+    /// - On follow-up: reuses `btw_session_id`, injects prior Q/A turns, and
+    ///   relaxes the "no follow-up" reminder (see `helpers::side_question`)
+    /// - No tool execution
     ///
-    /// Generates a unique btw session ID and persists the result to
-    /// `btw_history.jsonl` in the session folder.
-    pub(super) async fn handle_side_question(&self, question: &str) -> Result<String, String> {
-        let btw_session_id = format!("btw-{}", uuid::Uuid::new_v4());
+    /// Each turn is appended as its own `BtwEntry` in `btw_history.jsonl`
+    /// sharing the same `btw_session_id` (multi-entry history).
+    pub(super) async fn handle_side_question(
+        &self,
+        question: &str,
+        btw_session_id: Option<String>,
+        prior_turns: Vec<crate::session::helpers::side_question::BtwPriorTurn>,
+    ) -> Result<crate::session::helpers::side_question::SideQuestionResult, String> {
+        use crate::session::helpers::side_question::{
+            SideQuestionResult, build_side_question_items, resolve_btw_session_id,
+        };
+
+        let btw_session_id = resolve_btw_session_id(btw_session_id.as_deref());
         let parent_session_id = self.session_info.id.to_string();
         let asked_at = chrono::Utc::now();
 
@@ -33,48 +44,13 @@ impl SessionActor {
         // `ContentBlock::Thinking` without a top-level `thinking` config. The
         // Anthropic Messages API rejects requests that include thinking blocks in
         // messages but omit the `thinking` parameter.
-        let mut items: Vec<ConversationItem> =
+        let parent_items: Vec<ConversationItem> =
             xai_chat_state::compaction_utils::strip_reasoning_blocks(
                 self.chat_state_handle.get_conversation().await,
             );
 
-        // /btw fires mid-turn, so the snapshot may end with an assistant
-        // message whose tool_calls have no matching ToolResult yet. The
-        // Anthropic Messages API rejects this with "tool_use ids were found
-        // without tool_result blocks". Truncate the trailing incomplete
-        // assistant+tool_result run.
-        while let Some(last) = items.last() {
-            match last {
-                ConversationItem::Assistant(a) if !a.tool_calls.is_empty() => {
-                    items.pop();
-                }
-                ConversationItem::ToolResult(_) => {
-                    items.pop();
-                }
-                _ => break,
-            }
-        }
-
-        // Wrap the question in a <system-reminder> user message.
         let tag = self.reminder_wrapper_tag();
-        let wrapped_question = format!(
-            "<{tag}>This is a side question from the user. \
-             You must answer this question directly in a single response.\n\n\
-             IMPORTANT CONTEXT:\n\
-             - You are a separate, lightweight agent spawned to answer this one question\n\
-             - The main agent is NOT interrupted - it continues working independently in the background\n\
-             - You share the conversation context but are a completely separate instance\n\
-             - Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\n\
-             CRITICAL CONSTRAINTS:\n\
-             - You have NO tools available - you cannot read files, run commands, search, or take any actions\n\
-             - This is a one-off response - there will be no follow-up turns\n\
-             - You can ONLY provide information based on what you already know from the conversation context\n\
-             - NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n\
-             - If you don't know the answer, say so - do not offer to look it up or investigate\n\n\
-             Simply answer the question with the information you have.</{tag}>\n\n\
-             {question}"
-        );
-        items.push(ConversationItem::user(wrapped_question));
+        let items = build_side_question_items(parent_items, &prior_turns, question, tag);
 
         let tool_definitions = self.prepare_tool_definitions().await;
         let tool_specs: Vec<ToolSpec> = tool_definitions.into_iter().map(ToolSpec::from).collect();
@@ -132,7 +108,10 @@ impl SessionActor {
             return Err("No response from model".to_string());
         }
         persist(content.clone(), true, None);
-        Ok(content)
+        Ok(SideQuestionResult {
+            answer: content,
+            btw_session_id,
+        })
     }
 
     /// Generate a session recap and broadcast it via

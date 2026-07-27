@@ -102,14 +102,15 @@ Grok resolves the API key in this order:
 
 ### Credit failover (multi-account)
 
-When the active key is rejected for **credit / spending-limit** reasons (HTTP 402, or bodies like “out of credits”), Grok OSS automatically retries the same request with the next configured key on that model’s host. Provide multiple keys by:
+When the active credential is rejected for **credit / spending-limit** reasons (HTTP 402, or bodies like “out of credits”), **or** a plain HTTP **429** rate limit, Grok OSS automatically retries the same request with the next configured identity on that model’s host (when a failover list is configured). Provide multiple keys by:
 
 - Comma- or newline-separating values in `api_key` or in an env var  
   (`api_key = "sk-a,sk-b"` or `export OPENROUTER_API_KEY="sk-a,sk-b"`)
 - Listing several env names: `env_key = ["KEY_A", "KEY_B"]` (first set wins as primary; other set values are failover)
 - For OpenRouter: `OPENROUTER_API_KEYS` plus optional secret-store key from `grok-oss login --openrouter`
+- **First-party xAI dual-auth:** a SuperGrok OAuth session (`grok login`) plus a console / Business API key (`XAI_API_KEY`, secret store, or `auth.json`). Default order is **session first**, console key failover; set `[auth] preferred_method = "api_key"` to reverse. Hop session→key clears the live bearer resolver so the exhausted JWT is not re-injected; hop key→session uses the session JWT from the failover list. Never attaches the xAI session to OpenRouter.
 
-Exhausted keys are not reused for that request. Ordinary rate limits (429 without credit wording) still wait and retry on the same key.
+**Credit hop** sticky-skips the dead identity (~1h process-local memo) and toast says “credit exhausted.” **Rate-limit hop** uses a temporary shared cooldown on the left key only (not the credit memo) so the preferred primary can be tried again when cool; toast says “rate limited.” Without failover keys, plain 429 still waits and retries on the same key. Enterprise `disable_api_key_auth` keeps a single session identity (no console-key failover).
 
 ### Context Window
 

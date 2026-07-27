@@ -189,6 +189,8 @@ pub(super) enum PlanApprovalOutcome {
     Approved,
     Cancelled,
     Abandoned,
+    /// Clarifying question only — stay in plan mode; answer read-only; re-park.
+    Questions,
 }
 impl PlanApprovalOutcome {
     fn from_response(
@@ -197,6 +199,7 @@ impl PlanApprovalOutcome {
         match resp.outcome.as_str() {
             "approved" => Self::Approved,
             "abandoned" => Self::Abandoned,
+            "questions" => Self::Questions,
             _ => Self::Cancelled,
         }
     }
@@ -233,6 +236,22 @@ fn revise_plan_message(feedback: &str) -> String {
         format!("The user wants to revise the plan. The user said:\n{feedback}")
     }
 }
+/// Shared clarifying-question message for the Questions outcome (not a rewrite).
+/// Plan mode stays Active; the agent must answer read-only and call
+/// `exit_plan_mode` again to re-present approval.
+fn questions_plan_message(feedback: &str) -> String {
+    let feedback = feedback.trim();
+    let preamble = "The user has a clarifying question about the plan \
+         (not requesting a rewrite). Answer read-only from the plan and \
+         existing research. Do not rewrite plan.md unless the user explicitly \
+         asks to change it. End by calling exit_plan_mode again to re-present \
+         the plan for approval.";
+    if feedback.is_empty() {
+        format!("{preamble} Ask the user what they want to know about the plan.")
+    } else {
+        format!("{preamble}\n\nThe user asked:\n{feedback}")
+    }
+}
 /// What the resume re-park does with the user's decision. Extracted
 /// from `resume_plan_approval` so the branch logic is unit-testable without
 /// driving a real turn.
@@ -242,6 +261,8 @@ pub(super) enum ResumeAction {
     LeaveAndImplement,
     /// Request changes: stay in plan mode and start a revise turn (Plan mode).
     StayAndRevise(String),
+    /// Questions: stay in plan mode and start an answer-only turn (Plan mode).
+    StayAndAnswer(String),
     /// Abandoned: leave plan mode and wait for the user (no turn).
     LeaveOnly,
 }
@@ -250,6 +271,9 @@ fn resume_action_for(outcome: PlanApprovalOutcome, feedback: Option<String>) -> 
         PlanApprovalOutcome::Approved => ResumeAction::LeaveAndImplement,
         PlanApprovalOutcome::Cancelled => {
             ResumeAction::StayAndRevise(revise_plan_message(feedback.as_deref().unwrap_or("")))
+        }
+        PlanApprovalOutcome::Questions => {
+            ResumeAction::StayAndAnswer(questions_plan_message(feedback.as_deref().unwrap_or("")))
         }
         PlanApprovalOutcome::Abandoned => ResumeAction::LeaveOnly,
     }
@@ -1005,7 +1029,95 @@ impl SessionActor {
             )
             .in_scope(|| {});
         }
-        if !plan_file_auto_approve {
+        // S3: agent scrub-disable must use scrub-specific permission options
+        // (AllowOnce / AllowAlways / Reject), never YOLO / Read auto-allow.
+        // Reject keeps scrub on; AllowAlways also persists settings off.
+        if crate::session::helpers::is_disable_ascii_scrub_tool(&call.function.name) {
+            // Already off (session or durable) — confirm without re-prompt.
+            if !crate::session::helpers::scrub_active() {
+                tracing::info_span!(
+                    "tool.decision",
+                    tool_name = %call.function.name,
+                    tool_use_id = %call.id,
+                    decision = "allow",
+                    source = "config",
+                    wait_ms = 0_i64,
+                )
+                .in_scope(|| {});
+            } else {
+                let _pending_guard =
+                    crate::session::pending_interaction::PendingInteractionGuard::new(
+                        self.pending_interactions.clone(),
+                        self.notifications.gateway.clone(),
+                        self.session_info.id.clone(),
+                        tool_call_id.to_string(),
+                        crate::session::pending_interaction::PendingKind::Permission,
+                    );
+                let perm_start = self.events.permission_requested(&call.function.name);
+                if !self.permissions.is_yolo_mode() {
+                    self.dispatch_notification_hook(
+                        "permission_prompt",
+                        Some("ASCII scrub disable requested".into()),
+                        None,
+                        Some("info".into()),
+                    )
+                    .await;
+                }
+                let flow = crate::session::helpers::request_agent_scrub_disable(
+                    &self.notifications.gateway,
+                    self.session_info.id.clone(),
+                    tool_call_id.to_string(),
+                )
+                .await;
+                let wait_ms = perm_start.elapsed().as_millis() as u64;
+                match flow {
+                    crate::session::helpers::ScrubDisableFlowResult::KeptOn => {
+                        self.events.permission_resolved(
+                            &call.function.name,
+                            xai_file_utils::events::types::PermissionDecision::Deny,
+                            perm_start,
+                        );
+                        tracing::info_span!(
+                            "tool.decision",
+                            tool_name = %call.function.name,
+                            tool_use_id = %call.id,
+                            decision = "deny",
+                            source = "user",
+                            wait_ms = wait_ms as i64,
+                        )
+                        .in_scope(|| {});
+                        let message = format!(
+                            "User rejected disabling ASCII scrub for tool `{}`. \
+                             Fancy punctuation will continue to be scrubbed.",
+                            call.function.name
+                        );
+                        self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                            .await?;
+                        return Ok(Err(ToolLoop::PermissionReject {
+                            tool_name: call.function.name.clone(),
+                            reason: "User rejected disabling ASCII scrub".to_owned(),
+                        }));
+                    }
+                    crate::session::helpers::ScrubDisableFlowResult::Disabled { always } => {
+                        self.events.permission_resolved(
+                            &call.function.name,
+                            xai_file_utils::events::types::PermissionDecision::Allow,
+                            perm_start,
+                        );
+                        tracing::info_span!(
+                            "tool.decision",
+                            tool_name = %call.function.name,
+                            tool_use_id = %call.id,
+                            decision = "allow",
+                            source = if always { "user_always" } else { "user" },
+                            wait_ms = wait_ms as i64,
+                        )
+                        .in_scope(|| {});
+                        // Fall through to tool body for model-facing confirmation.
+                    }
+                }
+            }
+        } else if !plan_file_auto_approve {
             let (perm_title, perm_kind, perm_raw_input) = tool_call_display
                 .as_ref()
                 .map(|(t, k, r)| (Some(t.clone()), Some(*k), Some(r.clone())))
@@ -1325,6 +1437,27 @@ impl SessionActor {
                         self.chat_state_handle.push_tool_result(tool_chat);
                         return Ok(Err(ToolLoop::Continue));
                     }
+                    PlanApprovalOutcome::Questions => {
+                        tracing::info!(
+                            "[exit_plan_mode] user questions about plan — staying in plan mode"
+                        );
+                        let message =
+                            questions_plan_message(parsed.feedback.as_deref().unwrap_or(""));
+                        let tool_update = acp::ToolCallUpdate::new(
+                            tool_call_id.clone(),
+                            acp::ToolCallUpdateFields::new()
+                                .status(Some(acp::ToolCallStatus::Completed))
+                                .content(Some(vec![acp::ToolCallContent::from(
+                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
+                                )])),
+                        );
+                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                            .await;
+                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                        self.chat_state_handle.push_tool_result(tool_chat);
+                        // Do not run exit_plan_mode tool body; plan mode stays Active.
+                        return Ok(Err(ToolLoop::Continue));
+                    }
                     PlanApprovalOutcome::Approved => {
                         tracing::info!("[exit_plan_mode] user approved — executing tool");
                     }
@@ -1526,6 +1659,11 @@ impl SessionActor {
             }
             ResumeAction::StayAndRevise(text) => {
                 tracing::info!("[exit_plan_mode] resume: user requested changes");
+                self.start_resume_turn(text, PromptMode::Plan, completion_tx)
+                    .await;
+            }
+            ResumeAction::StayAndAnswer(text) => {
+                tracing::info!("[exit_plan_mode] resume: user has plan questions");
                 self.start_resume_turn(text, PromptMode::Plan, completion_tx)
                     .await;
             }
@@ -2456,6 +2594,11 @@ impl SessionActor {
                 ..
             } => match channel {
                 SamplingChannel::Text => {
+                    // Assistant AI text only — scrub curly punctuation at the
+                    // stream choke so UI chunks, persistence, and streaming
+                    // capture stay consistent (default ON; env/config off).
+                    let text =
+                        crate::session::helpers::assistant_ascii_scrub::scrub_assistant_text(text);
                     {
                         let mut cap = self.streaming_turn_capture.lock();
                         if cap.prompt_id.is_none() {
@@ -2962,8 +3105,8 @@ mod plan_mode_edit_gate_tests {
 #[cfg(test)]
 mod plan_approval_helper_tests {
     use super::{
-        PlanApprovalOutcome, ResumeAction, ext_method_no_client, resume_action_for,
-        revise_plan_message,
+        PlanApprovalOutcome, ResumeAction, ext_method_no_client, questions_plan_message,
+        resume_action_for, revise_plan_message,
     };
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
     fn resp(outcome: &str) -> ExitPlanModeExtResponse {
@@ -2985,6 +3128,10 @@ mod plan_approval_helper_tests {
         assert_eq!(
             PlanApprovalOutcome::from_response(&resp("cancelled")),
             PlanApprovalOutcome::Cancelled
+        );
+        assert_eq!(
+            PlanApprovalOutcome::from_response(&resp("questions")),
+            PlanApprovalOutcome::Questions
         );
         assert_eq!(
             PlanApprovalOutcome::from_response(&resp("approve")),
@@ -3010,6 +3157,30 @@ mod plan_approval_helper_tests {
         assert!(with.contains("use async"));
     }
     #[test]
+    fn questions_plan_message_is_not_revise_and_forbids_rewrite() {
+        let empty = questions_plan_message("");
+        assert!(
+            empty.contains("clarifying question"),
+            "empty questions message must name clarifying intent: {empty}"
+        );
+        assert!(
+            !empty.contains("wants to revise"),
+            "questions must not use the revise framing: {empty}"
+        );
+        assert!(
+            empty.contains("Do not rewrite plan.md"),
+            "questions must forbid plan rewrite: {empty}"
+        );
+        assert!(
+            empty.contains("exit_plan_mode again"),
+            "questions must re-park via exit_plan_mode: {empty}"
+        );
+        let with = questions_plan_message("why Redis?");
+        assert!(with.contains("why Redis?"));
+        assert!(with.contains("The user asked:"));
+        assert!(!with.contains("wants to revise"));
+    }
+    #[test]
     fn resume_action_maps_each_outcome() {
         assert_eq!(
             resume_action_for(PlanApprovalOutcome::Approved, None),
@@ -3022,6 +3193,14 @@ mod plan_approval_helper_tests {
         match resume_action_for(PlanApprovalOutcome::Cancelled, Some("tweak it".into())) {
             ResumeAction::StayAndRevise(text) => assert!(text.contains("tweak it")),
             other => panic!("expected StayAndRevise, got {other:?}"),
+        }
+        match resume_action_for(PlanApprovalOutcome::Questions, Some("why Redis?".into())) {
+            ResumeAction::StayAndAnswer(text) => {
+                assert!(text.contains("why Redis?"));
+                assert!(text.contains("clarifying question"));
+                assert!(!text.contains("wants to revise"));
+            }
+            other => panic!("expected StayAndAnswer, got {other:?}"),
         }
     }
 }

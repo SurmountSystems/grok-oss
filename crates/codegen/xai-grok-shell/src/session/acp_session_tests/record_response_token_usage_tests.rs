@@ -207,6 +207,77 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
         .await;
 }
 
+/// Subagent sessions must append `usage.jsonl` with `agent_kind` ≠ `main`
+/// and `turn_type` = `agent_turn` (D1), including optional `work_ulid`.
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_usage_jsonl_uses_agent_turn_identity() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            // Unique session id so concurrent tests do not share usage.jsonl.
+            actor.session_info.id = acp::SessionId::new(format!(
+                "usage-d1-sub-{}",
+                xai_grok_tools::util::ulid::mint()
+            ));
+            let work = xai_grok_tools::util::ulid::mint();
+            actor.startup_hints.is_subagent = true;
+            actor.startup_hints.subagent_type = Some("explore".into());
+            actor.startup_hints.work_ulid = Some(work.clone());
+
+            actor.record_response_token_usage(&response_with_usage(12_000), Some(5));
+
+            let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+            let path = session_dir.join(crate::session::usage_log::USAGE_FILE);
+            let text = std::fs::read_to_string(&path).expect("usage.jsonl written for subagent");
+            let line = text.lines().last().expect("at least one usage line");
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid usage jsonl");
+            assert_eq!(v["turn_type"], "agent_turn");
+            assert_eq!(v["agent_kind"], "explore");
+            assert_eq!(v["work_ulid"], work);
+            assert_ne!(v["agent_kind"], "main");
+            assert_eq!(v["total_tokens"], 12_000);
+            assert_eq!(v["api_duration_ms"], 5);
+            // Best-effort cleanup so ~/.grok/sessions does not accumulate test dirs.
+            let _ = std::fs::remove_dir_all(&session_dir);
+        })
+        .await;
+}
+
+/// Main sessions still stamp `main`/`main` on usage.jsonl after D1.
+#[tokio::test(flavor = "current_thread")]
+async fn main_usage_jsonl_keeps_main_identity() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.session_info.id = acp::SessionId::new(format!(
+                "usage-d1-main-{}",
+                xai_grok_tools::util::ulid::mint()
+            ));
+            assert!(!actor.startup_hints.is_subagent);
+
+            actor.record_response_token_usage(&response_with_usage(8_000), None);
+
+            let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+            let path = session_dir.join(crate::session::usage_log::USAGE_FILE);
+            let text = std::fs::read_to_string(&path).expect("usage.jsonl written for main");
+            let line = text.lines().last().expect("at least one usage line");
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid usage jsonl");
+            assert_eq!(v["turn_type"], "main");
+            assert_eq!(v["agent_kind"], "main");
+            assert!(v.get("work_ulid").is_none());
+            let _ = std::fs::remove_dir_all(&session_dir);
+        })
+        .await;
+}
+
 /// `record_response_token_usage` must also stash the per-turn `TokenUsage`
 /// in chat state so the next `PromptResponse._meta` can carry input/output
 /// token counts to the bot's telemetry layer.

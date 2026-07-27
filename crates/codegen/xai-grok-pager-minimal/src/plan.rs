@@ -5,15 +5,16 @@
 //! into native scrollback** as a normal conversation block (see
 //! [`maybe_commit_plan`]), so it reads and scrolls exactly like the rest of the
 //! transcript. The prompt-anchored live region then holds only the decision
-//! controls — approve / revise / keep planning — plus the feedback input when
-//! revising. Nothing of the plan body is drawn under the prompt.
+//! controls — approve / approve w/ comment / clarify / revise / quit — plus the
+//! feedback input when clarifying or revising. Nothing of the plan body is drawn
+//! under the prompt.
 //!
 //! Input routing is unchanged: while `line_viewer.is_some()` the agent's input
 //! handler already routes keys to `handle_line_viewer_key` (Preview focus:
-//! `a` approve / `s`/`Tab` revise / `q` keep planning) and `handle_plan_feedback_key`
-//! (Prompt focus: type feedback, `Enter` send, `Esc` back). Minimal keeps the
-//! line viewer open (so those keys fire) but renders this compact controls strip
-//! in place of the never-drawn fullscreen viewer.
+//! `a` approve / `A` notes / `?` clarify / `s` revise / `q` quit) and
+//! `handle_plan_feedback_key` (Prompt focus: type, `Enter` send, `Esc` back).
+//! Minimal keeps the line viewer open (so those keys fire) but renders this
+//! compact controls strip in place of the never-drawn fullscreen viewer.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -25,7 +26,7 @@ use xai_grok_pager::app::app_view::{ActiveView, AppView};
 use xai_grok_pager::minimal_api;
 use xai_grok_pager::scrollback::block::RenderBlock;
 use xai_grok_pager::theme::Theme;
-use xai_grok_pager::views::plan_approval_view::PlanApprovalFocus;
+use xai_grok_pager::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
 use xai_grok_pager::views::prompt_widget::PromptStyle;
 
 /// The active plan-approval focus, defaulting to `Preview`.
@@ -42,8 +43,9 @@ fn focus(agent: &AgentView) -> PlanApprovalFocus {
 const EMPTY_PLAN_SCROLLBACK: &str = "\
 No plan written yet.
 
-Approve to leave plan mode and start implementing, request changes to send the \
-agent back to planning, or quit to abandon.";
+Approve to leave plan mode and start implementing, clarify to ask about the \
+plan without rewriting it, revise to send the agent back to planning, or quit \
+to abandon.";
 
 /// Controls-strip header for the parked plan-approval surface.
 fn plan_header(has_plan: bool) -> &'static str {
@@ -176,13 +178,22 @@ pub fn render(
         .unwrap_or(false)
         || !agent.prompt.text().trim().is_empty();
     // Tab reopens the preview (including the empty-plan placeholder).
+    let prompt_intent = minimal_api::plan_approval_view(agent).map(|p| p.prompt_intent);
     let hint = match foc {
-        PlanApprovalFocus::Prompt if has_content => {
-            "enter request changes \u{00b7} tab plan \u{00b7} esc back"
-        }
+        PlanApprovalFocus::Prompt if has_content => match prompt_intent {
+            Some(PlanPromptIntent::Questions) => {
+                "enter clarify \u{00b7} tab plan \u{00b7} esc back"
+            }
+            Some(PlanPromptIntent::ApproveNotes) => {
+                "enter approve w/ comment \u{00b7} tab plan \u{00b7} esc back"
+            }
+            _ => "enter revise \u{00b7} tab plan \u{00b7} esc back",
+        },
         PlanApprovalFocus::Prompt => "enter approve \u{00b7} tab plan \u{00b7} esc back",
         PlanApprovalFocus::Commenting => "enter save comment \u{00b7} esc cancel",
-        PlanApprovalFocus::Preview => "a approve \u{00b7} s revise \u{00b7} q keep planning",
+        PlanApprovalFocus::Preview => {
+            "a approve \u{00b7} A approve w/ comment \u{00b7} ? clarify \u{00b7} s revise \u{00b7} q quit"
+        }
     };
     let hint_style = theme.dim().bg(Color::Reset);
     let controls_rect = Rect {

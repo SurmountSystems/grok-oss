@@ -6,7 +6,7 @@ Grok Build draws all TUI colors from a central theme. You can switch themes whil
 
 ## Available Themes
 
-Grok includes five built-in themes, plus an `auto` option that follows your system appearance:
+Grok includes six built-in themes, plus an `auto` option that follows your system appearance:
 
 | Theme | Config Names | Description | Truecolor Required |
 |-------|-------------|-------------|--------------------|
@@ -15,8 +15,29 @@ Grok includes five built-in themes, plus an `auto` option that follows your syst
 | **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | Dark, blue-tinted backgrounds from the Tokyo Night palette. Loses its character when quantized. | Yes |
 | **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | Muted dark palette with mauve accents, from the Rosé Pine family. | Yes |
 | **OscuraMidnight** | `oscura`, `oscura-midnight` | Deep dark base with purple accents. | Yes |
+| **DOGE** | `doge` | Pure black background (`#000000`), white text/lines (`#FFFFFF`), and only the eight classic pure ANSI primaries (channels `0` or `255` only). Black is pixel-off on emissive displays (design intent only — no measured power claims). | No |
 
 Theme names are case-insensitive. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
+
+### DOGE (pure 3-bit)
+
+The **DOGE** theme uses exactly eight pure digital colours — Black, Red,
+Green, Yellow, Blue, Magenta, Cyan, White — with channels only `0` or `255`
+(no mid-gray palette slots). Informal set mnemonic: **RGBCMYKW** (set
+membership; index order is classic ANSI SGR name order, not that string
+order).
+
+| Config name | Notes |
+|-------------|--------|
+| `doge` | Only accepted id (case-insensitive) |
+
+**Black (`#000000`)** is treated as true off for the canvas (OLED-friendly
+design). **Bright** SGR names use the same pure values as normal (already
+saturated). Dim UI roles use white plus a dim modifier rather than inventing
+non-primary grays.
+
+Palette table and quantisation rules (project internal note):
+`doc/dev/specs/doge-pure-8-colour-2026-07-26.md`.
 
 ### Minimal Mode Has No Theming
 
@@ -143,15 +164,39 @@ Use compact mode on small screens to maximize content area.
 
 ---
 
+## Hide header
+
+Hide chrome headers to reclaim vertical space:
+
+```toml
+[ui]
+hide_header = true
+```
+
+Or toggle **Hide header** under Appearance in `/settings`. Default is off.
+
+When enabled, the same knob zeros:
+
+1. **Agent status bar** (cwd/git left; context %, queue badge, plan chip, todos right)
+2. **Welcome location top bar** (git branch / cwd line on the welcome screen)
+3. **Dashboard location header** (location + status chips + New Agent button row)
+
+Hiding is intentional opt-in: you lose those clicks and labels. Minimal mode has different chrome and ignores this setting.
+
+---
+
 ## Syntax Highlighting
 
-Grok bundles three `.tmTheme` files for code-block syntax highlighting and selects one based on the active theme:
+Grok bundles four `.tmTheme` files for code-block syntax highlighting and selects one based on the active theme:
 
-- `grok-night.tmTheme` -- GrokNight, RosePineMoon, and OscuraMidnight
+- `grok-night.tmTheme` -- GrokNight, RosePineMoon, OscuraMidnight
+- `doge.tmTheme` -- DOGE — pure 8-colour primaries only (`#000000` / `#FFFFFF` + the eight primaries)
 - `grok-day.tmTheme` -- GrokDay
 - `tokyo-night.tmTheme` -- TokyoNight
 
 Grok selects the matching file automatically when you switch themes. The `.tmTheme` files are built into the binary, so you cannot replace them with your own.
+
+Under **DOGE**, the context usage bar also uses **solid DOGE colour steps** (no mid-gray gradient) so usage urgency stays on the pure 8-colour palette.
 
 ---
 

@@ -10,7 +10,7 @@ use crate::theme::Theme;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
-use crate::views::plan_approval_view::PlanApprovalFocus;
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -51,6 +51,31 @@ impl AgentView {
         } else {
             // File couldn't be read — cancel the undo group.
             self.prompt.textarea.cancel_undo_group();
+        }
+    }
+
+    /// Toggle line-viewer fullscreen ↔ side panel (plan approval) / popup (file).
+    ///
+    /// Shared by Ctrl+F and the title-bar fullscreen mouse button so both
+    /// paths restore `side_panel` for parked plan approval when leaving
+    /// fullscreen (force-modal leave via mouse must not land on the dimmed
+    /// centered popup while keyboard restores the side panel).
+    pub(super) fn toggle_line_viewer_fullscreen(&mut self) {
+        let Some(ref mut viewer) = self.line_viewer else {
+            return;
+        };
+        if viewer.fullscreen {
+            viewer.fullscreen = false;
+            // Restore side panel for plan approval; file previews fall back
+            // to the centered popup (`side_panel` already false).
+            if viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+                && self.plan_approval_view.is_some()
+            {
+                viewer.side_panel = true;
+            }
+        } else {
+            viewer.fullscreen = true;
+            viewer.side_panel = false;
         }
     }
 
@@ -110,20 +135,13 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Ctrl+F: toggle fullscreen.
+        // Ctrl+F: toggle fullscreen ↔ side panel (plan) / popup (file).
         if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(ref mut viewer) = self.line_viewer {
-                viewer.fullscreen = !viewer.fullscreen;
-            }
+            self.toggle_line_viewer_fullscreen();
             return InputOutcome::Changed;
         }
 
-        if in_plan_approval && key!('c').matches(key) {
-            return self.enter_plan_commenting();
-        }
-
-        // Casual mode: same `c` / `s` shortcuts as plan approval so the
-        // footer hints actually work.
+        // Casual plan preview: `c` comment / `s` send (not approval CTAs).
         if !in_plan_approval && self.is_plan_viewer() && key!('c').matches(key) {
             return self.enter_casual_plan_commenting();
         }
@@ -135,19 +153,23 @@ impl AgentView {
             return self.send_casual_plan_comments();
         }
 
+        // Plan approval primary CTAs:
+        // a approve · A approve w/ comment · ? clarify · s revise · q quit
+        // (no primary Comment; Enter / dbl-click still open line notes)
         if in_plan_approval && key!('a').matches(key) {
             return self.approve_plan();
         }
-
-        // s: switch to prompt so the user can type an overall revision
-        // message before submitting. Enter from Prompt does the actual send.
-        if in_plan_approval && key!('s').matches(key) {
-            if let Some(ref mut pav) = self.plan_approval_view {
-                pav.focus = PlanApprovalFocus::Prompt;
-            }
-            return InputOutcome::Changed;
+        if in_plan_approval && key!('A').matches(key) {
+            return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
         }
-
+        // s: revise — freeform Enter sends ACP "cancelled".
+        if in_plan_approval && key!('s').matches(key) {
+            return self.focus_plan_prompt(PlanPromptIntent::Revise);
+        }
+        // ?: clarify — freeform Enter sends ACP "questions" (answer-only).
+        if in_plan_approval && key!('?').matches(key) {
+            return self.focus_plan_prompt(PlanPromptIntent::Questions);
+        }
         if in_plan_approval && key!('q').matches(key) {
             return self.abandon_plan();
         }
@@ -186,6 +208,8 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         // y: copy selected line(s) to system clipboard.
+        // Plan approval / plan preview: same line/range copy as conversation
+        // selection (does not interfere with a/s/?/q CTAs).
         if key!('y').matches(key) {
             if let Some(ref viewer) = self.line_viewer {
                 let text = if viewer.list_state.visual_mode {
@@ -219,9 +243,26 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        // Y: copy filename to clipboard.
+        // Y: on plan surfaces, copy whole plan body; else copy filename/title.
         if key!('Y').matches(key) {
-            if let Some(ref viewer) = self.line_viewer {
+            let is_plan = self.line_viewer.as_ref().is_some_and(|v| {
+                v.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+            });
+            if is_plan {
+                let text = self.plan_body_for_preview().or_else(|| {
+                    self.line_viewer.as_ref().map(|viewer| {
+                        viewer
+                            .lines
+                            .iter()
+                            .map(|item| item.copy_text())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                });
+                if let Some(text) = text.filter(|t| !t.is_empty()) {
+                    self.copy_to_clipboard(&text);
+                }
+            } else if let Some(ref viewer) = self.line_viewer {
                 let name = viewer
                     .title_override
                     .as_deref()
@@ -329,24 +370,30 @@ impl AgentView {
         self.casual_editing_comment_id = None;
     }
 
-    /// Dismiss the /btw panel. If Done, flush response to scrollback first.
+    /// Dismiss the /btw panel. Flushes Done (full thread) or Error-with-prior
+    /// turns to scrollback first so multi-turn answers are not lost.
     pub(super) fn dismiss_btw_panel(&mut self) -> InputOutcome {
-        use crate::scrollback::block::RenderBlock;
-        use crate::scrollback::blocks::BtwBlock;
-        use crate::views::btw_overlay::BtwOverlayState;
-        if let Some(BtwOverlayState::Done {
-            question, content, ..
-        }) = self.btw_state.take()
-        {
-            self.scrollback
-                .push_block(RenderBlock::Btw(BtwBlock::new(question, content.text())));
-        } else {
-            self.btw_state = None;
-        }
+        self.flush_open_btw_to_scrollback();
+        self.btw_state = None;
         self.minimal_btw_lifecycle = None;
         self.btw_focused = false;
         self.clear_btw_drag_state();
         InputOutcome::Changed
+    }
+
+    /// Flush any open Done/Error prior-turn payload into scrollback without
+    /// clearing focus flags. Used by dismiss and by first-shot `/btw` that
+    /// replaces an open panel so the previous thread is not dropped.
+    pub(crate) fn flush_open_btw_to_scrollback(&mut self) {
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::BtwBlock;
+        let Some(state) = self.btw_state.as_ref() else {
+            return;
+        };
+        if let Some((question, body)) = state.scrollback_flush_payload() {
+            self.scrollback
+                .push_block(RenderBlock::Btw(BtwBlock::new(question, body)));
+        }
     }
 
     pub(super) fn clear_btw_drag_state(&mut self) {
@@ -389,8 +436,10 @@ impl AgentView {
         let close_area = viewer.close_button_area;
         let fs_area = viewer.fullscreen_button_area;
         let send_area = viewer.plan_ref().and_then(|p| p.send_button_area);
+        let questions_area = viewer.plan_ref().and_then(|p| p.questions_button_area);
         let abandon_area = viewer.plan_ref().and_then(|p| p.abandon_button_area);
         let approve_area = viewer.plan_ref().and_then(|p| p.approve_button_area);
+        let approve_notes_area = viewer.plan_ref().and_then(|p| p.approve_notes_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
         // Cached `is_plan_viewer()` so we don't need to call self while
         // the line_viewer is mutably borrowed below.
@@ -406,11 +455,9 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
-                // Click on fullscreen button -> toggle fullscreen.
+                // Click on fullscreen button -> same toggle as Ctrl+F.
                 if fs_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
-                    if let Some(ref mut v) = self.line_viewer {
-                        v.fullscreen = !v.fullscreen;
-                    }
+                    self.toggle_line_viewer_fullscreen();
                     return InputOutcome::Changed;
                 }
                 if abandon_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
@@ -426,28 +473,32 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
-                if comment_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                if approve_notes_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()))
+                {
                     if self.plan_approval_view.is_some() {
-                        return self.enter_plan_commenting();
+                        return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
                     }
-                    if is_plan_preview {
+                    return InputOutcome::Changed;
+                }
+                // Comment button is casual-preview only (approval has no
+                // primary Comment CTA; Enter / dbl-click still open notes).
+                if comment_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    if is_plan_preview && self.plan_approval_view.is_none() {
                         return self.enter_casual_plan_commenting();
                     }
-                    // The comment button is only set on plan viewers,
-                    // so the two arms above are exhaustive in practice.
-                    // Return here to make the dead fall-through
-                    // explicit and to match the abandon/approve hit
-                    // patterns just above.
                     return InputOutcome::Changed;
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        if let Some(ref mut pav) = self.plan_approval_view {
-                            pav.focus = PlanApprovalFocus::Prompt;
-                        }
-                        return InputOutcome::Changed;
+                        return self.focus_plan_prompt(PlanPromptIntent::Revise);
                     }
                     return self.send_casual_plan_comments();
+                }
+                if questions_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    if self.plan_approval_view.is_some() {
+                        return self.focus_plan_prompt(PlanPromptIntent::Questions);
+                    }
+                    return InputOutcome::Changed;
                 }
                 if modal_area.is_none_or(|a| !a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some()
@@ -507,6 +558,13 @@ impl AgentView {
                     viewer.plan_mut().send_hovered = send_hover;
                     changed = true;
                 }
+                let questions_hover =
+                    questions_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_questions = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
+                if questions_hover != prev_questions {
+                    viewer.plan_mut().questions_hovered = questions_hover;
+                    changed = true;
+                }
                 let abandon_hover =
                     abandon_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
                 let prev_abandon = viewer.plan_ref().is_some_and(|p| p.abandon_hovered);
@@ -519,6 +577,13 @@ impl AgentView {
                 let prev_approve = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
                 if approve_hover != prev_approve {
                     viewer.plan_mut().approve_hovered = approve_hover;
+                    changed = true;
+                }
+                let approve_notes_hover = approve_notes_area
+                    .is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_approve_notes = viewer.plan_ref().is_some_and(|p| p.approve_notes_hovered);
+                if approve_notes_hover != prev_approve_notes {
+                    viewer.plan_mut().approve_notes_hovered = approve_notes_hover;
                     changed = true;
                 }
                 let comment_btn_hover =

@@ -115,8 +115,14 @@ impl AgentView {
             PlanApprovalFocus::Prompt => {
                 let has_content = !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
                 if has_content {
+                    use crate::views::plan_approval_view::PlanPromptIntent;
+                    let enter_label = match pav.prompt_intent {
+                        PlanPromptIntent::ApproveNotes => "approve w/ comment",
+                        PlanPromptIntent::Questions => "clarify",
+                        PlanPromptIntent::Revise => "revise",
+                    };
                     vec![
-                        HintItem::new(key!(Enter), "request changes"),
+                        HintItem::new(key!(Enter), enter_label),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]
@@ -1137,6 +1143,7 @@ impl AgentView {
             area.width,
             self.scrollback.turn_count(),
         );
+        let hide_header = appearance.hide_header;
         let mut layout = AgentViewLayout::compute(
             area,
             layout_cfg,
@@ -1157,6 +1164,7 @@ impl AgentView {
             voice_recording_height,
             1,
             compact,
+            hide_header,
         );
         let search_active =
             self.scrollback_search.is_some() && self.active_pane == AgentPane::Scrollback;
@@ -1233,6 +1241,7 @@ impl AgentView {
                         voice_recording_height,
                         1,
                         compact,
+                        hide_header,
                     );
                     if search_reserved_rows > 0 {
                         layout.scrollback.height -= search_reserved_rows;
@@ -1255,247 +1264,267 @@ impl AgentView {
         agent::fill_background(buf, area, layout_cfg, compact, &theme);
         use crate::views::agent_status::AgentStatusBar;
         use crate::views::context_bar;
-        let mut status = AgentStatusBar::new(&theme);
-        if let Some(url) = self.highlighted_link_url() {
-            let max_len = layout.status_bar.width.saturating_sub(20) as usize;
-            let display = if url.len() > max_len {
-                let truncated: String = url.chars().take(max_len.saturating_sub(1)).collect();
-                format!("{truncated}\u{2026}")
-            } else {
-                url.to_string()
-            };
-            let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
-            status.push("link_url", Line::from(Span::styled(display, link_style)));
-        }
-        let running_count = self.tasks.running_count(
-            &self.session.bg_tasks,
-            &self.subagent_sessions,
-            &self.session.scheduled_tasks,
-            &self.workflow_runs,
-        );
-        if running_count > 0 {
-            let spinner_frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tasks.tick_count() / 4) as usize % spinner_frames.len();
-            let frame = spinner_frames[frame_idx];
-            let indicator = format!("{frame} {running_count}");
-            let mut indicator_style = Style::default().fg(theme.accent_running).bg(theme.bg_base);
-            if self.hit_bg_status.hovered {
-                indicator_style = indicator_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push(
-                "bg_tasks",
-                Line::from(Span::styled(indicator, indicator_style)),
-            );
-        }
-        if self.should_show_plan_chip(&appearance) {
-            let mut plan_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
-            if self.hit_plan_button.hovered {
-                plan_style = plan_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push("plan", Line::from(Span::styled("plan", plan_style)));
-        }
-        if let Some(ref goal) = self.goal_state {
-            let tick = self.tasks.tick_count() as usize;
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
-            status.push(
-                "goal",
-                crate::views::agent_status::goal_status_line(
-                    goal,
-                    &theme,
-                    self.hit_goal_status.hovered,
-                    tick,
-                    self.context_state.as_ref().map(|c| c.used),
-                    active_subagent_tokens,
-                ),
-            );
-        }
-        if let Some(mcp_line) = self.mcp_init_progress.as_ref().and_then(|p| {
-            crate::views::agent_status::mcp_status_line(p, self.scrollback.animation_tick(), &theme)
-        }) {
-            status.push("mcp", mcp_line);
-        }
-        let ctx_used = self.context_state.as_ref().map(|c| c.used);
-        let model_window = self.session.models.get_context_window();
-        let ctx_total = self
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or(model_window);
-        if let Some(ctx_line) = context_bar::context_bar_line_for_session(
-            ctx_used,
-            ctx_total,
-            self.hit_context.hovered,
-            &theme,
-            self.chat_kind,
-        ) {
-            status.push("context", ctx_line);
-        }
-        let running = self.session.current_prompt_id.as_deref();
-        let queue_len = self.session.queue_len()
-            + self
-                .shared_queue
-                .iter()
-                .filter(|e| Some(e.id.as_str()) != running)
-                .count();
-        if queue_len > 0 {
-            use ratatui::style::Modifier;
-            let mut queue_style = ratatui::style::Style::default()
-                .fg(theme.accent_user)
-                .bg(theme.bg_base);
-            if self.hit_queue_badge.hovered {
-                queue_style = queue_style.add_modifier(Modifier::BOLD);
-            }
-            status.push(
-                "queue",
-                Line::from(Span::styled(format!("+{queue_len}"), queue_style)),
-            );
-        }
-        let counts = self.todo.counts();
-        if let Some(badge_spans) = agent::render_todo_badge_spans(
-            &counts,
-            self.hit_badge.hovered,
-            self.todo.badge_flash_active(),
-            appearance.todo.badge_format,
-            &theme,
-        ) {
-            status.push("badge", Line::from(badge_spans));
-        }
-        let areas = status.render(buf, layout.status_bar);
-        self.hit_bg_status.rect = areas.get("bg_tasks").copied();
-        self.hit_goal_status.rect = areas.get("goal").copied();
-        self.hit_context.rect = areas.get("context").copied();
-        self.hit_credits.rect = areas.get("credits").copied();
-        self.hit_plan_button.rect = areas.get("plan").copied();
-        self.hit_queue_badge.rect = areas.get("queue").copied();
-        self.hit_badge.rect = areas.get("badge").copied();
-        let home = std::env::var("HOME").ok();
-        let display = self.session.cwd.display().to_string();
-        let short = match &home {
-            Some(h) if display.starts_with(h.as_str()) => {
-                format!("~{}", &display[h.len()..])
-            }
-            _ => display,
-        };
-        let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         use unicode_width::UnicodeWidthStr;
-        let mut parts: Vec<Span> = Vec::new();
-        let mut path_offset: u16 = 0;
-        let lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
-        let branch = self
-            .current_branch
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone()));
-        let git_text = branch.map(|b| {
-            let icon = crate::git_info::branch_icon();
-            if b.is_empty() {
-                format!("{icon} detached")
-            } else {
-                format!("{icon} {b}")
-            }
-        });
-        if let Some(git_text) = git_text {
-            let git_style = Style::default()
-                .fg(theme.text_primary)
-                .bg(theme.bg_base)
-                .add_modifier(ratatui::style::Modifier::DIM);
-            path_offset += git_text.width() as u16;
-            parts.push(Span::styled(git_text, git_style));
-            path_offset += 1;
-            parts.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
-        }
-        let show_worktree_label = self.is_worktree
-            || self.session.is_worktree
-            || lazy_git.as_ref().is_some_and(|i| i.is_worktree);
-        if show_worktree_label {
-            let label_style = Style::default().fg(theme.accent_user).bg(theme.bg_base);
-            path_offset += "worktree ".width() as u16;
-            parts.push(Span::styled("worktree ", label_style));
-        }
-        if let Some(profile) = xai_grok_sandbox::profile_name() {
-            let sandbox_text = format!("sandbox:{profile} ");
-            let sandbox_style = Style::default().fg(theme.warning).bg(theme.bg_base);
-            path_offset += sandbox_text.width() as u16;
-            parts.push(Span::styled(sandbox_text, sandbox_style));
-        }
-        let path_width = short.width() as u16;
-        let path_style = if self.hit_cwd.hovered {
-            Style::default().fg(theme.text_primary).bg(theme.bg_base)
-        } else {
-            cwd_style
-        };
-        parts.push(Span::styled(short, path_style));
-        let main_repo_display = self
-            .main_repo
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
-        if let Some(main_repo) = main_repo_display {
-            parts.push(Span::styled(
-                format!(" (worktree of {main_repo})"),
-                cwd_style,
-            ));
-        }
-        let cwd_line = Line::from(parts);
-        let max_cwd_width = areas
-            .values()
-            .map(|r| r.x)
-            .min()
-            .map(|min_x| min_x.saturating_sub(layout.status_bar.x).saturating_sub(1))
-            .unwrap_or(layout.status_bar.width);
-        let upgrade_cta =
-            crate::views::announcements::promo_cta(banner_announcements, hidden_announcement_ids);
-        let upgrade_reserve = upgrade_cta.map_or(0u16, |(_, label, _)| {
-            1 + crate::views::announcements::upgrade_cta_reserve(label, None)
-        });
-        let cwd_line = truncate_line(
-            cwd_line,
-            max_cwd_width.saturating_sub(upgrade_reserve) as usize,
-        );
-        let cwd_width = cwd_line.width() as u16;
-        buf.set_line_safe(
-            layout.status_bar.x,
-            layout.status_bar.y,
-            &cwd_line,
-            cwd_width,
-        );
-        let path_x = layout.status_bar.x + path_offset;
-        let visible_path_width = path_width.min(cwd_width.saturating_sub(path_offset));
-        self.hit_cwd.rect = (visible_path_width > 0).then_some(Rect {
-            x: path_x,
-            y: layout.status_bar.y,
-            width: visible_path_width,
-            height: 1,
-        });
-        let mut upgrade_cta_rect = None;
-        if let Some((_owner, label, _url)) = upgrade_cta {
-            let avail = max_cwd_width.saturating_sub(cwd_width);
-            if avail > 1 {
-                let cta_x = layout.status_bar.x + cwd_width;
-                buf.set_span(
-                    cta_x,
-                    layout.status_bar.y,
-                    &Span::styled(" ", Style::default().bg(theme.bg_base)),
-                    1,
-                );
-                upgrade_cta_rect = crate::views::announcements::render_cta_button(
-                    buf,
-                    &theme,
-                    cta_x + 1,
-                    layout.status_bar.y,
-                    avail - 1,
-                    label,
-                    None,
-                    self.hit_upgrade_cta.hovered,
-                );
-            }
-        }
         let dropdown_open = self.prompt.any_dropdown_open();
-        self.hit_upgrade_cta
-            .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
+        // `[ui] hide_header` → zero-height status_bar; skip paint + null hits.
+        if layout.status_bar.height == 0 {
+            self.hit_bg_status.rect = None;
+            self.hit_goal_status.rect = None;
+            self.hit_context.rect = None;
+            self.hit_credits.rect = None;
+            self.hit_plan_button.rect = None;
+            self.hit_queue_badge.rect = None;
+            self.hit_badge.rect = None;
+            self.hit_cwd.rect = None;
+            self.hit_upgrade_cta.rect = None;
+        } else {
+            let mut status = AgentStatusBar::new(&theme);
+            if let Some(url) = self.highlighted_link_url() {
+                let max_len = layout.status_bar.width.saturating_sub(20) as usize;
+                let display = if url.len() > max_len {
+                    let truncated: String = url.chars().take(max_len.saturating_sub(1)).collect();
+                    format!("{truncated}\u{2026}")
+                } else {
+                    url.to_string()
+                };
+                let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
+                status.push("link_url", Line::from(Span::styled(display, link_style)));
+            }
+            let running_count = self.tasks.running_count(
+                &self.session.bg_tasks,
+                &self.subagent_sessions,
+                &self.session.scheduled_tasks,
+                &self.workflow_runs,
+            );
+            if running_count > 0 {
+                let spinner_frames = crate::glyphs::dot_spinner_frames();
+                let frame_idx = (self.tasks.tick_count() / 4) as usize % spinner_frames.len();
+                let frame = spinner_frames[frame_idx];
+                let indicator = format!("{frame} {running_count}");
+                let mut indicator_style =
+                    Style::default().fg(theme.accent_running).bg(theme.bg_base);
+                if self.hit_bg_status.hovered {
+                    indicator_style = indicator_style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                status.push(
+                    "bg_tasks",
+                    Line::from(Span::styled(indicator, indicator_style)),
+                );
+            }
+            if self.should_show_plan_chip(&appearance) {
+                let mut plan_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+                if self.hit_plan_button.hovered {
+                    plan_style = plan_style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                status.push("plan", Line::from(Span::styled("plan", plan_style)));
+            }
+            if let Some(ref goal) = self.goal_state {
+                let tick = self.tasks.tick_count() as usize;
+                let active_subagent_tokens: u64 = self
+                    .subagent_sessions
+                    .values()
+                    .filter(|s| !s.finished && s.workflow_run_id.is_none())
+                    .filter_map(|s| s.tokens_used)
+                    .sum();
+                status.push(
+                    "goal",
+                    crate::views::agent_status::goal_status_line(
+                        goal,
+                        &theme,
+                        self.hit_goal_status.hovered,
+                        tick,
+                        self.context_state.as_ref().map(|c| c.used),
+                        active_subagent_tokens,
+                    ),
+                );
+            }
+            if let Some(mcp_line) = self.mcp_init_progress.as_ref().and_then(|p| {
+                crate::views::agent_status::mcp_status_line(
+                    p,
+                    self.scrollback.animation_tick(),
+                    &theme,
+                )
+            }) {
+                status.push("mcp", mcp_line);
+            }
+            let ctx_used = self.context_state.as_ref().map(|c| c.used);
+            let model_window = self.session.models.get_context_window();
+            let ctx_total = self
+                .context_state
+                .as_ref()
+                .and_then(|c| (c.total > 0).then_some(c.total))
+                .or(model_window);
+            if let Some(ctx_line) = context_bar::context_bar_line_for_session(
+                ctx_used,
+                ctx_total,
+                self.hit_context.hovered,
+                &theme,
+                self.chat_kind,
+            ) {
+                status.push("context", ctx_line);
+            }
+            let running = self.session.current_prompt_id.as_deref();
+            let queue_len = self.session.queue_len()
+                + self
+                    .shared_queue
+                    .iter()
+                    .filter(|e| Some(e.id.as_str()) != running)
+                    .count();
+            if queue_len > 0 {
+                use ratatui::style::Modifier;
+                let mut queue_style = ratatui::style::Style::default()
+                    .fg(theme.accent_user)
+                    .bg(theme.bg_base);
+                if self.hit_queue_badge.hovered {
+                    queue_style = queue_style.add_modifier(Modifier::BOLD);
+                }
+                status.push(
+                    "queue",
+                    Line::from(Span::styled(format!("+{queue_len}"), queue_style)),
+                );
+            }
+            let counts = self.todo.counts();
+            if let Some(badge_spans) = agent::render_todo_badge_spans(
+                &counts,
+                self.hit_badge.hovered,
+                self.todo.badge_flash_active(),
+                appearance.todo.badge_format,
+                &theme,
+            ) {
+                status.push("badge", Line::from(badge_spans));
+            }
+            let areas = status.render(buf, layout.status_bar);
+            self.hit_bg_status.rect = areas.get("bg_tasks").copied();
+            self.hit_goal_status.rect = areas.get("goal").copied();
+            self.hit_context.rect = areas.get("context").copied();
+            self.hit_credits.rect = areas.get("credits").copied();
+            self.hit_plan_button.rect = areas.get("plan").copied();
+            self.hit_queue_badge.rect = areas.get("queue").copied();
+            self.hit_badge.rect = areas.get("badge").copied();
+            let home = std::env::var("HOME").ok();
+            let display = self.session.cwd.display().to_string();
+            let short = match &home {
+                Some(h) if display.starts_with(h.as_str()) => {
+                    format!("~{}", &display[h.len()..])
+                }
+                _ => display,
+            };
+            let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let mut parts: Vec<Span> = Vec::new();
+            let mut path_offset: u16 = 0;
+            let lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
+            let branch = self
+                .current_branch
+                .clone()
+                .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone()));
+            let git_text = branch.map(|b| {
+                let icon = crate::git_info::branch_icon();
+                if b.is_empty() {
+                    format!("{icon} detached")
+                } else {
+                    format!("{icon} {b}")
+                }
+            });
+            if let Some(git_text) = git_text {
+                let git_style = Style::default()
+                    .fg(theme.text_primary)
+                    .bg(theme.bg_base)
+                    .add_modifier(ratatui::style::Modifier::DIM);
+                path_offset += git_text.width() as u16;
+                parts.push(Span::styled(git_text, git_style));
+                path_offset += 1;
+                parts.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
+            }
+            let show_worktree_label = self.is_worktree
+                || self.session.is_worktree
+                || lazy_git.as_ref().is_some_and(|i| i.is_worktree);
+            if show_worktree_label {
+                let label_style = Style::default().fg(theme.accent_user).bg(theme.bg_base);
+                path_offset += "worktree ".width() as u16;
+                parts.push(Span::styled("worktree ", label_style));
+            }
+            if let Some(profile) = xai_grok_sandbox::profile_name() {
+                let sandbox_text = format!("sandbox:{profile} ");
+                let sandbox_style = Style::default().fg(theme.warning).bg(theme.bg_base);
+                path_offset += sandbox_text.width() as u16;
+                parts.push(Span::styled(sandbox_text, sandbox_style));
+            }
+            let path_width = short.width() as u16;
+            let path_style = if self.hit_cwd.hovered {
+                Style::default().fg(theme.text_primary).bg(theme.bg_base)
+            } else {
+                cwd_style
+            };
+            parts.push(Span::styled(short, path_style));
+            let main_repo_display = self
+                .main_repo
+                .clone()
+                .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
+            if let Some(main_repo) = main_repo_display {
+                parts.push(Span::styled(
+                    format!(" (worktree of {main_repo})"),
+                    cwd_style,
+                ));
+            }
+            let cwd_line = Line::from(parts);
+            let max_cwd_width = areas
+                .values()
+                .map(|r| r.x)
+                .min()
+                .map(|min_x| min_x.saturating_sub(layout.status_bar.x).saturating_sub(1))
+                .unwrap_or(layout.status_bar.width);
+            let upgrade_cta = crate::views::announcements::promo_cta(
+                banner_announcements,
+                hidden_announcement_ids,
+            );
+            let upgrade_reserve = upgrade_cta.map_or(0u16, |(_, label, _)| {
+                1 + crate::views::announcements::upgrade_cta_reserve(label, None)
+            });
+            let cwd_line = truncate_line(
+                cwd_line,
+                max_cwd_width.saturating_sub(upgrade_reserve) as usize,
+            );
+            let cwd_width = cwd_line.width() as u16;
+            buf.set_line_safe(
+                layout.status_bar.x,
+                layout.status_bar.y,
+                &cwd_line,
+                cwd_width,
+            );
+            let path_x = layout.status_bar.x + path_offset;
+            let visible_path_width = path_width.min(cwd_width.saturating_sub(path_offset));
+            self.hit_cwd.rect = (visible_path_width > 0).then_some(Rect {
+                x: path_x,
+                y: layout.status_bar.y,
+                width: visible_path_width,
+                height: 1,
+            });
+            let mut upgrade_cta_rect = None;
+            if let Some((_owner, label, _url)) = upgrade_cta {
+                let avail = max_cwd_width.saturating_sub(cwd_width);
+                if avail > 1 {
+                    let cta_x = layout.status_bar.x + cwd_width;
+                    buf.set_span(
+                        cta_x,
+                        layout.status_bar.y,
+                        &Span::styled(" ", Style::default().bg(theme.bg_base)),
+                        1,
+                    );
+                    upgrade_cta_rect = crate::views::announcements::render_cta_button(
+                        buf,
+                        &theme,
+                        cta_x + 1,
+                        layout.status_bar.y,
+                        avail - 1,
+                        label,
+                        None,
+                        self.hit_upgrade_cta.hovered,
+                    );
+                }
+            }
+            self.hit_upgrade_cta
+                .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
+        } // end status_bar.height > 0
         let mut inline_edit_cursor: Option<(u16, u16)> = None;
         {
             self.sync_pending_user_input_marks();
@@ -3372,6 +3401,7 @@ impl AgentView {
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
             } else if in_plan_approval {
+                // CTAs first (a/s/q); copy always live (not vim-gated).
                 let mut h = vec![HintItem::new(key!('c'), "comment")];
                 if approval_has_comments {
                     h.push(HintItem::new(key!('s'), "send"));
@@ -3383,6 +3413,8 @@ impl AgentView {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
                 h.push(HintItem::new(key!('v'), "select"));
+                h.push(HintItem::new(key!('y'), "copy"));
+                h.push(HintItem::new(key!('Y'), "copy plan"));
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
             } else if is_plan_viewer {
@@ -3409,6 +3441,8 @@ impl AgentView {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
                 h.push(HintItem::new(key!('v'), "select"));
+                h.push(HintItem::new(key!('y'), "copy"));
+                h.push(HintItem::new(key!('Y'), "copy plan"));
                 h.push(HintItem::new(key!('f', CONTROL), "fullscreen"));
                 h.push(HintItem::new(key!('/'), "search"));
                 h.push(HintItem::new(key!(Esc), "close"));

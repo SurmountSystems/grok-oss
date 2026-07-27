@@ -175,6 +175,8 @@ impl AgentViewLayout {
         voice_recording_height: u16,
         shortcuts_height: u16,
         compact: bool,
+        // When true, the top agent status bar has height 0 (no paint/hits).
+        hide_header: bool,
     ) -> Self {
         let outer_vpad = layout_cfg.eff_outer_vpad(compact);
         let bottom_vpad = if area.height <= SHORT_TERMINAL_ROWS {
@@ -200,8 +202,9 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
+        let status_bar_height = if hide_header { 0 } else { 1 };
         let mut constraints = vec![
-            Constraint::Length(1), // StatusBar
+            Constraint::Length(status_bar_height), // StatusBar (0 when hide_header)
         ];
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
@@ -801,6 +804,21 @@ pub fn render_todo_badge_spans(
         Style::default().fg(theme.gray_dim).bg(theme.bg_base)
     };
     if matches!(format, TodoBadgeFormat::Default) {
+        // Points mode: leaf fib sizes (e.g. "3/8 pts"); else legacy done/total counts.
+        if counts.points_mode {
+            if counts.total_points == 0 {
+                return None;
+            }
+            return Some(vec![
+                Span::styled(counts.completed_points.to_string(), count_style),
+                Span::styled("/", dim_style),
+                Span::styled(counts.total_points.to_string(), count_style),
+                Span::styled(
+                    " pts".to_string(),
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+                ),
+            ]);
+        }
         let total = counts.total_excluding_cancelled();
         if total == 0 {
             return None;
@@ -1979,6 +1997,7 @@ mod tests {
             0,
             1,
             false,
+            false,
         )
     }
     fn layout_with_cta(area: Rect, cta_height: u16) -> AgentViewLayout {
@@ -2012,7 +2031,67 @@ mod tests {
             0,
             1,
             false,
+            false,
         )
+    }
+
+    #[test]
+    fn hide_header_zeroes_status_bar_height() {
+        let area = Rect::new(0, 0, 80, 40);
+        let layout_cfg = LayoutConfig::default();
+        let scrollbar_cfg = ScrollbarConfig::default();
+        let shown = AgentViewLayout::compute(
+            area,
+            &layout_cfg,
+            &scrollbar_cfg,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            false,
+            false,
+        );
+        let hidden = AgentViewLayout::compute(
+            area,
+            &layout_cfg,
+            &scrollbar_cfg,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            false,
+            true,
+        );
+        assert_eq!(shown.status_bar.height, 1);
+        assert_eq!(hidden.status_bar.height, 0);
+        assert!(
+            hidden.scrollback.height >= shown.scrollback.height,
+            "hiding header should free space for scrollback (shown={}, hidden={})",
+            shown.scrollback.height,
+            hidden.scrollback.height
+        );
     }
     #[test]
     fn timeline_rail_replaces_the_scrollbar_column() {
@@ -2198,6 +2277,7 @@ mod tests {
             pending: 2,
             completed: 2,
             cancelled: 0,
+            ..Default::default()
         };
         let spans =
             render_todo_badge_spans(&counts, false, false, TodoBadgeFormat::Default, &theme)
@@ -2212,6 +2292,7 @@ mod tests {
             pending: 1,
             completed: 2,
             cancelled: 1,
+            ..Default::default()
         };
         let spans = render_todo_badge_spans(
             &with_cancelled,
@@ -2226,6 +2307,26 @@ mod tests {
             text.starts_with("2/3"),
             "cancelled tasks are excluded from the total, got {text:?}"
         );
+    }
+
+    /// Points mode badge shows `done_pts/total_pts pts` from leaf sizes.
+    #[test]
+    fn todo_badge_points_mode_renders_pts_fraction() {
+        let theme = Theme::current();
+        let counts = super::super::todo_pane::TodoCounts {
+            in_progress: 1,
+            pending: 1,
+            completed: 1,
+            cancelled: 0,
+            completed_points: 2,
+            total_points: 5,
+            points_mode: true,
+        };
+        let spans =
+            render_todo_badge_spans(&counts, false, false, TodoBadgeFormat::Default, &theme)
+                .expect("badge renders in points mode");
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "2/5 pts");
     }
     /// No todos → no badge.
     #[test]
@@ -2246,6 +2347,7 @@ mod tests {
             pending: 0,
             completed: 0,
             cancelled: 3,
+            ..Default::default()
         };
         assert!(
             render_todo_badge_spans(

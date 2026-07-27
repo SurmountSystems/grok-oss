@@ -17,20 +17,77 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 
 The agent exited plan mode without writing a plan.
 
-- **Approve** — leave plan mode and start implementing
-- **Request changes** — send the agent back to planning
-- **Quit** — abandon and turn plan mode off
+- **Approve** (`a`) — leave plan mode and start implementing
+- **Approve w/ comment** (`A`) — approve and attach notes
+- **Clarify** (`?`) — ask about the plan without rewriting it
+- **Revise** (`s`) — send the agent back to planning
+- **Quit** (`q`) — abandon and turn plan mode off
 ";
 
-/// Status-line label while plan approval is parked.
+/// Toast shown when `exit_plan_mode` soft-parks approval without opening the
+/// full-screen plan modal (option A — non-blocking status chrome).
 ///
-/// Empty plans use an active decision prompt instead of "Waiting…", so the
-/// UI doesn't look stuck when there is no preview body to open.
+/// The approval surface stays reachable via `/view-plan`, the status-line
+/// click target, or `ShowPlan` / reopen paths (side panel by default).
+pub const PLAN_PARKED_TOAST: &str = "Plan parked — press /view-plan or click status to review";
+
+/// Header line for the inline transcript plan card (option C).
+pub const PLAN_CARD_HEADER: &str = "Plan ready for review";
+
+/// Empty-plan header for the inline transcript card.
+pub const PLAN_CARD_HEADER_EMPTY: &str = "No plan written yet";
+
+/// CTA legend painted on the soft-park transcript card (keys work with an
+/// empty prompt; `/view-plan` opens the side panel).
+pub const PLAN_CARD_CTAS: &str =
+    "a approve · A approve w/ comment · ? clarify · s revise · q quit · /view-plan open panel";
+
+/// Max body lines embedded in the soft-park transcript card before ellipsis.
+pub const PLAN_CARD_PREVIEW_LINES: usize = 12;
+
+/// Build the scrollback body for a soft-parked plan (option C).
+///
+/// Header + truncated plan preview + CTA legend. Chat remains usable; CTAs
+/// fire from an empty prompt without opening the side panel.
+pub fn format_parked_plan_card(plan_content: Option<&str>) -> String {
+    let has_plan = plan_content.is_some_and(|s| !s.trim().is_empty());
+    let header = if has_plan {
+        PLAN_CARD_HEADER
+    } else {
+        PLAN_CARD_HEADER_EMPTY
+    };
+    let mut out = String::new();
+    out.push_str(header);
+    out.push('\n');
+    out.push('\n');
+    if let Some(body) = plan_content.map(str::trim).filter(|s| !s.is_empty()) {
+        let lines: Vec<&str> = body.lines().collect();
+        let take = lines.len().min(PLAN_CARD_PREVIEW_LINES);
+        for line in &lines[..take] {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if lines.len() > PLAN_CARD_PREVIEW_LINES {
+            out.push_str("…\n");
+        }
+        out.push('\n');
+    } else {
+        out.push_str("The agent exited plan mode without writing a plan.\n\n");
+    }
+    out.push_str(PLAN_CARD_CTAS);
+    out
+}
+
+/// Status-line label while plan approval is parked (soft or modal).
+///
+/// Soft park (option A) keeps this non-modal indicator visible until the user
+/// opens the approval surface. Empty plans still name a review path so the
+/// status line never looks stuck with no way forward.
 pub fn plan_approval_status_label(has_plan: bool) -> &'static str {
     if has_plan {
-        "Waiting on plan approval"
+        "Plan parked — click or /view-plan to review"
     } else {
-        "No plan written — approve or request changes"
+        "No plan written — click or /view-plan to review"
     }
 }
 
@@ -39,6 +96,22 @@ pub enum PlanApprovalFocus {
     Preview,
     Prompt,
     Commenting,
+}
+
+/// What freeform Enter on the plan-approval prompt means.
+///
+/// - **Revise** (`s`): ACP `"cancelled"` — rewrite the plan.
+/// - **Questions** (`?` clarify): ACP `"questions"` — answer read-only; do not rewrite.
+/// - **ApproveNotes** (`A`): ACP `"approved"` + notes via approve Interject.
+///
+/// Wire outcomes keep their historical strings; user-facing labels use
+/// clarify / revise / approve w/ comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanPromptIntent {
+    #[default]
+    Revise,
+    Questions,
+    ApproveNotes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +136,8 @@ pub struct PlanApprovalViewState {
     pub response_tx: Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
 
     pub focus: PlanApprovalFocus,
+    /// Semantic for Prompt Enter with non-empty text (or comments).
+    pub prompt_intent: PlanPromptIntent,
     pub comments: Vec<PlanComment>,
     pub next_comment_id: u64,
     pub editing_comment_id: Option<u64>,
@@ -101,6 +176,7 @@ impl PlanApprovalViewState {
             stashed_prompt,
             response_tx: Some(response_tx),
             focus: PlanApprovalFocus::Preview,
+            prompt_intent: PlanPromptIntent::Revise,
             comments: Vec::new(),
             next_comment_id: 0,
             editing_comment_id: None,
@@ -110,34 +186,47 @@ impl PlanApprovalViewState {
     }
 
     pub fn format_feedback(&self, freeform: Option<&str>) -> String {
+        self.format_feedback_with_selection(freeform, None)
+    }
+
+    /// Build revise/clarify feedback for the agent.
+    ///
+    /// Every selected plan line the user commented on (or, when there are no
+    /// saved comments, the current viewer `selection`) is rendered as:
+    /// path (`@plan.md:N`), quoted line text, then the user's words.
+    /// That trio is required so the model does not have to guess which line
+    /// "this line" refers to.
+    pub fn format_feedback_with_selection(
+        &self,
+        freeform: Option<&str>,
+        selection: Option<&std::ops::Range<usize>>,
+    ) -> String {
         let mut parts: Vec<String> = self
             .comments
             .iter()
-            .map(|comment| match self.source {
-                PlanReviewSource::Inline => {
-                    let label = if comment.line_range.len() == 1 {
-                        format!("Proposed plan line {}:", comment.line_range.start)
-                    } else {
-                        format!(
-                            "Proposed plan lines {}-{}:",
-                            comment.line_range.start,
-                            comment.line_range.end - 1
-                        )
-                    };
-                    let snippets =
-                        inline_plan_snippets(self.plan_content.as_deref(), &comment.line_range);
-                    format!("{label}\n{snippets}\n\nComment:\n{}", comment.text)
-                }
-                PlanReviewSource::FileBacked => format_file_backed_plan_comment(comment),
-            })
+            .map(|comment| format_plan_line_comment(self.plan_content.as_deref(), comment))
             .collect();
+
+        // Freeform-only path: attach the live viewer selection so revise /
+        // clarify about "this line" still carries path + line + text.
+        if self.comments.is_empty()
+            && let Some(range) = selection
+            && range.start > 0
+            && range.end > range.start
+        {
+            parts.push(format_selected_plan_lines(
+                self.plan_content.as_deref(),
+                range,
+            ));
+        }
 
         if let Some(text) = freeform
             && !text.trim().is_empty()
         {
-            let text = match (self.source, self.comments.is_empty()) {
-                (PlanReviewSource::Inline, false) => format!("Additional feedback:\n{text}"),
-                _ => text.to_owned(),
+            let text = if self.comments.is_empty() {
+                text.to_owned()
+            } else {
+                format!("Additional feedback:\n{text}")
             };
             parts.push(text);
         }
@@ -186,22 +275,43 @@ impl PlanApprovalViewState {
         send_ext_response(&mut self.response_tx, "cancelled", feedback)
     }
 
+    /// Clarifying questions — plan mode stays Active; shell injects answer-only turn.
+    pub fn send_questions(&mut self, feedback: Option<String>) -> bool {
+        send_ext_response(&mut self.response_tx, "questions", feedback)
+    }
+
     pub fn send_stale_cancel(&mut self) -> bool {
         self.send_cancelled(None)
     }
 }
 
-fn format_file_backed_plan_comment(comment: &PlanComment) -> String {
-    let range = if comment.line_range.len() == 1 {
-        format!("@plan.md:{}", comment.line_range.start)
+/// Session plan file basename used in agent-facing selection anchors.
+/// Matches the on-disk name under the session directory (`…/plan.md`).
+pub const PLAN_FEEDBACK_PATH: &str = "plan.md";
+
+/// `@plan.md:N` or `@plan.md:N-M` for a 1-based half-open line range.
+pub(crate) fn format_plan_line_loc(range: &std::ops::Range<usize>) -> String {
+    if range.len() == 1 {
+        format!("@{PLAN_FEEDBACK_PATH}:{}", range.start)
     } else {
-        format!(
-            "@plan.md:{}-{}",
-            comment.line_range.start,
-            comment.line_range.end - 1
-        )
-    };
-    format!("{range}\n{}", comment.text)
+        format!("@{PLAN_FEEDBACK_PATH}:{}-{}", range.start, range.end - 1)
+    }
+}
+
+/// Path + line number(s) + quoted line text — the selection payload the agent
+/// needs when the user refers to "this line".
+pub(crate) fn format_selected_plan_lines(
+    plan_content: Option<&str>,
+    range: &std::ops::Range<usize>,
+) -> String {
+    let loc = format_plan_line_loc(range);
+    let snippets = inline_plan_snippets(plan_content, range);
+    format!("{loc}\n{snippets}")
+}
+
+fn format_plan_line_comment(plan_content: Option<&str>, comment: &PlanComment) -> String {
+    let header = format_selected_plan_lines(plan_content, &comment.line_range);
+    format!("{header}\n\nComment:\n{}", comment.text)
 }
 
 pub(crate) fn inline_plan_snippets(
@@ -231,19 +341,7 @@ pub(crate) fn inline_plan_snippets(
 pub(crate) fn format_plan_comments(comments: &[PlanComment], plan_content: Option<&str>) -> String {
     comments
         .iter()
-        .map(|comment| {
-            let label = if comment.line_range.len() == 1 {
-                format!("Proposed plan line {}:", comment.line_range.start)
-            } else {
-                format!(
-                    "Proposed plan lines {}-{}:",
-                    comment.line_range.start,
-                    comment.line_range.end - 1
-                )
-            };
-            let snippets = inline_plan_snippets(plan_content, &comment.line_range);
-            format!("{label}\n{snippets}\n\nComment:\n{}", comment.text)
-        })
+        .map(|comment| format_plan_line_comment(plan_content, comment))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -326,6 +424,24 @@ mod tests {
     }
 
     #[test]
+    fn test_send_questions_with_feedback() {
+        let (mut state, mut rx) = make_test_state();
+        assert!(state.send_questions(Some("Why Redis?".into())));
+        let resp = rx.try_recv().expect("should receive response");
+        let raw = resp.expect("should be Ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw.0.get()).expect("should be valid JSON");
+        assert_eq!(parsed["outcome"], "questions");
+        assert_eq!(parsed["feedback"], "Why Redis?");
+    }
+
+    #[test]
+    fn test_constructor_defaults_prompt_intent_revise() {
+        let (state, _rx) = make_test_state();
+        assert_eq!(state.prompt_intent, PlanPromptIntent::Revise);
+    }
+
+    #[test]
     fn test_send_stale_cancel() {
         let (mut state, mut rx) = make_test_state();
         assert!(state.send_stale_cancel());
@@ -399,13 +515,37 @@ mod tests {
 
     #[test]
     fn plan_approval_status_label_distinguishes_empty() {
-        assert_eq!(plan_approval_status_label(true), "Waiting on plan approval");
+        assert_eq!(
+            plan_approval_status_label(true),
+            "Plan parked — click or /view-plan to review"
+        );
         assert_eq!(
             plan_approval_status_label(false),
-            "No plan written — approve or request changes"
+            "No plan written — click or /view-plan to review"
+        );
+        assert!(
+            PLAN_PARKED_TOAST.contains("Plan parked") && PLAN_PARKED_TOAST.contains("/view-plan"),
+            "soft-park toast must name the non-modal review path"
         );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());
+        assert!(
+            EMPTY_PLAN_PLACEHOLDER.contains("Clarify")
+                && EMPTY_PLAN_PLACEHOLDER.contains("Revise")
+                && EMPTY_PLAN_PLACEHOLDER.contains("Approve w/ comment"),
+            "empty-plan CTA copy should list the four primary actions"
+        );
+    }
+
+    #[test]
+    fn format_parked_plan_card_embeds_preview_and_ctas() {
+        let card = format_parked_plan_card(Some("# Title\n\nLine two\nLine three"));
+        assert!(card.starts_with(PLAN_CARD_HEADER));
+        assert!(card.contains("# Title") && card.contains("Line two"));
+        assert!(card.contains(PLAN_CARD_CTAS));
+        let empty = format_parked_plan_card(None);
+        assert!(empty.starts_with(PLAN_CARD_HEADER_EMPTY));
+        assert!(empty.contains(PLAN_CARD_CTAS));
     }
 
     #[test]
@@ -449,9 +589,10 @@ mod tests {
 
         let feedback = state.format_feedback(Some("overall note"));
 
+        // Path + line number(s) + line text must all reach the agent.
         assert_eq!(
             feedback,
-            "Proposed plan line 2:\n> bravo\n\nComment:\nrewrite this\n\nProposed plan lines 3-4:\n> charlie\n> delta\n\nComment:\ncombine these\n\nAdditional feedback:\noverall note"
+            "@plan.md:2\n> bravo\n\nComment:\nrewrite this\n\n@plan.md:3-4\n> charlie\n> delta\n\nComment:\ncombine these\n\nAdditional feedback:\noverall note"
         );
     }
 
@@ -467,12 +608,12 @@ mod tests {
 
         assert_eq!(
             state.format_feedback(None),
-            "Proposed plan line 9:\n> [selected lines unavailable]\n\nComment:\nwhere is this"
+            "@plan.md:9\n> [selected lines unavailable]\n\nComment:\nwhere is this"
         );
     }
 
     #[test]
-    fn file_backed_plan_feedback_keeps_plan_md_references() {
+    fn file_backed_plan_feedback_includes_path_line_and_text() {
         let (mut state, _rx) = make_test_state();
         state.source = PlanReviewSource::FileBacked;
         state.plan_content = Some("alpha\nbravo".into());
@@ -482,9 +623,97 @@ mod tests {
             text: "keep file ref".into(),
         });
 
+        let feedback = state.format_feedback(Some("freeform"));
+        // P1: agent must receive plan path, line range, and quoted line text
+        // (not just @plan.md:N + comment without body).
         assert_eq!(
-            state.format_feedback(Some("freeform")),
-            "@plan.md:1-2\nkeep file ref\n\nfreeform"
+            feedback,
+            "@plan.md:1-2\n> alpha\n> bravo\n\nComment:\nkeep file ref\n\nAdditional feedback:\nfreeform"
+        );
+    }
+
+    /// Freeform revise/clarify with a viewer selection (no saved line comments)
+    /// must still deliver path + line number + line text so the agent is not
+    /// left guessing which "this line" the user means.
+    #[test]
+    fn freeform_with_selection_includes_path_line_and_text() {
+        let (mut state, _rx) = make_test_state();
+        state.source = PlanReviewSource::FileBacked;
+        state.plan_content = Some("alpha\nbravo\ncharlie".into());
+
+        let feedback = state.format_feedback_with_selection(Some("fix this line"), Some(&(2..3)));
+
+        assert_eq!(feedback, "@plan.md:2\n> bravo\n\nfix this line");
+    }
+
+    /// P2: multi-line highlight freeform must deliver the full range loc
+    /// (`@plan.md:N-M`) and quoted text for every selected line.
+    #[test]
+    fn freeform_with_multiline_selection_includes_range_and_all_line_text() {
+        let (mut state, _rx) = make_test_state();
+        state.source = PlanReviewSource::FileBacked;
+        state.plan_content = Some("alpha\nbravo\ncharlie\ndelta".into());
+
+        let feedback =
+            state.format_feedback_with_selection(Some("rewrite this block"), Some(&(2..4)));
+
+        assert_eq!(
+            feedback,
+            "@plan.md:2-3\n> bravo\n> charlie\n\nrewrite this block"
+        );
+    }
+
+    /// P2: multi-line saved comment also uses start–end loc + all quoted lines.
+    #[test]
+    fn multiline_comment_includes_range_and_all_line_text() {
+        let (mut state, _rx) = make_test_state();
+        state.plan_content = Some("alpha\nbravo\ncharlie\ndelta".into());
+        state.comments.push(PlanComment {
+            id: 0,
+            line_range: 2..4,
+            text: "tighten these two".into(),
+        });
+
+        assert_eq!(
+            state.format_feedback(None),
+            "@plan.md:2-3\n> bravo\n> charlie\n\nComment:\ntighten these two"
+        );
+    }
+
+    /// Without a selection, freeform alone is unchanged (no invented anchors).
+    #[test]
+    fn freeform_without_selection_is_plain() {
+        let (mut state, _rx) = make_test_state();
+        state.source = PlanReviewSource::FileBacked;
+        state.plan_content = Some("alpha\nbravo".into());
+
+        assert_eq!(
+            state.format_feedback_with_selection(Some("overall rewrite"), None),
+            "overall rewrite"
+        );
+    }
+
+    /// Saved comments already carry ranges — do not double-prefix the cursor
+    /// selection on top of them.
+    #[test]
+    fn selection_ignored_when_comments_already_present() {
+        let (mut state, _rx) = make_test_state();
+        state.plan_content = Some("alpha\nbravo\ncharlie".into());
+        state.comments.push(PlanComment {
+            id: 0,
+            line_range: 1..2,
+            text: "first".into(),
+        });
+
+        let feedback = state.format_feedback_with_selection(Some("more"), Some(&(3..4)));
+
+        assert_eq!(
+            feedback,
+            "@plan.md:1\n> alpha\n\nComment:\nfirst\n\nAdditional feedback:\nmore"
+        );
+        assert!(
+            !feedback.contains("@plan.md:3"),
+            "cursor selection must not double-attach when comments exist: {feedback}"
         );
     }
 }

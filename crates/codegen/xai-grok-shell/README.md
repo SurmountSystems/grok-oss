@@ -1818,10 +1818,12 @@ Grok OSS **never writes** into Zed’s stores. Override Zed config discovery wit
 # Preferred: environment variable (works for Grok OSS and Zed)
 export OPENROUTER_API_KEY="sk-or-..."
 
-# Or store a Grok OSS-local key
+# Or store a Grok OSS-local key (flag only — no-echo prompt; never pass the secret as argv)
 grok-oss login --openrouter
-# non-interactive:
-grok-oss login --openrouter --api-key "sk-or-..."
+# same prompt path with explicit flag:
+grok-oss login --openrouter --api-key
+# argv secrets are refused (shell history / process lists). Advanced automation:
+#   grok-oss login --openrouter --api-key -   # one line on non-TTY stdin
 
 # Clear Grok OSS stored key only (does not unset OPENROUTER_API_KEY or touch Zed)
 grok-oss logout --openrouter

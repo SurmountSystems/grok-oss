@@ -271,6 +271,14 @@ mod tests {
             prompt.contains("feat:"),
             "Planning section should mention feat: namespace"
         );
+        assert!(
+            prompt.contains("bug:"),
+            "Planning section should mention bug: namespace"
+        );
+        assert!(
+            prompt.contains("red/green TDD") || prompt.contains("failing test first"),
+            "Planning section should mention red/green TDD for user-reported bugs/features"
+        );
     }
 
     #[test]

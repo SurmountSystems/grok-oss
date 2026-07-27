@@ -70,6 +70,11 @@ const THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
+    EnumChoice {
+        canonical: "doge",
+        display: "DOGE",
+        description: "Pure black/white + 8-colour primaries.",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -212,6 +217,20 @@ const PLAN_MODE_CHOICES: &[EnumChoice] = &[
         canonical: "on",
         display: "On",
         description: "Agent summarises a plan and asks for approval before running tools.",
+    },
+];
+
+/// How `exit_plan_mode` presents plan approval (option D).
+const PLAN_APPROVAL_PARK_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "soft",
+        display: "Soft (toast)",
+        description: "Park durable approval + toast; open modal on demand (/view-plan).",
+    },
+    EnumChoice {
+        canonical: "modal",
+        display: "Modal",
+        description: "Open the plan approval modal immediately when the agent exits plan mode.",
     },
 ];
 
@@ -553,6 +572,11 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
+    EnumChoice {
+        canonical: "doge",
+        display: "DOGE",
+        description: "Pure black/white + 8-colour primaries.",
+    },
 ];
 
 /// Child settings shown inside the "Show contextual hints" group sub-sheet.
@@ -592,6 +616,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "hide_header",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shared,
+            label: "Hide header",
+            description: "Hide chrome headers for more content space: agent status bar, \
+                          welcome location top bar, and dashboard location header. \
+                          Fullscreen UI only; ignored in minimal mode.",
+            keywords: &[
+                "header",
+                "status",
+                "bar",
+                "hide",
+                "chrome",
+                "status bar",
+                "context",
+                "welcome",
+                "dashboard",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.hide_header,
+            },
+            restart_required: false,
+            hidden_in_minimal: true,
         },
         SettingMeta {
             key: "screen_mode",
@@ -666,6 +715,33 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
+        },
+        SettingMeta {
+            key: "scrub_ascii_punct",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shared,
+            label: "ASCII-safe assistant punctuation",
+            description: "Replace em/en dashes, smart quotes, and invisible Unicode spaces in \
+                          assistant text with ASCII-safe forms (default on). Turn off to keep \
+                          curly quotes and fancy dashes. Ops kill-switch: GROK_SCRUB_ASCII_PUNCT=0. \
+                          Agent requests to disable still need your approval.",
+            keywords: &[
+                "ascii",
+                "scrub",
+                "punctuation",
+                "dash",
+                "quote",
+                "emdash",
+                "curly",
+                "unicode",
+                "zwsp",
+                "nbsp",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.scrub_ascii_punct_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
         },
         SettingMeta {
             key: "combine_queued_prompts",
@@ -1302,6 +1378,33 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::Enum {
                 default: "off",
                 choices: PLAN_MODE_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHARED: `[ui].plan_approval_park` — soft toast (default) vs force modal
+        // when exit_plan_mode parks (option D).
+        SettingMeta {
+            key: "plan_approval_park",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Plan approval park",
+            description: "When the agent finishes planning: soft parks with a toast \
+                          (open on demand via /view-plan), or opens the approval modal immediately.",
+            keywords: &[
+                "plan",
+                "approval",
+                "park",
+                "modal",
+                "soft",
+                "toast",
+                "exit_plan_mode",
+                "view-plan",
+            ],
+            kind: SettingKind::Enum {
+                default: UiConfig::PLAN_APPROVAL_PARK_DEFAULT,
+                choices: PLAN_APPROVAL_PARK_CHOICES,
                 supports_preview: false,
             },
             restart_required: false,

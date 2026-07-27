@@ -211,6 +211,16 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 // A later Plan / todo_write refresh still replaces via the
                 // normal ACP Plan path.
             }
+            // Dual-auth D3: hop reason is already status chrome via
+            // TurnActivity::Retrying; also toast so the operator notices the
+            // SuperGrok session ↔ console key switch (no raw keys in copy).
+            if let XaiSessionUpdate::RetryState(
+                xai_grok_shell::extensions::notification::RetryState::Retrying { reason, .. },
+            ) = update
+                && xai_grok_shell::sampling::is_credential_hop_reason(reason)
+            {
+                agent.show_toast(reason);
+            }
             changed
         }
         XaiSessionUpdate::ImageCompressed {

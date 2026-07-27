@@ -489,6 +489,9 @@ impl SessionActor {
         SamplingConfig {
             api_key,
             failover_api_keys: creds.failover_api_keys,
+            failover_base_url: creds.failover_base_url,
+            session_base_url: creds.session_base_url,
+            session_identity_key: creds.session_identity_key,
             base_url: cfg.base_url,
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
@@ -527,6 +530,13 @@ impl SessionActor {
             } else {
                 None
             },
+            stashed_bearer_resolver: None,
+            // Durable live re-bind for hop-to-session without prior stash
+            // (key-primary dual-auth mid-hop; next turn also re-resolves here).
+            session_bearer_resolver: self.auth_manager.as_ref().map(|am| {
+                std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
+                    as xai_grok_sampler::SharedBearerResolver
+            }),
             supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
@@ -676,12 +686,15 @@ impl SessionActor {
             .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
-        let disable_api_key_auth = self
+        let (disable_api_key_auth, preferred_method) = self
             .auth_manager
             .as_ref()
-            .map(|am| am.grok_com_config().api_key_auth_disabled())
-            .unwrap_or(false);
-        crate::agent::config::resolve_aux_model_sampling_config(
+            .map(|am| {
+                let gc = am.grok_com_config();
+                (gc.api_key_auth_disabled(), gc.preferred_method)
+            })
+            .unwrap_or((false, None));
+        crate::agent::config::resolve_aux_model_sampling_config_preferring(
             slug,
             &models,
             &endpoints,
@@ -689,6 +702,7 @@ impl SessionActor {
             disable_api_key_auth,
             creds.alpha_test_key.clone(),
             creds.client_version.clone(),
+            preferred_method,
         )
     }
     /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,
@@ -1361,28 +1375,89 @@ impl SessionActor {
             self.chat_state_handle
                 .record_token_usage(u64::from(u.total_tokens));
             self.chat_state_handle.record_last_turn_usage(u.clone());
+            let model_id = response.assistant().and_then(|a| a.model_id.clone());
             self.chat_state_handle.record_model_call_usage(
-                response.assistant().and_then(|a| a.model_id.clone()),
+                model_id.clone(),
                 u.clone(),
                 api_duration_ms,
                 response.cost_usd_ticks,
             );
             self.signals_handle()
                 .record_token_usage(u.completion_tokens, u.reasoning_tokens);
+            // Durable per-call bill row (fail-open). Main vs subagent identity.
+            self.append_usage_jsonl(model_id, u, api_duration_ms, response.cost_usd_ticks);
         } else if self.tool_context.task_output_token_budget.is_some() {
             self.tool_context.fail_task_output_usage_closed();
             let handle = self.chat_state_handle.clone();
             tokio::spawn(async move {
                 let _ = handle.mark_usage_incomplete(true, true).await;
             });
+            self.append_usage_jsonl_incomplete(None);
         } else if self.tool_context.sampler_retry_only_before_output {
             let handle = self.chat_state_handle.clone();
             tokio::spawn(async move {
                 let _ = handle.mark_usage_incomplete(true, true).await;
             });
+            self.append_usage_jsonl_incomplete(None);
         }
     }
+
+    /// Main vs subagent row identity for `usage.jsonl`.
+    fn usage_jsonl_identity(&self) -> crate::session::usage_log::UsageIdentity {
+        use crate::session::usage_log::UsageIdentity;
+        if self.startup_hints.is_subagent {
+            let kind = self
+                .subagent_type_label()
+                .unwrap_or_else(|| crate::session::usage_log::AGENT_KIND_SUBAGENT.to_owned());
+            UsageIdentity::agent_turn(kind, self.startup_hints.work_ulid.clone())
+        } else {
+            let mut id = UsageIdentity::main();
+            // Main sessions rarely mint a work_ulid; pass through when set.
+            id.work_ulid = self.startup_hints.work_ulid.clone();
+            id
+        }
+    }
+
+    /// Append one model-call row to session `usage.jsonl`. Fail-open.
+    fn append_usage_jsonl(
+        &self,
+        model_id: Option<String>,
+        usage: &xai_grok_sampling_types::TokenUsage,
+        api_duration_ms: Option<u64>,
+        cost_usd_ticks: Option<i64>,
+    ) {
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
+        crate::session::usage_log::record_model_call(
+            &session_dir,
+            self.usage_jsonl_identity(),
+            self.session_info.id.0.as_ref(),
+            prompt_id,
+            model_id,
+            usage,
+            api_duration_ms,
+            cost_usd_ticks,
+        );
+    }
+
+    /// Append an incomplete model-call row when usage was omitted. Fail-open.
+    fn append_usage_jsonl_incomplete(&self, model_id: Option<String>) {
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
+        crate::session::usage_log::record_incomplete(
+            &session_dir,
+            self.usage_jsonl_identity(),
+            self.session_info.id.0.as_ref(),
+            prompt_id,
+            model_id,
+        );
+    }
     pub(super) async fn record_assistant_response(&self, assistant_item: ConversationItem) {
+        // Align chat_state / next-turn context with scrubbed stream UI text.
+        let assistant_item =
+            crate::session::helpers::assistant_ascii_scrub::scrub_assistant_conversation_item(
+                assistant_item,
+            );
         self.signals_handle().record_assistant_message();
         if let ConversationItem::Assistant(ref a) = assistant_item {
             tracing::info!(model_id = ?a.model_id, "DEBUG record_assistant_response model_id");

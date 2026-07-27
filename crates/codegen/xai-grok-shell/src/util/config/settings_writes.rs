@@ -11,6 +11,11 @@ pub async fn set_compact_mode(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.compact_mode = value).await
 }
 
+/// Persist `[ui].hide_header` via `update_config`.
+pub async fn set_hide_header(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.hide_header = value).await
+}
+
 /// Persist `[ui].show_timestamps` via `update_config`. `UiConfig::show_timestamps`
 /// is `Option<bool>` — pager-side `None` means "use default" — so we wrap.
 pub async fn set_show_timestamps(value: bool) -> Result<()> {
@@ -25,6 +30,20 @@ pub async fn set_show_timeline(value: bool) -> Result<()> {
 
 pub async fn set_page_flip_on_send(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.page_flip_on_send = Some(value)).await
+}
+
+/// Persist `[ui].scrub_ascii_punct` via `update_config`.
+pub async fn set_scrub_ascii_punct(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.scrub_ascii_punct = Some(value)).await
+}
+
+/// Persist `[ui].plan_approval_park` (`soft` | `modal`) via `update_config`.
+pub async fn set_plan_approval_park(value: String) -> Result<()> {
+    let canonical = match value.trim() {
+        "modal" => "modal",
+        _ => "soft",
+    };
+    update_config(|cfg| cfg.ui.plan_approval_park = Some(canonical.to_owned())).await
 }
 
 /// Persist `[ui].combine_queued_prompts` via `update_config`.
