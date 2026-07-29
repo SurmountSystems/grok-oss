@@ -94,16 +94,20 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     )
     .context("spawn resumed pager")?;
 
-    // The shell re-parks `exit_plan_mode` on resume, so approval chrome can open
-    // immediately and cover chat history. Prefer the chrome markers (product
-    // signal) over SETUP_SENTINEL, which may not be visible under the plan viewer.
-    // Without the shell re-park this times out.
+    // The shell re-parks `exit_plan_mode` on resume, so soft-park approval chrome
+    // can open immediately and cover chat history. Prefer the chrome markers
+    // (product signal) over SETUP_SENTINEL, which may not be visible under the
+    // plan viewer. Without the shell re-park this times out.
+    //
+    // Markers match soft-park CTA legend / footer (`PLAN_CARD_CTAS` + Preview
+    // hints): "s revise" (not the old "request changes" label) and the card
+    // header. Full-screen viewer uses "quit plan"; soft-park uses "q quit".
     resumed
-        .wait_for_text("request changes", WELCOME_TIMEOUT)
-        .context("restored approval 'request changes' after --continue")?;
+        .wait_for_text("s revise", WELCOME_TIMEOUT)
+        .context("restored approval 's revise' after --continue")?;
     resumed
-        .wait_for_text("quit plan", Duration::from_secs(5))
-        .context("restored approval 'quit plan' after resume")?;
+        .wait_for_text("Plan ready for review", Duration::from_secs(5))
+        .context("restored plan-ready card after resume")?;
     let screen = resumed.screen_contents();
     if !screen.contains("approve") {
         bail!("expected approval primary action after resume\n{screen}");
