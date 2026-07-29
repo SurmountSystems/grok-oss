@@ -910,6 +910,10 @@ pub struct AgentView {
     /// OpenRouter account credits for the prompt footer when the active model
     /// is OpenRouter-backed.
     pub openrouter_credit_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+    /// Live sampling identity for meter honesty (SuperGrok session vs console
+    /// key). Updated on dual-auth hop toasts and when billing marks SuperGrok
+    /// out of allowance so the next sample stays on the console key.
+    pub sampling_identity: crate::views::credit_bar::SamplingIdentityKind,
     /// Current goal orchestration state. Set by `GoalUpdated` session
     /// notifications, cleared when a new session starts.
     pub goal_state: Option<super::agent::GoalDisplayState>,

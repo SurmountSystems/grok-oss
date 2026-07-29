@@ -73,13 +73,37 @@ impl AgentView {
             .and_then(|p| p.plan_content.as_deref())
             .filter(|s| !s.trim().is_empty())
     }
+    /// Read non-empty session `plan.md` when the path resolves and is readable.
+    fn read_plan_file_body(&self) -> Option<String> {
+        self.plan_file_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .filter(|s| !s.trim().is_empty())
+    }
     /// Resolve the plan body for the line-viewer preview.
     ///
-    /// Prefers content carried on the approval request (inline plan-creation or
-    /// the shell-read file body), then falls back to the on-disk plan file.
-    /// Request body first keeps file-backed previews working when the path
-    /// resolution fails or the file disappears between intercept and open.
+    /// **File-backed** approval (`exit_plan_mode`): session `plan.md` is SoT —
+    /// re-read on every resolve so rewrites while parked appear in the panel.
+    /// The reverse-request snapshot on `plan_approval_view` is fallback when
+    /// the file is missing or unreadable.
+    ///
+    /// **Inline** CreatePlan: request body / `latest_inline_plan_content` first,
+    /// then disk.
     pub(super) fn plan_body_for_preview(&self) -> Option<String> {
+        let source = self.plan_approval_view.as_ref().map(|p| p.source);
+        if source == Some(PlanReviewSource::FileBacked) {
+            if let Some(disk) = self.read_plan_file_body() {
+                return Some(disk);
+            }
+            if let Some(content) = self
+                .plan_approval_view
+                .as_ref()
+                .and_then(|p| p.plan_content.as_deref())
+                .filter(|s| !s.trim().is_empty())
+            {
+                return Some(content.to_owned());
+            }
+            return None;
+        }
         if let Some(content) = self
             .plan_approval_view
             .as_ref()
@@ -95,9 +119,25 @@ impl AgentView {
         {
             return Some(content.to_owned());
         }
-        self.plan_file_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .filter(|s| !s.trim().is_empty())
+        self.read_plan_file_body()
+    }
+    /// Refresh FileBacked `plan_content` from disk so comment/feedback line
+    /// anchors match the body shown after a while-parked rewrite.
+    fn refresh_file_backed_plan_from_disk(&mut self) {
+        let is_file_backed = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| p.source == PlanReviewSource::FileBacked);
+        if !is_file_backed {
+            return;
+        }
+        let Some(disk) = self.read_plan_file_body() else {
+            return;
+        };
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.has_plan = true;
+            pav.plan_content = Some(disk);
+        }
     }
     /// Open the plan preview when content exists, or when plan approval is
     /// parked with an empty body (so the decision surface always pops).
@@ -112,6 +152,9 @@ impl AgentView {
     /// preview so the user always sees a decision surface (a/s/q) instead of
     /// a dead "Waiting on plan approval" line with a no-op Tab:plan.
     pub fn show_plan_preview(&mut self) {
+        // File-backed SoT: pull latest plan.md before painting so the panel
+        // and comment anchors track disk rewrites while approval is parked.
+        self.refresh_file_backed_plan_from_disk();
         let body = self.plan_body_for_preview();
         let approval_empty = self
             .plan_approval_view
@@ -483,6 +526,29 @@ impl AgentView {
         }
         self.prompt.set_text("");
     }
+    /// When plan approval owns the prompt (soft park or panel), a fully typed
+    /// registered slash command must route through the normal slash pipeline
+    /// (`SendPrompt` → registry → e.g. `ShowPlan` for `/view-plan`), not be
+    /// treated as freeform revise/approve notes.
+    fn try_submit_registered_slash_from_plan_prompt(&mut self) -> Option<InputOutcome> {
+        let raw = self.prompt.text().to_string();
+        let trimmed = raw.trim();
+        if !trimmed.starts_with('/') {
+            return None;
+        }
+        let invocation = crate::slash::parse_invocation(trimmed)?;
+        let reg = self.prompt.slash_controller.registry();
+        reg.get_for_dispatch(invocation.token)?;
+        if !crate::slash::is_command_complete(trimmed, reg) {
+            return None;
+        }
+        let to_send = trimmed.to_string();
+        self.prompt.slash_commit_preview();
+        self.prompt.slash_close();
+        self.prompt.set_text("");
+        Some(InputOutcome::Action(Action::SendPrompt(to_send)))
+    }
+
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
         let is_commenting = self
             .plan_approval_view
@@ -500,6 +566,12 @@ impl AgentView {
             && self.prompt.text().trim().is_empty()
             && self.prompt.images.is_empty();
         if soft_preview {
+            // Empty Enter = approve (same as `a` / empty Prompt Enter). Soft
+            // park previously swallowed bare Enter as a no-op while CTAs
+            // a/A/?/s/q worked — dogfood "I can't press Enter".
+            if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+                return self.approve_plan();
+            }
             if key.code == KeyCode::Char('a') && key.modifiers.is_empty() {
                 return self.approve_plan();
             }
@@ -516,6 +588,83 @@ impl AgentView {
             }
             if key.code == KeyCode::Char('q') && key.modifiers.is_empty() {
                 return self.abandon_plan();
+            }
+        }
+        // Slash completion while plan approval owns the prompt (soft park or
+        // panel). Soft-park used to skip `refresh_slash` and treat fully typed
+        // `/view-plan` as freeform feedback — toast says use `/view-plan`.
+        if self.prompt.slash_open() && !self.prompt.file_search_visible() {
+            match key.code {
+                KeyCode::Up => {
+                    self.prompt.slash_move_selection(-1);
+                    self.prompt.slash_preview_current_selection();
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Down => {
+                    self.prompt.slash_move_selection(1);
+                    self.prompt.slash_preview_current_selection();
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.prompt.slash_move_selection(-1);
+                    self.prompt.slash_preview_current_selection();
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.prompt.slash_move_selection(1);
+                    self.prompt.slash_preview_current_selection();
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Tab => {
+                    self.prompt.slash_commit_preview();
+                    self.prompt.accept_slash_completion(&self.session.models);
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Esc => {
+                    self.prompt.slash_cancel_preview();
+                    self.prompt.slash_close();
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    let snap = self.prompt.slash_snapshot();
+                    let exact_command = snap.cursor_in_command
+                        && crate::slash::parse_invocation(self.prompt.text()).is_some_and(
+                            |invocation| {
+                                invocation.args.is_empty()
+                                    && self
+                                        .prompt
+                                        .slash_controller
+                                        .registry()
+                                        .get_for_dispatch(invocation.token)
+                                        .is_some()
+                                    && crate::slash::is_command_complete(
+                                        self.prompt.text(),
+                                        self.prompt.slash_controller.registry(),
+                                    )
+                            },
+                        );
+                    if exact_command {
+                        self.prompt.slash_commit_preview();
+                        self.prompt.slash_close();
+                        if let Some(outcome) = self.try_submit_registered_slash_from_plan_prompt() {
+                            return outcome;
+                        }
+                    } else {
+                        let chains = snap
+                            .selection()
+                            .is_some_and(|row| row.insert_text.ends_with(' '));
+                        self.prompt.slash_commit_preview();
+                        self.prompt.accept_slash_completion(&self.session.models);
+                        if chains {
+                            return InputOutcome::Changed;
+                        }
+                        self.prompt.slash_close();
+                        if let Some(outcome) = self.try_submit_registered_slash_from_plan_prompt() {
+                            return outcome;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         if key.code == KeyCode::Tab && key.modifiers.is_empty() {
@@ -576,6 +725,10 @@ impl AgentView {
                 if is_commenting {
                     return self.save_plan_comment();
                 }
+                // Registered slash (e.g. `/view-plan`) before freeform feedback.
+                if let Some(outcome) = self.try_submit_registered_slash_from_plan_prompt() {
+                    return outcome;
+                }
                 // Ignore image-chip placeholders when judging empty freeform /
                 // building text feedback — chips ride as multimodal images.
                 let text = self.prompt.text_without_image_chips();
@@ -613,6 +766,12 @@ impl AgentView {
                         PlanPromptIntent::ApproveNotes => self.approve_plan(),
                     };
                 }
+                // Soft-park / Preview without panel: empty Enter already handled
+                // in soft_preview above. If we still reach here with empty
+                // freeform (e.g. focus drifted), approve rather than swallow.
+                if text.trim().is_empty() && !has_comments && !has_images {
+                    return self.approve_plan();
+                }
                 return InputOutcome::Changed;
             }
             EnterOutcome::PassThrough => {}
@@ -622,6 +781,10 @@ impl AgentView {
                 if let Some(req) = self.prompt.pending_viewer_request.take() {
                     self.open_line_viewer(&req.path, req.initial_range);
                 }
+                // Soft-park / plan-approval path owns keys; must refresh slash
+                // so `/view-plan` appears in autocomplete (normal prompt path
+                // does this in `handle_prompt_key`).
+                self.prompt.refresh_slash(&self.session.models);
                 InputOutcome::Changed
             }
             PromptEvent::Ignored => InputOutcome::Changed,
@@ -1304,6 +1467,113 @@ mod approve_plan_flush_tests {
         );
     }
 
+    /// Named contract: FileBacked plan approval SoT is live session `plan.md`.
+    /// Park with reverse-request body A, rewrite disk to B, then preview /
+    /// `plan_body_for_preview` / reopen must show B — not the frozen snapshot.
+    #[test]
+    fn file_backed_plan_preview_rereads_disk_after_park_rewrite() {
+        let mut agent = make_agent();
+        let session_id = format!(
+            "plan-sot-reread-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let cwd = "/tmp";
+        agent.session.session_id = Some(agent_client_protocol::SessionId::new(session_id.clone()));
+        agent.session.cwd = std::path::PathBuf::from(cwd);
+
+        let plan_path = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(urlencoding::encode(cwd).as_ref())
+            .join(&session_id)
+            .join("plan.md");
+        let session_dir = plan_path
+            .parent()
+            .expect("plan.md has a parent")
+            .to_path_buf();
+        std::fs::create_dir_all(&session_dir).expect("create session dir for plan SoT test");
+
+        let content_a = "# Plan A\n\nStatus approved 2026-07-26\nMode implementing\n";
+        let content_b =
+            "# Plan B — failover + keyring\n\n### Critical Files for Implementation\n- foo.rs\n";
+        std::fs::write(&plan_path, content_a).expect("seed plan.md with A");
+
+        let _rx = install_plan_approval(&mut agent, content_a);
+        agent.plan_approval_view.as_mut().unwrap().source = PlanReviewSource::FileBacked;
+
+        // Agent rewrites (or partially rewrites) plan.md while approval is parked.
+        std::fs::write(&plan_path, content_b).expect("rewrite plan.md to B");
+
+        let body = agent
+            .plan_body_for_preview()
+            .expect("FileBacked preview must resolve a body");
+        assert!(
+            body.contains("Plan B") && body.contains("Critical Files for Implementation"),
+            "FileBacked preview must re-read plan.md (B), not frozen park snapshot A; got {body:?}"
+        );
+        assert!(
+            !body.contains("Status approved 2026-07-26"),
+            "must not show frozen reverse-request snapshot A; got {body:?}"
+        );
+
+        agent.reopen_plan_approval();
+        let shown = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .expect("reopen must open plan side panel");
+        assert!(
+            shown.contains("Plan B") && shown.contains("Critical Files for Implementation"),
+            "reopen/show path must paint disk B; got {shown:?}"
+        );
+        assert!(
+            !shown.contains("Status approved 2026-07-26"),
+            "reopen must not paint frozen A; got {shown:?}"
+        );
+        let refreshed = agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|p| p.plan_content.as_deref())
+            .expect("plan_content still present");
+        assert!(
+            refreshed.contains("Plan B"),
+            "open must refresh plan_content from disk for comment anchors; got {refreshed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&session_dir);
+    }
+
+    /// FileBacked fallback: when session plan.md is missing/unreadable, keep
+    /// reverse-request snapshot so soft-park engage still works.
+    #[test]
+    fn file_backed_plan_preview_falls_back_to_snapshot_when_disk_missing() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(agent_client_protocol::SessionId::new(
+            "plan-sot-missing-disk".to_string(),
+        ));
+        agent.session.cwd = std::path::PathBuf::from("/tmp");
+        // Intentionally do not write plan.md under this session.
+        let snapshot = "# File Plan from reverse-request\n";
+        let _rx = install_plan_approval(&mut agent, snapshot);
+        agent.plan_approval_view.as_mut().unwrap().source = PlanReviewSource::FileBacked;
+
+        assert_eq!(
+            agent.plan_body_for_preview().as_deref(),
+            Some(snapshot),
+            "missing disk must fall back to park snapshot"
+        );
+        agent.reopen_plan_approval();
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .and_then(|v| v.markdown_content_for_test()),
+            Some(snapshot)
+        );
+    }
+
     /// Select-to-copy: `Y` on plan preview copies the whole plan body (not title).
     #[test]
     fn plan_preview_shift_y_copies_whole_plan_body() {
@@ -1485,6 +1755,131 @@ mod approve_plan_flush_tests {
             agent.prompt.text(),
             format!("{before}a"),
             "typed char must append to draft; soft CTA must not swallow key"
+        );
+    }
+
+    /// Named contract (dogfood): soft-park routes keys through
+    /// `handle_plan_feedback_key`. Typing `/view` must refresh slash
+    /// autocomplete so `/view-plan` is offered (not missing from the menu).
+    #[test]
+    fn soft_park_view_plan_slash_autocomplete_offers_view_plan() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Soft park slash menu");
+        assert!(agent.line_viewer.is_none(), "soft park has no line viewer");
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+
+        for ch in "/view".chars() {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            let _ = agent.handle_plan_feedback_key(&key);
+        }
+
+        let snap = agent.prompt.slash_snapshot();
+        assert!(
+            snap.active,
+            "slash state must be active after typing /view under soft park"
+        );
+        let names: Vec<&str> = snap.matches.iter().map(|r| r.display.as_str()).collect();
+        assert!(
+            names.iter().any(|n| *n == "/view-plan"),
+            "/view-plan must appear in soft-park slash autocomplete, got {names:?}"
+        );
+    }
+
+    /// Named contract: fully typed `/view-plan` under soft park must route as
+    /// a registered slash command (`SendPrompt`), not freeform plan feedback
+    /// or a swallowed Enter.
+    #[test]
+    fn soft_park_view_plan_enter_sends_slash_not_feedback() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Soft park view-plan dispatch");
+        assert!(agent.line_viewer.is_none());
+        agent.set_active_pane(ActivePane::Prompt, true);
+        // Preview focus (default soft park) with draft `/view-plan`.
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text("/view-plan");
+        agent.prompt.set_cursor("/view-plan".len());
+        agent.prompt.refresh_slash(&agent.session.models);
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&enter);
+
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(
+                    text.trim(),
+                    "/view-plan",
+                    "must dispatch the view-plan slash token, not freeform"
+                );
+            }
+            other => panic!(
+                "expected SendPrompt(/view-plan) so slash pipeline opens the plan panel; got {other:?}"
+            ),
+        }
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "must not dismiss approval as revise/abandon before slash runs"
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "slash submit clears the composer"
+        );
+    }
+
+    /// Aliases documented in the user guide (`/show-plan`, `/plan-view`) also
+    /// dispatch under soft park.
+    #[test]
+    fn soft_park_view_plan_aliases_send_slash() {
+        for alias in ["/show-plan", "/plan-view"] {
+            let mut agent = make_agent();
+            let _rx = install_plan_approval(&mut agent, "# alias");
+            agent.prompt.set_text(alias);
+            agent.prompt.set_cursor(alias.len());
+            let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            let outcome = agent.handle_plan_feedback_key(&enter);
+            match outcome {
+                InputOutcome::Action(Action::SendPrompt(text)) => {
+                    assert_eq!(text.trim(), alias, "alias {alias} must send as slash");
+                }
+                other => panic!("alias {alias}: expected SendPrompt, got {other:?}"),
+            }
+        }
+    }
+
+    /// Integration: `SendPrompt("/view-plan")` while soft-parked hits the
+    /// slash registry → `ShowPlan` → reopens the plan panel.
+    #[test]
+    fn soft_park_view_plan_slash_pipeline_returns_show_plan() {
+        use crate::app::agent::AgentId;
+        use crate::app::app_view::tests::test_app_with_agent;
+        use crate::app::dispatch::dispatch;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            let _rx = install_plan_approval(agent, "# Soft park plan\n\nBody");
+            agent.latest_inline_plan_content = Some("# Soft park plan\n\nBody".into());
+        }
+
+        let effects = dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+        assert!(
+            effects.is_empty(),
+            "ShowPlan is sync; expected no async effects, got {effects:?}"
+        );
+        let agent = &app.agents[&id];
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "approval must remain after /view-plan"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "/view-plan must open the plan panel (line viewer)"
         );
     }
 
@@ -1787,6 +2182,470 @@ mod approve_plan_flush_tests {
             other => panic!("expected Interject with notes, got {other:?}"),
         }
         assert_eq!(agent.prompt.text(), "original chat");
+    }
+
+    /// Named contract: soft-park plan approval (Preview focus, no side panel,
+    /// empty prompt) — bare Enter must approve, same as `a` and empty Prompt
+    /// Enter. Must not be a silent no-op (dogfood: "I can't press Enter").
+    #[test]
+    fn soft_park_preview_empty_enter_approves() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nApprove via Enter");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            // Soft park leaves focus on Preview and does not open the panel.
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(agent.line_viewer.is_none(), "soft park has no line viewer");
+        agent.prompt.set_text("");
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&enter);
+
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "empty Enter on soft-park Preview must approve (Changed); got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "empty Enter must clear plan_approval_view (approve), not leave it parked"
+        );
+        assert_outcome_approved(rx);
+    }
+
+    /// Soft-park `a` still approves (regression guard next to Enter contract).
+    #[test]
+    fn soft_park_preview_a_still_approves() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nApprove via a");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&a);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(agent.plan_approval_view.is_none());
+        assert_outcome_approved(rx);
+    }
+
+    /// Named contract (dogfood 2026-07-27): soft-park CTAs must survive full
+    /// `handle_input` when Scrollback is focused (user clicked the parked plan
+    /// card to read it). Previously `active_pane != Scrollback` gated the route
+    /// and keys fell through as scrollback no-ops while the legend still showed.
+    #[test]
+    fn soft_park_cta_a_approves_via_handle_input_while_scrollback_focused() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nRead card then approve");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        agent.set_active_pane(ActivePane::Scrollback, true);
+        assert!(agent.line_viewer.is_none(), "soft park has no line viewer");
+        assert_eq!(agent.active_pane, ActivePane::Scrollback);
+
+        let registry = ActionRegistry::defaults();
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let outcome = agent.handle_input(&Event::Key(a), &registry);
+
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "soft-park a via handle_input must approve even with Scrollback focus; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "a must clear plan_approval_view (approve), not leave it parked under Scrollback"
+        );
+        assert_outcome_approved(rx);
+    }
+
+    /// Soft-park empty Enter via full handle_input + Scrollback focus.
+    #[test]
+    fn soft_park_empty_enter_approves_via_handle_input_while_scrollback_focused() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nEnter while reading");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        agent.set_active_pane(ActivePane::Scrollback, true);
+
+        let registry = ActionRegistry::defaults();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = agent.handle_input(&Event::Key(enter), &registry);
+
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "soft-park empty Enter via handle_input must approve under Scrollback; got {outcome:?}"
+        );
+        assert!(agent.plan_approval_view.is_none());
+        assert_outcome_approved(rx);
+    }
+
+    /// Panel Preview: Enter on a selected plan line still opens line-comment
+    /// (secondary notes path; primary approve remains `a` / empty Prompt Enter).
+    #[test]
+    fn plan_panel_preview_enter_opens_line_commenting() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Plan\n\n## Step 1\nDo something\n");
+        agent.show_plan_preview();
+        {
+            let viewer = agent
+                .line_viewer
+                .as_mut()
+                .expect("show_plan_preview must open panel");
+            viewer.prepare_layout(80, 20);
+            // Select a real source line so Enter can attach line notes.
+            if viewer.selected_line_range().is_none() {
+                viewer.set_initial_selection(1..2);
+                viewer.prepare_layout(80, 20);
+            }
+            assert!(
+                viewer.selected_line_range().is_some(),
+                "fixture must have a selected plan line"
+            );
+        }
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = agent.handle_line_viewer_key(&enter);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Enter on panel Preview must be consumed; got {outcome:?}"
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Commenting),
+            "Enter on selected plan line must enter Commenting (line notes)"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "line-note Enter must not approve/dismiss plan approval"
+        );
+    }
+
+    /// FileBacked panel SoT after park rewrite: reopen must not paint a
+    /// dual/merged body (old snapshot A mixed with new disk B).
+    #[test]
+    fn file_backed_reopen_panel_body_is_single_disk_plan_not_dual_merge() {
+        let mut agent = make_agent();
+        let session_id = format!(
+            "plan-sot-dual-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let cwd = "/tmp";
+        agent.session.session_id = Some(agent_client_protocol::SessionId::new(session_id.clone()));
+        agent.session.cwd = std::path::PathBuf::from(cwd);
+
+        let plan_path = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(urlencoding::encode(cwd).as_ref())
+            .join(&session_id)
+            .join("plan.md");
+        let session_dir = plan_path
+            .parent()
+            .expect("plan.md has a parent")
+            .to_path_buf();
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let content_a = "# Plan A failover\n\nStatus approved 2026-07-26\nMode implementing\n";
+        let content_b =
+            "# Plan B usage-display\n\n### Critical Files for Implementation\n- usage_detail.rs\n";
+        std::fs::write(&plan_path, content_a).expect("seed A");
+
+        let _rx = install_plan_approval(&mut agent, content_a);
+        agent.plan_approval_view.as_mut().unwrap().source = PlanReviewSource::FileBacked;
+
+        // Agent rewrote plan.md while approval stayed parked.
+        std::fs::write(&plan_path, content_b).expect("rewrite B");
+
+        agent.reopen_plan_approval();
+        let shown = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .expect("reopen must open panel");
+
+        assert!(
+            shown.contains("Plan B usage-display") && shown.contains("usage_detail.rs"),
+            "panel must show current disk plan B; got {shown:?}"
+        );
+        assert!(
+            !shown.contains("Plan A failover")
+                && !shown.contains("Status approved 2026-07-26")
+                && !shown.contains("Mode implementing"),
+            "panel must not dual-merge frozen A with B; got {shown:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&session_dir);
+    }
+
+    /// Named contract: plan-panel footer CTAs are real clickable buttons.
+    /// Click on `approve_button_area` must approve (same as `a`).
+    #[test]
+    fn plan_panel_click_approve_button_approves() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nClick approve");
+        agent.show_plan_preview();
+        assert!(agent.line_viewer.is_some(), "panel must open");
+
+        // Simulate a rendered footer hit target (render paints these; tests set
+        // them without a full TUI frame).
+        let hit = Rect::new(10, 20, 12, 1);
+        {
+            let viewer = agent.line_viewer.as_mut().unwrap();
+            viewer.plan_mut().feedback_active = true;
+            viewer.plan_mut().approve_button_area = Some(hit);
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 30));
+        }
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x + 1,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_line_viewer_mouse(&click);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "approve button click must be consumed; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "approve button click must clear plan approval"
+        );
+        assert_outcome_approved(rx);
+    }
+
+    /// Click Approve-with-notes button focuses Prompt with ApproveNotes intent.
+    #[test]
+    fn plan_panel_click_approve_notes_button_focuses_prompt() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Plan\n\nNotes path");
+        agent.show_plan_preview();
+        let hit = Rect::new(30, 20, 18, 1);
+        {
+            let viewer = agent.line_viewer.as_mut().unwrap();
+            viewer.plan_mut().feedback_active = true;
+            viewer.plan_mut().approve_notes_button_area = Some(hit);
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 30));
+        }
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let _ = agent.handle_line_viewer_mouse(&click);
+        let pav = agent.plan_approval_view.as_ref().expect("still parked");
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::ApproveNotes);
+    }
+
+    /// Click clarify / revise / quit buttons dispatch the matching actions.
+    #[test]
+    fn plan_panel_click_clarify_revise_quit_buttons() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        // Clarify
+        {
+            let mut agent = make_agent();
+            let _rx = install_plan_approval(&mut agent, "# Plan");
+            agent.show_plan_preview();
+            let hit = Rect::new(5, 22, 10, 1);
+            agent
+                .line_viewer
+                .as_mut()
+                .unwrap()
+                .plan_mut()
+                .feedback_active = true;
+            agent
+                .line_viewer
+                .as_mut()
+                .unwrap()
+                .plan_mut()
+                .questions_button_area = Some(hit);
+            agent.line_viewer.as_mut().unwrap().last_modal_area = Some(Rect::new(0, 0, 80, 30));
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hit.x,
+                row: hit.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            let _ = agent.handle_line_viewer_mouse(&click);
+            let pav = agent.plan_approval_view.as_ref().unwrap();
+            assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+            assert_eq!(pav.prompt_intent, PlanPromptIntent::Questions);
+        }
+        // Revise
+        {
+            let mut agent = make_agent();
+            let _rx = install_plan_approval(&mut agent, "# Plan");
+            agent.show_plan_preview();
+            let hit = Rect::new(5, 22, 10, 1);
+            agent
+                .line_viewer
+                .as_mut()
+                .unwrap()
+                .plan_mut()
+                .feedback_active = true;
+            agent
+                .line_viewer
+                .as_mut()
+                .unwrap()
+                .plan_mut()
+                .send_button_area = Some(hit);
+            agent.line_viewer.as_mut().unwrap().last_modal_area = Some(Rect::new(0, 0, 80, 30));
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hit.x,
+                row: hit.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            let _ = agent.handle_line_viewer_mouse(&click);
+            let pav = agent.plan_approval_view.as_ref().unwrap();
+            assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+            assert_eq!(pav.prompt_intent, PlanPromptIntent::Revise);
+        }
+        // Quit
+        {
+            let mut agent = make_agent();
+            let mut rx = install_plan_approval(&mut agent, "# Plan");
+            agent.show_plan_preview();
+            let hit = Rect::new(5, 22, 8, 1);
+            agent
+                .line_viewer
+                .as_mut()
+                .unwrap()
+                .plan_mut()
+                .feedback_active = true;
+            agent
+                .line_viewer
+                .as_mut()
+                .unwrap()
+                .plan_mut()
+                .abandon_button_area = Some(hit);
+            agent.line_viewer.as_mut().unwrap().last_modal_area = Some(Rect::new(0, 0, 80, 30));
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hit.x,
+                row: hit.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            let _ = agent.handle_line_viewer_mouse(&click);
+            assert!(agent.plan_approval_view.is_none());
+            let resp = rx.try_recv().expect("abandon response");
+            let raw = resp.expect("Ok");
+            let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+            assert_eq!(parsed["outcome"], "abandoned");
+        }
+    }
+
+    /// Valid 8×8 PNG bytes for drop-classifier image paste tests.
+    fn test_png_bytes() -> Vec<u8> {
+        use image::{ImageBuffer, Rgba};
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(8, 8, Rgba([128, 64, 32, 255]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode png");
+        buf
+    }
+
+    /// Named contract: paste while plan approval Preview is active (panel open)
+    /// must attach images/paths to the plan composer — not swallow into the
+    /// list-pane search bar.
+    #[test]
+    fn plan_panel_preview_paste_image_path_attaches_to_prompt() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Plan\n\nPaste screenshot");
+        agent.show_plan_preview();
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(agent.line_viewer.is_some());
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().focus,
+            PlanApprovalFocus::Preview
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png_path = dir.path().join("shot.png");
+        std::fs::write(&png_path, test_png_bytes()).unwrap();
+
+        let paste_text = format!("file://{}", png_path.display());
+        let outcome = agent.handle_input(&Event::Paste(paste_text), &ActionRegistry::defaults());
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "plan panel Preview paste must be handled; got {outcome:?}"
+        );
+        assert!(
+            !agent.prompt.images.is_empty() || agent.prompt.text().contains("[Image"),
+            "paste must attach image chip into plan composer; text={:?} images={}",
+            agent.prompt.text(),
+            agent.prompt.images.len()
+        );
+    }
+
+    /// Soft-park Preview (no panel): paste must not be Unchanged/swallowed —
+    /// screenshots attach to the plan composer for approve/revise/clarify.
+    #[test]
+    fn soft_park_preview_paste_attaches_image_path() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Plan\n\nSoft paste");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(agent.line_viewer.is_none());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png_path = dir.path().join("shot.png");
+        std::fs::write(&png_path, test_png_bytes()).unwrap();
+
+        let outcome = agent.handle_input(
+            &Event::Paste(format!("file://{}", png_path.display())),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "soft-park Preview paste must not be Unchanged; got {outcome:?}"
+        );
+        assert!(
+            !agent.prompt.images.is_empty() || agent.prompt.text().contains("[Image"),
+            "soft-park paste must attach image; text={:?} n={}",
+            agent.prompt.text(),
+            agent.prompt.images.len()
+        );
     }
 }
 #[cfg(test)]

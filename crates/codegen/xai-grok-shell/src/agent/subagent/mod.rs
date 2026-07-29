@@ -722,12 +722,15 @@ async fn read_parent_sampling_config(
             let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
-            let inherited = xai_grok_sampler::SamplerConfig {
+            let mut inherited = xai_grok_sampler::SamplerConfig {
                 api_key: creds.api_key,
-                failover_api_keys: Vec::new(),
-                failover_base_url: None,
-                session_base_url: None,
-                session_identity_key: None,
+                // Keep dual-auth failover so prefer_live / mid-request hop can
+                // leave SuperGrok for the console key (was stripped → subagents
+                // stayed on SuperGrok extras while the parent had already hopped).
+                failover_api_keys: creds.failover_api_keys,
+                failover_base_url: creds.failover_base_url,
+                session_base_url: creds.session_base_url,
+                session_identity_key: creds.session_identity_key,
                 base_url: cfg.base_url,
                 model: cfg.model.clone(),
                 max_completion_tokens: cfg.max_completion_tokens,
@@ -765,6 +768,9 @@ async fn read_parent_sampling_config(
                 doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
                 header_injector: ctx.sampling_config.header_injector.clone(),
             };
+            // Same sticky preference as reconstruct_full_config: if SuperGrok is
+            // memoized out of allowance, start the child already on the console key.
+            let _ = xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut inherited);
             let model_id = ctx.model_id.clone();
             let global_model_id = ctx.models_manager.current_model_id();
             xai_grok_telemetry::unified_log::debug(
@@ -841,7 +847,7 @@ fn resolve_model_override_to_config(
     let mut credentials = resolve_credentials(&entry, session_key);
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;
-    let config = sampling_config_for_model(
+    let mut config = sampling_config_for_model(
         &entry,
         credentials,
         ctx.alpha_test_key.clone(),
@@ -849,6 +855,7 @@ fn resolve_model_override_to_config(
         ctx.sampling_config.deployment_id.clone(),
         ctx.sampling_config.user_id.clone(),
     );
+    let _ = xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut config);
     xai_grok_telemetry::unified_log::debug(
         "subagent resolve_model_override_to_config",
         None,

@@ -186,6 +186,12 @@ nix = { workspace = true }
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 dbus-secret-service = { version = "4", features = ["crypto-rust"] }
 
+# Secure non-D-Bus keyring fallback when Secret Service times out / is locked.
+# Kernel keyutils — no session unlock prompt; secrets are process/session lifetime.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring-core = "1"
+linux-keyutils-keyring-store = "1"
+
 [target.'cfg(windows)'.dependencies]
 siphasher = { workspace = true }
 # Win32_Security_Credentials: Zed Credential Manager interop (`zed:url=…`).

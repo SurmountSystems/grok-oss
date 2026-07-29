@@ -68,9 +68,9 @@ When the agent finishes planning, it calls the `exit_plan_mode` tool. By default
 
 - Toast + status chip (“Plan parked — press `/view-plan`…”) without taking over the screen
 - An **inline plan card** in the transcript (preview + CTA legend)
-- With an empty prompt, **`a` / `A` / `?` / `s` / `q`** work from the soft-park surface (no modal required)
+- With an empty prompt, **`Enter` / `a` / `A` / `?` / `s` / `q`** work from the soft-park surface (no modal required). Bare **Enter** and **`a`** both approve immediately.
 
-Open the full review surface on demand with **`/view-plan`**, the status chip, or **`ShowPlan`**. That opens a **side panel** beside chat (CTAs in the panel footer). **Ctrl+F** enlarges the panel to fullscreen and back.
+Open the full review surface on demand with **`/view-plan`**, the status chip, or **`ShowPlan`**. That opens a **side panel** beside chat with **clickable CTA buttons** in the panel footer (Approve / Approve w/ comment / Clarify / Revise / Quit). Keys `a` / `A` / `?` / `s` / `q` remain accelerators. On a narrow side panel the footer uses shorter labels (or key-only) so the hit targets always stay clickable. **Ctrl+F** enlarges the panel to fullscreen and back. The panel always re-reads the latest session `plan.md` when you open it (so rewrites while parked show up — not a frozen snapshot from park time).
 
 To open a full-screen plan modal immediately every time, set:
 
@@ -143,8 +143,10 @@ picks up the live viewer selection when you have not saved a comment yet.
 
 ### Screenshots in plan mode
 
-You can paste or attach **screenshots** (and other images) on the plan-approval
-prompt the same way as the normal chat composer. On submit:
+You can paste or attach **screenshots** (and other images) while plan approval
+is parked — including soft-park Preview and with the side panel open on Preview
+— the same way as the normal chat composer (paste path / drop / wrap image).
+On submit:
 
 | Action | What happens |
 | ------ | ------------ |

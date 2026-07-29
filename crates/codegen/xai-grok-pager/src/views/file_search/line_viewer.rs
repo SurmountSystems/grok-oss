@@ -1211,6 +1211,24 @@ fn build_shortcut_button<'a>(
     ]
 }
 
+/// Key-only CTA button (no label) for narrow plan side panels.
+fn build_shortcut_button_key_only<'a>(
+    key: char,
+    hovered: bool,
+    theme: &crate::theme::Theme,
+) -> Vec<Span<'a>> {
+    let bg = if hovered {
+        theme.bg_highlight
+    } else {
+        theme.bg_base
+    };
+    let key_style = Style::default()
+        .fg(theme.text_primary)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    vec![Span::styled(key.to_string(), key_style)]
+}
+
 /// Preferred side-panel width as a fraction of the overlay.
 const SIDE_PANEL_WIDTH_FRAC: f32 = 0.45;
 /// Soft minimum columns for the plan side panel when the overlay is wide
@@ -1562,104 +1580,163 @@ pub fn render_line_viewer(
         let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
 
         if is_approval {
-            // a approve · A approve w/ comment · ? clarify · s revise · q quit
-            let approve_spans = build_shortcut_button('a', "approve", approve_hovered, theme);
-            let approve_w: u16 = approve_spans.iter().map(|s| s.width() as u16).sum();
-
-            let notes_spans =
-                build_shortcut_button('A', "approve w/ comment", approve_notes_hovered, theme);
-            let notes_w: u16 = notes_spans.iter().map(|s| s.width() as u16).sum();
-
+            // Clickable CTA buttons (mouse primary; keys remain accelerators).
+            // Side panels are often ~36 cols at 80-wide terminals — full labels
+            // (~80 cols) must not drop all hit targets. Try full → compact →
+            // key-only until the row fits.
             let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
-            let clarify_spans = build_shortcut_button('?', "clarify", questions_hovered, theme);
-            let clarify_w: u16 = clarify_spans.iter().map(|s| s.width() as u16).sum();
-
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
-            let revise_spans = build_shortcut_button('s', "revise", send_hovered, theme);
-            let revise_w: u16 = revise_spans.iter().map(|s| s.width() as u16).sum();
 
-            let quit_spans = build_shortcut_button('q', "quit", abandon_hovered, theme);
-            let quit_w: u16 = quit_spans.iter().map(|s| s.width() as u16).sum();
+            // (approve, notes, clarify, revise, quit) label suffixes after key.
+            let label_modes: [[&str; 5]; 3] = [
+                ["approve", "approve w/ comment", "clarify", "revise", "quit"],
+                ["approve", "notes", "clarify", "revise", "quit"],
+                // Key-only: empty suffix → just bold key (fits ~15 cols).
+                ["", "", "", "", ""],
+            ];
+            let keys = ['a', 'A', '?', 's', 'q'];
+            let hovers = [
+                approve_hovered,
+                approve_notes_hovered,
+                questions_hovered,
+                send_hovered,
+                abandon_hovered,
+            ];
 
-            // 5 buttons + 4 separators; badge after A when line notes exist.
-            let total_w = approve_w
-                .saturating_add(sep_w)
-                .saturating_add(notes_w)
-                .saturating_add(badge_w)
-                .saturating_add(sep_w)
-                .saturating_add(clarify_w)
-                .saturating_add(sep_w)
-                .saturating_add(revise_w)
-                .saturating_add(sep_w)
-                .saturating_add(quit_w);
+            let mut painted = false;
+            for labels in &label_modes {
+                let span_sets: Vec<Vec<Span>> = keys
+                    .iter()
+                    .zip(labels.iter())
+                    .zip(hovers.iter())
+                    .map(|((&k, &lab), &hov)| {
+                        if lab.is_empty() {
+                            build_shortcut_button_key_only(k, hov, theme)
+                        } else {
+                            build_shortcut_button(k, lab, hov, theme)
+                        }
+                    })
+                    .collect();
+                let widths: Vec<u16> = span_sets
+                    .iter()
+                    .map(|s| s.iter().map(|sp| sp.width() as u16).sum())
+                    .collect();
+                let mut total_w = widths.iter().copied().sum::<u16>();
+                // 4 separators between 5 buttons.
+                total_w = total_w.saturating_add(sep_w.saturating_mul(4));
+                total_w = total_w.saturating_add(badge_w);
 
-            if total_w <= inner.width {
+                if total_w > inner.width {
+                    continue;
+                }
+
                 let mut x = inner.x + (inner.width - total_w) / 2;
+                let areas = [
+                    // approve
+                    {
+                        let ax = x;
+                        for span in &span_sets[0] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                        Some(Rect::new(ax, bottom_y, widths[0], 1))
+                    },
+                    // notes (+ optional comment badge)
+                    {
+                        let nx = x;
+                        for span in &span_sets[1] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        if badge_w > 0 {
+                            buf.set_string(x, bottom_y, &badge_text, badge_style);
+                            x += badge_w;
+                        }
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                        Some(Rect::new(nx, bottom_y, widths[1], 1))
+                    },
+                    // clarify
+                    {
+                        let cx = x;
+                        for span in &span_sets[2] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                        Some(Rect::new(cx, bottom_y, widths[2], 1))
+                    },
+                    // revise
+                    {
+                        let rx = x;
+                        for span in &span_sets[3] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                        Some(Rect::new(rx, bottom_y, widths[3], 1))
+                    },
+                    // quit
+                    {
+                        let qx = x;
+                        for span in &span_sets[4] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        Some(Rect::new(qx, bottom_y, widths[4], 1))
+                    },
+                ];
 
-                let ax = x;
-                for span in &approve_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().approve_button_area = Some(Rect::new(ax, bottom_y, approve_w, 1));
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-
-                let nx = x;
-                for span in &notes_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().approve_notes_button_area =
-                    Some(Rect::new(nx, bottom_y, notes_w, 1));
-                if badge_w > 0 {
-                    buf.set_string(x, bottom_y, &badge_text, badge_style);
-                    x += badge_w;
-                }
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-
-                let qx = x;
-                for span in &clarify_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().questions_button_area =
-                    Some(Rect::new(qx, bottom_y, clarify_w, 1));
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-
-                let rx = x;
-                for span in &revise_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().send_button_area = Some(Rect::new(rx, bottom_y, revise_w, 1));
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-
-                let quit_x = x;
-                for span in &quit_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().abandon_button_area =
-                    Some(Rect::new(quit_x, bottom_y, quit_w, 1));
-                // No primary Comment in approval mode.
-                viewer.plan_mut().comment_button_area = None;
-            } else {
                 let plan = viewer.plan_mut();
-                plan.approve_button_area = None;
-                plan.approve_notes_button_area = None;
-                plan.questions_button_area = None;
-                plan.send_button_area = None;
+                plan.approve_button_area = areas[0];
+                plan.approve_notes_button_area = areas[1];
+                plan.questions_button_area = areas[2];
+                plan.send_button_area = areas[3];
+                plan.abandon_button_area = areas[4];
                 plan.comment_button_area = None;
-                plan.abandon_button_area = None;
+                painted = true;
+                break;
+            }
+
+            if !painted {
+                // Extreme narrow: left-align key-only buttons until width runs out.
+                let mut x = inner.x;
+                let mut areas: [Option<Rect>; 5] = [None; 5];
+                for (i, &k) in keys.iter().enumerate() {
+                    let spans = build_shortcut_button_key_only(k, hovers[i], theme);
+                    let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+                    let need = if i == 0 { w } else { sep_w.saturating_add(w) };
+                    if x.saturating_sub(inner.x).saturating_add(need) > inner.width {
+                        break;
+                    }
+                    if i > 0 {
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                    }
+                    let start = x;
+                    for span in &spans {
+                        let sw = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, sw);
+                        x += sw;
+                    }
+                    areas[i] = Some(Rect::new(start, bottom_y, w, 1));
+                }
+                let plan = viewer.plan_mut();
+                plan.approve_button_area = areas[0];
+                plan.approve_notes_button_area = areas[1];
+                plan.questions_button_area = areas[2];
+                plan.send_button_area = areas[3];
+                plan.abandon_button_area = areas[4];
+                plan.comment_button_area = None;
             }
         } else {
             // Casual: c comment [badge] | s send (when comments exist)
@@ -1944,5 +2021,62 @@ mod tests {
         assert_eq!(panel.width, 45);
         assert_eq!(panel.x, 55);
         assert_eq!(panel.height, 40);
+    }
+
+    /// Named contract: plan-approval side panel footer always exposes
+    /// clickable CTA hit targets (approve / notes / clarify / revise / quit),
+    /// even when the panel is too narrow for the full long labels.
+    #[test]
+    fn plan_approval_narrow_side_panel_footer_sets_cta_hit_areas() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.side_panel = true;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        // ~36 cols is a typical side-panel width at 80-col terminals (45%).
+        // Full labels need ~80 cols and used to drop all hit areas.
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(
+            &mut buf,
+            full,
+            &mut viewer,
+            std::path::Path::new("/tmp"),
+            &theme,
+            0,
+        );
+
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.approve_button_area.is_some(),
+            "narrow side panel must still expose Approve hit target"
+        );
+        assert!(
+            plan.approve_notes_button_area.is_some(),
+            "narrow side panel must still expose Approve-with-notes hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_some(),
+            "narrow side panel must still expose Clarify hit target"
+        );
+        assert!(
+            plan.send_button_area.is_some(),
+            "narrow side panel must still expose Revise hit target"
+        );
+        assert!(
+            plan.abandon_button_area.is_some(),
+            "narrow side panel must still expose Quit hit target"
+        );
     }
 }

@@ -5102,10 +5102,30 @@ pub fn resolve_credentials_preferring(
             Vec::new()
         };
         let session_host = info.base_url.clone();
+        // Console hop host: model.api_base_url when set. Session-auth catalog
+        // fetch historically left api_base_url unset (only ApiKey fetch filled
+        // it), so dual-auth would queue a console key while failover_base_url
+        // stayed None → hop kept cli-chat-proxy + xai-grok-cli headers → 401.
+        // When primary is the SuperGrok proxy and first-party, fall back to the
+        // public API base so hop can switch hosts.
         let console_host = model
             .api_base_url
-            .clone()
-            .unwrap_or_else(|| info.base_url.clone());
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                let base = info.base_url.as_str();
+                let on_cli_chat_proxy = {
+                    let lower = base.to_ascii_lowercase();
+                    lower.contains("cli-chat-proxy") || lower.contains("cli_chat_proxy")
+                };
+                if first_party && on_cli_chat_proxy {
+                    XAI_API_BASE_URL_DEFAULT.to_owned()
+                } else {
+                    info.base_url.clone()
+                }
+            });
         let split_hosts = session_host.trim_end_matches('/') != console_host.trim_end_matches('/');
 
         match (session.as_deref(), !console_keys.is_empty(), first_party) {
@@ -7425,6 +7445,39 @@ reasoning_effort = "low"
         let _ = model; // keep mut for clarity if we extend
     }
 
+    /// Dogfood (2026-07-27): Session-auth model catalog left `api_base_url` unset
+    /// while still dual-auth ready. Hop swapped to the console key but stayed on
+    /// cli-chat-proxy → 401 "no auth context" and a useless OIDC recovery loop.
+    /// Named contract: session + console on proxy host without api_base_url still
+    /// queues the public console API host for hop.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_session_catalog_missing_api_base_still_splits_hosts() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-biz-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+        // Matches live Session catalog: proxy base_url, no api_base_url.
+        let model = test_model_entry("m", proxy, None, None, None);
+        assert!(model.api_base_url.is_none());
+        let creds = resolve_credentials(&model, Some("session-jwt-proxy"));
+        assert_eq!(creds.auth_type, AuthType::SessionToken);
+        assert_eq!(creds.api_key.as_deref(), Some("session-jwt-proxy"));
+        assert_eq!(creds.base_url, proxy);
+        assert_eq!(creds.failover_api_keys, vec!["console-biz-key".to_string()]);
+        assert_eq!(
+            creds.failover_base_url.as_deref(),
+            Some(XAI_API_BASE_URL_DEFAULT),
+            "missing api_base_url must not leave console hop on cli-chat-proxy"
+        );
+        assert_eq!(creds.session_base_url.as_deref(), Some(proxy));
+    }
+
     /// preferred_method=api_key dual with empty keys after retain → exclusive empty.
     #[test]
     #[serial_test::serial]
@@ -7567,6 +7620,161 @@ reasoning_effort = "low"
             "enterprise single-identity must clear console-key failover"
         );
     }
+
+    /// B2: multi console keys from `XAI_API_KEY` keep left-to-right order as
+    /// the leading failover keys (Business first = leftmost). Process store keys
+    /// may append after env; store multi-add order is covered by `xai_console`.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_multi_console_keys_preserve_env_comma_order() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let _xai = EnvGuard::set(
+            XAI_API_KEY_ENV_VAR,
+            "console-business-first,console-personal-second",
+        );
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        let creds = resolve_credentials(&model, Some("session-jwt-b2"));
+        assert_eq!(creds.auth_type, AuthType::SessionToken);
+        assert_eq!(creds.api_key.as_deref(), Some("session-jwt-b2"));
+        assert!(
+            creds.failover_api_keys.len() >= 2,
+            "expected at least env keys: {:?}",
+            creds.failover_api_keys.len()
+        );
+        assert_eq!(
+            &creds.failover_api_keys[..2],
+            [
+                "console-business-first".to_string(),
+                "console-personal-second".to_string(),
+            ]
+            .as_slice(),
+            "env comma-list must lead failover order (Business first = leftmost); got {:?}",
+            creds.failover_api_keys
+        );
+        assert!(
+            !creds
+                .failover_api_keys
+                .iter()
+                .any(|k| k == "session-jwt-b2"),
+            "session must not appear in console failover list"
+        );
+    }
+
+    /// B2: preferred_method=api_key → first console primary; remaining consoles then session last.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credentials_api_key_preferred_multi_console_session_last() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::PreferredAuthMethod;
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "biz-key,personal-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        let session = "session-jwt-last";
+        let creds = resolve_credentials_preferring(
+            &model,
+            Some(session),
+            Some(PreferredAuthMethod::ApiKey),
+        );
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        assert_eq!(creds.api_key.as_deref(), Some("biz-key"));
+        assert_eq!(
+            creds.failover_api_keys.first().map(String::as_str),
+            Some("personal-key"),
+            "next env console key immediately after primary: {:?}",
+            creds.failover_api_keys
+        );
+        assert_eq!(
+            creds.failover_api_keys.last().map(String::as_str),
+            Some(session),
+            "SuperGrok session must be last after all console keys: {:?}",
+            creds.failover_api_keys
+        );
+        let session_pos = creds
+            .failover_api_keys
+            .iter()
+            .position(|k| k == session)
+            .expect("session in failover");
+        let personal_pos = creds
+            .failover_api_keys
+            .iter()
+            .position(|k| k == "personal-key")
+            .expect("personal in failover");
+        assert!(
+            personal_pos < session_pos,
+            "console keys before session: {:?}",
+            creds.failover_api_keys
+        );
+    }
+
+    /// B2 end-to-end: resolve multi console + mark SuperGrok used up + prefer_live
+    /// → Business (first) console + api.x.ai; not SuperGrok extras.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_then_prefer_live_multi_console_prefers_first_not_session_extras() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_grok_sampler::AllowanceExhaustAction;
+        use xai_grok_test_support::EnvGuard;
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "biz-team-key,other-console-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let session = "session-with-extras-burning";
+        let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+        let model = test_model_entry("m", proxy, None, None, None);
+        let creds = resolve_credentials(&model, Some(session));
+        assert_eq!(creds.api_key.as_deref(), Some(session));
+        assert_eq!(
+            creds.failover_api_keys.first().map(String::as_str),
+            Some("biz-team-key")
+        );
+        assert!(
+            creds
+                .failover_api_keys
+                .iter()
+                .any(|k| k == "other-console-key"),
+            "second env console must be queued: {:?}",
+            creds.failover_api_keys
+        );
+
+        assert_eq!(
+            xai_grok_sampler::sync_allowance_exhaust_from_usage(100.0, Some(session), true),
+            AllowanceExhaustAction::Marked
+        );
+        let mut sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+        let reason = xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut sampling)
+            .expect("must leave SuperGrok when console keys bound");
+        assert_eq!(sampling.api_key.as_deref(), Some("biz-team-key"));
+        assert!(
+            sampling
+                .failover_api_keys
+                .iter()
+                .any(|k| k == "other-console-key"),
+            "remaining console keys kept: {:?}",
+            sampling.failover_api_keys
+        );
+        assert!(
+            !sampling
+                .failover_api_keys
+                .iter()
+                .any(|k| k.trim() == session),
+            "exhausted SuperGrok must not remain in failover: {:?}",
+            sampling.failover_api_keys
+        );
+        assert!(
+            sampling.base_url.contains("api.x.ai"),
+            "console host after prefer_live: {}",
+            sampling.base_url
+        );
+        assert!(reason.contains("console key"), "{reason}");
+        // Cleanup process memo so sibling serial tests see a clean slate.
+        let _ = xai_grok_sampler::sync_allowance_exhaust_from_usage(0.0, Some(session), true);
+    }
+
     /// Regression: BYOK env-var auth must stay ApiKey even when signed in,
     /// otherwise the bearer resolver overwrites the BYOK key with a session JWT.
     #[test]

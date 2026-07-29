@@ -153,7 +153,7 @@
     /// Dual-auth D3: hop reason is status chrome (and toast-eligible) with no raw keys.
     #[test]
     fn dual_auth_hop_reason_is_status_chrome_not_raw_key() {
-        let reason = "Switched SuperGrok session → console key (credit exhausted)";
+        let reason = "Switched SuperGrok session → console key (out of allowance)";
         assert!(
             xai_grok_shell::sampling::is_credential_hop_reason(reason),
             "hop copy must be toast/status eligible"
@@ -185,7 +185,7 @@
     #[test]
     fn dual_auth_hop_retry_state_shows_toast() {
         let mut app = make_app_with_agent("sess-1");
-        let reason = "Switched SuperGrok session → console key (credit exhausted)";
+        let reason = "Switched SuperGrok session → console key (out of allowance)";
         assert!(xai_grok_shell::sampling::is_credential_hop_reason(reason));
 
         let update = XaiSessionUpdate::RetryState(RetryState::Retrying {
@@ -206,6 +206,12 @@
             "hop must show toast with label copy (no raw keys)"
         );
         assert!(!reason.contains("sk-") && !reason.contains("jwt"));
+        // Meter honesty: destination identity drives footer (not SuperGrok extras).
+        assert_eq!(
+            agent.sampling_identity,
+            crate::views::credit_bar::SamplingIdentityKind::ConsoleKey,
+            "hop to console must set sampling identity for meter"
+        );
         // Status chrome still set.
         match agent.session.tracker.activity() {
             Some(TurnActivity::Retrying { reason: r, .. }) => assert_eq!(r, reason),

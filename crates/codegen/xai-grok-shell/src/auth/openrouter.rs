@@ -267,7 +267,12 @@ pub fn run_openrouter_login(
         )?
     };
 
-    store_openrouter_api_key(&store, &key)?;
+    // After secret accept: dual-backend budget progress on TTY stderr while
+    // keyring write blocks (same contract as console login).
+    let show_progress = super::secret_store_progress::should_show_secret_store_progress();
+    super::secret_store_progress::with_secret_store_progress(show_progress, || {
+        store_openrouter_api_key(&store, &key)
+    })?;
     eprintln!("OpenRouter API key saved to the secret store.");
     eprintln!(
         "Select the model with `/model {OPENROUTER_GROK_45_CATALOG_ID}` or \

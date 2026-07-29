@@ -363,6 +363,36 @@ pub(super) fn handle_billing_fetched(
     if let Some(or) = openrouter_balance {
         app.openrouter_credit_balance = Some(or);
     }
+    // Leave SuperGrok when included usage is full: if a console key is bound,
+    // mark the session out of allowance so the next sample prefers the console
+    // key without waiting for a 402 (extras would still succeed on SuperGrok and
+    // burn paid balance). Threshold is 100% (`INCLUDED_ALLOWANCE_EXHAUST_PCT`);
+    // poll floor remains 99% so we keep refreshing near the end of the pool
+    // (session-load + turn-end also fetch).
+    //
+    // When marked, sampler stays on the console key — update meter identity so
+    // the footer does not keep showing SuperGrok prepaid extras as spend.
+    let exhaust_action = if let Some(bal) = balance.as_ref() {
+        let grok_home = xai_grok_shell::util::grok_home::grok_home();
+        xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(bal.usage_pct, &grok_home)
+    } else {
+        xai_grok_shell::auth::AllowanceExhaustAction::None
+    };
+    match exhaust_action {
+        xai_grok_shell::auth::AllowanceExhaustAction::Marked => {
+            for agent in app.agents.values_mut() {
+                agent.sampling_identity =
+                    crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
+            }
+        }
+        xai_grok_shell::auth::AllowanceExhaustAction::Cleared => {
+            for agent in app.agents.values_mut() {
+                agent.sampling_identity =
+                    crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession;
+            }
+        }
+        xai_grok_shell::auth::AllowanceExhaustAction::None => {}
+    }
     app.billing_poll_wanted = balance
         .as_ref()
         .map(|b| b.usage_pct >= 99.0)

@@ -57,8 +57,8 @@ When histories keep breaking: **stack product on their tip**, then **join
 Surmount `main`** (`-s ours`) so GitHub compare/PR works, then PR to `main`.
 Detect: `./scripts/detect-upstream-export.sh` or `just upstream-detect`.
 
-Full process: [`docs/upstream-history.md`](docs/upstream-history.md)  
-Import log: [`docs/upstream-import-log.md`](docs/upstream-import-log.md)  
+Full process: [`docs/upstream-history.md`](docs/upstream-history.md)
+Import log: [`docs/upstream-import-log.md`](docs/upstream-import-log.md)
 Onto log: [`docs/upstream-onto-log.md`](docs/upstream-onto-log.md)
 
 **Never:** reset Surmount `main` to xAI; GitHub “Sync fork” that drops Surmount
@@ -77,7 +77,8 @@ list when you ship fork work.
 - [x] **Binary / branding** — `grok-oss` (crate package still `xai-grok-pager-bin`); welcome, terminal/tab titles, resume hints, and docs say Grok OSS / `grok-oss`
 - [x] **OpenRouter** — separate model option (`openrouter-grok-4.5`); login/logout; secret store; optional Zed credential probe (read-only)
 - [x] **Multi-key OpenRouter** — comma lists / failover keys for credit + rate-limit rotation
-- [x] **SuperGrok OAuth ↔ console API key dual-auth** — first-party resolve merge (session primary + console failover by default; `preferred_method=api_key` reverses); identity hop on **credit** and **plain 429** (session→key clears bearer; key→session via JWT in failover list); dual-host hop; **D3** process-local credit exhausted-fingerprint memo + distinct hop status/toast (credit vs rate-limited; labels only); rate-limit hop uses temporary shared `grok-rate-limit` cooldown (not credit memo); kill-switch clears key failover; console keys in keyring/`provider_credentials.json` + env/auth.json; **live re-bind without prior stash** (`session_bearer_resolver`); **multi-add** `grok login --api-key` + `--list-api-keys` (fingerprints only). Plans: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md), [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md). Residual: dual OAuth S3 out of scope; optional durable memo.
+- [x] **SuperGrok OAuth ↔ console API key dual-auth** — first-party resolve merge (session primary + console failover by default; `preferred_method=api_key` reverses); identity switch on **credit / SuperGrok Heavy usage-limit** and **plain 429** (session→key clears bearer; key→session via JWT in failover list); also switches API host (SuperGrok proxy ↔ `api.x.ai`); credit/allowance exhausted-fingerprint memo (process cache + durable `$GROK_HOME/exhausted_credits/`, 1h TTL; **console-key success clears**, **session success does not** — extras-paid SuperGrok 200s must not put SuperGrok back) + status/toast (“out of allowance” vs “rate limited”; labels only); when billing included `usage_pct ≥ 100%` + dual-auth, mark SuperGrok used up and prefer console key before the next request (no 402; clear on period reset); rate-limit switch uses temporary shared `grok-rate-limit` cooldown (not credit memo); kill-switch clears key failover + host metadata; console keys in keyring/`provider_credentials.json` + env/auth.json; **live re-bind without prior stash** (`session_bearer_resolver`); **multi-add** `grok login --api-key` + `--list-api-keys` (fingerprints only). Plans: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md), [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md). Residual: multi SuperGrok OAuth failover (personal vs business Heavy session) not built — hop is session ↔ console key only.
+- [x] **Keyring login time-box + fail-loud + secure fallback + TTY progress** — OS keyring get/set/delete wall-clock budget (`KEYRING_OP_TIMEOUT`); interactive `grok login --api-key` / OpenRouter login require a **secure** backend (primary platform store, then on Linux automatic **keyutils** fallback when Secret Service times out/errors). TTY stderr progress counts seconds up to **2× timeout (~6s)** during store RMW+write (suppressed non-TTY / env short-circuit). Only if **all** secure backends fail → clear error, **no** silent `provider_credentials.json` secret dump. File mirror only after successful secure write. `GROK_CREDENTIALS_FORCE_FILE` = tests/CI only (not user recovery).
 - [x] **Economic mode** — soft-cap effective context at the Grok 4.5 long-context price cliff (~200k); `/economic-mode`; settings default on
 - [x] **Auto-compact default 95% + live-apply** — stock Grok 4.5 catalog omits a per-model undercut (was 80); remote `models_cache` undercuts on stock models are dropped so the product default applies; user session/env still win; banner shows usage **and** configured threshold. Settings commit live-applies to open sessions (`restart_required: false`): disk persist → ACP `x.ai/auto_compact_threshold_changed` → `SessionCommand::SetAutoCompactThreshold` → CompactionConfig Cells (same write path as model switch). Live-apply pushes the **committed Settings value** (race-safe vs disk); env `GROK_AUTO_COMPACT_THRESHOLD_*` wins again on the next full resolve (spawn / model switch). Detail: `docs/dev/research/rca-auto-compact-early-fire.md`
 - [x] **Auto-run `/implement`** — after a successful turn, queue a follow-up implement block when present; **appends** after any already-queued prompts (does not drop them); economic mode can clamp implement `--effort`
@@ -184,6 +185,10 @@ list when you ship fork work.
   unchanged. **B/C/D parked** (side panel / inline / config) unless A jars —
   do not invent. Design:
   [`doc/dev/research/plan-modal-softer-park-2026-07-26.md`](doc/dev/research/plan-modal-softer-park-2026-07-26.md)
+- [x] **Plan approval panel SoT = live `plan.md`** — FileBacked preview re-reads
+  session `plan.md` on open / body resolve (frozen reverse-request snapshot is
+  fallback only). Product CTAs only (`a`/`A`/`?`/`s`/`q`); no freeform chat
+  approve. User-guide `19-plan-mode`.
 - [x] **Plan mode selection + screenshots (P1–P4)** — revise/clarify feedback
   carries `@plan.md:N` (or `N-M`) + quoted line text for single- and multi-line
   highlight; paste screenshots on the plan prompt — images ride Interject with
@@ -310,5 +315,5 @@ processes. Disable shared coordination with `GROK_DISABLE_SHARED_RATE_LIMIT=1`.
 
 ## License
 
-Apache License 2.0 — [`LICENSE`](LICENSE).  
+Apache License 2.0 — [`LICENSE`](LICENSE).
 Third-party: [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES).

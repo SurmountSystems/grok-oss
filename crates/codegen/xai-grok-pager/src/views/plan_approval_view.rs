@@ -39,8 +39,7 @@ pub const PLAN_CARD_HEADER_EMPTY: &str = "No plan written yet";
 
 /// CTA legend painted on the soft-park transcript card (keys work with an
 /// empty prompt; `/view-plan` opens the side panel).
-pub const PLAN_CARD_CTAS: &str =
-    "a approve · A approve w/ comment · ? clarify · s revise · q quit · /view-plan open panel";
+pub const PLAN_CARD_CTAS: &str = "Enter/a approve · A approve w/ comment · ? clarify · s revise · q quit · /view-plan open panel";
 
 /// Max body lines embedded in the soft-park transcript card before ellipsis.
 pub const PLAN_CARD_PREVIEW_LINES: usize = 12;

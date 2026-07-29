@@ -68,7 +68,8 @@ pub struct SamplerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_base_url: Option<String>,
     /// Exact token that marks the SuperGrok / OAuth session identity in the
-    /// failover list (or primary). Used for dual-host hop + bearer reinstall.
+    /// failover list (or primary). Used when switching API host with the key
+    /// (SuperGrok proxy ↔ `api.x.ai`) and for bearer reinstall.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_identity_key: Option<String>,
     pub base_url: String,

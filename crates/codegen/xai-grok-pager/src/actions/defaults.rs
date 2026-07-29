@@ -331,12 +331,15 @@ pub(super) fn default_actions(
             default_key: key!('e', CONTROL),
             alt_keys: vec![],
             category: Category::ConversationAction,
-            context: When::ScrollbackFocused,
+            // AgentScreen so Ctrl+E works from the prompt as well as scrollback.
+            // ScrollbackFocused-only left the chord as textarea EOL while the
+            // prompt was focused (silent no-op for thinking expand).
+            context: When::AgentScreen,
             hint_priority: Some(3),
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Shows or hides the agent's reasoning (thinking) blocks across the whole transcript in one keypress.\nReveal how the agent reached an answer, or hide reasoning to focus on results.\nSeparate from E, which folds every entry regardless of type.",
+                "Shows or hides the agent's reasoning (thinking) blocks across the whole transcript in one keypress.\nReveal how the agent reached an answer, or hide reasoning to focus on results.\nWorks from the prompt or scrollback. Separate from E, which folds every entry regardless of type.",
             ),
         },
         ActionDef {

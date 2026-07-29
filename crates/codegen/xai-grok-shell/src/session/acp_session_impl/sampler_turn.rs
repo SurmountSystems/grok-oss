@@ -486,7 +486,7 @@ impl SessionActor {
                 extra_headers.insert("x-compaction-at".to_string(), value.to_string());
             }
         }
-        SamplingConfig {
+        let mut full = SamplingConfig {
             api_key,
             failover_api_keys: creds.failover_api_keys,
             failover_base_url: creds.failover_base_url,
@@ -542,7 +542,22 @@ impl SessionActor {
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+        };
+        // Dual-auth sticky: resolve always re-pins SuperGrok session as primary.
+        // When that identity is memoized credit-exhausted, prefer console key
+        // *here* so first attempt (main turn, compaction, aux clients built from
+        // this config) never hits SuperGrok extras and never shows per-turn hop
+        // Retrying chrome. Silent when already sticky.
+        if let Some(hop_reason) =
+            xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut full)
+        {
+            tracing::info!(
+                target: "xai_grok_shell::session",
+                %hop_reason,
+                "reconstruct_full_config: sticky credit preference → console primary"
+            );
         }
+        full
     }
     /// Install auto-mode permission classifier with a live LLM side-query
     /// (laziness-classifier pattern: `prepare_chat_completion` +
@@ -1213,7 +1228,31 @@ impl SessionActor {
             if self.auth_gate(&model_id, &base_url).active() {
                 match am.get_valid_token().await {
                     Ok(key) => {
-                        if creds.api_key.as_deref() != Some(&key) {
+                        // Dual-auth: after hop / prefer_live the live primary may
+                        // be the console API key while ACP auth method stays
+                        // session-based. session_identity_key holds the SuperGrok
+                        // JWT; when live api_key differs, do **not** clobber the
+                        // console key with a fresh session JWT (that left JWT on
+                        // api.x.ai and kept draining the wrong pool / subagents).
+                        let live_is_console_after_hop = creds
+                            .session_identity_key
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .zip(
+                                creds
+                                    .api_key
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty()),
+                            )
+                            .is_some_and(|(sess, live)| sess != live);
+                        if live_is_console_after_hop {
+                            tracing::debug!(
+                                model = %model_id,
+                                "pre-flight: keep console primary (session JWT still in memo); skip session token overwrite"
+                            );
+                        } else if creds.api_key.as_deref() != Some(&key) {
                             let mut creds = creds;
                             creds.api_key = Some(key);
                             self.chat_state_handle.update_credentials(creds);

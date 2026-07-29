@@ -326,6 +326,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             autotopup,
             openrouter_balance,
         } => {
+            if let Some(bal) = balance.as_ref() {
+                let grok_home = xai_grok_shell::util::grok_home::grok_home();
+                let _ = xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(
+                    bal.usage_pct,
+                    &grok_home,
+                );
+            }
             app.credit_balance = balance;
             apply_auto_topup(&mut app.auto_topup, &autotopup);
             if let Some(or) = openrouter_balance {

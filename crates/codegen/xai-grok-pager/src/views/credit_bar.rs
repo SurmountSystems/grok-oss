@@ -45,6 +45,55 @@ pub struct OpenRouterCreditBalance {
     pub balance_cents: i64,
 }
 
+/// Which identity is live for sampling (drives meter honesty in the prompt footer).
+///
+/// After SuperGrok included allowance is full, Build can stay on a **console**
+/// API key while SuperGrok billing still reports personal prepaid extras. The
+/// footer must not present those extras as what Build is burning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SamplingIdentityKind {
+    /// Live sampling uses the SuperGrok OAuth session (default when unknown).
+    #[default]
+    SuperGrokSession,
+    /// Live sampling uses a console / Business API key (`api.x.ai`).
+    ConsoleKey,
+}
+
+impl SamplingIdentityKind {
+    /// Plain-language label for status / meter copy (no secrets).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SuperGrokSession => "SuperGrok session",
+            Self::ConsoleKey => "console key",
+        }
+    }
+
+    /// True when live sampling is on a console / Business API key.
+    pub fn is_console(self) -> bool {
+        matches!(self, Self::ConsoleKey)
+    }
+}
+
+/// Map a dual-auth hop status/toast reason to the **destination** identity.
+///
+/// Returns `None` when `reason` is not a known identity-switch string.
+pub fn sampling_identity_from_hop_reason(reason: &str) -> Option<SamplingIdentityKind> {
+    // Exact allow-list mirrors sampler hop copy (no loose substring match).
+    match reason {
+        "Switched SuperGrok session → console key (out of allowance)"
+        | "Switched SuperGrok session → console key (rate limited)"
+        | "Switched to next console key (out of allowance)"
+        | "Switched to next console key (rate limited)" => Some(SamplingIdentityKind::ConsoleKey),
+        "Switched console key → SuperGrok session (out of allowance)"
+        | "Switched console key → SuperGrok session (rate limited)"
+        | "Switched to next SuperGrok session (out of allowance)"
+        | "Switched to next SuperGrok session (rate limited)" => {
+            Some(SamplingIdentityKind::SuperGrokSession)
+        }
+        _ => None,
+    }
+}
+
 impl CreditBalance {
     /// Label for the percentage allowance, chosen from the period type:
     /// "Weekly limit" / "Monthly limit", falling back to "Usage" when unknown.
@@ -107,9 +156,10 @@ fn fmt_dollars(cents: i64) -> String {
 
 /// Build the `/usage` summary block shown in scrollback.
 ///
-/// Always shows usage % and (when known) the next reset time. The credits
-/// block is rendered only when the user has a positive prepaid balance:
-/// - no prepaid balance       → credits block omitted entirely
+/// Always shows usage % and (when known) the next reset time. The SuperGrok
+/// extras block is rendered only when the user has a positive prepaid balance
+/// from the grok.com session billing fetch (not console.x.ai team credits):
+/// - no prepaid balance       → extras block omitted entirely
 /// - auto top-up off/unknown  → `Auto topup: disabled` (no max line)
 /// - auto top-up on, no max   → `Auto topup: $N`
 /// - auto top-up on, max set  → `Auto topup: $N` + `Max monthly topup: $M`
@@ -127,13 +177,15 @@ pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopu
 
     // Billing stores credit / top-up amounts as negative cents (accounting
     // convention); display the absolute USD value, matching the web clients.
+    // Label as SuperGrok extras so the footer is never mistaken for console
+    // team prepaid credits (those are a different pool on console.x.ai).
     if let Some(prepaid) = balance
         .prepaid_balance_cents
         .map(i64::abs)
         .filter(|c| *c > 0)
     {
         lines.push(String::new());
-        lines.push(format!("Credits: {}", fmt_dollars(prepaid)));
+        lines.push(format!("SuperGrok extras: {}", fmt_dollars(prepaid)));
         match autotopup {
             Some(at) if at.enabled && at.topup_amount_cents.is_some() => {
                 lines.push(format!(
@@ -202,9 +254,9 @@ pub fn usage_warning_for_session(
 /// Prompt info-row warning, optionally preferring OpenRouter account credits
 /// when the active model is OpenRouter-backed.
 ///
-/// When `openrouter_model` is true and an OR balance is known, always shows
-/// `Credits left: $N` (yellow when ≤ $10). xAI Build billing is ignored for
-/// that model so the footer matches the provider actually being charged.
+/// Defaults live sampling identity to SuperGrok session. Prefer
+/// [`usage_warning_for_session_with_identity`] when the pager knows the live
+/// primary (console key after stay-on-console, hop toast, etc.).
 pub fn usage_warning_for_session_with_openrouter(
     balance: Option<&CreditBalance>,
     autotopup: Option<&AutoTopupInfo>,
@@ -213,6 +265,39 @@ pub fn usage_warning_for_session_with_openrouter(
     gateway_chat: bool,
     openrouter_model: bool,
 ) -> Option<(String, bool)> {
+    usage_warning_for_session_with_identity(
+        balance,
+        autotopup,
+        openrouter,
+        usage_visible,
+        gateway_chat,
+        openrouter_model,
+        SamplingIdentityKind::SuperGrokSession,
+    )
+}
+
+/// Like [`usage_warning_for_session_with_openrouter`], but labels the meter by
+/// **live sampling identity**.
+///
+/// When `openrouter_model` is true and an OR balance is known, always shows
+/// `OpenRouter credits left: $N` (yellow when ≤ $10). xAI SuperGrok billing is
+/// ignored for that model so the footer matches the provider actually charged.
+///
+/// When live primary is a **console key**, never presents SuperGrok prepaid
+/// extras as the spend meter (personal SuperGrok $ is a different pool). Shows
+/// honest console copy instead (`console key · no $ meter yet`).
+///
+/// When live primary is SuperGrok, prepaid is labeled **SuperGrok extras left**
+/// — never generic "Credits left".
+pub fn usage_warning_for_session_with_identity(
+    balance: Option<&CreditBalance>,
+    autotopup: Option<&AutoTopupInfo>,
+    openrouter: Option<&OpenRouterCreditBalance>,
+    usage_visible: bool,
+    gateway_chat: bool,
+    openrouter_model: bool,
+    sampling_identity: SamplingIdentityKind,
+) -> Option<(String, bool)> {
     if gateway_chat || !usage_visible {
         return None;
     }
@@ -220,14 +305,31 @@ pub fn usage_warning_for_session_with_openrouter(
     if openrouter_model {
         let or = openrouter?;
         // Show remaining even at $0 so the user sees the balance was fetched.
-        let text = format!("Credits left: {}", fmt_dollars(or.balance_cents.abs()));
+        let text = format!(
+            "OpenRouter credits left: {}",
+            fmt_dollars(or.balance_cents.abs())
+        );
         let critical = or.balance_cents.abs() <= LOW_BALANCE_CENTS || or.balance_cents <= 0;
         return Some((text, critical));
     }
 
+    // Console / Business API key is live: do not show SuperGrok prepaid extras
+    // or included-% as if they were the pool Build is burning. Honest absence
+    // of a console $ balance beats the wrong SuperGrok number.
+    if sampling_identity.is_console() {
+        let label = sampling_identity.as_str();
+        let mut chars = label.chars();
+        let labeled = match chars.next() {
+            None => String::new(),
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        };
+        return Some((format!("{labeled} · no $ meter yet"), false));
+    }
+
     let balance = balance?;
 
-    // A non-zero prepaid balance (stored as signed cents) means the credits model.
+    // A non-zero prepaid balance (stored as signed cents) means SuperGrok
+    // extras / bought credits from the session billing path.
     let credits = balance
         .prepaid_balance_cents
         .map(i64::abs)
@@ -260,14 +362,14 @@ pub fn usage_warning_for_session_with_openrouter(
         return None;
     };
 
-    // Credits are only drawn down at 100% usage; don't warn before then.
+    // Extras are only drawn down at 100% included usage; don't warn before then.
     if balance.usage_pct < 100.0 {
         return None;
     }
 
     let credits_warning = || {
         (
-            format!("Credits left: {}", fmt_dollars(credits_cents)),
+            format!("SuperGrok extras left: {}", fmt_dollars(credits_cents)),
             true,
         )
     };
@@ -376,12 +478,12 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, None),
-            "Usage: 25%\n\nCredits: $100\nAuto topup: disabled"
+            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"
         );
         // A disabled rule renders the same.
         assert_eq!(
             format_usage_summary(&b, Some(&topup(false, Some(2000), Some(10000)))),
-            "Usage: 25%\n\nCredits: $100\nAuto topup: disabled"
+            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"
         );
     }
 
@@ -393,7 +495,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(2000), None))),
-            "Usage: 25%\n\nCredits: $100\nAuto topup: $20"
+            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: $20"
         );
     }
 
@@ -406,7 +508,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(2000), Some(10000)))),
-            "Usage: 25%\nNext reset: June 14, 16:00\n\nCredits: $100\nAuto topup: $20\nMax monthly topup: $100"
+            "Usage: 25%\nNext reset: June 14, 16:00\n\nSuperGrok extras: $100\nAuto topup: $20\nMax monthly topup: $100"
         );
     }
 
@@ -418,7 +520,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(550), None))),
-            "Usage: 25%\n\nCredits: $12.50\nAuto topup: $5.50"
+            "Usage: 25%\n\nSuperGrok extras: $12.50\nAuto topup: $5.50"
         );
     }
 
@@ -432,7 +534,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(-500), Some(-1000)))),
-            "Usage: 100%\n\nCredits: $5\nAuto topup: $5\nMax monthly topup: $10"
+            "Usage: 100%\n\nSuperGrok extras: $5\nAuto topup: $5\nMax monthly topup: $10"
         );
     }
 
@@ -591,7 +693,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&exhausted, Some(&disabled), true),
-            Some(("Credits left: $4.53".to_string(), true))
+            Some(("SuperGrok extras left: $4.53".to_string(), true))
         );
     }
 
@@ -605,7 +707,7 @@ mod tests {
         let disabled = topup(false, None, None);
         assert_eq!(
             usage_warning(&b, Some(&disabled), true),
-            Some(("Credits left: $4.53".to_string(), true))
+            Some(("SuperGrok extras left: $4.53".to_string(), true))
         );
     }
 
@@ -624,7 +726,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&at_ten, Some(&disabled), true),
-            Some(("Credits left: $10".to_string(), true))
+            Some(("SuperGrok extras left: $10".to_string(), true))
         );
     }
 
@@ -649,7 +751,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&b, Some(&topup(true, Some(2000), Some(10000))), true),
-            Some(("Credits left: $15".to_string(), true))
+            Some(("SuperGrok extras left: $15".to_string(), true))
         );
         let plenty = CreditBalance {
             prepaid_balance_cents: Some(2500),
@@ -669,7 +771,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&b, Some(&topup(true, Some(-2000), Some(-10000))), true),
-            Some(("Credits left: $4.53".to_string(), true))
+            Some(("SuperGrok extras left: $4.53".to_string(), true))
         );
     }
 
@@ -697,6 +799,143 @@ mod tests {
         );
     }
 
+    // ── Meter honesty: live sampling identity (console vs SuperGrok) ─
+
+    #[test]
+    fn sampling_identity_labels_are_plain_language() {
+        assert_eq!(
+            SamplingIdentityKind::SuperGrokSession.as_str(),
+            "SuperGrok session"
+        );
+        assert_eq!(SamplingIdentityKind::ConsoleKey.as_str(), "console key");
+        assert!(SamplingIdentityKind::ConsoleKey.is_console());
+        assert!(!SamplingIdentityKind::SuperGrokSession.is_console());
+    }
+
+    #[test]
+    fn sampling_identity_from_hop_reason_destination() {
+        assert_eq!(
+            sampling_identity_from_hop_reason(
+                "Switched SuperGrok session → console key (out of allowance)"
+            ),
+            Some(SamplingIdentityKind::ConsoleKey)
+        );
+        assert_eq!(
+            sampling_identity_from_hop_reason(
+                "Switched console key → SuperGrok session (out of allowance)"
+            ),
+            Some(SamplingIdentityKind::SuperGrokSession)
+        );
+        assert_eq!(
+            sampling_identity_from_hop_reason("Switched to next console key (rate limited)"),
+            Some(SamplingIdentityKind::ConsoleKey)
+        );
+        assert_eq!(sampling_identity_from_hop_reason("rate limited"), None);
+    }
+
+    /// Contract: live primary = console after allowance mark → meter must not
+    /// present SuperGrok prepaid extras as bare "Credits left" / SuperGrok
+    /// extras $ without a console active-identity label.
+    #[test]
+    fn warning_console_primary_does_not_show_supergrok_extras_dollars() {
+        // Dogfood shape: SuperGrok included full + ~$9.96 personal extras still
+        // in billing, but samples run on the console key.
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(996),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..bal(100.0)
+        };
+        let disabled = topup(false, None, None);
+        let w = usage_warning_for_session_with_identity(
+            Some(&b),
+            Some(&disabled),
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+        );
+        let (text, critical) = w.expect("console primary should show honest console meter copy");
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            lower.contains("console"),
+            "must label active identity as console: {text}"
+        );
+        assert!(
+            !text.starts_with("SuperGrok extras left:"),
+            "must not lead with SuperGrok extras $ while on console: {text}"
+        );
+        assert!(
+            !text.starts_with("Credits left:"),
+            "must not use bare Credits left: {text}"
+        );
+        // SuperGrok personal extras dollar amount must not be the primary story.
+        assert!(
+            !text.contains("$9.96"),
+            "must not show SuperGrok extras dollars as meter primary: {text}"
+        );
+        assert!(
+            !critical,
+            "honest console absence is not a critical low-balance warn"
+        );
+    }
+
+    /// Contract: live primary = SuperGrok with prepaid extras → existing extras
+    /// path still works and is labeled SuperGrok.
+    #[test]
+    fn warning_supergrok_primary_still_shows_labeled_extras() {
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(996),
+            ..bal(100.0)
+        };
+        let disabled = topup(false, None, None);
+        assert_eq!(
+            usage_warning_for_session_with_identity(
+                Some(&b),
+                Some(&disabled),
+                None,
+                true,
+                false,
+                false,
+                SamplingIdentityKind::SuperGrokSession,
+            ),
+            Some(("SuperGrok extras left: $9.96".to_string(), true))
+        );
+        // Legacy openrouter wrapper defaults to SuperGrok session identity.
+        assert_eq!(
+            usage_warning_for_session_with_openrouter(
+                Some(&b),
+                Some(&disabled),
+                None,
+                true,
+                false,
+                false,
+            ),
+            Some(("SuperGrok extras left: $9.96".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn warning_console_primary_suppresses_supergrok_included_pct_too() {
+        // Included-% about SuperGrok is also the wrong pool when console is live.
+        let b = bal_period(92.0, "USAGE_PERIOD_TYPE_WEEKLY");
+        let w = usage_warning_for_session_with_identity(
+            Some(&b),
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+        );
+        let (text, _) = w.expect("console meter copy");
+        assert!(text.to_ascii_lowercase().contains("console"), "{text}");
+        assert!(
+            !text.contains("Weekly limit"),
+            "must not show SuperGrok included % as primary while on console: {text}"
+        );
+    }
+
     // ── usage_warning: OpenRouter account credits ────────────────────
 
     #[test]
@@ -710,7 +949,7 @@ mod tests {
                 false,
                 true,
             ),
-            Some(("Credits left: $63.86".to_string(), false))
+            Some(("OpenRouter credits left: $63.86".to_string(), false))
         );
         // Low balance → critical (yellow).
         assert_eq!(
@@ -722,7 +961,7 @@ mod tests {
                 false,
                 true,
             ),
-            Some(("Credits left: $5".to_string(), true))
+            Some(("OpenRouter credits left: $5".to_string(), true))
         );
         // OR model without a fetched balance → no warning (don't fall back to xAI).
         assert_eq!(

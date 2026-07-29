@@ -848,6 +848,12 @@ impl AgentView {
                         self.handle_line_viewer_key(key)
                     }
                     Event::Paste(text) => {
+                        // Plan approval (any focus): screenshots / file drops
+                        // attach to the shared plan composer. Do not swallow
+                        // into list-pane search when Preview is focused.
+                        if self.plan_approval_view.is_some() {
+                            return self.route_popup_paste(text);
+                        }
                         self.line_viewer
                             .as_mut()
                             .map_or(InputOutcome::Unchanged, |viewer| {
@@ -1039,27 +1045,24 @@ impl AgentView {
                 _ => InputOutcome::Changed,
             };
         }
-        if self.plan_approval_view.is_some()
-            && self.line_viewer.is_none()
-            && self.active_pane != AgentPane::Scrollback
-        {
-            return match ev {
+        // Soft-park plan approval (durable view, no line viewer yet). CTA keys
+        // must work even when Scrollback is focused — clicking the parked plan
+        // card to read it must not kill Enter/a/A/?/s/q (dogfood 2026-07-27:
+        // legend visible, keys no-op). Mouse still falls through to the
+        // scrollback handler so status-chip / plan-chip reopen paths stay shared.
+        if self.plan_approval_view.is_some() && self.line_viewer.is_none() {
+            match ev {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if key!('q', CONTROL).matches(key) {
                         return InputOutcome::Unchanged;
                     }
-                    self.handle_plan_feedback_key(key)
+                    return self.handle_plan_feedback_key(key);
                 }
                 Event::Paste(text) => {
-                    if self
-                        .plan_approval_view
-                        .as_ref()
-                        .is_some_and(|view| view.focus != PlanApprovalFocus::Preview)
-                    {
-                        self.route_popup_paste(text)
-                    } else {
-                        InputOutcome::Unchanged
-                    }
+                    // Soft-park Preview used to swallow paste (hidden prompt).
+                    // Screenshots on the plan path must attach for approve /
+                    // revise / clarify — same composer as Prompt focus.
+                    return self.route_popup_paste(text);
                 }
                 Event::Mouse(mouse) => {
                     let mut changed = false;
@@ -1099,13 +1102,13 @@ impl AgentView {
                         return InputOutcome::Changed;
                     }
                     if changed {
-                        InputOutcome::Changed
-                    } else {
-                        InputOutcome::Unchanged
+                        return InputOutcome::Changed;
                     }
+                    // Not a soft-park chrome hit — let scrollback mouse handle
+                    // selection/scroll (do not swallow the click).
                 }
-                _ => InputOutcome::Changed,
-            };
+                _ => return InputOutcome::Changed,
+            }
         }
         if self.rewind_state.is_some() {
             return match ev {

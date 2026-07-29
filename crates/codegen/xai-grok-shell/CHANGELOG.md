@@ -6,8 +6,12 @@
 
 - **Grok OSS branding**: product name Grok OSS, CLI binary `grok-oss` (Surmount open-source fork of Grok Build).
 - **OpenRouter** is available as a separate model option (`openrouter-grok-4.5` / Grok 4.5 via OpenRouter). It does not replace native Grok Build models.
-- **`grok-oss login --openrouter`** / **`grok-oss logout --openrouter`** store or clear an OpenRouter API key in the OS keyring (or `~/.grok/provider_credentials.json`). Prefer `OPENROUTER_API_KEY` when set.
+- **`grok-oss login --openrouter`** / **`grok-oss logout --openrouter`** store or clear an OpenRouter API key in the OS keyring (file mirror only after keyring success). Prefer `OPENROUTER_API_KEY` when set.
 - **Zed-compatible credential discovery**: when no local key is set, Grok OSS read-only probes Zed’s `development_credentials` file and Zed’s OS keychain layouts. Grok OSS never writes Zed’s stores.
+
+## Bug Fixes
+
+- **`grok login --api-key` / OpenRouter login** no longer hang forever when Secret Service / keyring D-Bus blocks. Keyring ops are time-boxed. On Linux, if the primary Secret Service path times out or errors, login **automatically** falls back to kernel keyutils (secure, no D-Bus). Only if all secure backends fail does login error (no silent dump of the secret to `provider_credentials.json`). `GROK_CREDENTIALS_FORCE_FILE` remains tests/CI only.
 
 
 

@@ -1,11 +1,15 @@
 //! First-party xAI console / Business API key store helpers.
 //!
-//! Mirrors OpenRouter: OS keyring service `grok-build` +
-//! `$GROK_HOME/provider_credentials.json` (0600). Env (`XAI_API_KEY`) wins and
-//! is never written to the store.
+//! Interactive store writes require the OS keyring service `grok-build`
+//! (time-boxed). A file mirror under `$GROK_HOME/provider_credentials.json`
+//! (0600) is written only after a successful keyring write — not a silent
+//! fallback when Secret Service is blocked. Env (`XAI_API_KEY`) wins and is
+//! never written to the store.
 //!
 //! Multi-add: the store secret may hold a comma-separated list of keys
-//! (`grok login --api-key` appends unique keys). List shows fingerprints only.
+//! (`grok login --api-key` appends unique keys). Load-for-update is fail-closed
+//! on keyring error so a stale empty file mirror cannot clobber existing keys.
+//! List shows fingerprints only.
 //!
 //! Secrets are never accepted as CLI argv values (see [`super::secret_entry`]).
 //! Interactive entry uses no-echo TTY reads.
@@ -36,6 +40,9 @@ pub fn credential_url(base_url: Option<&str>) -> String {
 /// Load a stored console API key blob (store only; env is checked by callers).
 ///
 /// May be a single key or a comma-separated multi-key list.
+///
+/// Uses fail-open [`CredentialsStore::read`] (agent resolve / status). For
+/// multi-add RMW use [`load_stored_console_api_keys_for_update`].
 pub fn load_stored_console_api_key(
     store: &CredentialsStore,
 ) -> Result<Option<String>, CredentialsStoreError> {
@@ -43,23 +50,39 @@ pub fn load_stored_console_api_key(
     Ok(store.read(&url)?.map(|(_, secret)| secret))
 }
 
+fn split_unique_console_keys(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in crate::agent::config::split_api_key_list(raw) {
+        if !out.iter().any(|k| k == &part) {
+            out.push(part);
+        }
+    }
+    out
+}
+
 /// Ordered unique keys from the store secret (no env).
 ///
-/// Split acceptance matches resolve: [`crate::agent::config::split_api_key_list`]
-/// (commas, `\n`, `\r`) so store load and dual-auth resolve share one parser.
+/// Fail-open read (resolve / list). Split acceptance matches resolve:
+/// [`crate::agent::config::split_api_key_list`] (commas, `\n`, `\r`).
 pub fn load_stored_console_api_keys(
     store: &CredentialsStore,
 ) -> Result<Vec<String>, CredentialsStoreError> {
     Ok(match load_stored_console_api_key(store)? {
-        Some(raw) => {
-            let mut out = Vec::new();
-            for part in crate::agent::config::split_api_key_list(&raw) {
-                if !out.iter().any(|k| k == &part) {
-                    out.push(part);
-                }
-            }
-            out
-        }
+        Some(raw) => split_unique_console_keys(&raw),
+        None => Vec::new(),
+    })
+}
+
+/// Ordered unique keys for multi-add RMW — fail-closed on keyring error/timeout.
+///
+/// Must not invent an empty list from a missing file mirror when the keyring
+/// is unreachable (would clobber existing multi-key state on write).
+pub fn load_stored_console_api_keys_for_update(
+    store: &CredentialsStore,
+) -> Result<Vec<String>, CredentialsStoreError> {
+    let url = credential_url(None);
+    Ok(match store.read_for_update(&url)? {
+        Some((_, raw)) => split_unique_console_keys(&raw),
         None => Vec::new(),
     })
 }
@@ -99,7 +122,9 @@ pub fn add_console_api_key(
     if key.is_empty() {
         return Err(XaiConsoleAuthError::EmptyKey);
     }
-    let mut keys = load_stored_console_api_keys(store).map_err(XaiConsoleAuthError::Store)?;
+    // Fail-closed load: never RMW from an empty file view when keyring erred.
+    let mut keys =
+        load_stored_console_api_keys_for_update(store).map_err(XaiConsoleAuthError::Store)?;
     if keys.iter().any(|k| k == key) {
         return Ok(false);
     }
@@ -159,7 +184,12 @@ pub fn run_xai_console_login(
         )
         .map_err(XaiConsoleAuthError::Io)?
     };
-    let added = add_console_api_key(&store, &key)?;
+    // After secret accept: show dual-backend budget progress while RMW+write
+    // blocks (TTY stderr only; never prints secrets).
+    let show_progress = super::secret_store_progress::should_show_secret_store_progress();
+    let added = super::secret_store_progress::with_secret_store_progress(show_progress, || {
+        add_console_api_key(&store, &key)
+    })?;
     // Mirror into auth.json for legacy paths (fail-open). `store_api_key`
     // dual-writes via add_console_api_key (idempotent when already present).
     if let Err(e) = super::storage::store_api_key(grok_home, &key) {
@@ -243,6 +273,9 @@ mod tests {
         assert!(!fp.is_empty());
     }
 
+    /// B2: multi-add append order is the store half of dual-auth console order
+    /// (after `XAI_API_KEY` in `collect_xai_console_api_keys`). First added =
+    /// first tried after SuperGrok hop when env is unset — add Business first.
     #[test]
     #[serial_test::serial]
     fn multi_add_console_keys_and_list_fingerprints_only() {
@@ -259,7 +292,11 @@ mod tests {
         );
 
         let keys = load_stored_console_api_keys(&store).unwrap();
-        assert_eq!(keys, vec!["key-alpha".to_string(), "key-beta".to_string()]);
+        assert_eq!(
+            keys,
+            vec!["key-alpha".to_string(), "key-beta".to_string()],
+            "append order stable: first added is first in store list"
+        );
 
         let fps = list_console_api_key_fingerprints(&store);
         assert_eq!(fps.len(), 2);

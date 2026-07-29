@@ -214,12 +214,19 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             // Dual-auth D3: hop reason is already status chrome via
             // TurnActivity::Retrying; also toast so the operator notices the
             // SuperGrok session ↔ console key switch (no raw keys in copy).
+            // Track destination identity so the credits meter does not keep
+            // showing SuperGrok prepaid extras while samples run on console.
             if let XaiSessionUpdate::RetryState(
                 xai_grok_shell::extensions::notification::RetryState::Retrying { reason, .. },
             ) = update
                 && xai_grok_shell::sampling::is_credential_hop_reason(reason)
             {
                 agent.show_toast(reason);
+                if let Some(kind) =
+                    crate::views::credit_bar::sampling_identity_from_hop_reason(reason)
+                {
+                    agent.sampling_identity = kind;
+                }
             }
             changed
         }

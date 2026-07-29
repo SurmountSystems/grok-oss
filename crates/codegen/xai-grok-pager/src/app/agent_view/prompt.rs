@@ -1615,6 +1615,47 @@ mod history_browse_panel_tests {
     }
 }
 
+/// Ctrl+E expand-thinking must work while the prompt is focused (not only
+/// scrollback). Otherwise the chord falls through to the textarea as EOL and
+/// looks like a silent no-op.
+#[cfg(test)]
+mod expand_thinking_key_tests {
+    use super::*;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::types::DisplayMode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn ctrl_e() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_e_from_prompt_emits_expand_all_thinking() {
+        let mut agent = make_agent();
+        assert_eq!(agent.active_pane, crate::app::agent_view::AgentPane::Prompt);
+        // Seed a live truncated thought so expand has work to do.
+        let id = agent
+            .scrollback
+            .push_block(RenderBlock::thinking_streaming());
+        agent.scrollback.set_last_running(true);
+        agent
+            .scrollback
+            .push_chunk_to_thinking(id, "reason step by step\nmore lines\nhere");
+        assert_eq!(
+            agent.scrollback.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Truncated
+        );
+
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_e());
+        match outcome {
+            InputOutcome::Action(Action::ExpandAllThinking) => {}
+            other => panic!("expected ExpandAllThinking from prompt Ctrl+E, got {other:?}"),
+        }
+    }
+}
+
 /// Send-now (InterjectPrompt) must never silent-no-op: toast or action.
 #[cfg(test)]
 mod send_now_key_tests {

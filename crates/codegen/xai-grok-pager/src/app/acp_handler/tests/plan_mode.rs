@@ -24,6 +24,11 @@
             "soft park must not auto-open the plan modal"
         );
         assert_eq!(
+            agent.active_pane,
+            crate::views::agent::ActivePane::Prompt,
+            "soft park must focus Prompt so CTA keys are not dead under Scrollback"
+        );
+        assert_eq!(
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
             Some(crate::views::plan_approval_view::PLAN_PARKED_TOAST),
             "soft park must show the non-modal review toast"

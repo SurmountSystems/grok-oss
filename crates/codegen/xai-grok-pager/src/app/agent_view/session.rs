@@ -119,6 +119,7 @@ impl AgentView {
             credit_balance: None,
             auto_topup: None,
             openrouter_credit_balance: None,
+            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
             goal_state: None,
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),

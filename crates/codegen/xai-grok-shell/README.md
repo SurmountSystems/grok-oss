@@ -1806,13 +1806,13 @@ not a source for models OpenRouter does not host (e.g. Composer-class models).
 
 1. `OPENROUTER_API_KEY` (portable; shared with Zed and other tools)
 2. `OPENROUTER_API_KEYS` (optional extra keys for multi-account failover)
-3. Grok OSS secret store (OS keyring service `grok-build`, or `~/.grok/provider_credentials.json`)
+3. Grok OSS secret store (OS keyring service `grok-build`; file mirror under `~/.grok/provider_credentials.json` only after a successful keyring write)
 4. **Read-only** shared harness probes — including keys already saved in **Zed**:
    - Dev channel: `~/.config/zed/development_credentials` (or `%APPDATA%\Zed\…`)
    - OS store: Zed’s Secret Service / Keychain / Credential Manager layout  
      (Linux label `zed-github-account` + `url` attribute; Windows target `zed:url=…`)
 
-Grok OSS **never writes** into Zed’s stores. Override Zed config discovery with `GROK_ZED_CONFIG_DIR`. Set `GROK_CREDENTIALS_FORCE_FILE=1` to skip the OS keyring (CI / headless).
+Grok OSS **never writes** into Zed’s stores. Override Zed config discovery with `GROK_ZED_CONFIG_DIR`. Interactive login uses a secure keyring path (time-boxed). On Linux, if Secret Service times out or errors, login **automatically** tries kernel keyutils (no D-Bus unlock). Only if all secure backends fail does login error — no silent plaintext file dump. `GROK_CREDENTIALS_FORCE_FILE=1` skips the keyring for **tests / headless CI only** — not a recovery path for real secrets.
 
 ```bash
 # Preferred: environment variable (works for Grok OSS and Zed)

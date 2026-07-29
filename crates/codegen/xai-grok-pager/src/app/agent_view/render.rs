@@ -134,6 +134,17 @@ impl AgentView {
                     ]
                 }
             }
+            // Soft-park Preview (no side panel yet): advertise the same CTAs as
+            // the transcript card so the footer is not empty while keys work.
+            // When the line viewer is open, the panel footer paints the buttons.
+            PlanApprovalFocus::Preview if self.line_viewer.is_none() => vec![
+                HintItem::new(key!(Enter), "approve"),
+                HintItem::new(key!('a'), "approve"),
+                HintItem::new(key!('A'), "approve w/ comment"),
+                HintItem::new(key!('?'), "clarify"),
+                HintItem::new(key!('s'), "revise"),
+                HintItem::new(key!('q'), "quit"),
+            ],
             PlanApprovalFocus::Preview => vec![],
         }
     }
@@ -2300,13 +2311,14 @@ impl AgentView {
             .models
             .current_model_id_str()
             .is_some_and(xai_grok_shell::auth::is_openrouter_catalog_id);
-        let warning = crate::views::credit_bar::usage_warning_for_session_with_openrouter(
+        let warning = crate::views::credit_bar::usage_warning_for_session_with_identity(
             self.credit_balance.as_ref(),
             self.auto_topup.as_ref(),
             self.openrouter_credit_balance.as_ref(),
             self.billing_surface_visible,
             self.chat_kind,
             openrouter_model,
+            self.sampling_identity,
         );
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();

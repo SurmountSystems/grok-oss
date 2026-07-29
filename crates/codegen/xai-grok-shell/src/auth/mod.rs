@@ -1,3 +1,4 @@
+pub mod allowance_exhaust_from_billing;
 pub(crate) mod attribution;
 mod auth_provider;
 mod config;
@@ -19,6 +20,7 @@ pub mod openrouter;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
 pub mod secret_entry;
+pub mod secret_store_progress;
 pub(crate) mod single_flight;
 mod storage;
 mod token_output;
@@ -47,6 +49,9 @@ pub use flow::{
 };
 pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
 mod meta;
+pub use allowance_exhaust_from_billing::{
+    apply_billing_usage_to_session_exhaust, load_session_access_token,
+};
 pub use dual_auth_status::{
     DualAuthStatus, collect_dual_auth_status, collect_dual_auth_status_with,
 };
@@ -84,3 +89,5 @@ pub use xai_console::{
     list_console_api_key_fingerprints, load_stored_console_api_key, load_stored_console_api_keys,
     run_list_console_api_keys, run_xai_console_login, store_console_api_key,
 };
+/// Outcome of applying SuperGrok included-usage % to the out-of-allowance memo.
+pub use xai_grok_sampler::AllowanceExhaustAction;

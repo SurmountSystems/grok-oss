@@ -37,7 +37,31 @@ less than product code and tests. Do not invent long essays or git nags.
    be surgical and reviewed in context.
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
-   replies, product docs, tests, or **filenames**.
+   replies, product docs, tests, or **filenames**. **No bare plan-step codes**
+   (`S1`, `S3`, `D3`, `B2`, …) in residual, chat, join notes, **or identifiers**
+   without the plain name next to them — agents and humans misread them (e.g.
+   **S3** ≠ Amazon, **B2** ≠ Backblaze).
+   **Names are product (pinned 2026-07-27):** **file and directory names first**
+   (they stand out in git, PRs, and search), then variables, functions, modules,
+   test names, and user-visible enums. Thoughtful, readable, plain meaning
+   first. Not clever jargon or step codes in paths/symbols (`b2_order.rs`,
+   `proactive_hop`). Prefer names a tired reader can parse. Wire/protocol
+   fields we do not own may keep upstream spelling; our files, wrappers, and
+   tests still get clear names.
+   **Sapient Experience (stance pointer):** speak to humans as humans do; do
+   not try to *be* human. Full pin: host `~/.grok/AGENTS.md` § Sapient
+   Experience; open residual [`RESIDUAL.md`](RESIDUAL.md) §2f. Do not dump
+   novels here.
+   **Billing meters stay distinct:** personal SuperGrok dollar credits ≠
+   included weekly allowance ≠ console API spend. Name which meter.
+   **Dual-auth language (pinned 2026-07-27):** ban bare jargon **proactive hop**,
+   **sticky exhaust** / **sticky hop**, and **dual-host** without plain
+   explanation. Prefer: *mark SuperGrok used up from billing % / leave SuperGrok
+   when weekly included is full*; *stay on the console key after switch /
+   remember this SuperGrok identity is out of allowance*; *also switch the API
+   host (SuperGrok proxy ↔ `api.x.ai`)*. Residual, joins, comments, tests, and
+   **identifiers** use the plain names. (UI sticky headers / permission sticky
+   cursor are unrelated product terms — leave those alone.)
 5. **Never ask permission to continue clear work.** If the goal is known
    (finish the onto stack, resolve conflicts, keep going), **do the next step**
    — do not end with “say the word,” “want me to continue?,” or similar. Ask
@@ -96,6 +120,12 @@ rule: `~/.grok/AGENTS.md` § *Regressions…* + § *Hard stop — parent is
 coordinator only*. Git handoff only when the operator asked for complex git
 help (see hard constraint **Git silence**).
 
+**Default loop (pinned 2026-07-27):** track on board → **spawn** → **wait** →
+join on disk. Do **not** kill/respawn mid-flight to re-scope; do **not**
+monologue interim workarounds while an implementer runs. Mid-flight operator
+clarifications → board upsert only; **resume** after join (or additive spawn
+if disjoint). Host: § *Hard stop* default loop.
+
 - **User-facing language** (mirror of host `~/.grok/AGENTS.md` § Language,
   2026-07-26): never bare **child/children** as a nickname for subagents
   (“Child finished green” is wrong). Prefer **subagent**, **implementer**,
@@ -125,6 +155,13 @@ intent, or recon survival from prose alone.
   **spawn_subagent** (explore or general-purpose as fits).
 - Verify against **code and load paths** (and live trees) before asserting.
 - Join on short on-disk notes; do not re-prove the subagent in the parent.
+- **Auth / credentials store / keyring:** diagnose with **red/green TDD**
+  (`cargo test` contracts), not host shell D-Bus/keyring probes. Do **not** fan
+  out explore + implementer on the same store bug. One implementer owns TDD.
+  Pin: `~/.grok/AGENTS.md` § *Product auth / store diagnosis*.
+- **Plan approval:** product CTAs only (`exit_plan_mode` → soft-park →
+  `a`/`A`/`?`/`s`/`q`). **Never** freeform chat “reply approve/revise/abandon.”
+  Pin: `~/.grok/AGENTS.md` § *Plan approval — product CTAs only*.
 
 ## Skills (multi-source)
 

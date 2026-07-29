@@ -1306,6 +1306,10 @@ impl MvpAgent {
             user_id,
         );
         config.origin_client = origin_client;
+        // Sticky dual-auth: if SuperGrok session is memoized credit-exhausted,
+        // start on console key (same as reconstruct_full_config). Covers model
+        // switch / initial session config that never hits reconstruct yet.
+        let _ = xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut config);
         config
     }
     /// Resolve sampling config for a model by ID, falling back to the global

@@ -254,6 +254,9 @@ pub(super) fn handle_exit_plan_mode(
         );
     } else {
         // Non-blocking status chrome: toast + status label + transcript card.
+        // Focus Prompt so soft-park CTA keys (a/Enter/…) are not left dead under
+        // a Scrollback-focused read of the plan card (dogfood 2026-07-27).
+        agent.set_active_pane(crate::views::agent::ActivePane::Prompt, false);
         agent.commit_parked_plan_card();
         agent.show_toast(PLAN_PARKED_TOAST);
         tracing::info!(

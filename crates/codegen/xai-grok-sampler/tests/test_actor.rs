@@ -569,8 +569,8 @@ async fn plain_429_with_failover_hops_to_next_identity() {
         "expected rate-limit hop toast reason, got {hop_reasons:?}"
     );
     assert!(
-        hop_reasons.iter().all(|r| !r.contains("credit exhausted")),
-        "must not claim credit hop: {hop_reasons:?}"
+        hop_reasons.iter().all(|r| !r.contains("out of allowance")),
+        "must not claim allowance hop: {hop_reasons:?}"
     );
     match events.last().unwrap() {
         SamplingEvent::Completed { response, .. } => {
@@ -636,8 +636,8 @@ async fn credit_exhausted_with_failover_still_hops() {
         })
         .collect();
     assert!(
-        hop_reasons.iter().any(|r| r.contains("credit exhausted")),
-        "expected credit hop reason, got {hop_reasons:?}"
+        hop_reasons.iter().any(|r| r.contains("out of allowance")),
+        "expected allowance hop reason, got {hop_reasons:?}"
     );
     match events.last().unwrap() {
         SamplingEvent::Completed { response, .. } => {
