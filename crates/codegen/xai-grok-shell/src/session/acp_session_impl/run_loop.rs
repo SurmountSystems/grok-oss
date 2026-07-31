@@ -591,6 +591,10 @@ pub(super) async fn run_session(
                         SessionCommand::RestoreTodoBoard { plan_state } => {
                             session.restore_todo_board(plan_state).await;
                         }
+                        SessionCommand::ClearCompletedTodos { respond_to } => {
+                            let n = session.clear_completed_todos().await;
+                            let _ = respond_to.send(n);
+                        }
                         SessionCommand::GetToolOverrides { respond_to } => {
                             let _ = respond_to.send(session.effective_tool_overrides());
                         }

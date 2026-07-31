@@ -387,6 +387,33 @@ pub fn seed_ask_todo(state: &mut TodoState, prompt_id: &str, content: &str) -> b
     changed
 }
 
+/// Remove **completed** and **cancelled** items from the active board.
+///
+/// Each removed row is appended to [`TodoState::cleared_todos`] with
+/// [`ClearedReason::UserClearCompleted`]. Pending and in-progress items stay.
+/// Protected-prefix ids that are finished are cleared like any other done row
+/// (open protected work is untouched).
+///
+/// Returns how many items were archived (0 = no-op).
+///
+/// This is the human **Clear done** path — not `merge: false` wipe and not the
+/// pane `h` hide-done view filter.
+pub fn clear_completed_todos(state: &mut TodoState) -> usize {
+    let ids: Vec<TodoId> = state
+        .todo_items_with_ids()
+        .filter(|(_, item)| matches!(item.status, TodoStatus::Completed | TodoStatus::Cancelled))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut n = 0usize;
+    for id in ids {
+        if let Some(snapshot) = state.todos.shift_remove(&id) {
+            state.push_cleared(id, snapshot, ClearedReason::UserClearCompleted);
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Drop oldest `ask:*` items (by insertion order) when over `max_asks`.
 /// Prefers pruning completed/cancelled asks first, then oldest pending.
 /// Dropped asks are appended to the capped [`TodoState::cleared_todos`] archive.
@@ -656,6 +683,9 @@ pub enum ClearedReason {
     ReplaceUnmentioned,
     /// Dropped by [`prune_old_ask_todos`] when over the ask cap.
     AskPrune,
+    /// Operator cleared completed/cancelled rows from the live board
+    /// (todo pane **Clear done**, key, or `/clear-completed-todos`).
+    UserClearCompleted,
 }
 
 /// Snapshot of a todo that left the active board (off-pane archive).
@@ -2495,6 +2525,106 @@ mod tests {
         let from_legacy: TodoState = serde_json::from_value(legacy).unwrap();
         assert!(from_legacy.has_id("1"));
         assert_eq!(from_legacy.cleared_len(), 0);
+    }
+
+    // ── clear_completed_todos (operator Clear done) ────────────────────
+
+    #[test]
+    fn clear_completed_archives_done_and_cancelled_leaves_open() {
+        let mut state = seed_state(&[
+            ("open", "Still working", TodoStatus::Pending),
+            ("run", "In flight", TodoStatus::InProgress),
+            ("done", "Finished", TodoStatus::Completed),
+            ("nope", "Dropped", TodoStatus::Cancelled),
+            ("feat:shipped", "Protected finished", TodoStatus::Completed),
+            ("plan:open", "Protected open", TodoStatus::Pending),
+        ]);
+        let n = clear_completed_todos(&mut state);
+        assert_eq!(n, 3, "completed + cancelled + finished protected");
+        assert!(state.has_id("open"));
+        assert!(state.has_id("run"));
+        assert!(state.has_id("plan:open"));
+        assert!(!state.has_id("done"));
+        assert!(!state.has_id("nope"));
+        assert!(!state.has_id("feat:shipped"));
+
+        let cleared: Vec<_> = state.cleared_todos().collect();
+        assert_eq!(cleared.len(), 3);
+        for c in &cleared {
+            assert_eq!(c.reason, ClearedReason::UserClearCompleted);
+            assert!(matches!(
+                c.snapshot.status,
+                TodoStatus::Completed | TodoStatus::Cancelled
+            ));
+        }
+        let ids: Vec<&str> = cleared.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"done"));
+        assert!(ids.contains(&"nope"));
+        assert!(ids.contains(&"feat:shipped"));
+    }
+
+    #[test]
+    fn clear_completed_is_noop_when_nothing_done() {
+        let mut state = seed_state(&[
+            ("a", "One", TodoStatus::Pending),
+            ("b", "Two", TodoStatus::InProgress),
+        ]);
+        assert_eq!(clear_completed_todos(&mut state), 0);
+        assert_eq!(state.todo_items().count(), 2);
+        assert_eq!(state.cleared_len(), 0);
+    }
+
+    #[test]
+    fn clear_completed_reason_serde_round_trip() {
+        let mut state = seed_state(&[("done", "x", TodoStatus::Completed)]);
+        assert_eq!(clear_completed_todos(&mut state), 1);
+        let json = serde_json::to_value(&state).unwrap();
+        let restored: TodoState = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.cleared_len(), 1);
+        assert_eq!(
+            restored.cleared_todos().next().unwrap().reason,
+            ClearedReason::UserClearCompleted
+        );
+        // Wire spelling is snake_case.
+        let reason_json = serde_json::to_value(ClearedReason::UserClearCompleted).unwrap();
+        assert_eq!(reason_json, serde_json::json!("user_clear_completed"));
+    }
+
+    #[test]
+    fn clear_completed_updates_leaf_progress_badge_math() {
+        let mut state = TodoState::default();
+        state.push(
+            "leaf-done".into(),
+            TodoItem {
+                content: "done leaf".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Completed,
+                meta: None,
+                size: Some(2),
+            },
+        );
+        state.push(
+            "leaf-open".into(),
+            TodoItem {
+                content: "open leaf".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+                size: Some(1),
+            },
+        );
+        let before = compute_leaf_progress(&state);
+        assert!(before.points_mode);
+        assert_eq!(before.completed, 2);
+        assert_eq!(before.total, 3);
+
+        assert_eq!(clear_completed_todos(&mut state), 1);
+        let after = compute_leaf_progress(&state);
+        assert!(after.points_mode);
+        assert_eq!(after.completed, 0);
+        assert_eq!(after.total, 1);
+        assert!(state.has_id("leaf-open"));
+        assert!(!state.has_id("leaf-done"));
     }
 
     // ── Fibonacci size + leaf progress ─────────────────────────────────

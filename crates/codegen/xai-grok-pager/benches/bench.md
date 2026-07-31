@@ -102,7 +102,9 @@ Thinking blocks render identically to agent messages but default to `DisplayMode
 
 ### `UserPromptBlock` — lightweight ✨
 
-User prompts are short (1–5 lines typically), render with a `┃` accent in `accent_user` colour, and are **never foldable**. They're the cheapest block to render.
+User prompts are short (1–5 lines typically), render with a static `┃` left
+rail in `accent_user` colour (DOGE: pure green Human chrome), and fold when
+they wrap past three visual lines. They're among the cheapest blocks to render.
 
 ---
 
@@ -110,9 +112,10 @@ User prompts are short (1–5 lines typically), render with a `┃` accent in `a
 
 The leftmost column of every entry shows a vertical accent bar `┃`. This serves as a visual type indicator:
 
-- **User prompts**: `accent_user` (Tokyo Night blue, `#7aa2f7`)
+- **User prompts (Human)**: `accent_user` (DOGE green `#00FF00`; Tokyo Night blue `#7aa2f7`)
+- **Recap idle expanded**: `accent_tool` (DOGE white)
 - **Tool calls**: `accent_tool` / `accent_success` / `accent_error`
-- **Thinking**: `accent_thinking` (purple, `#bb9af7`)
+- **Thinking**: `accent_thinking` (DOGE magenta; Tokyo Night purple `#bb9af7`)
 - **Running blocks**: animated wave effect 🌊
 
 The animation uses `blend_color(bg, fg, brightness)` per-row per-frame:

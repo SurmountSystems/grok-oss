@@ -11,4 +11,5 @@ pub mod render;
 pub mod syntax;
 pub mod terminal;
 pub mod theme;
+pub mod tui_screenshot;
 pub mod util;

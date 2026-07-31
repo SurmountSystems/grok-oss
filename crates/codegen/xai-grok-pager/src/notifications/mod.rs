@@ -17,7 +17,12 @@ pub use config::{
     NotificationCondition, NotificationConfig, NotificationEventKind, NotificationHook,
     NotificationMethod, TitleConfig, TitleItem,
 };
-pub use title::TitleState;
+pub use title::{TitleState, format_busy_agents_title_part, resolve_session_title_name};
+
+/// Pure gate: title OSC only when nested title.enabled and window-title hide is off.
+pub(crate) fn title_updates_should_run(title_enabled: bool, hide_title_bar: bool) -> bool {
+    title_enabled && !hide_title_bar
+}
 
 pub struct NotificationEvent {
     pub kind: NotificationEventKind,
@@ -129,7 +134,7 @@ impl NotificationService {
     pub fn flush_idle_state(&mut self, state: &title::TitleState<'_>) {
         let mut buf = String::new();
 
-        if self.config.title.enabled
+        if self.title_updates_active()
             && let Some(esc) = self.title_manager.update(state)
         {
             buf.push_str(&esc);
@@ -156,7 +161,7 @@ impl NotificationService {
     pub fn build_idle_escapes(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         let mut buf = String::new();
 
-        if self.config.title.enabled
+        if self.title_updates_active()
             && let Some(esc) = self.title_manager.update(state)
         {
             buf.push_str(&esc);
@@ -177,7 +182,7 @@ impl NotificationService {
     pub fn on_tick(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         let mut buf = String::new();
 
-        if self.config.title.enabled
+        if self.title_updates_active()
             && let Some(title_esc) = self.title_manager.update(state)
         {
             buf.push_str(&title_esc);
@@ -212,13 +217,16 @@ impl NotificationService {
 
     pub fn shutdown(&mut self) {
         // Reset the tab title back to the product brand so it doesn't linger
-        // on the last activity label after exit.
-        let title_esc = self.title_manager.reset();
-        xai_grok_shell::util::with_locked_stderr(|stderr| {
-            use std::io::Write as _;
-            let _ = stderr.write_all(title_esc.as_bytes());
-            let _ = stderr.flush();
-        });
+        // on the last activity label after exit. Skip when hide_title_bar is
+        // on so we never wrote a Grok title to begin with.
+        if self.title_updates_active() {
+            let title_esc = self.title_manager.reset();
+            xai_grok_shell::util::with_locked_stderr(|stderr| {
+                use std::io::Write as _;
+                let _ = stderr.write_all(title_esc.as_bytes());
+                let _ = stderr.flush();
+            });
+        }
 
         let mut buf = String::new();
         self.clear_progress_into(&mut buf);
@@ -229,6 +237,15 @@ impl NotificationService {
                 let _ = stderr.flush();
             });
         }
+    }
+
+    /// Title OSC updates require both `[ui.notifications.title].enabled` and
+    /// `[ui].hide_title_bar = false`.
+    fn title_updates_active(&self) -> bool {
+        title_updates_should_run(
+            self.config.title.enabled,
+            crate::app::hide_title_bar_runtime(),
+        )
     }
 
     /// Returns `true` if a terminal notification for `ApprovalRequired` has
@@ -564,8 +581,29 @@ mod tests {
             cwd: None,
             turn_elapsed: None,
             is_busy,
+            busy_agent_count: 0,
             focused: true,
         }
+    }
+
+    #[test]
+    fn title_updates_inactive_when_hide_title_bar() {
+        // Named contract: hide_title_bar true suppresses title OSC even when
+        // [ui.notifications.title].enabled is true. Pure gate (no process
+        // atomic) so parallel tests cannot race HIDE_TITLE_BAR.
+        assert!(
+            !title_updates_should_run(true, true),
+            "hide on must block title updates"
+        );
+        assert!(
+            title_updates_should_run(true, false),
+            "hide off + enabled must allow title updates"
+        );
+        assert!(
+            !title_updates_should_run(false, false),
+            "title.enabled false must block even when hide is off"
+        );
+        assert!(!title_updates_should_run(false, true));
     }
 
     #[test]

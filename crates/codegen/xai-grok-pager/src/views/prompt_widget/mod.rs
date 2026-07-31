@@ -464,6 +464,10 @@ pub struct PromptWidget {
     textarea_state: TextAreaState,
     /// Cached textarea render area from last draw (for mouse coordinate mapping).
     textarea_area: Rect,
+    /// Cached top-bar ⧉ copy button rect from last draw (None when chrome off).
+    copy_button_area: Option<Rect>,
+    /// Whether the draft-copy button is hovered.
+    copy_hovered: bool,
     /// @-completion file search state.
     pub file_search: FileSearchState,
     /// Pending request to open the line viewer.
@@ -569,6 +573,8 @@ impl PromptWidget {
             textarea,
             textarea_state: TextAreaState::default(),
             textarea_area: Rect::default(),
+            copy_button_area: None,
+            copy_hovered: false,
             file_search: FileSearchState::new(cwd),
             pending_viewer_request: None,
             history_search: HistorySearchState::new(),
@@ -1473,6 +1479,27 @@ impl PromptWidget {
     /// Last rendered textarea area for mouse hit-testing.
     pub fn textarea_area(&self) -> Rect {
         self.textarea_area
+    }
+
+    /// Top-bar draft-copy (`⧉`) hit target from the last draw, if painted.
+    pub fn copy_button_area(&self) -> Option<Rect> {
+        self.copy_button_area
+    }
+
+    /// Update hover for the draft-copy button. Returns `true` if changed.
+    pub fn update_copy_hover(&mut self, col: u16, row: u16) -> bool {
+        let new = self
+            .copy_button_area
+            .is_some_and(|r| r.contains((col, row).into()));
+        let changed = new != self.copy_hovered;
+        self.copy_hovered = new;
+        changed
+    }
+
+    /// Plain text of the current draft (includes multimodal chip labels like
+    /// `[Image #1]` as they appear in the composer). Empty when nothing typed.
+    pub fn draft_plain_text(&self) -> &str {
+        self.text()
     }
 
     /// Compute the content width inside the chrome (if any).
@@ -2849,6 +2876,8 @@ impl PromptWidget {
         voice: Option<VoicePromptOverlay>,
     ) -> PromptRenderResult {
         if area.height == 0 || area.width < 4 {
+            // Drop stale hit targets from a wider prior frame.
+            self.copy_button_area = None;
             return PromptRenderResult {
                 cursor_pos: None,
                 post_flush_escapes: None,
@@ -2907,7 +2936,8 @@ impl PromptWidget {
 
         let text_area_rect = chunks[1];
 
-        // Top divider: ╭──────────╮
+        // Top divider: ╭──────────╮  (optional session title + ⧉ draft copy)
+        self.copy_button_area = None;
         if vpad_top > 0 && style.chrome && style.show_borders {
             let div_style = Style::default().fg(border_color).bg(bg);
             let div_y = chunks[0].y;
@@ -2927,22 +2957,47 @@ impl PromptWidget {
                 }
             }
 
+            // Draft-copy chrome on the top border, right-aligned before ╮:
+            // `…[⧉] ╮` — always painted when borders are on so the hit target
+            // is discoverable; click no-ops on empty draft (caller checks).
+            let copy_icon = crate::glyphs::copy_icon();
+            let copy_label = format!("[{copy_icon}]");
+            let copy_w: u16 = 3; // [ + icon + ]
+            // One cell pad before the corner glyph.
+            if area.width > copy_w + 4 {
+                let copy_x = right_x.saturating_sub(copy_w + 1);
+                let copy_style = if self.copy_hovered {
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .bg(bg)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.gray).bg(bg)
+                };
+                buf.set_string(copy_x, div_y, &copy_label, copy_style);
+                self.copy_button_area = Some(Rect::new(copy_x, div_y, copy_w, 1));
+            }
+
             // Session title inlined in the divider (` title `, right-aligned
-            // ending 2 cells before ╮) in the shared chrome-caption style;
-            // the pad spaces blank the adjacent `─`.
+            // ending left of the copy button) in the shared chrome-caption
+            // style; the pad spaces blank the adjacent `─`.
             if let Some(title) = style
                 .title
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
             {
-                // Corners plus 2-cell insets on both sides stay plain border.
-                let max_w = area.width.saturating_sub(6);
+                // Reserve copy chrome + corner inset (or plain 3-cell inset).
+                let right_reserve = self
+                    .copy_button_area
+                    .map(|r| (area.x + area.width).saturating_sub(r.x) + 1)
+                    .unwrap_or(3);
+                let max_w = area.width.saturating_sub(3 + right_reserve);
                 if max_w >= 6 {
                     let label = format!(" {title} ");
                     let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
                     let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
-                    let x = area.x + area.width.saturating_sub(3 + label_w);
+                    let x = area.x + area.width.saturating_sub(right_reserve + label_w);
                     buf.set_string(
                         x,
                         div_y,
@@ -3323,12 +3378,19 @@ impl PromptWidget {
 
         // When the prompt is unfocused, fade info-line content further toward
         // bg so it follows the same focused/unfocused dimming as the prompt
-        // border. Model name and flag color use a higher opacity than the
-        // separator so they remain readable.
+        // border. Model name stays on `accent_model` (full when focused; soft
+        // blend of accent when unfocused) so it never reads as gray chrome.
+        // Flags still dim via gray / flag color.
         let sep_opacity = if focused { 1.0 } else { 0.6 };
         let flag_opacity = if focused { 0.75 } else { 0.5 };
 
-        let model_style = Self::chrome_caption_style(bg, theme, focused);
+        let model_fg = if focused {
+            theme.accent_model
+        } else {
+            crate::render::color::blend_color(bg, theme.accent_model, 0.75)
+                .unwrap_or(theme.accent_model)
+        };
+        let model_style = Style::default().fg(model_fg).bg(bg);
         let sep_fg = if focused {
             theme.gray_dim
         } else {

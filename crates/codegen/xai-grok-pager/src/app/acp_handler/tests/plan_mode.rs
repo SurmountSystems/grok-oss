@@ -220,8 +220,8 @@
             assert!(!pav.has_plan);
             assert_eq!(
                 pav.focus,
-                crate::views::plan_approval_view::PlanApprovalFocus::Preview,
-                "soft park keeps Preview focus until the user opens the modal"
+                crate::views::plan_approval_view::PlanApprovalFocus::Prompt,
+                "soft park focuses Prompt so L1 typing is live (modal-free)"
             );
             assert!(agent.line_viewer.is_none());
             assert_eq!(

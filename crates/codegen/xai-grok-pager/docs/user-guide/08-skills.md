@@ -17,28 +17,37 @@ Use a skill for a repeatable procedure that's too specific for AGENTS.md but too
 Skills are **multi-source**. Grok owns discovery and load order in the product;
 skill packs may live in the project, your home directory, a network-synced
 bundle cache, config paths, server inject, or plugins. Same-named skills shadow
-by scope (local/repo beat user; user beats bundled).
+by **scope** first (Local beats Repo beats User beats Server beats Bundled;
+native bare names beat plugins), then by **first-seen** within a scope.
 
-Rough load order (higher bare-name priority first): project walk (`.agents`
-before `.grok` at each tier) → user home (same order) → `[skills].paths` →
-server → bundled (`~/.grok/bundled/skills`) → plugins. Process pins for agents
-working **in this repository** live in project `AGENTS.md` / `FORK.md`;
-operator skill packs often live under `~/.agents/skills` on the host and are
-not the same thing as product process docs.
+### Bare-name load order (code)
 
-Grok discovers skills from these directories, in priority order:
+Higher priority first. At every project or home tier, config dir **names** are
+scanned in this order: **`.agents` → `.grok` → `.claude` (if compat) →
+`.cursor` (if compat)**. First-seen wins for the same bare name at the same
+scope, so a maintained `~/.agents/skills/<name>` pack overrides a same-named
+`~/.grok/skills/<name>` copy (important when host skill packs pin process rules
+such as agent depth L1 / L2 / L3).
 
 | Location | Scope | Priority | Notes |
 |----------|-------|----------|-------|
-| `./.grok/skills/`, `./.grok/commands/` | Local (CWD) | Highest | Current directory skills / legacy command markdown |
-| `<repo_root>/.grok/skills/`, `…/commands/` | Repo | Medium | Shared across the repo |
-| `~/.grok/skills/`, `~/.grok/commands/` | User | Lowest | Personal skills for all projects |
-| `~/.claude/skills/`, `~/.claude/commands/` | User | Lowest | Claude Code compatibility (configurable) |
-| `./.claude/skills/`, `./.claude/commands/` | Local / Repo | High | Project Claude skills and legacy custom slash commands |
-| `~/.cursor/skills/` | User | Lowest | Cursor compatibility (configurable) |
-| `./.cursor/skills/` | Local / Repo | High | Project Cursor skills (when cursor compat skills are enabled) |
+| `./.agents/skills/`, `./.agents/commands/` | Local (CWD) | Highest | Maintained agent skill tree at cwd |
+| `./.grok/skills/`, `./.grok/commands/` | Local (CWD) | Highest | Grok-owned cwd skills / legacy command markdown |
+| `./.claude/skills/`, `./.claude/commands/` | Local (CWD) | Highest | Project Claude skills and legacy custom slash commands (compat) |
+| `./.cursor/skills/` | Local (CWD) | Highest | Project Cursor skills when cursor compat skills are on |
+| Intermediate dirs between cwd and repo root (same name order) | Repo | High | Walk every directory up to the git root |
+| `<repo_root>/.agents/…`, `<repo_root>/.grok/…` (+ vendor if on) | Repo | High | Shared across the repo |
+| `~/.agents/skills/`, `~/.agents/commands/` | User | Medium | Host operator skill packs (all projects) |
+| `~/.grok/skills/`, `~/.grok/commands/` | User | Medium | Personal Grok skills for all projects |
+| `~/.claude/skills/`, `~/.claude/commands/` | User | Medium | Claude Code compatibility (configurable) |
+| `~/.cursor/skills/` | User | Medium | Cursor compatibility (configurable) |
+| `[skills].paths` entries | Repo if under git root, else User | Medium | Extra dirs or direct `SKILL.md` files; stamp as config |
+| Server-injected skill dirs | Server | Lower | Managed workspace / launcher inject |
+| `~/.grok/bundled/skills/` (+ injected bundled dirs) | Bundled | Lower | Platform pack cache (network sync) |
+| Plugin skills | Plugin | Lowest bare name | Bare name loses to native; qualified `plugin:name` kept |
 
-Grok deduplicates skills by name -- a higher-priority location overrides a lower one. Grok also scans `.agents/skills/` (and `commands/`) at each tier (alongside `.grok/`) and walks every directory between your working directory and the repo root.
+Grok also walks every directory between your working directory and the repo
+root, applying the same `.agents` → `.grok` → vendor name order at each level.
 
 Flat `*.md` files under a `commands/` directory become user-invocable slash commands (filename stem = command name), matching Claude Code's legacy custom-command layout.
 

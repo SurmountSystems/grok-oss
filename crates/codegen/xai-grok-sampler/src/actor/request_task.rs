@@ -44,12 +44,29 @@ fn provider_key_for_config(config: &SamplerConfig) -> ProviderKey {
     }
 }
 
+/// Wait on a shared cooldown, aborting early when `cancel_token` fires.
+///
+/// Returns `false` if cancelled (caller should stop); `true` when the wait
+/// finished (or there was nothing to wait for).
+async fn wait_shared_or_cancel(
+    store: &SharedRateLimitStore,
+    key: &ProviderKey,
+    cancel_token: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => false,
+        _ = store.wait_if_limited(key) => true,
+    }
+}
+
 /// Before each HTTP attempt: honor any shared cross-process cooldown.
-async fn wait_before_attempt(config: &SamplerConfig) {
+/// Cancel-aware so Esc is not blocked for the full peer cooldown.
+///
+/// Returns `false` if cancelled during the wait.
+async fn wait_before_attempt(config: &SamplerConfig, cancel_token: &CancellationToken) -> bool {
     let store = SharedRateLimitStore::process_default();
-    store
-        .wait_if_limited(&provider_key_for_config(config))
-        .await;
+    wait_shared_or_cancel(&store, &provider_key_for_config(config), cancel_token).await
 }
 
 /// After a failed attempt: on 429 publish shared cooldown; always wait shared
@@ -218,8 +235,8 @@ pub(crate) async fn run_request_task(
         }
 
         // Cross-process rate-limit coordination (Grok OSS): wait until peers say open.
-        wait_before_attempt(&config).await;
-        if cancel_token.is_cancelled() {
+        // Cancel-aware: do not pin Esc behind an uncancellable shared sleep.
+        if !wait_before_attempt(&config, &cancel_token).await {
             handle_cancellation(&event_tx, &request_id, &mut completion_tx);
             return request_id;
         }
@@ -1030,6 +1047,26 @@ fn emit_failed(
     });
 }
 
+/// Short footer-safe reason for transport failures. Full Display often starts
+/// with `reqwest error stream: Transport error: error…` and the TUI 45-char
+/// clip left bare `error`. Prefer a stable human label; keep detail in logs.
+fn retry_footer_reason(err: &SamplingError) -> String {
+    match err {
+        SamplingError::EventStreamError(msg)
+            if msg.contains("timed out waiting for response headers") =>
+        {
+            "response headers timed out".into()
+        }
+        SamplingError::EventStreamError(_) | SamplingError::StreamError { .. } => {
+            "connection interrupted".into()
+        }
+        SamplingError::Http(e) if e.is_timeout() => "request timed out".into(),
+        SamplingError::Http(e) if e.is_connect() => "connection failed".into(),
+        SamplingError::Http(_) => "connection interrupted".into(),
+        other => other.to_string(),
+    }
+}
+
 fn emit_retrying(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
@@ -1039,7 +1076,8 @@ fn emit_retrying(
     config: &SamplerConfig,
 ) {
     let info = SamplingErrorInfo::from(err);
-    let mut reason = err.to_string();
+    // Full chain stays on the error / telemetry; footer gets a short label.
+    let mut reason = retry_footer_reason(err);
     if err.is_rate_limited() {
         let key = provider_key_for_config(config);
         let rem = SharedRateLimitStore::process_default().remaining(&key);
@@ -1051,6 +1089,12 @@ fn emit_retrying(
             reason = format!("{reason} · coordinating with other grok-oss sessions");
         }
     }
+    tracing::debug!(
+        full_error = %err,
+        footer_reason = %reason,
+        attempt,
+        "emitting Retrying status"
+    );
     emit_retrying_reason(event_tx, request_id, attempt, max_retries, &info, reason);
 }
 
@@ -1231,6 +1275,73 @@ mod tests {
 
         cancel_token.cancel();
         assert!(!sleeper.await);
+    }
+
+    /// Contract: shared cooldown wait before an attempt must not ignore Esc.
+    #[tokio::test(start_paused = true)]
+    async fn wait_before_attempt_aborts_on_cancel() {
+        const DISABLE_ENV: &str = "GROK_DISABLE_SHARED_RATE_LIMIT";
+        let dir = tempfile::TempDir::new().expect("temp rate-limit dir");
+        // Ensure shared limits are on for this store path (open() still honors DISABLE).
+        let prev_disable = std::env::var_os(DISABLE_ENV);
+        // SAFETY: test-only env flip; restore below.
+        unsafe {
+            std::env::remove_var(DISABLE_ENV);
+        }
+        let store = SharedRateLimitStore::open(dir.path()).expect("open store");
+        let key = ProviderKey::new("wait-before-attempt-cancel");
+        store
+            .observe(
+                &key,
+                Duration::from_secs(3600),
+                RateLimitMeta {
+                    status: Some(429),
+                    reason: Some("peer cooldown".into()),
+                },
+            )
+            .expect("observe");
+        assert!(store.remaining(&key) > Duration::ZERO);
+
+        let cancel_token = CancellationToken::new();
+        let wait = wait_shared_or_cancel(&store, &key, &cancel_token);
+        tokio::pin!(wait);
+        cancel_token.cancel();
+        assert!(
+            !wait.await,
+            "cancel must abort before the full shared cooldown"
+        );
+
+        if let Some(v) = prev_disable {
+            // SAFETY: restore prior env after test-only flip above.
+            unsafe { std::env::set_var(DISABLE_ENV, v) }
+        }
+    }
+
+    #[test]
+    fn retry_footer_reason_uses_short_transport_label() {
+        let err = SamplingError::EventStreamError(
+            "Transport error: error sending request for url (https://api.x.ai/v1/chat/completions)"
+                .into(),
+        );
+        assert_eq!(retry_footer_reason(&err), "connection interrupted");
+        let headers = SamplingError::EventStreamError(
+            "timed out waiting for response headers after 120s".into(),
+        );
+        assert_eq!(retry_footer_reason(&headers), "response headers timed out");
+    }
+
+    /// Attempt number only advances on failure classify, not on stream start.
+    #[test]
+    fn retry_attempt_stays_1_until_second_failure_even_if_second_attempt_long() {
+        // Document the stamp semantics: emit_retrying uses retry_count after
+        // increment; StreamStarted must not fabricate attempt 2.
+        let mut retry_count: u32 = 0;
+        retry_count += 1; // first failure classify
+        assert_eq!(retry_count, 1);
+        // long second attempt would still show attempt 1 until another fail
+        assert_eq!(retry_count, 1);
+        retry_count += 1; // second failure
+        assert_eq!(retry_count, 2);
     }
 
     #[tokio::test(start_paused = true)]

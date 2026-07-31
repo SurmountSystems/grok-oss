@@ -276,7 +276,7 @@ impl AgentView {
     pub(super) fn handle_todo_key(
         &mut self,
         key: &KeyEvent,
-        _registry: &ActionRegistry,
+        registry: &ActionRegistry,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
         if key!('t', CONTROL).matches(key) {
@@ -301,6 +301,12 @@ impl AgentView {
                 self.set_active_pane(AgentPane::Scrollback, false);
             }
             return overlay_action_to_outcome(action);
+        }
+        // X = clear completed (same as chrome Clear done / ActionId).
+        if !has_input
+            && (key!('X').matches(key) || registry.matches_id(ActionId::ClearCompletedTodos, key))
+        {
+            return InputOutcome::Action(Action::ClearCompletedTodos);
         }
         if self.todo.handle_key(key) {
             InputOutcome::Changed
@@ -790,6 +796,70 @@ mod scroll_granularity_tests {
         );
     }
 }
+#[cfg(test)]
+mod clear_completed_todos_key_tests {
+    use super::super::{AgentPane, test_fixtures::make_agent};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::key;
+    use crossterm::event::Event;
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+
+    fn shift_x() -> Event {
+        Event::Key(key!('X').to_key_event())
+    }
+
+    /// Named contract: bare X / Shift+X only clears completed when the todo
+    /// pane is focused. Tasks (and other panes) must not fall through to
+    /// AgentScreen ClearCompletedTodos.
+    #[test]
+    fn clear_completed_todos_x_key_only_when_todo_pane_focused() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+
+        // Tasks focused: X must not archive.
+        agent.tasks.overlay.visible = true;
+        agent.tasks.overlay.focused = true;
+        agent.set_active_pane(AgentPane::Tasks, true);
+        let tasks_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            !matches!(tasks_out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Tasks pane must not map X to ClearCompletedTodos, got {tasks_out:?}"
+        );
+
+        // Catalog focused: same guard.
+        agent.tasks.overlay.visible = false;
+        agent.tasks.overlay.focused = false;
+        agent.set_active_pane(AgentPane::Catalog, true);
+        let catalog_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            !matches!(
+                catalog_out,
+                InputOutcome::Action(Action::ClearCompletedTodos)
+            ),
+            "Catalog pane must not map X to ClearCompletedTodos, got {catalog_out:?}"
+        );
+
+        // Todo focused: X clears.
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = true;
+        agent.set_active_pane(AgentPane::Todo, true);
+        let todo_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            matches!(todo_out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Todo pane focused must map X to ClearCompletedTodos, got {todo_out:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod mouse_reporting_registry_tests {
     use super::super::{AgentPane, test_fixtures::make_agent};

@@ -643,6 +643,33 @@ pub fn default_settings() -> Vec<SettingMeta> {
             hidden_in_minimal: true,
         },
         SettingMeta {
+            key: "hide_title_bar",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shared,
+            label: "Hide window title",
+            description: "Clear the terminal/tab window title and stop Grok from \
+                          updating it (OSC 0). Opt out of session/activity titles \
+                          (on by default for discoverability). Distinct from Hide \
+                          header (in-app status chrome). Off by default.",
+            keywords: &[
+                "title",
+                "title bar",
+                "tab",
+                "window",
+                "window title",
+                "osc",
+                "hide",
+                "chrome",
+                "terminal title",
+                "resume",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.hide_title_bar,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
             key: "screen_mode",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
@@ -830,8 +857,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "light",
             ],
             kind: SettingKind::Enum {
-                // `Option<String>` — `None` resolved to "groknight".
-                default: "groknight",
+                // `Option<String>` — `None` resolved to "doge" (product default).
+                default: "doge",
                 choices: THEME_CHOICES,
                 supports_preview: true,
             },
@@ -846,8 +873,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Theme to use when the system is in dark mode (only with theme=auto).",
             keywords: &["auto", "dark", "theme", "system", "appearance", "night"],
             kind: SettingKind::Enum {
-                // `Option<String>` — `None` falls back to "groknight".
-                default: "groknight",
+                // `Option<String>` — `None` falls back to "doge" (product default).
+                default: "doge",
                 choices: CONCRETE_THEME_CHOICES,
                 supports_preview: true,
             },

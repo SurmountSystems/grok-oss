@@ -597,6 +597,7 @@ pub fn current_value_for(
         // SHARED — UiConfig source of truth, pager keeps a cache.
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         "hide_header" => Some(SettingValue::Bool(ui.hide_header)),
+        "hide_title_bar" => Some(SettingValue::Bool(ui.hide_title_bar)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
         // Cache is the send-path source of truth (same pattern as group_tool_verbs).
@@ -714,14 +715,14 @@ pub fn current_value_for(
             ui.theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
-                .unwrap_or("groknight"),
+                .unwrap_or("doge"),
         )),
         "auto_dark_theme" => Some(SettingValue::Enum(
             ui.auto_dark_theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
                 .filter(|s| *s != "auto")
-                .unwrap_or("groknight"),
+                .unwrap_or("doge"),
         )),
         "auto_light_theme" => Some(SettingValue::Enum(
             ui.auto_light_theme
@@ -865,6 +866,12 @@ mod tests {
                         "hide_header default drifts from UiConfig::default()"
                     );
                 }
+                ("hide_title_bar", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.hide_title_bar,
+                        "hide_title_bar default drifts from UiConfig::default()"
+                    );
+                }
                 // Per-tip contextual hints: `None` (inherit) → default ON.
                 ("contextual_hints.undo", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -968,7 +975,7 @@ mod tests {
                         .theme
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
-                        .unwrap_or("groknight");
+                        .unwrap_or("doge");
                     assert_eq!(
                         *default, expected,
                         "theme default drifts from UiConfig::default()",
@@ -984,7 +991,7 @@ mod tests {
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
                         .filter(|s| *s != "auto")
-                        .unwrap_or("groknight");
+                        .unwrap_or("doge");
                     assert_eq!(
                         *default, expected,
                         "auto_dark_theme default drifts from UiConfig::default()",
@@ -1643,7 +1650,7 @@ mod tests {
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
         assert_eq!(
             value,
-            SettingValue::Enum("groknight"),
+            SettingValue::Enum("doge"),
             "corrupted `auto_dark_theme = \"auto\"` must fall back to canonical default",
         );
     }
@@ -1672,7 +1679,7 @@ mod tests {
         };
         let pager = PagerLocalSnapshot::default();
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
-        assert_eq!(value, SettingValue::Enum("groknight"));
+        assert_eq!(value, SettingValue::Enum("doge"));
     }
 
     /// Keywords must be lowercase and non-empty.

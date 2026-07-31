@@ -160,6 +160,138 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
+/// Included usage % + period-end RFC 3339 from a credits / billing config.
+///
+/// Prefers `credit_usage_percent` + `current_period.end`; falls back to
+/// `monthly_limit`/`used` and `billing_period_end`. Returns `None` usage when
+/// neither shape is present (honest absence — do not invent 0%).
+///
+/// Only **included** SuperGrok allowance; not dollar extras or console $.
+pub fn included_usage_and_period_end(config: &BillingConfig) -> (Option<f64>, Option<String>) {
+    let usage_pct = match config.credit_usage_percent {
+        Some(pct) => Some(pct),
+        None => {
+            let limit = config.monthly_limit.as_ref().map(|c| c.val).unwrap_or(0);
+            let used = config.used.as_ref().map(|c| c.val).unwrap_or(0);
+            if limit > 0 {
+                Some((used as f64 / limit as f64 * 100.0).min(100.0))
+            } else {
+                None
+            }
+        }
+    };
+    let period_end = config
+        .current_period
+        .as_ref()
+        .and_then(|p| p.end.clone())
+        .or_else(|| config.billing_period_end.clone());
+    (usage_pct, period_end)
+}
+
+/// Fetch `GetGrokCreditsConfig` for one SuperGrok session token (included-safe).
+///
+/// Same CLI proxy path as the active `x.ai/billing` handler:
+/// `GET {proxy}/billing?format=credits`. Does not burn SuperGrok dollar extras
+/// (not an inference call). Used for non-active dual-principal polls.
+pub async fn fetch_credits_config_with_session(
+    proxy_base: &str,
+    access_token: &str,
+    user_id: &str,
+) -> Result<BillingConfigResponse, String> {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return Err("empty SuperGrok session token".into());
+    }
+    let base = proxy_base.trim_end_matches('/');
+    let credits_url = format!("{base}/billing?format=credits");
+    let credits_resp = crate::http::shared_client()
+        .get(&credits_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header(
+            "X-XAI-Token-Auth",
+            crate::auth::GrokComConfig::default().token_header,
+        )
+        .header("x-userid", user_id)
+        .header("x-grok-client-version", xai_grok_version::VERSION)
+        .header(
+            crate::http::CLIENT_MODE_HEADER,
+            crate::http::process_client_mode(),
+        )
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch billing data: {e}"))?;
+
+    if !credits_resp.status().is_success() {
+        let status = credits_resp.status().as_u16();
+        let body = credits_resp.text().await.unwrap_or_default();
+        let detail = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(format!("Billing service error: {detail}"));
+    }
+
+    credits_resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse billing data: {e}"))
+}
+
+/// Poll non-active SuperGrok principals and remember their included fields.
+///
+/// Best-effort: a failed sibling poll does not fail the active billing path.
+/// No-op when fewer than two SuperGrok principals are stored.
+pub async fn poll_and_remember_non_active_supergrok_included_billing(
+    grok_home: &std::path::Path,
+    proxy_base: &str,
+) {
+    let targets = crate::auth::load_non_active_supergrok_billing_poll_targets(grok_home);
+    if targets.is_empty() {
+        return;
+    }
+    for target in targets {
+        match fetch_credits_config_with_session(proxy_base, &target.access_token, &target.user_id)
+            .await
+        {
+            Ok(resp) => {
+                let Some(config) = resp.config.as_ref() else {
+                    tracing::debug!(
+                        identity_id = %target.identity_id,
+                        "sibling SuperGrok billing: no config in response"
+                    );
+                    continue;
+                };
+                let (usage_pct, period_end) = included_usage_and_period_end(config);
+                let Some(pct) = usage_pct else {
+                    tracing::debug!(
+                        identity_id = %target.identity_id,
+                        "sibling SuperGrok billing: no included usage in response"
+                    );
+                    continue;
+                };
+                crate::auth::remember_supergrok_included_billing(
+                    &target.identity_id,
+                    pct,
+                    period_end.as_deref(),
+                );
+                tracing::debug!(
+                    identity_id = %target.identity_id,
+                    usage_pct = pct,
+                    "remembered non-active SuperGrok included billing"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    identity_id = %target.identity_id,
+                    error = %e,
+                    "sibling SuperGrok billing poll failed (active path unchanged)"
+                );
+            }
+        }
+    }
+}
+
 /// Structured context for unified-log entries from a successful billing fetch.
 ///
 /// Keeps history to a count + the most recent period so `~/.grok/logs/unified.jsonl`
@@ -208,65 +340,21 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
     let base = proxy_base.trim_end_matches('/');
 
     // Credits balance / usage (new billing system) via the CLI proxy, which
-    // forwards to the backend `GetGrokCreditsConfig`.
-    let credits_url = format!("{}/billing?format=credits", base);
-    let credits_resp = crate::http::shared_client()
-        .get(&credits_url)
-        .header("Authorization", format!("Bearer {}", &auth.key))
-        .header(
-            "X-XAI-Token-Auth",
-            crate::auth::GrokComConfig::default().token_header,
-        )
-        .header("x-userid", &auth.user_id)
-        .header("x-grok-client-version", xai_grok_version::VERSION)
-        .header(
-            crate::http::CLIENT_MODE_HEADER,
-            crate::http::process_client_mode(),
-        )
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| {
+    // forwards to the backend `GetGrokCreditsConfig`. Shared with non-active
+    // dual-principal polls via [`fetch_credits_config_with_session`].
+    let mut billing = match fetch_credits_config_with_session(base, &auth.key, &auth.user_id).await
+    {
+        Ok(b) => b,
+        Err(e) => {
             tracing::error!(error = %e, "billing: upstream request failed");
             xai_grok_telemetry::unified_log::warn(
                 "billing: upstream request failed",
                 None,
-                Some(serde_json::json!({ "error": e.to_string() })),
+                Some(serde_json::json!({ "error": e })),
             );
-            acp::Error::internal_error().data(format!("Failed to fetch billing data: {e}"))
-        })?;
-
-    if !credits_resp.status().is_success() {
-        let status = credits_resp.status().as_u16();
-        let body = credits_resp.text().await.unwrap_or_default();
-        tracing::warn!(status, url = %credits_url, "billing: upstream error");
-
-        let detail = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-            .unwrap_or_else(|| format!("HTTP {status}"));
-
-        xai_grok_telemetry::unified_log::warn(
-            "billing: upstream error",
-            None,
-            Some(serde_json::json!({
-                "status": status,
-                "detail": detail,
-            })),
-        );
-
-        return Err(acp::Error::internal_error().data(format!("Billing service error: {detail}")));
-    }
-
-    let mut billing: BillingConfigResponse = credits_resp.json().await.map_err(|e| {
-        tracing::error!(error = %e, "billing: failed to parse response");
-        xai_grok_telemetry::unified_log::warn(
-            "billing: failed to parse response",
-            None,
-            Some(serde_json::json!({ "error": e.to_string() })),
-        );
-        acp::Error::internal_error().data(format!("Failed to parse billing data: {e}"))
-    })?;
+            return Err(acp::Error::internal_error().data(e));
+        }
+    };
 
     // Enrich with fields from remote settings.
     let rs = agent.cfg.borrow().remote_settings.clone();
@@ -276,6 +364,24 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             .clone()
             .or_else(|| rs.subscription_tier.clone())
     });
+
+    // Feed active principal into process included-billing cache (ranking + dual
+    // /limits). Pager still remembers too; idempotent same values.
+    let grok_home = crate::util::grok_home::grok_home();
+    if let Some(ref config) = billing.config {
+        let (usage_pct, period_end) = included_usage_and_period_end(config);
+        if let Some(pct) = usage_pct {
+            crate::auth::remember_active_supergrok_included_billing(
+                &grok_home,
+                pct,
+                period_end.as_deref(),
+            );
+        }
+    }
+    // Dual SuperGrok: also poll non-active principal(s) on the same
+    // included-safe credits endpoint so sibling /limits rows fill honestly.
+    // Best-effort; failures leave sibling as "no data yet".
+    poll_and_remember_non_active_supergrok_included_billing(&grok_home, base).await;
 
     // Every prompt / /usage / poll path hits `x.ai/billing`; log the fetched
     // credits snapshot so support can correlate limit UX with real balances.
@@ -348,6 +454,70 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn included_usage_prefers_credit_usage_percent_and_period_end() {
+        let config = BillingConfig {
+            credit_usage_percent: Some(33.5),
+            current_period: Some(UsagePeriod {
+                period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+                start: Some("2026-07-01T00:00:00Z".into()),
+                end: Some("2026-07-08T00:00:00Z".into()),
+            }),
+            monthly_limit: Some(Cent { val: 2000 }),
+            used: Some(Cent { val: 999 }),
+            on_demand_cap: None,
+            on_demand_used: None,
+            prepaid_balance: None,
+            is_unified_billing_user: None,
+            billing_period_start: None,
+            billing_period_end: Some("2026-08-01T00:00:00Z".into()),
+            history: vec![],
+        };
+        let (pct, end) = included_usage_and_period_end(&config);
+        assert_eq!(pct, Some(33.5));
+        assert_eq!(end.as_deref(), Some("2026-07-08T00:00:00Z"));
+    }
+
+    #[test]
+    fn included_usage_falls_back_to_limit_used_and_billing_period_end() {
+        let config = BillingConfig {
+            credit_usage_percent: None,
+            current_period: None,
+            monthly_limit: Some(Cent { val: 1000 }),
+            used: Some(Cent { val: 250 }),
+            on_demand_cap: None,
+            on_demand_used: None,
+            prepaid_balance: None,
+            is_unified_billing_user: None,
+            billing_period_start: Some("2026-07-01T00:00:00Z".into()),
+            billing_period_end: Some("2026-08-01T00:00:00Z".into()),
+            history: vec![],
+        };
+        let (pct, end) = included_usage_and_period_end(&config);
+        assert_eq!(pct, Some(25.0));
+        assert_eq!(end.as_deref(), Some("2026-08-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn included_usage_honest_absence_when_no_meters() {
+        let config = BillingConfig {
+            credit_usage_percent: None,
+            current_period: None,
+            monthly_limit: None,
+            used: None,
+            on_demand_cap: None,
+            on_demand_used: None,
+            prepaid_balance: None,
+            is_unified_billing_user: None,
+            billing_period_start: None,
+            billing_period_end: None,
+            history: vec![],
+        };
+        let (pct, end) = included_usage_and_period_end(&config);
+        assert_eq!(pct, None);
+        assert_eq!(end, None);
+    }
 
     #[test]
     fn auto_topup_disabled_rule_omits_enabled_field() {

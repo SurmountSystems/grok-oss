@@ -203,6 +203,84 @@ fn record_stream_request_failure(err: &reqwest::Error) {
     span.record("error", err.to_string().as_str());
 }
 
+/// Default wait for HTTP response headers on streaming `execute` (TTFB).
+///
+/// **Product default: 120 seconds.** Override with env
+/// `GROK_STREAM_HEADERS_TIMEOUT_SECS` (positive integer seconds).
+/// Connect is separate (`GROK_CONNECT_TIMEOUT_SECS`, default 10s). Idle after
+/// headers is L2 `idle_timeout_secs` (default 300s). 120s is long enough for
+/// cold starts / slow proxies and short enough that stuck Retrying chrome
+/// cannot sit 13–19 minutes with no progress.
+const DEFAULT_STREAM_HEADERS_TIMEOUT_SECS: u64 = 120;
+
+/// Resolve headers-timeout seconds from an optional env value.
+///
+/// `None`, `0`, or invalid → [`DEFAULT_STREAM_HEADERS_TIMEOUT_SECS`] (120).
+/// Pure helper so unit tests can assert the product default without touching
+/// process env (pairs with integration `stream_headers_timeout`).
+fn stream_headers_timeout_secs(env: Option<&str>) -> u64 {
+    env.and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(DEFAULT_STREAM_HEADERS_TIMEOUT_SECS)
+}
+
+/// Env: `GROK_STREAM_HEADERS_TIMEOUT_SECS` (positive integer seconds).
+/// `0` or unset/invalid → default 120. Read per attempt so tests can override
+/// without rebuilding the shared client.
+pub(crate) fn stream_headers_timeout() -> std::time::Duration {
+    let env = std::env::var("GROK_STREAM_HEADERS_TIMEOUT_SECS").ok();
+    std::time::Duration::from_secs(stream_headers_timeout_secs(env.as_deref()))
+}
+
+/// Join `source()` chain — reqwest Display hides hyper causes.
+fn error_cause_chain(err: &dyn std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    msg
+}
+
+/// Map eventsource transport failures with cause chain (not bare outer Display).
+fn format_event_stream_error(e: eventsource_stream::EventStreamError<reqwest::Error>) -> String {
+    use eventsource_stream::EventStreamError;
+    match e {
+        EventStreamError::Transport(inner) => {
+            format!("Transport error: {}", error_cause_chain(&inner))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Await streaming `execute` until response headers, with a first-byte budget.
+/// Does **not** bound the subsequent SSE body read (idle timeout owns that).
+async fn execute_streaming(
+    http: &reqwest::Client,
+    built_request: reqwest::Request,
+) -> Result<reqwest::Response> {
+    let budget = stream_headers_timeout();
+    match tokio::time::timeout(budget, http.execute(built_request)).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(e)) => {
+            tracing::debug!("HTTP stream request failed: {}", e);
+            record_stream_request_failure(&e);
+            Err(SamplingError::Http(e))
+        }
+        Err(_elapsed) => {
+            let secs = budget.as_secs();
+            let msg = format!("timed out waiting for response headers after {secs}s");
+            tracing::warn!(timeout_secs = secs, "{msg}");
+            let span = tracing::Span::current();
+            span.record("success", false);
+            span.record("error", msg.as_str());
+            Err(SamplingError::EventStreamError(msg))
+        }
+    }
+}
+
 /// Parse `Retry-After` as integer seconds (HTTP-date forms ignored → None).
 ///
 /// Grok OSS: **no default duration cap** — honor the server value fully.
@@ -993,11 +1071,7 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "chat/completions");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = execute_streaming(&self.http, built_request).await?;
 
         let status = response.status();
         let span = tracing::Span::current();
@@ -1098,7 +1172,9 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        Some(Err(SamplingError::EventStreamError(e.to_string())))
+                        Some(Err(SamplingError::EventStreamError(
+                            format_event_stream_error(e),
+                        )))
                     }
                 };
                 std::future::ready(item)
@@ -1352,11 +1428,7 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "responses");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = execute_streaming(&self.http, built_request).await?;
 
         let status = response.status();
         let span = tracing::Span::current();
@@ -1459,7 +1531,9 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
+                        Some(Some(Err(SamplingError::EventStreamError(
+                            format_event_stream_error(e),
+                        ))))
                     }
                 };
                 std::future::ready(item)
@@ -1652,11 +1726,7 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "messages");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = execute_streaming(&self.http, built_request).await?;
 
         let status = response.status();
         let span = tracing::Span::current();
@@ -1756,7 +1826,9 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        Some(Err(SamplingError::EventStreamError(e.to_string())))
+                        Some(Err(SamplingError::EventStreamError(
+                            format_event_stream_error(e),
+                        )))
                     }
                 };
                 std::future::ready(item)
@@ -2060,6 +2132,39 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
         }
+    }
+
+    /// Contract: product default stream headers wait is **120s** when env is
+    /// unset (and when env is `0` / invalid). Guards against upstream removing
+    /// or changing [`DEFAULT_STREAM_HEADERS_TIMEOUT_SECS`]. Pairs with the
+    /// integration test binary `stream_headers_timeout` (short env override
+    /// proves the timeout fires; this unit test locks the default constant).
+    #[test]
+    fn stream_headers_timeout_defaults_to_120_secs_when_env_unset() {
+        assert_eq!(
+            DEFAULT_STREAM_HEADERS_TIMEOUT_SECS, 120,
+            "product default stream headers timeout must stay 120s"
+        );
+        assert_eq!(
+            stream_headers_timeout_secs(None),
+            120,
+            "unset GROK_STREAM_HEADERS_TIMEOUT_SECS → 120s"
+        );
+        assert_eq!(
+            stream_headers_timeout_secs(Some("0")),
+            120,
+            "zero env is treated as unset → default 120s"
+        );
+        assert_eq!(
+            stream_headers_timeout_secs(Some("bogus")),
+            120,
+            "invalid env → default 120s"
+        );
+        assert_eq!(
+            stream_headers_timeout_secs(Some("1")),
+            1,
+            "positive override still honored"
+        );
     }
 
     /// Verify the serialized shape of StreamingChatRequest matches the

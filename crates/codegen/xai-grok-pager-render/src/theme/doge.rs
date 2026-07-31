@@ -11,9 +11,21 @@
 //! Design intent: OLED-friendly true black canvas with only the classic
 //! 3-bit primary set (Black Red Green Yellow Blue Magenta Cyan White),
 //! matching ANSI / ECMA-48 / ISO 6429 SGR *names* and index order. No
-//! mid-gray hex; dim roles use white (callers may apply `Modifier::DIM`).
-//! Blue is reserved for sparse chrome — never long body text.
-//! Do **not** claim measured power savings in product docs.
+//! mid-gray hex; muted UI roles use pure accents (cyan / yellow / white),
+//! not `#808080` gray or ANSI DarkGray.
+//!
+//! **Grok OSS application semantic roles** (on top of the pure palette;
+//! normative palette SoT: https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md
+//! Clause 8 MAY define app roles):
+//! - **Green** — Human (prompt pointer, left rail, OSC 12 cursor, success)
+//! - **Magenta** — Agent (activity, model label, assistant/thinking chrome)
+//! - **Yellow** — Dates, times, other useful context / secondary chrome
+//! - **Cyan** — System tags, limits, credits, path/meta
+//! - **Red / Blue** — Avoid unless contextually useful (errors stay red)
+//! - **Gray / alpha** — Forbidden as theme palette colours
+//!
+//! Pure blue is not used for UI text slots (palette still includes blue
+//! for quantisation). Do **not** claim measured power savings in product docs.
 
 use ratatui::style::{Color, Modifier};
 
@@ -194,7 +206,7 @@ impl Theme {
     ///
     /// **Context-bar solid-step contract** (keep in sync with
     /// `xai-grok-pager::views::context_bar` structural fingerprint fallback):
-    /// `bg_base=black`, `text_primary=white`, `gray=white`, `warning=yellow`,
+    /// `bg_base=black`, `text_primary=white`, `gray=yellow`, `warning=yellow`,
     /// `accent_error=red`, `accent_assistant=magenta`, `path=cyan`. Production
     /// gating is `ThemeKind::Doge` first; the fingerprint is a unit-test
     /// fallback for raw/quantized themes without a kind cache set.
@@ -209,27 +221,36 @@ impl Theme {
             bg_hover: BLACK,
             bg_terminal: BLACK,
 
-            accent_user: WHITE,
+            // Human chrome: prompt pointer, left rail, OSC 12 cursor → green.
+            accent_user: GREEN,
             accent_assistant: MAGENTA,
             accent_thinking: MAGENTA,
             accent_tool: WHITE,
-            accent_system: BLUE, // sparse chrome only
+            // System tags / limits / credits family → cyan (free green for Human).
+            accent_system: CYAN,
             accent_error: RED,
+            // Success checkmarks stay green (same primary as Human).
             accent_success: GREEN,
+            // Agent activity + subagent throbber / tool running accent → magenta.
             accent_running: MAGENTA,
-            accent_skill: BLUE,
+            // Slash skills + skill tool accent → green (affordance family).
+            accent_skill: GREEN,
 
             text_primary: WHITE,
             text_secondary: WHITE,
 
-            // No mid-gray hex — white; Theme::dim / muted may apply DIM.
-            gray_dim: WHITE,
-            gray: WHITE,
+            // No mid-gray hex / silver: chromatic hierarchy for muted UI.
+            // gray_dim = ambient meta (badges, starting-session spinner).
+            // gray = secondary chrome (timers, activity meta, close chips).
+            // gray_bright = near-body secondary.
+            gray_dim: CYAN,
+            gray: YELLOW,
             gray_bright: WHITE,
 
             command: YELLOW,
             path: CYAN,
-            running: CYAN,
+            // Semantic running indicator chrome (activity) → magenta.
+            running: MAGENTA,
             warning: YELLOW,
 
             fuzzy_accent: CYAN,
@@ -245,7 +266,8 @@ impl Theme {
             prompt_border_active: WHITE,
             hover_border: WHITE,
 
-            accent_model: CYAN,
+            // Prompt info-line model label (e.g. "Grok 4.5 (high)") → magenta.
+            accent_model: MAGENTA,
 
             scrollbar_bg: BLACK,
             scrollbar_fg: WHITE,
@@ -282,8 +304,9 @@ impl Theme {
             md_muted: WHITE,
             md_code_bg: BLACK,
             md_text: WHITE,
-            // Prefer cyan over pure blue for links (contrast on black).
-            link_fg: CYAN,
+            // Pure green for links: higher luminance than blue/cyan on black
+            // for most eyes; stays on the DOGE primary set.
+            link_fg: GREEN,
         }
     }
 }
@@ -389,12 +412,195 @@ mod tests {
         assert_eq!(t.accent_error, Color::Rgb(255, 0, 0));
         assert_eq!(t.accent_success, Color::Rgb(0, 255, 0));
         assert_eq!(t.command, Color::Rgb(255, 255, 0));
-        assert_eq!(t.accent_system, Color::Rgb(0, 0, 255));
+        assert_eq!(t.accent_user, Color::Rgb(0, 255, 0));
+        assert_eq!(t.accent_system, Color::Rgb(0, 255, 255));
         assert_eq!(t.accent_assistant, Color::Rgb(255, 0, 255));
         assert_eq!(t.path, Color::Rgb(0, 255, 255));
         // No blue long body text.
         assert_ne!(t.text_primary, Color::Rgb(0, 0, 255));
         assert_ne!(t.md_text, Color::Rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn doge_link_fg_is_pure_green() {
+        let t = Theme::doge();
+        assert_eq!(
+            t.link_fg,
+            Color::Rgb(0, 255, 0),
+            "DOGE markdown/hyperlink text must be pure green for visibility"
+        );
+        assert_ne!(t.link_fg, Color::Rgb(0, 0, 255), "must not use pure blue");
+        assert_ne!(t.link_fg, Color::Rgb(0, 255, 255), "must not use cyan");
+    }
+
+    /// Agent activity animation + subagent throbber tokens are pure magenta.
+    /// Skills/links stay green; path meta may stay cyan.
+    #[test]
+    fn doge_agent_activity_and_subagent_chrome_are_pure_magenta() {
+        let t = Theme::doge();
+        let magenta = Color::Rgb(255, 0, 255);
+        let cyan = Color::Rgb(0, 255, 255);
+        let green = Color::Rgb(0, 255, 0);
+
+        // Paint paths: upper-right subagent indicator + lower-left / task
+        // running accents read `theme.accent_running`; `theme.running` is the
+        // semantic running indicator used for live activity chrome.
+        assert_eq!(t.accent_running, magenta, "accent_running must be #FF00FF");
+        assert_eq!(t.running, magenta, "running must be #FF00FF");
+        assert_ne!(t.accent_running, cyan);
+        assert_ne!(t.accent_running, green);
+        assert_ne!(t.running, cyan);
+        assert_ne!(t.running, green);
+
+        // Non-agent chrome must not be dragged onto magenta by this contract.
+        assert_eq!(t.accent_skill, green, "skills stay green");
+        assert_eq!(t.link_fg, green, "links stay green");
+        assert_eq!(t.path, cyan, "path meta may stay cyan");
+    }
+
+    /// Status/prompt chrome: model label token is magenta (not gray/cyan).
+    #[test]
+    fn doge_accent_model_is_pure_magenta_for_model_label() {
+        let t = Theme::doge();
+        assert_eq!(
+            t.accent_model,
+            Color::Rgb(255, 0, 255),
+            "model label token must be DOGE magenta #FF00FF"
+        );
+        assert_eq!(
+            t.text_primary,
+            Color::Rgb(255, 255, 255),
+            "branch chrome uses white"
+        );
+    }
+
+    /// Product semantic roles on DOGE (application layer over pure 8-colour):
+    /// Green = Human; Magenta = Agent; Yellow = dates/times/context;
+    /// Cyan = system / limits / credits; no gray paint tokens.
+    #[test]
+    fn doge_accent_user_is_pure_green_for_human() {
+        let t = Theme::doge();
+        let green = Color::Rgb(0, 255, 0);
+        assert_eq!(
+            t.accent_user, green,
+            "Human chrome (pointer, rail, OSC 12) must be pure green #00FF00"
+        );
+        assert_eq!(
+            t.accent_success, green,
+            "success stays green (same primary as Human)"
+        );
+        assert_ne!(
+            t.accent_user,
+            Color::Rgb(255, 255, 255),
+            "Human is not white"
+        );
+        assert!(!matches!(t.accent_user, Color::Gray | Color::DarkGray));
+    }
+
+    #[test]
+    fn doge_accent_system_is_pure_cyan_for_system_limits_credits() {
+        let t = Theme::doge();
+        let cyan = Color::Rgb(0, 255, 255);
+        assert_eq!(
+            t.accent_system, cyan,
+            "system tags / limits chrome must be pure cyan #00FFFF (not green)"
+        );
+        assert_ne!(
+            t.accent_system,
+            Color::Rgb(0, 255, 0),
+            "system must free green for Human"
+        );
+    }
+
+    /// Green = Human + static affordances; magenta = agent activity / subagent
+    /// chrome; cyan = system / path/meta (not agent motion); no pure-blue UI
+    /// slots; muted hierarchy is chromatic (not mid-gray / silver).
+    #[test]
+    fn doge_roles_green_cyan_no_blue_ui_no_gray_text() {
+        let t = Theme::doge();
+        let green = Color::Rgb(0, 255, 0);
+        let cyan = Color::Rgb(0, 255, 255);
+        let magenta = Color::Rgb(255, 0, 255);
+        let yellow = Color::Rgb(255, 255, 0);
+        let white = Color::Rgb(255, 255, 255);
+        let blue = Color::Rgb(0, 0, 255);
+
+        // Human + static affordance → green
+        assert_eq!(t.accent_user, green, "Human pointer / rail / cursor");
+        assert_eq!(t.accent_skill, green, "slash skills");
+        assert_eq!(t.link_fg, green, "links");
+        assert_eq!(t.accent_success, green);
+        assert_eq!(t.accent_remember, green);
+        // System / limits / credits → cyan (not green)
+        assert_eq!(t.accent_system, cyan, "system tags / limits chrome");
+
+        // Agent activity + subagent chrome → pure magenta (not cyan/green)
+        assert_eq!(
+            t.accent_running, magenta,
+            "subagent throbber / running accent"
+        );
+        assert_eq!(t.running, magenta, "running indicator chrome");
+        assert_ne!(t.accent_running, cyan, "agent chrome must not be cyan");
+        assert_ne!(t.accent_running, green, "agent chrome must not be green");
+        assert_ne!(t.running, cyan, "running chrome must not be cyan");
+        assert_ne!(t.running, green, "running chrome must not be green");
+
+        // Path / search meta stay cyan; model label is magenta (agent chrome family)
+        assert_eq!(t.path, cyan);
+        assert_eq!(t.fuzzy_accent, cyan);
+        assert_eq!(t.accent_feedback, cyan);
+        assert_eq!(
+            t.accent_model, magenta,
+            "prompt info-line model label must be pure magenta, not gray/cyan"
+        );
+
+        // Muted hierarchy: no gray paint tokens
+        assert_eq!(t.gray_dim, cyan, "ambient meta / dimmest chrome");
+        assert_eq!(t.gray, yellow, "secondary chrome labels (not gray)");
+        assert_eq!(t.gray_bright, white);
+        assert_eq!(t.text_secondary, white);
+
+        // No pure-blue semantic UI slots (blue stays in palette only).
+        let ui_slots = [
+            t.accent_system,
+            t.accent_skill,
+            t.accent_running,
+            t.accent_user,
+            t.accent_assistant,
+            t.accent_thinking,
+            t.accent_tool,
+            t.accent_error,
+            t.accent_success,
+            t.text_primary,
+            t.text_secondary,
+            t.gray_dim,
+            t.gray,
+            t.gray_bright,
+            t.command,
+            t.path,
+            t.running,
+            t.warning,
+            t.fuzzy_accent,
+            t.accent_plan,
+            t.accent_verify,
+            t.accent_feedback,
+            t.accent_remember,
+            t.link_fg,
+            t.md_text,
+            t.md_muted,
+        ];
+        for c in ui_slots {
+            assert_ne!(c, blue, "UI slot must not be pure blue: {c:?}");
+            assert!(
+                !matches!(c, Color::Gray | Color::DarkGray),
+                "UI slot must not be ANSI gray: {c:?}"
+            );
+            if let Color::Rgb(r, g, b) = c {
+                // Reject mid-gray RGB (equal channels not pure black/white).
+                let is_mid_gray = r == g && g == b && r > 0 && r < 255;
+                assert!(!is_mid_gray, "UI slot must not be mid-gray RGB: {c:?}");
+            }
+        }
     }
 
     /// Every canvas / sunken / elevated background slot is pure black —
@@ -480,9 +686,16 @@ mod tests {
             (t.accent_error, "#FF0000"),
             (t.accent_success, "#00FF00"),
             (t.command, "#FFFF00"),
-            (t.accent_system, "#0000FF"),
+            (t.accent_user, "#00FF00"),
+            (t.accent_system, "#00FFFF"),
             (t.accent_assistant, "#FF00FF"),
             (t.path, "#00FFFF"),
+            (t.accent_skill, "#00FF00"),
+            (t.accent_running, "#FF00FF"),
+            (t.running, "#FF00FF"),
+            (t.link_fg, "#00FF00"),
+            (t.gray_dim, "#00FFFF"),
+            (t.gray, "#FFFF00"),
         ];
         for (color, hex) in pairs {
             let Color::Rgb(r, g, b) = color else {

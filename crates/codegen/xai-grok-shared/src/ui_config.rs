@@ -23,6 +23,14 @@ pub struct UiConfig {
     /// Fullscreen agent chrome only; default false. Read by pager.
     #[serde(default)]
     pub hide_header: bool,
+    /// Clear the terminal/tab **window title** (OSC 0) and skip dynamic
+    /// agent-state title updates. Distinct from `hide_header` (in-app
+    /// status/location chrome). Default **false**: Grok manages the title
+    /// (session name + activity + brand) so tabs stay discoverable; first
+    /// write is always product-managed (never raw `grok-oss --resume …`
+    /// argv). Opt out with `true`. Read by pager.
+    #[serde(default)]
+    pub hide_title_bar: bool,
     /// Simple mode. Read by pager, declared here for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simple_mode: Option<bool>,
@@ -283,6 +291,7 @@ impl Default for UiConfig {
             ui_theme: None,
             compact_mode: false,
             hide_header: false,
+            hide_title_bar: false,
             simple_mode: None,
             permission_mode: None,
             approval_mode: None,
@@ -447,6 +456,28 @@ mod tests {
         let missing: UiConfig = serde_json::from_value(serde_json::json!({}))
             .expect("UiConfig defaults missing hide_header");
         assert!(!missing.hide_header);
+    }
+
+    #[test]
+    fn hide_title_bar_defaults_false() {
+        // Named contract: window titles visible by default for discoverability
+        // (session name + agent activity via OSC 0). Opt out with hide_title_bar = true.
+        assert!(
+            !UiConfig::default().hide_title_bar,
+            "default must show managed window titles"
+        );
+        let on: UiConfig = serde_json::from_value(serde_json::json!({ "hide_title_bar": true }))
+            .expect("UiConfig deserializes hide_title_bar true");
+        assert!(on.hide_title_bar);
+        let off: UiConfig = serde_json::from_value(serde_json::json!({ "hide_title_bar": false }))
+            .expect("UiConfig deserializes hide_title_bar false");
+        assert!(!off.hide_title_bar);
+        let missing: UiConfig = serde_json::from_value(serde_json::json!({}))
+            .expect("UiConfig defaults missing hide_title_bar");
+        assert!(
+            !missing.hide_title_bar,
+            "missing field must default false (titles on for discoverability)"
+        );
     }
 
     #[test]

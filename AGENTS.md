@@ -120,6 +120,21 @@ rule: `~/.grok/AGENTS.md` § *Regressions…* + § *Hard stop — parent is
 coordinator only*. Git handoff only when the operator asked for complex git
 help (see hard constraint **Git silence**).
 
+### Agent depth L1 / L2 / L3 (pinned 2026-07-29) — not session-board layers
+
+**Not** the session-board L0/L1/L2 table below (residual / todos / join notes).
+Product agent depth:
+
+| Depth | Name | Role |
+|-------|------|------|
+| **L1** | **Main thread** | Operator chat. HITL coordinator only. **Modal-free** — typing and chat must stay unobstructed. Must not get stuck in plan soft-park or exclusive key capture that blocks the prompt. |
+| **L2** | **Subagents** | Spawned by L1 (implement, explore, plan, review, …). Planning, research, implement, review, test work lives here. |
+| **L3** | **Subagent-spawned specialists** | L2 may spawn further specialists/personas. **Do not go deeper than L3.** |
+
+L1 coordinates; deeper layers do the heavy work. Product: soft-park that
+**traps** L1 is rejected; plan review is on demand (`/view-plan`, status click,
+panel CTAs), not forced keyboard capture of the main thread.
+
 **Default loop (pinned 2026-07-27):** track on board → **spawn** → **wait** →
 join on disk. Do **not** kill/respawn mid-flight to re-scope; do **not**
 monologue interim workarounds while an implementer runs. Mid-flight operator
@@ -139,10 +154,11 @@ if disjoint). Host: § *Hard stop* default loop.
 - Parent must **not**: pull CI logs, open failing tests, re-run nextest, edit
   product code, re-do the subagent’s greps “to be sure,” or research/implement
   in the main thread.
-- **Additive asks:** new independent work → **spawn**; **never kill** approved
-  in-flight subagents unless the operator says stop/supersede. Same-file race →
-  serialize the new work, don’t casually kill. Full pin: `~/.grok/AGENTS.md`
-  § *Additive asks — do not kill approved in-flight children*.
+- **Additive asks / “also”:** phrases like **also**, **this too**, **and also**,
+  **this work too** mean a second slice, not a pivot. Board-upsert; **spawn**
+  another subagent (or queue if same-file race); **never kill**, cancel, or
+  re-prompt healthy in-flight subagents on the prior goal unless the operator
+  explicitly stops/supersedes. Full pin: `~/.grok/AGENTS.md` § *Additive asks*.
 
 ## Never assume without checking
 
@@ -193,6 +209,14 @@ just upstream-assert-process-pins
 
 Import runs the assert after `FORK_PATHS` restore. See FORK § *What recon keeps*.
 
+**Product seams inside `xai-grok-*` are not path-restored.** OpenRouter,
+dual-auth, DOGE default, titles-on, stuck-retry clear, and similar live in
+shared crates and survive onto only via cherry-picks plus **cargo tests**.
+Assert proves files exist; it does not prove those contracts. Durable filter
+catalog: [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md);
+cheat sheet also in FORK § *Upstream regression filters*. After recon, run
+assert **and** those filters (or `just check`).
+
 ## Ship / CI / git
 
 - Ship product work: short hierarchical note in [`FORK.md`](FORK.md); link out.
@@ -226,6 +250,9 @@ paths; join on disk. Every continue/join merge = human `git commit -S`.
   campaign closed writeups → `doc/dev/campaigns/`.
 
 ## Operator orchestration (session board L0–L2)
+
+Session-board layers only (todos / joins). **Do not confuse** with agent depth
+**main thread (L1) / subagents (L2) / specialists (L3 max)** above.
 
 | Session layer | Where |
 |---------------|--------|

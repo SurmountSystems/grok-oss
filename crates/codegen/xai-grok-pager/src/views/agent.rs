@@ -690,9 +690,13 @@ pub fn render_todo_chrome(
         close_hovered,
         theme,
         None,
+        None,
+        false,
     )
 }
 /// Like [`render_todo_chrome`], with optional close label (queue uses `[close]`).
+///
+/// `action_label` is an optional chrome control left of close (todo **Clear done**).
 #[allow(clippy::too_many_arguments)]
 pub fn render_todo_chrome_with_close_label(
     buf: &mut Buffer,
@@ -703,6 +707,8 @@ pub fn render_todo_chrome_with_close_label(
     close_hovered: bool,
     theme: &Theme,
     close_label: Option<&'static str>,
+    action_label: Option<&'static str>,
+    action_hovered: bool,
 ) -> Option<SelectionBox> {
     if todo_area.area() == 0 {
         return None;
@@ -719,6 +725,9 @@ pub fn render_todo_chrome_with_close_label(
         .with_closable(focused, close_hovered);
     if focused && let Some(label) = close_label {
         sel = sel.with_close_label(Some(label));
+    }
+    if focused {
+        sel = sel.with_action_label(action_label, action_hovered);
     }
     sel.render(buf);
     Some(sel)
@@ -960,6 +969,11 @@ pub fn build_hints(
                 crate::key!('h'),
                 if show_done { "hide done" } else { "show done" },
             ));
+            if let Some(def) = registry.find(ActionId::ClearCompletedTodos) {
+                hints.push(def.hint());
+            } else {
+                hints.push(HintItem::new(crate::key!('X'), "clear done"));
+            }
             hints
         }
         ActivePane::Queue => {

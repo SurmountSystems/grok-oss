@@ -642,6 +642,7 @@ impl AgentView {
                                 }
                                 let images = self.prompt.drain_images();
                                 self.prompt.set_text("");
+                                self.clear_unsent_prompt_draft();
                                 let queue_id = self.session.next_queue_id;
                                 self.session.next_queue_id += 1;
                                 self.session.pending_prompts.push_front(
@@ -675,6 +676,7 @@ impl AgentView {
                         // Drain images BEFORE set_text("") wipes the chip elements.
                         let images = self.prompt.drain_images();
                         self.prompt.set_text("");
+                        self.clear_unsent_prompt_draft();
                         return InputOutcome::Action(Action::Interject { text, images });
                     }
                     if turn_running {
@@ -789,6 +791,7 @@ impl AgentView {
                         self.open_line_viewer(&req.path, req.initial_range);
                     }
                     self.prompt.refresh_slash(&self.session.models);
+                    self.persist_unsent_prompt_draft();
                     if let Some(eff) = self.notify_suggestion_text_changed() {
                         self.pending_effects.push(eff);
                     }

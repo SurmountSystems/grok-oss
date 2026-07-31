@@ -852,6 +852,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
     match key {
         "compact_mode" => Some(Action::SetCompactMode(new)),
         "hide_header" => Some(Action::SetHideHeader(new)),
+        "hide_title_bar" => Some(Action::SetHideTitleBar(new)),
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),

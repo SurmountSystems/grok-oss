@@ -867,6 +867,18 @@ pub fn set_plan_mode_active(v: &mut AgentView, on: bool) {
     v.plan_mode_active = on;
 }
 
+/// Test-only setter for `AgentView::plan_approval_view` (minimal plan-strip CTAs).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_plan_approval_view(v: &mut AgentView, val: Option<PlanApprovalViewState>) {
+    v.plan_approval_view = val;
+}
+
+/// Test-only: whether the plan line viewer is open.
+#[cfg(any(test, feature = "test-support"))]
+pub fn line_viewer_is_some(v: &AgentView) -> bool {
+    v.line_viewer.is_some()
+}
+
 /// Test-only setter for `AgentView::plan_mode_pending`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_plan_mode_pending(v: &mut AgentView, val: Option<bool>) {

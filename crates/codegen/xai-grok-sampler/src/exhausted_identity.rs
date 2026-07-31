@@ -267,6 +267,17 @@ pub fn is_exhausted(fingerprint: &str) -> bool {
     }
 }
 
+/// True when the raw credential secret (session JWT or API key) is memoized
+/// out of allowance. Fingerprints only; never logs the secret.
+pub fn is_credential_exhausted(secret: &str) -> bool {
+    use grok_rate_limit::fingerprint_secret;
+    let s = secret.trim();
+    if s.is_empty() {
+        return false;
+    }
+    is_exhausted(&fingerprint_secret(s))
+}
+
 fn process_is_exhausted(fp: &str) -> bool {
     let Ok(mut guard) = MEMO.lock() else {
         return false;

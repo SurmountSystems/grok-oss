@@ -1360,6 +1360,10 @@ pub fn load_npm_registry_sync() -> Option<String> {
 
 /// Synchronously load just the management_api_key from the config file.
 /// This is intended for use in contexts where async is not available.
+///
+/// This is the Management API key (billing / prepaid), **not** the inference
+/// `XAI_API_KEY`. Prefer the secret-store path via
+/// [`crate::auth::resolve_management_api_key`] when interactive.
 pub fn load_management_api_key_sync() -> Option<String> {
     let root: TomlValue = crate::config::load_effective_config().ok()?;
     if let TomlValue::Table(table) = root
@@ -1368,6 +1372,29 @@ pub fn load_management_api_key_sync() -> Option<String> {
         endpoints
             .get("management_api_key")
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+/// Synchronously load `[endpoints] management_team_id` from config.
+///
+/// Explicit Management API team id for prepaid balance and other team-scoped
+/// Management routes. **Not** SuperGrok OIDC `team_id` — operator must set this
+/// (Console team id) for console team Business Usage meters.
+pub fn load_management_team_id_sync() -> Option<String> {
+    let root: TomlValue = crate::config::load_effective_config().ok()?;
+    if let TomlValue::Table(table) = root
+        && let Some(TomlValue::Table(endpoints)) = table.get("endpoints")
+    {
+        endpoints
+            .get("management_team_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
     } else {
         None

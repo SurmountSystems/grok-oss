@@ -32,7 +32,7 @@ pub(super) struct ReplaySendUpdateFixture {
     pub(super) actor: SessionActor,
     pub(super) event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     sent: Arc<tokio::sync::Mutex<Vec<acp::SessionNotification>>>,
-    persistence_rx: mpsc::UnboundedReceiver<PersistenceMsg>,
+    pub(super) persistence_rx: mpsc::UnboundedReceiver<PersistenceMsg>,
 }
 pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture {
     let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
@@ -473,6 +473,51 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
         })
         .await;
 }
+/// Contract: `StreamStarted` must notify the pager to clear sticky Retrying
+/// chrome (`RetryState::StreamResumed`) so attempt N does not freeze across
+/// a live post-retry stream.
+#[tokio::test(flavor = "current_thread")]
+async fn stream_started_emits_retry_state_stream_resumed() {
+    use crate::extensions::notification::{RetryState, SessionUpdate as XaiSessionUpdate};
+    use xai_grok_sampler::{RequestId, SamplingEvent};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut fixture = make_replay_send_update_fixture().await;
+            let actor = Arc::new(fixture.actor);
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("prompt-resume".to_string());
+            actor
+                .handle_sampling_event(SamplingEvent::StreamStarted {
+                    request_id: RequestId::random(),
+                    timestamp_ms: 1,
+                })
+                .await;
+            // Yield so fire-and-forget path completes persistence send.
+            tokio::task::yield_now().await;
+            let mut found = false;
+            while let Ok(msg) = fixture.persistence_rx.try_recv() {
+                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n)) = msg
+                {
+                    if matches!(
+                        n.update,
+                        XaiSessionUpdate::RetryState(RetryState::StreamResumed)
+                    ) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            assert!(
+                found,
+                "StreamStarted must persist RetryState::StreamResumed for pager chrome clear"
+            );
+        })
+        .await;
+}
+
 /// `handle_sampling_event::ChannelToken` for `Reasoning` and `Text`
 /// channels must accumulate into the session's streaming capture so
 /// the trace upload can serialize it even when the canonical

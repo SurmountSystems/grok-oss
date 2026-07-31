@@ -155,8 +155,9 @@ pub fn blend_color_with_mode(
 /// Structural pure-primary fingerprint is a **fallback** for unit tests that
 /// build `Theme::doge()` (raw or quantized) without setting the kind cache.
 /// Slot contract must stay aligned with `Theme::doge()`:
-/// `bg_base=black`, `text_primary=white`, `gray=white`, `warning=yellow`,
-/// `accent_error=red`, `accent_assistant=magenta`, `path=cyan`.
+/// `bg_base=black`, `text_primary=white`, `gray=yellow` (secondary chrome),
+/// `warning=yellow`, `accent_error=red`, `accent_assistant=magenta`,
+/// `path=cyan`.
 fn uses_solid_context_steps(theme: &Theme) -> bool {
     if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
         return true;
@@ -184,7 +185,7 @@ fn is_doge_theme_structural(theme: &Theme) -> bool {
         (
             Some((0, 0, 0)),
             Some((255, 255, 255)),
-            Some((255, 255, 255)),
+            Some((255, 255, 0)), // gray = yellow secondary chrome (not mid-gray)
             Some((255, 255, 0)),
             Some((255, 0, 0)),
             Some((255, 0, 255)),
@@ -512,7 +513,7 @@ mod tests {
         assert!(uses_solid_context_steps(&theme));
         let bps = default_breakpoints(&theme);
 
-        // Right-closed: 0% white, 50% accent_user (also white on DOGE),
+        // Right-closed: 0% white, 50% accent_user (Human green on DOGE),
         // 95%+ error red, 100% error red.
         let c0 = blend_color_with_mode(0.0, &bps, true);
         let c50 = blend_color_with_mode(50.0, &bps, true);
@@ -532,8 +533,8 @@ mod tests {
     fn doge_context_bar_mid_segment_holds_lower_not_lerp_gray() {
         let theme = Theme::doge();
         let bps = default_breakpoints(&theme);
-        // Between 65% (accent_user/white) and 75% (warning/yellow): solid
-        // holds white. Lerp would invent pale yellow / off-palette midtones.
+        // Between 65% (accent_user / Human green on DOGE) and 75% (warning/yellow):
+        // solid holds the lower step. Lerp would invent off-palette midtones.
         let c70 = blend_color_with_mode(70.0, &bps, true);
         assert_eq!(c70, theme.accent_user);
         assert!(is_doge_primary_color(c70));

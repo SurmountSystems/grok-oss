@@ -1025,16 +1025,16 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum(
             &mut app,
         );
 
-        // Reset → SetTheme("groknight") (the registered default).
+        // Reset → SetTheme("doge") (the registered product default).
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             Effect::PersistSetting { key, value, .. } => {
                 assert_eq!(*key, "theme");
-                assert_eq!(value, &SettingValue::Enum("groknight"));
+                assert_eq!(value, &SettingValue::Enum("doge"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
-        assert_eq!(app.current_ui.theme.as_deref(), Some("groknight"));
+        assert_eq!(app.current_ui.theme.as_deref(), Some("doge"));
     });
 }
 
@@ -1045,6 +1045,160 @@ fn show_usage_on_welcome_screen_is_noop() {
     assert!(
         effects.is_empty(),
         "ShowUsage with no active agent should be a no-op"
+    );
+}
+
+#[test]
+fn show_limits_on_welcome_screen_is_noop() {
+    let mut app = test_app();
+    let effects = dispatch(Action::ShowLimits, &mut app);
+    assert!(
+        effects.is_empty(),
+        "ShowLimits with no active agent should be a no-op"
+    );
+}
+
+#[test]
+fn show_limits_pushes_cached_snapshot_block() {
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+
+    let mut app = test_app_with_agent();
+    app.credit_balance = Some(CreditBalance {
+        usage_pct: 24.0,
+        effective_usage_pct: 24.0,
+        period_end_display: Some("Jul 30, 12:00".into()),
+        pay_as_you_go: false,
+        on_demand_cap_cents: None,
+        on_demand_used_cents: None,
+        prepaid_balance_cents: Some(1250),
+        period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+        is_unified_billing_user: None,
+    });
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        // Agent cache empty → falls back to app.credit_balance.
+        agent.credit_balance = None;
+    }
+    let before = agent_scrollback_len(&app);
+    let effects = dispatch(Action::ShowLimits, &mut app);
+    // Snapshot is cache-only; optional silent FetchBilling only when Management
+    // key+team_id are configured and prepaid cents are still cold.
+    assert!(
+        effects.is_empty()
+            || matches!(
+                effects.as_slice(),
+                [Effect::FetchBilling { silent: true, .. }]
+            ),
+        "limits shows cache (+ optional silent management refresh): {effects:?}"
+    );
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let text = last_system_text(&app, AgentId(0));
+    assert!(text.contains("Limits"), "header: {text}");
+    assert!(
+        text.contains("Included weekly allowance: 24% used · 76% remaining"),
+        "{text}"
+    );
+    assert!(text.contains("SuperGrok dollar extras: $12.50"), "{text}");
+    assert!(text.contains("Next reset: Jul 30, 12:00"), "{text}");
+    // Honest gap family (host may or may not have management config).
+    assert!(
+        text.contains("Balance: no management key/team id")
+            || text.contains("Balance: loading team prepaid...")
+            || text.contains("Balance: team prepaid unavailable"),
+        "honest console prepaid gap: {text}"
+    );
+    assert!(
+        !text.contains("no $ meter yet"),
+        "soft placeholder retired: {text}"
+    );
+}
+
+#[test]
+fn show_limits_console_live_keeps_meters_distinct() {
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.sampling_identity = SamplingIdentityKind::ConsoleKey;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 100.0,
+            effective_usage_pct: 100.0,
+            period_end_display: Some("Jul 30, 12:00".into()),
+            pay_as_you_go: false,
+            on_demand_cap_cents: None,
+            on_demand_used_cents: None,
+            prepaid_balance_cents: Some(500),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            is_unified_billing_user: None,
+        });
+    }
+    let _ = dispatch(Action::ShowLimits, &mut app);
+    let text = last_system_text(&app, AgentId(0));
+    assert!(text.contains("Live sampling: console key"), "{text}");
+    assert!(text.contains("Path: live"), "{text}");
+    assert!(
+        text.contains("Balance: no management key/team id")
+            || text.contains("Balance: loading team prepaid...")
+            || text.contains("Balance: team prepaid unavailable"),
+        "honest console prepaid gap: {text}"
+    );
+    assert!(
+        !text.contains("no $ meter yet"),
+        "soft placeholder retired: {text}"
+    );
+    assert!(
+        text.contains("SuperGrok dollar extras: $5"),
+        "extras labeled SuperGrok, not console: {text}"
+    );
+}
+
+/// Named contract: fixture Management prepaid cents → `/limits` Balance dollars.
+#[test]
+fn show_limits_console_live_with_management_fixture_shows_prepaid_balance() {
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+
+    let mut app = test_app_with_agent();
+    app.console_team_prepaid_cents = Some(12_500);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.sampling_identity = SamplingIdentityKind::ConsoleKey;
+        agent.console_team_prepaid_cents = Some(12_500);
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 100.0,
+            effective_usage_pct: 100.0,
+            period_end_display: Some("Jul 30, 12:00".into()),
+            pay_as_you_go: false,
+            on_demand_cap_cents: None,
+            on_demand_used_cents: None,
+            prepaid_balance_cents: Some(996),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            is_unified_billing_user: None,
+        });
+    }
+    let effects = dispatch(Action::ShowLimits, &mut app);
+    // Cache already warm → no silent refresh required.
+    assert!(
+        effects.is_empty(),
+        "warm prepaid: no FetchBilling: {effects:?}"
+    );
+    let text = last_system_text(&app, AgentId(0));
+    assert!(text.contains("Live sampling: console key"), "{text}");
+    assert!(
+        text.contains("Balance (console team prepaid): $125"),
+        "management prepaid on /limits: {text}"
+    );
+    assert!(
+        !text.contains("no $ meter yet")
+            && !text.contains("no management key/team id")
+            && !text.contains("team prepaid unavailable")
+            && !text.contains("loading team prepaid"),
+        "must not claim absence when cents present: {text}"
+    );
+    assert!(
+        text.contains("SuperGrok dollar extras: $9.96"),
+        "SuperGrok extras stay SuperGrok-labeled: {text}"
     );
 }
 

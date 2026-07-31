@@ -1418,6 +1418,10 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "hide_header" => {
             let _ = dispatch(Action::SetHideHeader(true), app);
         }
+        "hide_title_bar" => {
+            // Default is true (hidden); move away by showing titles.
+            let _ = dispatch(Action::SetHideTitleBar(false), app);
+        }
         "show_timestamps" => {
             let _ = dispatch(Action::SetTimestamps(false), app);
         }
@@ -3049,7 +3053,7 @@ fn set_auto_dark_theme_emits_persist_setting_with_correct_payload() {
             } => {
                 assert_eq!(*key, "auto_dark_theme");
                 assert_eq!(*value, SettingValue::Enum("grokday"));
-                assert_eq!(*rollback_value, SettingValue::Enum("groknight"));
+                assert_eq!(*rollback_value, SettingValue::Enum("doge"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
@@ -3176,9 +3180,10 @@ fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetTheme("auto".into()), &mut app);
         assert!(crate::theme::cache::is_auto_mode());
+        // Product default auto-dark mapping is DOGE.
         assert_eq!(
             crate::theme::cache::current_kind(),
-            crate::theme::ThemeKind::GrokNight,
+            crate::theme::ThemeKind::Doge,
         );
         let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
         assert_eq!(

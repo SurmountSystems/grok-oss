@@ -603,6 +603,10 @@ pub struct LineViewerState {
     pub fullscreen_button_area: Option<Rect>,
     /// Whether the fullscreen button is hovered.
     pub fullscreen_hovered: bool,
+    /// Cached copy (⧉) button rect from last render (top bar, left of ↗).
+    pub copy_button_area: Option<Rect>,
+    /// Whether the copy button is hovered.
+    pub copy_hovered: bool,
     /// Plan-specific state. `Some` only when `kind == PlanPreview`.
     /// Keeps plan-only fields (buttons, approval, double-click) out of
     /// the generic viewer.
@@ -671,6 +675,8 @@ impl LineViewerState {
             close_hovered: false,
             fullscreen_button_area: None,
             fullscreen_hovered: false,
+            copy_button_area: None,
+            copy_hovered: false,
             plan: None,
             initial_scroll_range: None,
             title_override: None,
@@ -733,6 +739,8 @@ impl LineViewerState {
             close_hovered: false,
             fullscreen_button_area: None,
             fullscreen_hovered: false,
+            copy_button_area: None,
+            copy_hovered: false,
             plan: None,
             initial_scroll_range: None,
             title_override: None,
@@ -1310,6 +1318,10 @@ pub fn render_line_viewer(
     if popup_area.width < 10 || popup_area.height < min_height {
         viewer.last_popup_area = None;
         viewer.last_modal_area = None;
+        // Drop stale chrome hit targets from a wider prior frame.
+        viewer.copy_button_area = None;
+        viewer.close_button_area = None;
+        viewer.fullscreen_button_area = None;
         return;
     }
 
@@ -1403,22 +1415,20 @@ pub fn render_line_viewer(
     }
 
     // 6. Action buttons on the top border, right-aligned.
-    //    Layout: ... [↗][✗]  (rightmost buttons first; the two abut
-    //    flush — see the spacing notes on the close/fullscreen labels
-    //    below).
+    //    Layout: ... [⧉][↗][✗]  (rightmost first; buttons abut flush).
     //    The close [✗] is omitted in plan-review (feedback) mode because
     //    the modal is not user-closeable in that state — clicking it
     //    would be a no-op (see the close-button branch of
     //    `handle_line_viewer_mouse` in agent_view.rs).
+    //    Copy [⧉] copies the whole body (same payload as `Y` on plans).
     let mut right_edge = popup_area.x + popup_area.width - 1;
 
     if !viewer.feedback_active() {
         let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
-        // Label is `[✗] ` (trailing space, no leading space). The
-        // fullscreen button's label has no trailing space when the
-        // close is visible, so the two buttons abut flush as `[↗][✗]`,
-        // tucked under the top-right corner with one space inside the
-        // frame on each side: ` [↗][✗] `.
+        // Label is `[✗] ` (trailing space, no leading space). Neighbor
+        // buttons drop their trailing space so the row sits flush as
+        // `[⧉][↗][✗]`, tucked under the top-right corner with one space
+        // inside the frame on each side: ` [⧉][↗][✗] `.
         let close_w: u16 = 4; // "[✗] "
         if popup_area.width > close_w + 2 {
             let close_x = right_edge - close_w;
@@ -1444,17 +1454,15 @@ pub fn render_line_viewer(
     // Fullscreen toggle button. The icon stays constant regardless of
     // current state — the button is a toggle, not a status indicator.
     //
-    // Spacing: when the close button is rendered (casual mode) the
-    // fullscreen drops its trailing space so the two sit flush as
-    // `[↗][✗]`. When the close is hidden (plan-review mode) the
-    // fullscreen keeps its trailing space so it doesn't crowd the
-    // corner `╮`.
+    // Spacing (copy always painted left of this when room allows):
+    // - close visible → `[↗]` abuts both neighbors: `[⧉][↗][✗]`
+    // - close hidden  → `[↗] ` trailing space for the corner: `[⧉][↗] `
     let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
     let close_visible = viewer.close_button_area.is_some();
     let (fs_label, fs_w): (String, u16) = if close_visible {
-        (format!(" [{fs_icon}]"), 4)
+        (format!("[{fs_icon}]"), 3)
     } else {
-        (format!(" [{fs_icon}] "), 5)
+        (format!("[{fs_icon}] "), 4)
     };
     if right_edge > popup_area.x + fs_w + 2 {
         let fs_x = right_edge - fs_w;
@@ -1469,8 +1477,30 @@ pub fn render_line_viewer(
         let fs_span = Span::styled(fs_label, fs_style);
         buf.set_span(fs_x, popup_area.y, &fs_span, fs_w);
         viewer.fullscreen_button_area = Some(Rect::new(fs_x, popup_area.y, fs_w, 1));
+        right_edge = fs_x;
     } else {
         viewer.fullscreen_button_area = None;
+    }
+
+    // Copy button (⧉) — whole-body copy, same path as `Y` on plans.
+    // Leading space so the cluster sits off the title: ` [⧉][↗]…`.
+    let copy_icon = crate::glyphs::copy_icon();
+    let (copy_label, copy_w): (String, u16) = (format!(" [{copy_icon}]"), 4);
+    if right_edge > popup_area.x + copy_w + 2 {
+        let copy_x = right_edge - copy_w;
+        let copy_style = if viewer.copy_hovered {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(theme.bg_base)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.gray).bg(theme.bg_base)
+        };
+        let copy_span = Span::styled(copy_label, copy_style);
+        buf.set_span(copy_x, popup_area.y, &copy_span, copy_w);
+        viewer.copy_button_area = Some(Rect::new(copy_x, popup_area.y, copy_w, 1));
+    } else {
+        viewer.copy_button_area = None;
     }
 
     // The legacy top-border "send" button is gone — both plan-approval
@@ -2021,6 +2051,57 @@ mod tests {
         assert_eq!(panel.width, 45);
         assert_eq!(panel.x, 55);
         assert_eq!(panel.height, 40);
+    }
+
+    /// Named contract: line-viewer top bar paints a clickable ⧉ hit target
+    /// left of ↗/✗ so one-click whole-body copy works without the `Y` key.
+    #[test]
+    fn line_viewer_top_bar_sets_copy_button_hit_area() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nCopy me whole\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.side_panel = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(
+            &mut buf,
+            full,
+            &mut viewer,
+            std::path::Path::new("/tmp"),
+            &theme,
+            0,
+        );
+
+        assert!(
+            viewer.copy_button_area.is_some(),
+            "plan top bar must expose ⧉ copy hit target next to enlarge/close"
+        );
+        assert!(
+            viewer.fullscreen_button_area.is_some(),
+            "enlarge button still present beside copy"
+        );
+        // Copy sits left of enlarge on the same row.
+        let copy = viewer.copy_button_area.unwrap();
+        let fs = viewer.fullscreen_button_area.unwrap();
+        assert_eq!(copy.y, fs.y, "copy and enlarge share the top border row");
+        assert!(
+            copy.x + copy.width <= fs.x,
+            "copy must sit left of enlarge (copy.x={} w={} fs.x={})",
+            copy.x,
+            copy.width,
+            fs.x
+        );
     }
 
     /// Named contract: plan-approval side panel footer always exposes

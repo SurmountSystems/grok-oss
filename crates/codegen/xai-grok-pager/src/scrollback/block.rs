@@ -978,7 +978,8 @@ impl RenderBlock {
         let theme = Theme::current();
 
         match self {
-            RenderBlock::UserPrompt(_) => Some(theme.text_primary),
+            // Finish-flash / lookup: same Human token as live UserPrompt rail.
+            RenderBlock::UserPrompt(_) => Some(theme.accent_user),
             RenderBlock::AgentMessage(_) => None, // No accent for agent messages
             RenderBlock::Workflow(_) => None,
             RenderBlock::ToolCall(block) => {

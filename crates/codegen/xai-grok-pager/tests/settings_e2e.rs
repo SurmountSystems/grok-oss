@@ -30,6 +30,7 @@ use xai_grok_shell::agent::config::UiConfig;
 const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compact_mode",
     "hide_header",
+    "hide_title_bar",
     "screen_mode",
     "show_timestamps",
     "show_timeline",
@@ -220,6 +221,9 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("hide_header", Action::SetHideHeader(b)) => {
             assert_eq!(b, expected, "SetHideHeader value differs from expected")
+        }
+        ("hide_title_bar", Action::SetHideTitleBar(b)) => {
+            assert_eq!(b, expected, "SetHideTitleBar value differs from expected")
         }
         ("show_timestamps", Action::SetTimestamps(b)) => {
             assert_eq!(b, expected, "SetTimestamps value differs from expected")
@@ -1841,6 +1845,7 @@ fn registry_kind_membership_through_pr_14() {
         vec![
             "compact_mode",
             "hide_header",
+            "hide_title_bar",
             "group_tool_verbs",
             "collapsed_edit_blocks",
             "invert_scroll",
@@ -2011,6 +2016,7 @@ fn defaults_round_trip_through_registry() {
         match key {
             "compact_mode" => SettingValue::Bool(false),
             "hide_header" => SettingValue::Bool(false),
+            "hide_title_bar" => SettingValue::Bool(false),
             "screen_mode" => SettingValue::Enum("fullscreen"),
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
@@ -2022,8 +2028,8 @@ fn defaults_round_trip_through_registry() {
             "remember_tool_approvals" => SettingValue::Bool(false),
             "toolset.ask_user_question.timeout_enabled" => SettingValue::Bool(true),
             "keep_text_selection" => SettingValue::Enum("flash"),
-            "theme" => SettingValue::Enum("groknight"),
-            "auto_dark_theme" => SettingValue::Enum("groknight"),
+            "theme" => SettingValue::Enum("doge"),
+            "auto_dark_theme" => SettingValue::Enum("doge"),
             "auto_light_theme" => SettingValue::Enum("grokday"),
             "render_mermaid" => SettingValue::Enum("auto"),
             "multiline_mode" => SettingValue::Bool(false),
@@ -2118,6 +2124,7 @@ fn settings_value_payload_matches_kind() {
         match outcome {
             SettingsKeyOutcome::Action(Action::SetCompactMode(_))
             | SettingsKeyOutcome::Action(Action::SetHideHeader(_))
+            | SettingsKeyOutcome::Action(Action::SetHideTitleBar(_))
             | SettingsKeyOutcome::Action(Action::SetTimestamps(_))
             | SettingsKeyOutcome::Action(Action::SetTimeline(_))
             | SettingsKeyOutcome::Action(Action::SetPageFlipOnSend(_))
@@ -2523,24 +2530,47 @@ fn pr4_theme_preview_and_commit_e2e() {
     let theme_meta = reg
         .find("theme")
         .expect("registry must contain `theme` for PR 4");
-    let (default_canonical, default_idx, choices_count, next_canonical, next_idx) =
-        match &theme_meta.kind {
-            SettingKind::Enum {
-                default, choices, ..
-            } => {
-                let default_idx = choices
-                    .iter()
-                    .position(|c| c.canonical == *default)
-                    .expect("theme default must exist in choices");
-                assert!(
-                    default_idx + 1 < choices.len(),
-                    "test requires at least one choice AFTER the default; reorder?"
-                );
-                let next = choices[default_idx + 1].canonical;
-                (*default, default_idx, choices.len(), next, default_idx + 1)
-            }
-            other => panic!("expected Enum kind for `theme`, got {other:?}"),
-        };
+    // Neighbor of the default: prefer the next choice; if default is last
+    // (e.g. doge), use the previous choice and navigate Up instead of Down.
+    let (
+        default_canonical,
+        default_idx,
+        choices_count,
+        neighbor_canonical,
+        neighbor_idx,
+        step_away,
+    ) = match &theme_meta.kind {
+        SettingKind::Enum {
+            default, choices, ..
+        } => {
+            let default_idx = choices
+                .iter()
+                .position(|c| c.canonical == *default)
+                .expect("theme default must exist in choices");
+            let (neighbor_idx, step_away) = if default_idx + 1 < choices.len() {
+                (default_idx + 1, KeyCode::Down)
+            } else if default_idx > 0 {
+                (default_idx - 1, KeyCode::Up)
+            } else {
+                panic!("test requires a neighbor choice beside the default");
+            };
+            let neighbor = choices[neighbor_idx].canonical;
+            (
+                *default,
+                default_idx,
+                choices.len(),
+                neighbor,
+                neighbor_idx,
+                step_away,
+            )
+        }
+        other => panic!("expected Enum kind for `theme`, got {other:?}"),
+    };
+    let step_back = match step_away {
+        KeyCode::Down => KeyCode::Up,
+        KeyCode::Up => KeyCode::Down,
+        other => panic!("unexpected step key {other:?}"),
+    };
     assert!(
         choices_count >= 3,
         "PR 4 test requires ≥3 theme choices, got {choices_count}",
@@ -2568,7 +2598,7 @@ fn pr4_theme_preview_and_commit_e2e() {
         } => {
             assert_eq!(*key, "theme");
             // choices_idx points at the registry's default (derived
-            // dynamically — no hardcoded "1").
+            // dynamically — no hardcoded index).
             assert_eq!(*choices_idx, default_idx);
             match original_value {
                 SettingValue::Enum(s) => *s,
@@ -2579,25 +2609,25 @@ fn pr4_theme_preview_and_commit_e2e() {
     };
     assert_eq!(original_canonical, default_canonical);
 
-    // Down → preview-navigate to next choice. The dispatched Action
+    // Step away → preview-navigate to neighbor. The dispatched Action
     // is now a PREVIEW (no persist).
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Down));
+    let outcome = handle_settings_key(&mut s, &press(step_away));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(
-                name, next_canonical,
+                name, neighbor_canonical,
                 "preview dispatch must carry the canonical of the new focused choice",
             );
         }
-        other => panic!("expected Action::PreviewTheme(\"{next_canonical}\"), got {other:?}"),
+        other => panic!("expected Action::PreviewTheme(\"{neighbor_canonical}\"), got {other:?}"),
     }
     match s.mode() {
-        SettingsModalMode::PickingEnum { choices_idx, .. } => assert_eq!(choices_idx, next_idx),
-        ref other => panic!("expected PickingEnum after Down, got {other:?}"),
+        SettingsModalMode::PickingEnum { choices_idx, .. } => assert_eq!(choices_idx, neighbor_idx),
+        ref other => panic!("expected PickingEnum after step away, got {other:?}"),
     }
 
-    // Up → preview-revert to default.
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Up));
+    // Step back → preview-revert to default.
+    let outcome = handle_settings_key(&mut s, &press(step_back));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(name, default_canonical);
@@ -2605,8 +2635,8 @@ fn pr4_theme_preview_and_commit_e2e() {
         other => panic!("expected Action::PreviewTheme(\"{default_canonical}\"), got {other:?}"),
     }
 
-    // Down again so commit lands on a non-default canonical.
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    // Step away again so commit lands on a non-default canonical.
+    let _ = handle_settings_key(&mut s, &press(step_away));
 
     // Enter → COMMIT. Dispatches `Action::SetTheme(current_canonical)`
     // — a typed Action variant carrying the current preview value.
@@ -2616,11 +2646,13 @@ fn pr4_theme_preview_and_commit_e2e() {
     match outcome {
         SettingsKeyOutcome::Action(Action::SetTheme(name)) => {
             assert_eq!(
-                name, next_canonical,
+                name, neighbor_canonical,
                 "Enter must commit the current preview, not the original"
             );
         }
-        other => panic!("expected Action::SetTheme(\"{next_canonical}\") commit, got {other:?}"),
+        other => {
+            panic!("expected Action::SetTheme(\"{neighbor_canonical}\") commit, got {other:?}")
+        }
     }
     assert!(
         matches!(s.mode(), SettingsModalMode::Browse),
@@ -8211,5 +8243,70 @@ fn hide_header_renders_under_appearance_category_shared() {
     match &meta.kind {
         SettingKind::Bool { default } => assert!(!*default, "default must be false"),
         other => panic!("expected Bool kind for hide_header, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// hide_title_bar — SHARED Bool (Appearance, default false = titles on)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hide_title_bar_space_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "hide_title_bar");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    // Default is false (titles visible); Space toggles to true (hide).
+    assert_set_bool_action(outcome, "hide_title_bar", true);
+}
+
+#[test]
+fn hide_title_bar_enter_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "hide_title_bar");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert_set_bool_action(outcome, "hide_title_bar", true);
+}
+
+#[test]
+fn hide_title_bar_mouse_click_two_stage_toggles() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "hide_title_bar") as u16;
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click on a different row body should only select, got: {outcome:?}"
+    );
+    assert_eq!(s.selected, row_y as usize);
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "hide_title_bar", true);
+}
+
+#[test]
+fn hide_title_bar_renders_under_appearance_category_shared_default_false() {
+    // Named contract: titles visible by default for discoverability.
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("hide_title_bar")
+        .expect("hide_title_bar must be registered");
+    assert_eq!(meta.category, SettingCategory::Appearance);
+    assert_eq!(meta.owner, SettingOwner::Shared);
+    match &meta.kind {
+        SettingKind::Bool { default } => {
+            assert!(!*default, "default must be false (window titles on)")
+        }
+        other => panic!("expected Bool kind for hide_title_bar, got {other:?}"),
     }
 }

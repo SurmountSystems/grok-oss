@@ -374,4 +374,75 @@ mod tests {
         }
         theme_cache::reset_for_test();
     }
+
+    /// Comment scope must be light on DOGE pure-black canvas.
+    /// Dogfood bug: `#000000` comment fg made shell/markdown comments invisible.
+    #[test]
+    fn doge_tmtheme_comment_foreground_is_white_not_black() {
+        let text = std::str::from_utf8(doge_tmtheme_bytes()).expect("utf-8");
+        // Named "Comment" rule (not "Comment Doc" / "Comment Doc Emphasized").
+        let marker = "<string>Comment</string>";
+        let start = text
+            .find(marker)
+            .expect("doge.tmTheme must define a Comment scope rule");
+        let chunk = &text[start..text.len().min(start + 800)];
+        let fg_key = chunk
+            .find("<key>foreground</key>")
+            .expect("Comment rule must set foreground");
+        let after = &chunk[fg_key..];
+        let hash = after
+            .find('#')
+            .expect("Comment foreground must be a #RRGGBB hex colour");
+        let hex = &after[hash..hash + 7];
+        assert_eq!(
+            hex.to_ascii_uppercase(),
+            "#FFFFFF",
+            "Comment syntax colour must be pure white on DOGE black bg, got {hex}"
+        );
+    }
+
+    /// Runtime: a pure-comment line under DOGE must not paint black-on-black.
+    #[test]
+    fn doge_highlight_comment_line_is_not_black() {
+        let _guard = theme_cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        theme_cache::reset_for_test();
+        theme_cache::set(ThemeKind::Doge);
+        let syn = get_syntect();
+        let mut hl = syn.highlight_lines_for_token("shellscript");
+        let fallback = Style::default().fg(Color::Rgb(255, 255, 255));
+        let spans = highlight_line("# 1) Normal warm up comment line", &mut hl, syn, fallback);
+        assert!(!spans.is_empty(), "expected highlighted comment spans");
+        let mut saw_comment_text = false;
+        for span in &spans {
+            let content = span.content.as_ref();
+            if content.trim().is_empty() {
+                continue;
+            }
+            saw_comment_text = true;
+            match span.style.fg {
+                Some(Color::Rgb(0, 0, 0)) | Some(Color::Black) => {
+                    panic!("comment span {content:?} is black-on-black (invisible on DOGE)");
+                }
+                Some(Color::Rgb(r, g, b)) => {
+                    // Must be light enough: prefer pure white / DOGE white primary.
+                    assert!(
+                        r >= 200 && g >= 200 && b >= 200,
+                        "comment span {content:?} fg Rgb({r},{g},{b}) must be light/white"
+                    );
+                }
+                Some(Color::White) | Some(Color::Gray) | None => {}
+                other => {
+                    // Named bright colours ok; reject only pure black (above).
+                    let _ = other;
+                }
+            }
+        }
+        assert!(
+            saw_comment_text,
+            "expected non-empty comment text spans for shell line"
+        );
+        theme_cache::reset_for_test();
+    }
 }

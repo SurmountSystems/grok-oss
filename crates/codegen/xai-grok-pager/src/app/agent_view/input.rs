@@ -834,6 +834,29 @@ impl AgentView {
             {
                 return InputOutcome::Action(Action::VoiceToggle);
             }
+            // Minimal plan strip paints SoftParkCtaHits even when line_viewer is
+            // open (shared input path). Hit-test before line-viewer mouse so
+            // footer Approve/Quit stay primary under the compact strip.
+            if let Event::Mouse(mouse) = ev {
+                match mouse.kind {
+                    MouseEventKind::Moved => {
+                        if self
+                            .hit_soft_park_ctas
+                            .update_hover(mouse.column, mouse.row)
+                        {
+                            return InputOutcome::Changed;
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(outcome) =
+                            self.handle_soft_park_cta_click(mouse.column, mouse.row)
+                        {
+                            return outcome;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let plan_prompt_focused = self
                 .plan_approval_view
                 .as_ref()
@@ -886,8 +909,14 @@ impl AgentView {
                         .prompt
                         .contains((mouse.column, mouse.row).into());
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
-                        self.prompt.handle_mouse(mouse);
-                        InputOutcome::Changed
+                        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                            && self.try_copy_prompt_draft_at(mouse.column, mouse.row)
+                        {
+                            InputOutcome::Changed
+                        } else {
+                            self.prompt.handle_mouse(mouse);
+                            InputOutcome::Changed
+                        }
                     } else {
                         self.handle_line_viewer_mouse(mouse)
                     }
@@ -1072,12 +1101,24 @@ impl AgentView {
                             changed |= self
                                 .hit_plan_approval_status
                                 .update_hover(mouse.column, mouse.row);
+                            changed |= self
+                                .hit_soft_park_ctas
+                                .update_hover(mouse.column, mouse.row);
                             changed |= self.hit_context.update_hover(mouse.column, mouse.row);
                             changed |= self.hit_credits.update_hover(mouse.column, mouse.row);
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
                             if self.hit_voice_stop_button.contains(mouse.column, mouse.row) {
                                 return InputOutcome::Action(Action::VoiceToggle);
+                            }
+                            // Soft-park footer CTAs (mouse primary; works with draft).
+                            if let Some(outcome) =
+                                self.handle_soft_park_cta_click(mouse.column, mouse.row)
+                            {
+                                return outcome;
+                            }
+                            if self.try_copy_prompt_draft_at(mouse.column, mouse.row) {
+                                return InputOutcome::Changed;
                             }
                             if self.hit_plan_button.contains(mouse.column, mouse.row) {
                                 self.reopen_plan_approval();
@@ -1098,6 +1139,11 @@ impl AgentView {
                         .prompt
                         .contains((mouse.column, mouse.row).into());
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
+                        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                            && self.try_copy_prompt_draft_at(mouse.column, mouse.row)
+                        {
+                            return InputOutcome::Changed;
+                        }
                         self.prompt.handle_mouse(mouse);
                         return InputOutcome::Changed;
                     }

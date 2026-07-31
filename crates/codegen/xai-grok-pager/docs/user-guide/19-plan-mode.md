@@ -66,9 +66,10 @@ The plan file contains:
 
 When the agent finishes planning, it calls the `exit_plan_mode` tool. By default the TUI **soft-parks** the plan:
 
-- Toast + status chip (“Plan parked — press `/view-plan`…”) without taking over the screen
-- An **inline plan card** in the transcript (preview + CTA legend)
-- With an empty prompt, **`Enter` / `a` / `A` / `?` / `s` / `q`** work from the soft-park surface (no modal required). Bare **Enter** and **`a`** both approve immediately.
+- Toast + status chip (“Plan parked — click or `/view-plan`…”) without taking over the screen
+- An **inline plan card** in the transcript (preview only; not a fake button menu)
+- **Clickable footer buttons** (Approve / Notes / Clarify / Revise / Quit) as the primary path. Mouse works even when the prompt has draft text.
+- With an empty prompt, **`Enter` / `a` / `A` / `?` / `s` / `q`** are keyboard accelerators (no modal required). Bare **Enter** and **`a`** both approve immediately.
 
 Open the full review surface on demand with **`/view-plan`**, the status chip, or **`ShowPlan`**. That opens a **side panel** beside chat with **clickable CTA buttons** in the panel footer (Approve / Approve w/ comment / Clarify / Revise / Quit). Keys `a` / `A` / `?` / `s` / `q` remain accelerators. On a narrow side panel the footer uses shorter labels (or key-only) so the hit targets always stay clickable. **Ctrl+F** enlarges the panel to fullscreen and back. The panel always re-reads the latest session `plan.md` when you open it (so rewrites while parked show up — not a frozen snapshot from park time).
 
@@ -85,7 +86,7 @@ If the agent exits without writing a plan (empty or missing `plan.md`), the same
 
 ### Reviewing the Plan
 
-Scroll the plan with the arrow keys or `j`/`k`. Copy like conversation scrollback: **`y`** copies the selected line (or visual range); **`Y`** copies the whole plan body. CTAs and revise→agent selection are unchanged.
+Scroll the plan with the arrow keys or `j`/`k`. Copy like conversation scrollback: **`y`** copies the selected line (or visual range); **`Y`** copies the whole plan body. The plan panel top bar also has a **`⧉`** button next to `[↗]` (and `[✗]` when close is shown) that copies the whole plan body (same payload as **`Y`**). Conversation user/assistant bubbles also show always-on **`⧉`** (independent of plan chrome). In plan review, close is omitted on purpose. CTAs and revise→agent selection are unchanged.
 
 The action bar shows these shortcuts:
 
@@ -146,6 +147,13 @@ picks up the live viewer selection when you have not saved a comment yet.
 You can paste or attach **screenshots** (and other images) while plan approval
 is parked — including soft-park Preview and with the side panel open on Preview
 — the same way as the normal chat composer (paste path / drop / wrap image).
+
+**TUI self-screenshot:** `/screenshot` or **F9** captures the current pager
+frame under `$GROK_HOME/screenshots/tui-*.png`. When plan approval is open, that
+PNG is **auto-attached** to the plan composer (same multimodal chip as a paste),
+so approve / revise / clarify can send it without a separate paste step. Outside
+plan approval the capture is toast + path only.
+
 On submit:
 
 | Action | What happens |

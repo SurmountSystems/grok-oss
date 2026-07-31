@@ -26,6 +26,9 @@ impl AgentView {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
+                if self.hit_todo_clear_done.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::ClearCompletedTodos);
+                }
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
                     self.todo.overlay.escape();
                     self.todo.on_state_change();
@@ -238,6 +241,9 @@ impl AgentView {
                     self.copy_to_clipboard(&path);
                     return InputOutcome::Changed;
                 }
+                if self.try_copy_prompt_draft_at(mouse.column, mouse.row) {
+                    return InputOutcome::Changed;
+                }
                 if self.hit_badge.contains(mouse.column, mouse.row) {
                     self.todo.overlay.toggle();
                     self.todo.on_state_change();
@@ -399,6 +405,14 @@ impl AgentView {
                 }
                 if self.hit_sb_copy.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::CopyBlockContent);
+                }
+                // Always-on bubble ⧉: before drag/select arm (same tier as selection ⧉).
+                if let Some(&(idx, _)) = self
+                    .bubble_copy_hits
+                    .iter()
+                    .find(|(_, r)| r.contains((mouse.column, mouse.row).into()))
+                {
+                    return InputOutcome::Action(Action::CopyEntryContent { idx });
                 }
                 if self.hit_sb_view.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::OpenBlockViewer);
@@ -961,6 +975,10 @@ impl AgentView {
                     );
                 }
                 if self.active_pane == AgentPane::Prompt {
+                    // Top-bar ⧉ is chrome, not textarea — handle before TextArea.
+                    if self.try_copy_prompt_draft_at(mouse.column, mouse.row) {
+                        return InputOutcome::Changed;
+                    }
                     let event = self.prompt.handle_mouse(mouse);
                     if matches!(event, PromptEvent::Edited)
                         && let Some(eff) = self.notify_suggestion_text_changed()
@@ -1064,6 +1082,9 @@ impl AgentView {
                 changed |= self.hit_context.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_credits.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_todo_close.update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .hit_todo_clear_done
+                    .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_queue_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_queue_badge.update_hover(mouse.column, mouse.row);
                 if matches!(
@@ -1124,6 +1145,7 @@ impl AgentView {
                 changed |= self.hit_bg_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);
+                changed |= self.prompt.update_copy_hover(mouse.column, mouse.row);
                 changed |= self.hit_upgrade_cta.update_hover(mouse.column, mouse.row);
                 {
                     let new_kill = self
@@ -1149,6 +1171,17 @@ impl AgentView {
                 }
                 changed |= self.hit_sb_copy.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_sb_view.update_hover(mouse.column, mouse.row);
+                {
+                    let new_bubble = self
+                        .bubble_copy_hits
+                        .iter()
+                        .find(|(_, r)| r.contains((mouse.column, mouse.row).into()))
+                        .map(|&(idx, _)| idx);
+                    if new_bubble != self.hovered_bubble_copy {
+                        self.hovered_bubble_copy = new_bubble;
+                        changed = true;
+                    }
+                }
                 if let Some(hd_area) = self.history_dropdown_area {
                     let hs_count = self.prompt.history_search.result_count();
                     let has_sb = hs_count > hd_area.height as usize;

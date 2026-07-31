@@ -349,6 +349,49 @@ impl HitArea {
         self.hovered = false;
     }
 }
+
+/// Soft-park plan-approval footer CTAs (mouse primary; keys remain accelerators).
+///
+/// Painted on the shortcuts row when plan approval is soft-parked (no side
+/// panel). Hit-tested independently of the empty-prompt keyboard gate.
+#[derive(Debug, Default)]
+pub struct SoftParkCtaHits {
+    pub approve: HitArea,
+    pub notes: HitArea,
+    pub clarify: HitArea,
+    pub revise: HitArea,
+    pub quit: HitArea,
+}
+
+impl SoftParkCtaHits {
+    pub fn clear(&mut self) {
+        self.approve.clear();
+        self.notes.clear();
+        self.clarify.clear();
+        self.revise.clear();
+        self.quit.clear();
+    }
+
+    /// Update hover for all five buttons. Returns true if any hover flipped.
+    pub fn update_hover(&mut self, col: u16, row: u16) -> bool {
+        let mut changed = false;
+        changed |= self.approve.update_hover(col, row);
+        changed |= self.notes.update_hover(col, row);
+        changed |= self.clarify.update_hover(col, row);
+        changed |= self.revise.update_hover(col, row);
+        changed |= self.quit.update_hover(col, row);
+        changed
+    }
+
+    pub fn apply_areas(&mut self, areas: crate::views::plan_approval_view::SoftParkCtaAreas) {
+        self.approve.set(areas.approve);
+        self.notes.set(areas.notes);
+        self.clarify.set(areas.clarify);
+        self.revise.set(areas.revise);
+        self.quit.set(areas.quit);
+    }
+}
+
 pub use super::queue_edit::PromptMode;
 /// Which special input mode the prompt is currently in.
 ///
@@ -910,6 +953,9 @@ pub struct AgentView {
     /// OpenRouter account credits for the prompt footer when the active model
     /// is OpenRouter-backed.
     pub openrouter_credit_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+    /// Console team prepaid remaining USD cents (Management API). Distinct from
+    /// SuperGrok session extras and OpenRouter. `None` = honest absence.
+    pub console_team_prepaid_cents: Option<i64>,
     /// Live sampling identity for meter honesty (SuperGrok session vs console
     /// key). Updated on dual-auth hop toasts and when billing marks SuperGrok
     /// out of allowance so the next sample stays on the console key.
@@ -1097,6 +1143,8 @@ pub struct AgentView {
     pub hit_context: HitArea,
     pub hit_credits: HitArea,
     pub hit_todo_close: HitArea,
+    /// Todo pane chrome **Clear done** (archives completed/cancelled).
+    pub hit_todo_clear_done: HitArea,
     pub hit_bg_close: HitArea,
     pub hit_subagent_close: HitArea,
     pub hit_catalog_close: HitArea,
@@ -1110,6 +1158,8 @@ pub struct AgentView {
     pub hit_queue_badge: HitArea,
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
+    /// Soft-park footer CTA buttons (Approve / Notes / Clarify / Revise / Quit).
+    pub hit_soft_park_ctas: SoftParkCtaHits,
     pub hit_follow_indicator: HitArea,
     /// CWD / worktree path in the status bar (click to copy).
     pub hit_cwd: HitArea,
@@ -1276,6 +1326,11 @@ pub struct AgentView {
     pub(crate) hit_sb_copy: HitArea,
     /// Hit area for scrollback selection box view button.
     pub(crate) hit_sb_view: HitArea,
+    /// Always-on per-bubble ⧉ hit targets: `(entry_idx, rect)` for visible
+    /// user/assistant messages. Cleared each paint; emptied while drag active.
+    pub(crate) bubble_copy_hits: Vec<(usize, Rect)>,
+    /// Hovered bubble-copy entry index (for highlight).
+    pub(crate) hovered_bubble_copy: Option<usize>,
     /// Active question view (from `AskUserQuestion` tool). When `Some`, the
     /// prompt area shows a structured question UI and input is modal.
     pub(crate) question_view: Option<QuestionViewState>,
@@ -1352,6 +1407,9 @@ pub struct AgentView {
     /// (option C soft park). Dedupes so a re-draw / second soft park of the
     /// same request does not spam the transcript.
     pub(crate) plan_card_committed_id: Option<String>,
+    /// Scrollback entry for the soft-park card so FileBacked rewrites can
+    /// refresh the body in place without pushing a second card.
+    pub(crate) plan_card_entry_id: Option<crate::scrollback::entry::EntryId>,
     pub(crate) plan_comments: Vec<PlanComment>,
     /// Monotonic counter for casual plan comment IDs.
     pub(crate) plan_next_comment_id: u64,
@@ -2126,8 +2184,10 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
             }
             Action::VoiceToggle
         }
+        ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
         ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
+        ActionId::ClearCompletedTodos => Action::ClearCompletedTodos,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal

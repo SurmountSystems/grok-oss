@@ -28,8 +28,9 @@ use xai_grok_telemetry::events::ManualAuthSurface;
 #[cfg(test)]
 use super::model::UserInfo;
 use super::model::{
-    AuthMode, GrokAuth, early_invalidation, is_expired, is_expired_with_buffer, lookup_auth,
-    token_suffix,
+    AuthMode, GrokAuth, early_invalidation, is_expired, is_expired_with_buffer,
+    is_supergrok_session_mode, lookup_auth, lookup_supergrok_session_for_base, token_suffix,
+    upsert_supergrok_session,
 };
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
 use super::storage::{
@@ -303,7 +304,11 @@ impl AuthManager {
 
         let (auth, auth_read_detail, initial_disk_state) = match read_auth_json(&path) {
             Ok(map) => {
-                let found = lookup_auth(&map, &scope);
+                // Active base first; if empty, adopt a SuperGrok multi-slot sibling
+                // (second login left Business/personal when current was cleared).
+                let found = lookup_auth(&map, &scope)
+                    .filter(|a| a.auth_mode != AuthMode::WebLogin)
+                    .or_else(|| lookup_supergrok_session_for_base(&map, &scope));
                 // If lookup_auth skipped a legacy WebLogin token, remove the
                 // stale scope entry from auth.json so it is not re-evaluated
                 // on every launch.
@@ -488,6 +493,11 @@ impl AuthManager {
     /// Drop `scope` from auth.json and persist, deleting the file when the last
     /// scope is gone. Caller holds the `auth.json` lock (taken by
     /// [`Self::remove_scope_impl`]).
+    ///
+    /// Does **not** cascade into SuperGrok multi-slots. Reauth clears only the
+    /// active base so a second SuperGrok login can keep personal/Business
+    /// siblings. Logout removes the active multi-slot explicitly (see
+    /// [`crate::auth::flow::perform_logout`]).
     fn write_scope_removal(&self, scope: &str) -> std::io::Result<ScopeRemoval> {
         let Ok(mut auth_store) = read_auth_json(&self.path) else {
             return Ok(ScopeRemoval::SkippedUnreadable);
@@ -830,9 +840,14 @@ impl AuthManager {
             }
         };
         let mut map = map;
-        // One entry per scope (personal and team share the scope key).
+        // Multi SuperGrok: keep sibling principals under multi-slots; base =
+        // active primary for AuthManager refresh.
         tracing::debug!(scope = %self.scope, "auth: storing token");
-        map.insert(self.scope.clone(), auth.clone());
+        if is_supergrok_session_mode(auth.auth_mode) {
+            upsert_supergrok_session(&mut map, &self.scope, auth.clone());
+        } else {
+            map.insert(self.scope.clone(), auth.clone());
+        }
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = update_started.elapsed().as_millis() as u64;
         match &write_result {
@@ -893,7 +908,11 @@ impl AuthManager {
         };
         let mut map = map;
         tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        map.insert(self.scope.clone(), auth.clone());
+        if is_supergrok_session_mode(auth.auth_mode) {
+            upsert_supergrok_session(&mut map, &self.scope, auth.clone());
+        } else {
+            map.insert(self.scope.clone(), auth.clone());
+        }
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
@@ -1057,7 +1076,11 @@ impl AuthManager {
                 return Some(auth);
             }
         };
-        map.insert(self.scope.clone(), auth.clone());
+        if is_supergrok_session_mode(auth.auth_mode) {
+            upsert_supergrok_session(&mut map, &self.scope, auth.clone());
+        } else {
+            map.insert(self.scope.clone(), auth.clone());
+        }
         if let Err(e) = write_auth_json(&self.path, &map) {
             tracing::warn!(error = %e, "auth: failed to persist refreshed token to disk");
         }

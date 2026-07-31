@@ -47,6 +47,10 @@ pub struct SelectionBox {
     pub close_hovered: bool,
     /// Optional close label; `None` uses default `✗`.
     pub close_label: Option<&'static str>,
+    /// Optional action label left of close (e.g. todo pane "Clear done").
+    pub action_label: Option<&'static str>,
+    /// Whether the action control is currently hovered.
+    pub action_hovered: bool,
 }
 
 /// Output from render that needs post-processing.
@@ -133,6 +137,8 @@ impl SelectionBox {
             closable: false,
             close_hovered: false,
             close_label: None,
+            action_label: None,
+            action_hovered: false,
         }
     }
 
@@ -166,6 +172,13 @@ impl SelectionBox {
         self
     }
 
+    /// Optional chrome action left of close (e.g. "Clear done"). Focused only.
+    pub fn with_action_label(mut self, label: Option<&'static str>, hovered: bool) -> Self {
+        self.action_label = label;
+        self.action_hovered = hovered;
+        self
+    }
+
     /// Hit-test rect for the close control, if it would be rendered.
     ///
     /// Pure computation — does not touch the buffer. Use for mouse hit-testing.
@@ -184,6 +197,39 @@ impl SelectionBox {
         Some(Rect {
             x,
             y: self.inner_area.y - 1,
+            width: label_w,
+            height: 1,
+        })
+    }
+
+    /// Hit-test rect for the optional action control left of close.
+    ///
+    /// One space gap between action label and close. `None` when no label,
+    /// top clipped, or not enough width.
+    pub fn action_button_rect(&self) -> Option<Rect> {
+        let label = self.action_label?;
+        if self.top_clipped || self.inner_area.y == 0 {
+            return None;
+        }
+        let label_w = (label.chars().count() as u16).max(1);
+        let y = self.inner_area.y - 1;
+        let x = if let Some(close) = self.close_button_rect() {
+            // [action][gap][close] — action ends one cell left of close.
+            let need = label_w.saturating_add(1).saturating_add(close.width);
+            if need > self.inner_area.width {
+                return None;
+            }
+            close.x.saturating_sub(1 + label_w)
+        } else {
+            let right_x = self.inner_area.x + self.inner_area.width.saturating_sub(1);
+            right_x.saturating_sub(label_w.saturating_sub(1))
+        };
+        if x < self.inner_area.x {
+            return None;
+        }
+        Some(Rect {
+            x,
+            y,
             width: label_w,
             height: 1,
         })
@@ -250,6 +296,18 @@ impl SelectionBox {
                 }
             } else if let Some(cell) = buf.cell_mut((right_x, corner_y)) {
                 cell.set_char(border_chars::TOP_RIGHT).set_style(self.style);
+            }
+            // Optional action left of close (todo "Clear done").
+            if let Some(action_rect) = self.action_button_rect()
+                && let Some(label) = self.action_label
+            {
+                use crate::render::SafeBuf;
+                let style = if self.action_hovered {
+                    Style::default().fg(Theme::current().text_primary)
+                } else {
+                    self.style
+                };
+                buf.set_string_safe(action_rect.x, action_rect.y, label, style);
             }
         }
 
@@ -434,5 +492,20 @@ mod tests {
 
         // Bottom corners at y=4
         assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "└");
+    }
+
+    #[test]
+    fn action_button_sits_left_of_close_with_gap() {
+        // Wide enough for "Clear done" + gap + ✗
+        let sel = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default())
+            .with_closable(true, false)
+            .with_action_label(Some("Clear done"), false);
+        let close = sel.close_button_rect().expect("close");
+        let action = sel.action_button_rect().expect("action");
+        assert_eq!(action.height, 1);
+        assert_eq!(action.y, close.y);
+        assert_eq!(action.width, "Clear done".chars().count() as u16);
+        // Gap of one cell between action right edge and close left.
+        assert_eq!(action.x + action.width + 1, close.x);
     }
 }

@@ -552,6 +552,24 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::ClearCompletedTodos,
+            label: "clear done",
+            description: "Clear completed todos from the board",
+            // No AgentScreen default key: bare X is handled only when the todo
+            // pane is focused (panes.rs). AgentScreen binding would fire after
+            // Tasks/Catalog/Queue fallthrough. Chrome button + slash remain.
+            default_key: key!(Null),
+            alt_keys: vec![],
+            category: Category::Panels,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: Some("X"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Removes completed and cancelled items from the live session board and archives them.\nDoes not hide-only (that is h on the todo pane). Pending and in-progress stay.\nSame action as the pane Clear done control and /clear-completed-todos. Key X works only with the todo pane focused.",
+            ),
+        },
+        ActionDef {
             id: ActionId::ToggleQueue,
             label: "queue",
             description: "Toggle prompt queue",
@@ -851,6 +869,24 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: None,
+        },
+        // TUI self-screenshot: F9 was free (not mouse-toggle / voice / settings).
+        // Always so welcome, dashboard, and agent screens can capture. Slash
+        // `/screenshot` remains the primary discoverable surface.
+        ActionDef {
+            id: ActionId::CaptureTuiScreenshot,
+            label: "screenshot",
+            description: "Capture the current TUI frame as a PNG",
+            default_key: key!(F(9)),
+            alt_keys: vec![],
+            category: Category::GettingStarted,
+            context: When::Always,
+            hint_priority: None,
+            hint_key_display: Some("F9"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Writes the last rendered TUI frame to $GROK_HOME/screenshots/tui-*.png and toasts the path.\nDuring plan approval the PNG is also attached to the plan composer so approve/revise/clarify can send it multimodal (same path as pasting an image).\nSame action as /screenshot. Not an OS screenshot of other windows.",
+            ),
         },
     ];
 

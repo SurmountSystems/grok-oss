@@ -606,6 +606,12 @@ mod tests {
                 "fallback {fallback:?} must be 1 column"
             );
         }
+        // Live helper (legacy or fancy) stays 1 col so fixed `[⧉]` hit widths hold.
+        assert_eq!(
+            copy_icon().width(),
+            1,
+            "copy_icon() must stay 1 column wide"
+        );
     }
 
     // Every diamond glyph and its legacy fallback must be exactly one

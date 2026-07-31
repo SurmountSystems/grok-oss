@@ -22,12 +22,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use xai_grok_sampler::{
     ApiBackend, RequestId, RetryPolicy, SamplerActor, SamplerConfig, SamplingChannel,
-    SamplingErrorKind, SamplingEvent,
+    SamplingErrorKind, SamplingEvent, clear_all_including_durable,
 };
 use xai_grok_sampling_types::{
     ConversationItem, ConversationRequest, DoomLoopRecoveryPolicy, UserItem,
 };
-use xai_grok_test_support::{SseEvent, sse};
+use xai_grok_test_support::{EnvGuard, SseEvent, sse};
 
 // ---------------------------------------------------------------------------
 // Mock server harness
@@ -588,7 +588,19 @@ async fn plain_429_with_failover_hops_to_next_identity() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn credit_exhausted_with_failover_still_hops() {
-    // Sticky credit memo is unit-tested under with_memo_lock; here assert hop chrome.
+    // Sticky credit memo is unit-tested under with_memo_lock; here assert mid-request
+    // hop chrome. Isolate $GROK_HOME so a prior run's durable memo for "credit-dead"
+    // cannot silent-skip primary (prefer_live) and erase Retrying chrome.
+    let _memo_home = {
+        let dir = tempfile::TempDir::new().expect("temp GROK_HOME for credit hop test");
+        let guard = EnvGuard::set("GROK_HOME", dir.path());
+        clear_all_including_durable();
+        // Keep TempDir alive for the test body via leak-to-guard pattern:
+        // store path inside EnvGuard lifetime by holding both.
+        (dir, guard)
+    };
+    clear_all_including_durable();
+
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
     let app = Router::new().route(
@@ -627,6 +639,7 @@ async fn credit_exhausted_with_failover_still_hops() {
     handle.submit(RequestId::from("req-credit-hop"), user_request("hi"));
     let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
     server.shutdown();
+    clear_all_including_durable();
 
     let hop_reasons: Vec<&str> = events
         .iter()

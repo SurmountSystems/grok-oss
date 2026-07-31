@@ -6,17 +6,25 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
-- **Plan approval UI dead after soft-park (2026-07-27) — primary fixed:** root
-  cause was soft-park CTA keys gated on `active_pane != Scrollback`, so reading
-  the parked plan card killed Enter/a/A/?/s/q while the legend still showed.
-  Fix: always route soft-park keys; focus Prompt on park; Preview footer lists
-  CTAs. Join:
-  `join-plan-ctas-dead.md`. Board `bug:plan-approval-ctas-dead` green.
-  **Still soft:** card legend is text (not hit-tested buttons); empty prompt
-  still required for soft-park keys (draft preserved). Panel footer buttons
-  already worked via `/view-plan` / status click. Related process-only:
-  `bug:exit-plan-mode-false-approve` (soft-park ≠ approve; tool "start coding"
-  only after real CTA) — host pin `~/.grok/AGENTS.md` § Plan approval item 7.
+- **Plan approval UI dead after soft-park (2026-07-27) — fixed + soft-park mouse
+  CTAs (2026-07-29):** keys no longer die when reading the parked card; soft-park
+  footer is hit-tested (mouse primary, works with draft / Prompt focus); scrollback
+  card is preview + plain pointer only (no fake button row); empty placeholder
+  points at real footer / `/view-plan` (not AI-Dungeon key menu). Card body
+  re-reads live `plan.md` (panel + soft-park commit). Keys still need empty
+  prompt (intentional; mouse / status / `/view-plan` escape). Joins:
+  `join-plan-ctas-dead.md`, `/tmp/grok-join-impl-plan-ux-no-lockup-2026-07-29.md`,
+  `/tmp/grok-join-impl-soft-park-card-freshness-2026-07-29.md`.
+  **Still soft:** agent-written `plan.md` can invent freeform "reply approve /
+  options 1–5" (product chrome does not; process law = product CTAs only).
+  Process: `bug:exit-plan-mode-false-approve` — host pin § Plan approval item 7.
+
+- **Stuck Retrying / stream headers (shipped → FORK; soft dogfood only):**
+  product truth in [`FORK.md`](FORK.md) (StreamResumed clear, 120s headers
+  timeout, cancel-aware cooldown, short transport labels). Soft not shipped:
+  phase-timer "since retry"; remaining-seconds on non-429 shared-wait.
+  **Dogfood** after `just install` if the stable binary lags the tree. Join:
+  `/tmp/grok-join-impl-stuck-retry-fix-2026-07-30.md`.
 
 0. **Structured todos: fib leaves + progress + no casual reset (shipped product)**
    **Shipped:** first-class optional `size` (1|2 only; reject 0/3/5/8…);
@@ -25,10 +33,12 @@ or code — not only here. Closed campaign history:
    counts); reject size on parents with children; tool result includes
    `progress` + optional `merge:false` archive warning; status-bar badge
    shows `N/M pts` in points mode; `prompt.md` Planning + tool description
-   teach merge-only + fib leaves. **Process dual-pin** already on host
-   `_SKILL_RULES` / product AGENTS L1. **Still soft:** no hard ban on
-   inventing bare ids; phase vs work tree is agent structure (not enforced
-   hierarchy product). Plan:
+   teach merge-only + fib leaves. **Clear done** (pane / focused `X` /
+   `/clear-completed-todos` + `SHELL_RESERVED`) → lasting truth in
+   [`FORK.md`](FORK.md); not open residual.
+   **Still soft:** no hard ban on inventing bare ids; phase vs work tree is
+   agent structure (not enforced hierarchy product); no archive browser UI.
+   Plan:
    [`.agents/plans/plan-todo-progress-fib.md`](.agents/plans/plan-todo-progress-fib.md).
    Brief: [`doc/dev/research/todo-progress-fib-2026-07-26.md`](doc/dev/research/todo-progress-fib-2026-07-26.md).
 
@@ -43,35 +53,49 @@ or code — not only here. Closed campaign history:
    dogfood finds a new model-facing JSON chokepoint. Detail:
    [`doc/dev/research/udax-json-toon-2026-07-26.md`](doc/dev/research/udax-json-toon-2026-07-26.md).
 
-2. **Plan approval soft park (option A shipped; B/C/D parked)**
+2. **Plan approval soft park (option A shipped; non-capturing Char 2026-07-29;
+   B/C/D parked)**
    **Shipped:** when `exit_plan_mode` parks, durable approval + status chrome +
    toast (“Plan parked — press /view-plan or click status to review”) without
    auto-opening the line-viewer modal; modal still on demand via `/view-plan`,
-   status click, or `ShowPlan` / `reopen_plan_approval`. Four CTAs, clarify RO,
-   park/abandon durable. Track `feat:plan-modal-softer-park`. Design note:
+   status click, or `ShowPlan` / `reopen_plan_approval`. Track
+   `feat:plan-modal-softer-park`. Design note:
    [`doc/dev/research/plan-modal-softer-park-2026-07-26.md`](doc/dev/research/plan-modal-softer-park-2026-07-26.md).
-   **Parked (do not invent):** options B/C/D (side panel / inline card / config
-   modal-vs-soft) and full non-modal redesign — only if dogfood shows option A
-   toast still jars; A is not broken.
+   **Operator rejects stuck soft-park (2026-07-29):** main thread (**agent L1**)
+   must stay **modal-free**. Product: soft-park is **non-capturing** for Char /
+   empty Enter (all printable → composer; no exclusive a/A/s/?/q/Enter approve).
+   Approve/quit via **mouse footer CTAs**, status chip, or `/view-plan` panel
+   (panel keeps empty-prompt accelerators). Join:
+   `/tmp/grok-join-impl-l1-modal-free-plan-2026-07-29.md`. Process pin: project
+   `AGENTS.md` § *Agent depth L1 / L2 / L3*.
+   **Still soft:** footer CTA legend / toast wording may still *feel* modal;
+   full “no soft-park mode at all” (toast + chip only, zero exclusive key route)
+   is polish if dogfood still jars. **Parked (do not invent):** options B/C/D.
 
-2d. **Plan approval: real clickable CTAs + fresh plan.md (OPEN — dogfood 2026-07-27)**
-   Operator still sees keyboard-only footer text
-   (`Enter/a approve · A · ? · s · q · /view-plan`) with **nowhere to click**,
-   and the park/approval card can show a **stale title/body** (old usage-meter
-   plan) while session `plan.md` on disk was rewritten (billing plan). Product
-   law: **mouse/click primary** — real buttons (Approve, Approve with notes,
-   Clarify, Revise, Quit); accelerators may mirror; never treat accelerator
-   text as the UI. File-backed preview must **re-read `plan.md` on open**.
-   Prior hit-area work claimed shipped (`bug:plan-cta-buttons`) — dogfood says
-   incomplete or wrong surface. Session board: `bug:plan-cta-no-click-buttons`,
-   `bug:plan-approval-stale-snapshot`. **Defer implement** until billing/limits
-   (wrong credit pool / Business) is green — track only; do not burn tokens on
-   this while personal SuperGrok extras are the live spend path.
+2d. **Plan approval: real clickable CTAs + fresh plan.md (product chrome shipped
+   2026-07-29; agent plan.md freeform still open)**
+   **Shipped:** soft-park footer mouse CTAs (hit-tested; draft durable; Prompt
+   focus paint); scrollback card not a fake button menu; empty placeholder not
+   a key list; FileBacked panel + soft-park card re-read live `plan.md` (in-place
+   card update, no second-card spam). Boards `bug:plan-cta-no-click-buttons`,
+   `bug:plan-approval-stale-snapshot` product side green. Joins under `/tmp/grok-join-impl-*plan*2026-07-29.md`.
+   **Still open:** agent-written `plan.md` body can still invent freeform chat
+   menus; product does not inject that chrome. Do not claim agent ceremony gone.
 
-2e. **TUI self-screenshot (parked feature — dogfood ask 2026-07-27)**
-   Build can capture its own screen for agent debugging / dogfood (hard to
-   screenshot retries by hand). Board: `feat:tui-self-screenshot`. **Park**
-   until billing/limits dogfood-green; do not implement ahead of residual §4.
+2e. **TUI self-screenshot (v1 + F9 + plan auto-attach shipped 2026-07-29; font soft)**
+   **Contract (plain language):** capture the **current rendered TUI frame** as
+   a PNG for dogfood, agent attach, and plan comments — not an OS screenshot of
+   other apps, not a second share-sheet. Board: `feat:tui-self-screenshot`.
+   **Shipped:** `/screenshot` slash → last presented ratatui buffer → PNG under
+   `$GROK_HOME/screenshots/tui-*.png` + toast path; pure encode helpers in
+   `xai-grok-pager-render::tui_screenshot` (TDD); **F9** global chord; when plan
+   approval is open, capture auto-attaches the PNG into the plan multimodal
+   path. Joins: `/tmp/grok-join-impl-tui-self-screenshot-2026-07-29.md` (v1);
+   `/tmp/grok-join-impl-screenshot-soft-2026-07-29.md` (F9 + plan auto-attach).
+   Tests: `capture_tui_screenshot_bound_to_f9_always`,
+   `try_attach_tui_screenshot_for_plan_when_approval_open`.
+   **Still soft:** richer font raster (v1 uses simple ink marks). Operator can
+   still open the toast path and paste.
 
 2f. **Sapient Experience (SX) + plain English + thoughtful names (OPEN)**
    Operator intent (2026-07-27): **Sapient Experience** is how tools talk with
@@ -119,8 +143,9 @@ or code — not only here. Closed campaign history:
    + process plan** for session UX and agent behavior, not more ad-hoc pins
    alone. Board: `plan:structured-token-efficient-convo`. **Park full plan
    write** until billing/limits is dogfood-stable enough not to steal the only
-   remaining personal SuperGrok money; then plan mode or a dedicated plan
-   pass. Also pin: parent must not keep multi-file doc edits in main chat.
+   remaining personal SuperGrok dollar credits / included weekly allowance;
+   then plan mode or a dedicated plan pass. Also pin: parent must not keep
+   multi-file doc edits in main chat.
 
 2g. **Live rule feedback into the completion stream (OPEN — track only)**
    Operator intent (2026-07-27): when standing rules are **violated in the
@@ -159,78 +184,154 @@ or code — not only here. Closed campaign history:
    Campaign Wave 0 scrub closed. Detail:
    [`doc/dev/research/ascii-scrub-assistant-2026-07-26.md`](doc/dev/research/ascii-scrub-assistant-2026-07-26.md).
 
-3. **UI: hide header + DOGE (shipped H1+H2 + pure palette + polish)**
-   **Shipped:** `[ui] hide_header` (default false) zeros top agent status bar,
-   **welcome location top bar**, and **dashboard location header**; settings
-   Appearance + live apply. Theme **`doge`** only (display “DOGE”; no
-   `ecma-doge` / `rgbcmykw` / `ansi-8` aliases): pure `#000000`/`#FFFFFF` + 8
-   primaries exactly; `requires_truecolor: false`; hard-threshold quantise
-   util + tests; **context-bar solid DOGE steps** (no mid-gray lerp);
-   **pure-primary `doge.tmTheme`** for syntax. OLED-friendly motivation only —
-   no power claims. Project note (not an ECMA standard):
+3. **UI chrome + window title + DOGE default (shipped → FORK 2026-07-30)**
+   Lasting product truth: [`FORK.md`](FORK.md) (hide_header vs hide_title_bar
+   titles-on, DOGE default theme, always-on bubble copy). Spec:
    [`doc/dev/specs/doge-pure-8-colour-2026-07-26.md`](doc/dev/specs/doge-pure-8-colour-2026-07-26.md).
-   **Still open polish:** none on this slice (Wave 2 DOGE polish closed).
+   **Host frame / edgeless (docs only, not open code):** TUI cannot force OS
+   decorations off via OSC; user-guide
+   [Host window frame (edgeless)](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md#host-window-frame-edgeless)
+   has host snippets. No fake `hide_window_frame` flag.
+   **Process note (not open code):** new features default ON for discoverability;
+   chrome that *removes* clicks stays default off (`hide_header`). Regression
+   filters: [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md).
 
-4. **OAuth SuperGrok ↔ console API key failover (rate-limit switch + durable memo shipped)**
-   **Shipped:** first-party resolve merge (session primary + console key
-   failover; `preferred_method=api_key` reverses, including aux/web-search);
-   identity rotate on **credit / SuperGrok Heavy usage-limit** and **plain HTTP
-   429**, and **also switch the API host** (cli-chat-proxy ↔ `api.x.ai`, proxy
-   header strip/restore, bearer stash/reinstall); **credit/allowance**
-   exhausted-fingerprint memo (1h TTL; process cache + durable
-   `$GROK_HOME/exhausted_credits/`; preemptive skip survives restart;
-   **console-key** success clears that fingerprint; **session** success does
-   **not** clear — extras-paid SuperGrok 200s must not put SuperGrok back) +
-   status chrome / toast (“… (out of allowance)” vs “… (rate limited)”,
-   fingerprints only — no raw keys); when billing included `usage_pct ≥ 100%`
-   + dual-auth, mark SuperGrok used up and prefer console key **before** the
-   next request (no 402 so paid extras do not burn; clear on period reset /
-   usage drop); rate-limit switch observes temporary shared `grok-rate-limit`
-   cooldown for the left identity (not the credit memo, so primary can return
-   when cool); kill-switch clears console failover + host-switch metadata; xAI
-   console keys in keyring `grok-build` + `provider_credentials.json` (env wins);
-   login TTY progress during keyring store. User-guide `02-authentication` +
-   `11-custom-models`.
-   **Also shipped (polish):** AuthManager **live re-bind without prior stash**
-   (`session_bearer_resolver` durable; hop-to-session prefers stash then live
-   re-bind; next turn re-resolves via `reconstruct_full_config`); **multi-add**
-   console keys (`add_console_api_key` comma-list store; `grok login --api-key`
-   multi-add; `grok login --list-api-keys` fingerprints only — never raw keys).
-   **Still open (dogfood 2026-07-27) — deferred rigorous plan, not drive-by:**
+3b. **Human green gutter + DOGE semantic roles (shipped 2026-07-30; gray/alpha scrub open)**
+   **Shipped:** every Human prompt static green left `┃` rail (`accent_user`);
+   DOGE `accent_user` → green, `accent_system` → cyan; role map Green=Human,
+   Magenta=Agent, Yellow=context, Cyan=system/limits/credits; user-guide
+   `06-theming` + in-tree doge annex + FORK; external SoT
+   [0001_DOGE.md](https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md).
+   Join: `/tmp/grok-join-impl-human-gutter-doge-roles-2026-07-30.md`.
+   **Still open (gray/alpha leak scrub, not blocking Human rail):**
+   - Runtime `blend_color` opacity (animated accents, collapsed dim) can emit
+     mid-channel RGB off pure primaries under truecolor DOGE.
+   - UserPrompt terminal-native band still uses ANSI `Gray` / `DarkGray`.
+   - Settings / list chrome hard-coded `DarkGray` row backgrounds.
+   - Token names `gray` / `gray_dim` / `gray_bright` paint chromatic on DOGE
+     but the names still imply gray.
+   - Optional Agent message left rail (magenta) parked unless a later slice
+     wants symmetry with green=Human.
+   Board: `feat:doge-gray-alpha-scrub` (park; free with nearby chrome work).
 
-   Operator clarification (same day; durable):
-   - **Want included SuperGrok limits first** (personal weekly/monthly headroom),
-     **not** prepaid SuperGrok dollar extras and **not** console API $ as the
-     silent primary while limits remain. Current dogfood pin
-     `preferred_method = "api_key"` burns console $ first (config, not hop bug).
-   - **Not** asking for `preferred_method = "personal" | "business"`. Method pin
-     stays **login session vs console API key**. **Role** (personal SuperGrok /
-     Business SuperGrok / console key, etc.) should inform **failover order**
-     and labeling, not replace method names.
-   - **Naming (`feat:auth-preferred-aliases-roles`):** keep `api_key`; add serde
-     aliases `console_api_key`, `api`, `key`. Prefer config/UI name **`oauth`**
-     for the session method (aliases `oauth_token`; keep `oidc` as accepted
-     alias). Plain language in doctor/status: "SuperGrok login" / "console API
-     key", not bare `oidc`.
-   - **Role-aware failover + multi SuperGrok store** (`feat:failover-any-live-limits`,
-     slice `feat:second-supergrok-business`): plan later with full TDD matrix
-     (defaults, hop combinations, meter per live identity). Do **not** invent
-     ship shape in residual beyond: prefer free/included headroom before extras
-     and console $; hop when hard-limited; meter = billed account.
-   - **Meter honesty (`bug:credits-meter-wrong-pool`):** still open (console
-     live shows `"no $ meter yet"`; SuperGrok extras meter can lie after hop).
+4. **OAuth SuperGrok ↔ console API key failover (limits residual = two halves;
+   Half A shipped; Half B core prepaid shipped 2026-07-30; series / dogfood open)**
+   **Operator pin (2026-07-30, second clarification) — both halves intended:**
+   Limits residual is **not** either SuperGrok **or** console. Hunter wanted
+   **both**:
+   1. SuperGrok / session-style meters in the TUI (included weekly + SuperGrok
+      $ extras, dual SuperGrok principals, `/limits`)
+   2. **And** console.x.ai Grok Business Usage class data in the TUI (team
+      Surmount: tokens, spend, charts class)
 
-   Meters stay distinct: personal SuperGrok **included limits** ≠ SuperGrok
-   **dollar extras** ≠ **console API spend** ≠ Business SuperGrok **included/
-   Heavy** (separate principal when multi-session exists).
+   Status is **core meters largely shipped; series + live dogfood still open**,
+   not "wrong-target waste." SuperGrok work was correct and remains wanted.
+   Agents previously shipped only Half A and treated Half B as "not our
+   product" / either-or — that dismissal was wrong. Do **not** claim full
+   Business Usage charts done; core prepaid balance meter is shipped.
 
-   **Deferred plan (branch + session, survive compaction):**
-   [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md)
-   (aliases + role/failover/TDD outline; implement only after explicit approve).
+   ### Half A — SuperGrok session billing meters (**shipped**, keep)
+   Dual principals, sibling poll, `/limits` dual rows, footer credit-bar
+   honesty for included weekly + SuperGrok $ extras. Useful; incomplete only
+   relative to the **full** two-half ask. Detail under shipped bullets below.
+   Do **not** discard or reframe Half A as pure waste.
+
+   ### Half B — console team Grok Business Usage class meter (**core prepaid shipped; series open**)
+   TUI picture of team prepaid / tokens / spend / usage charts class data
+   (console product, Team Surmount), via xAI **Management API** + `team_id`.
+   **Do not invent scrape of console.x.ai HTML** or fake endpoints. Not "web
+   only / different surface / not our work."
+
+   **Shipped (core dual-auth):** first-party resolve merge (session primary +
+   console failover; `preferred_method=api_key` reverses); hop on credit /
+   Heavy limit / plain 429 + **API host switch** (proxy ↔ `api.x.ai`);
+   exhausted-fingerprint memo (1h; process + `$GROK_HOME/exhausted_credits/`;
+   console success clears, session success does not); billing `usage_pct ≥ 100%`
+   preemptive mark + prefer console; rate-limit shared cooldown; kill-switch;
+   multi-add console keys; live re-bind without prior stash. User-guide
+   `02-authentication` + `11-custom-models` (+ dual-principal polish 2026-07-29).
+   **Also shipped (2026-07-29 joins):**
+   - **`[auth] auto_use_included_limits = true`** (separate from
+     `preferred_method`; `auto` is **not** a method value so ordinary grok
+     configs stay compatible; serde alias `prefer_sooner_reset` for one release)
+     + pure SuperGrok ranking (prefer included before $ extras; earlier
+     `reset_at` + headroom among included pools; not Business-first)
+     + resolve/hop order wire (`order_credentials_for_preferred_auto`, post-exhaust
+     reorder; ExhaustedAll → console; oauth/api_key pins still honored).
+   - **Meter honesty sticky console:** silent prefer-console / console auth
+     primary no longer sells SuperGrok dollar extras as live spend
+     (`meter_sampling_identity`, allowance Cleared keeps ConsoleKey).
+   Joins: `/tmp/grok-join-impl-dual-supergrok-auto-failover-2026-07-29.md`,
+   `/tmp/grok-join-impl-auto-wire-hop-2026-07-29.md`,
+   `/tmp/grok-join-impl-billing-meter-honesty-2026-07-29.md`.
+   **Also shipped (Half A — multi SuperGrok + `/limits` SuperGrok surface):**
+   - **Multi SuperGrok login store** — two OIDC principals; second login does
+     not wipe the first; doctor / `grok login --list-api-keys` list both with
+     role labels + fingerprints only; ranking loads both.
+   - **Live included headroom + `reset_at` into ranking** when billing provides
+     them (process cache per identity; hermetic dual fixtures; sooner-reset
+     among included pools). Honest absence when never polled.
+   - **`/limits`** detail panel + **dual SuperGrok rows** + live principal
+     role on sampling line and footer when dual principals + role known.
+   - **Sibling poll:** non-active SuperGrok principal billing poll on the same
+     included-safe `GET …/billing?format=credits` path after active
+     `x.ai/billing`; process cache remember per identity so dual `/limits` +
+     ranking fill both SuperGrok pools. Hermetic dual fixtures + HTTP mock.
+   Joins: `/tmp/grok-join-impl-multi-supergrok-login-2026-07-29.md`,
+   `/tmp/grok-join-impl-live-ranking-dual-limits-2026-07-29.md`,
+   `/tmp/grok-join-impl-limits-a1-2026-07-29.md`,
+   `/tmp/grok-join-impl-sibling-billing-poll-2026-07-29.md`.
+
+   **Shipped (Half B core prepaid — 2026-07-30):**
+   - Management key store (keyring URL `https://management-api.x.ai`, not
+     inference) + config `[endpoints] management_api_key`
+   - `[endpoints] management_team_id` pin (explicit; not SuperGrok OIDC team)
+   - Hermetic `GET …/billing/teams/{team_id}/prepaid/balance` →
+     `ConsoleTeamPrepaidMeter` + 60s process cache
+   - TUI wire: billing refresh populates cents; footer
+     `Console key · team prepaid: $N` when console live; `/limits`
+     `Balance (console team prepaid): $N`; honest gap when unknown:
+     `no management key/team id` / `loading team prepaid...` /
+     `team prepaid unavailable` (soft `no $ meter yet` retired)
+   - User-guide: `02-authentication` + `04-slash-commands` `/limits`
+   Joins: `/tmp/grok-join-impl-mgmt-key-team-fetch-2026-07-30.md`,
+   `/tmp/grok-join-impl-console-meter-tui-2026-07-30.md`,
+   `/tmp/grok-join-impl-no-dollar-meter-real-0c6a7911.md`.
+
+   **Also shipped (soft `/usage` console-live honesty — 2026-07-30):**
+   When console is the live sampling principal, non-silent `/usage` names
+   **console team prepaid** (or honest gap family above) and does **not** sell
+   SuperGrok session billing / SuperGrok $ extras as live console spend.
+   Join: `/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`.
+
+   **Still open (Half B remaining — do not claim full Business Usage charts done):**
+   - **Token / spend series UI** not wired (documented Management
+     `POST …/billing/teams/{team_id}/usage` with `analyticsRequest`; no invent
+     GET; ship after dogfood if needed). No charts without real series data.
+   - **Dogfood** with live management key + real team_id (operator).
+   - **Soft polish (known UX):** console team prepaid refresh is ≤60s process
+     cache TTL + last-good on fetch miss/error (poll does not bust cache; app
+     does not clear cents on `None`). Dollars can lag real balance drop until
+     TTL expiry or restart. Documented honesty, not a force-refresh product
+     this wave.
+   - Failover intent remains: prefer included before SuperGrok $ extras /
+     console $; hop on exhaust; honor oauth/api_key pins.
+
+   Meters stay distinct: personal SuperGrok **included weekly** ≠ SuperGrok
+   **dollar extras** ≠ **console team prepaid / Business Usage** ≠ second
+   SuperGrok OAuth principal (Business SuperGrok session is not console team
+   prepaid).
+
+   **Highest-value next (re-rank after meter + `/usage` honesty + copy wave):**
+   **1 operator dogfood prepaid meter live** (management key + real team_id).
+   **2 series charts** only if dogfood needs them. Plan freeform polish behind
+   those. One-click copy chrome (§13 / `feat:copy-text-one-click`) **shipped**.
+   Do not invent series UI without data. Do not re-open §13 as unshipped.
+
+   Plan (still valid for remaining slices):
+   [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md).
    Older: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md),
    [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md).
-   Joins: `join-dual-auth-audit.md`, `join-hop-wiring.md`,
-   `join-failover-meter-intent.md`.
 
 5. **btw panel UX + free-text “plan” ≠ plan mode (shipped B1–B3 + user-guide)**
    - **B1 shipped:** Done panel Copy via focused `y` + chrome `[y]`; clipboard
@@ -297,29 +398,95 @@ or code — not only here. Closed campaign history:
    multi-file cap if patch storms appear. Inventory:
    [`doc/dev/research/python-to-rust-tools-2026-07-26.md`](doc/dev/research/python-to-rust-tools-2026-07-26.md).
 
+13. **One-click copy buttons (SHIPPED → FORK 2026-07-30)**
+   Lasting truth in [`FORK.md`](FORK.md) (selection / plan / prompt / always-on
+   bubble `⧉`). No open next-slice. Filters: `bubble_copy_` in
+   [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md).
+
 ## Highest-value next (product residual only)
 
 **Wave 0 / 0b / Wave 1 core shipped** (ASCII S0–S4, plan selection P1–P4, T4
 `json_to_toon`, session_reader Codex+Cursor SQLite, plan soft-park A,
-implement-memory + plan_validate intercepts). Soft polish below is **parked
-unless dogfood or operator re-ranks** — not next-wave must-do.
+implement-memory + plan_validate intercepts). **Also shipped 2026-07-29+30:**
+dual-auth core + auto rank/hop + meter honesty sticky console; multi SuperGrok
+login; live ranking headroom + dual SuperGrok `/limits`; non-active SuperGrok
+billing poll; `/limits` panel; TUI `/screenshot` + F9 + plan auto-attach;
+**window titles on by default** (`hide_title_bar = false`; session + `agents`
+items; distinct from `hide_header`); **DOGE default theme**; always-on bubble
+`⧉`; **Clear done** todos (focused `X` / chrome / slash); edgeless = host docs
+only.
 
-**Parked / skip (honesty close-out 2026-07-26):** plan soft-park B/C/D (A fine);
-`send_now_*` → interject rename (cosmetic only); first-class memory/plan-validate
-tool registration (intercept path enough; no dogfood demand).
+**Limits residual = two halves (both intended; pin 2026-07-30):**
+**Half A shipped** (SuperGrok session meters: dual principals, sibling poll,
+`/limits` dual rows, footer honesty for included weekly + SuperGrok $ extras).
+Not wrong-target waste; keep it. **Half B core prepaid shipped (2026-07-30):**
+management key store, `management_team_id`, GET prepaid/balance, footer +
+`/limits` console team prepaid labels (see §4). **Soft `/usage` console-live
+honesty also shipped** (join
+`/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`). Honest gaps when
+unknown: `no management key/team id` | `loading team prepaid...` |
+`team prepaid unavailable` | else `$N` (soft `no $ meter yet` retired).
+`just check` green at least once after this meter wave. Remaining Half B =
+**operator dogfood** (rank 1) + optional series UI (behind dogfood). Half A
+alone was never full limits done; core prepaid closes the main meter gap, not
+full charts. Series still open and optional.
 
-**What unblocks parallelization next:** real ranked rows are sparse and
-disjoint from parked polish. Fan out only on non-overlapping paths. Do not
-parallel two writers on the same dual-auth hop files.
+**Also open (not billing):** none for one-click copy — §13 /
+`feat:copy-text-one-click` **shipped** (selection default-on `⧉`, plan top-bar
+`⧉`, prompt draft `⧉`, always-on user/assistant bubble `⧉`). Soft leftover
+always-on bubble is **closed as shipped** (2026-07-30).
+
+**Parked / skip:** plan soft-park B/C/D (A fine); `send_now_*` rename (cosmetic);
+first-class memory/plan-validate tool registration (intercept enough); multi
+SuperGrok **help/docs polish** (user-guide updated 2026-07-29 — demoted);
+screenshot **font raster** soft only (not ranked); plan freeform `plan.md`
+menus (process/skills; product chrome already green) unless dogfood still jars
+**and** ranked after dogfood / copy / series decision.
+
+**Skills multi-source / hierarchy discoverability (dogfood 2026-07-29 — green):**
+Product load order matches code: project walk (`.agents` before `.grok` at each
+tier) → user home (same order) → `[skills].paths` → Server → Bundled → Plugin
+(bare name loses). Tests: `agents_home_skills_shadow_grok_user_skills` (full
+pipeline + production `HOME/.agents` + `HOME/.grok` layout),
+`local_agents_skills_shadow_local_grok_skills`, plus existing user/bundled/
+server/compat order tests. User-guide `08-skills.md` table + shell README skill
+locations aligned (docs lag fixed; no second skill system). Host L1/L2/L3 pins
+live under `~/.agents/skills` and win over same-named `~/.grok/skills` on this
+branch. **Soft:** installed stable `grok` binary may lag the branch until
+rebuild/install — dogfood with workspace product when verifying path winners.
+Join: `/tmp/grok-join-impl-skills-discoverability-6a125de7.md`.
+
+**Compaction honesty:** session `plan.md` is soft. Durable residual is this
+file + join notes + `AGENTS.md` / `FORK.md`. Implement via main-thread (L1)
+coordinator → subagents (L2) → specialists (L3 max); short joins on disk.
+
+**What unblocks parallelization next:** fan out only on non-overlapping paths.
+Do not parallel two writers on the same dual-auth hop / resolve files.
 
 | Rank | Work | Why |
 |------|------|-----|
-| 1 | Optional `$GROK_HOME` durable exhausted-identity memo | Dual-auth soft; process-local shipped |
+| 1 | **Operator dogfood prepaid meter live** (management key + real `team_id`) | Half B **core prepaid shipped** (store, team_id, GET balance, footer + `/limits`). Soft `/usage` console-live honesty **shipped**. Remaining billing gap is live proof with real management credentials. No HTML scrape. |
+| 2 | **Series UI only if dogfood needs charts** (`POST …/billing/teams/{team_id}/usage`) | Documented analytics surface; no invent GET; no charts without real series data. **Behind** dogfood; optional. |
+| 3 | Plan freeform `plan.md` menus (process/skills) only if dogfood still jars | Product chrome green; agent ceremony = process/skills. **Behind** dogfood / series. |
 
-**Not ranked here:** operator git land; onto join/PR; import ledger; dual OAuth
-SuperGrok; formal xAI import — separate tracks (`#6`–`#10`). Parked cosmetic /
-optional invent items (`#2` B/C/D, `#11`, first-class tool names in `#12`) stay
-out of this table until dogfood or operator re-rank.
+**Not "parked forever":** Half B core prepaid is **shipped**. Soft `/usage`
+console-live honesty is **shipped**. Soft `"no $ meter yet"` is **retired**;
+honest gaps = `no management key/team id` | `loading team prepaid...` |
+`team prepaid unavailable` | `$N`. With config + successful fetch, surfaces show
+console team prepaid `$N`. One-click copy chrome (§13) is **shipped**. Main
+leftover independent of credentials is optional series UI after dogfood
+(see §4). Do **not** re-claim management key unwired or "needs store + team_id."
+Do **not** re-dismiss console meters as website-only work. Do **not** treat
+Half A SuperGrok work as discarded. Do **not** re-open §13 as missing default
+copy chrome (selection/plan/prompt `⧉` landed). Do **not** claim full Business
+Usage charts done.
+
+**Not ranked here:** operator git land; onto join/PR; import ledger; formal xAI
+import — separate tracks (`#6`–`#10`). Parked design: live rule stream (§2g),
+structured convo plan (§2h), SX product steers (§2f). Parked cosmetic / optional
+invent (`#2` B/C/D, `#11`, first-class tool names in `#12`) stay out until
+dogfood or operator re-rank. Skills discoverability dogfood demoted (green).
+One-click copy (§13) is **shipped**, not ranked open and not parked-forever.
 
 **Tracking rule:** when a product slice ships, move lasting truth to FORK; keep
 only **open next slice** here; demote soft gaps out of this table. Session board
@@ -329,10 +496,14 @@ foreign prefixes.
 ## Validate honesty
 
 Focused filters for **remaining** open areas (and quick regression on shipped
-neighbors). Full historical block:
+neighbors). **Durable full catalog** (survives D0 demotion):
+[`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
++ FORK § *Upstream regression filters*. Process pins still required:
+`./scripts/assert-process-pins.sh` (item 11) — path gate only; product seams
+need the cargo blocks below or `just check`. Full historical closed block:
 [`doc/dev/campaigns/interject-todos-closed-2026-07.md`](doc/dev/campaigns/interject-todos-closed-2026-07.md).
 
-**Open residual**
+**Open residual + dual-auth regression**
 
 1. **UDAX T0–T6 regression:**
    `cargo test -p xai-grok-tools --lib -- toon json_to_toon dynamic_to_prompt free_text densify_mcp densify_structured task_output_handoff subagent_completed_handoff`
@@ -341,14 +512,28 @@ neighbors). Full historical block:
    `cargo test -p xai-grok-sampler --lib -- rotate_ exhausted memo fingerprint hop_reason live_rebind`
    `cargo test -p xai-grok-pager --lib -- login_ dual_auth_hop_reason`
    `cargo test -p xai-grok-sampling-types --lib -- credit_exhausted`
-3. **DOGE / hide_header (shipped polish regression):**
-   `cargo test -p xai-grok-shared --lib -- hide_header`
-   `cargo test -p xai-grok-pager-render --lib -- theme doge`
-   `cargo test -p xai-grok-pager --lib -- hide_header context_bar`
+2b. **Multi SuperGrok principals + live ranking + dual `/limits` + sibling poll (shipped):**
+   `cargo test -p xai-grok-shell --lib -- upsert_personal_then_business team_login_then_personal_keeps dual_supergrok load_supergrok_candidates two_principals_billing enrich_candidates principal_limits_label non_active_poll_targets remember_both_principals included_usage poll_non_active_remembers`
+   `cargo test -p xai-grok-pager --lib -- format_dual_principals live_console_omits extra_principals_hook show_limits format_supergrok_session footer_names_live_principal`
+3. **DOGE default / hide_header / hide_title_bar titles-on / title items (shipped regression):**
+   `cargo test -p xai-grok-shared --lib -- hide_header hide_title`
+   `cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config theme doge`
+   `cargo test -p xai-grok-pager --lib -- hide_header hide_title_bar default_title_items title_state notifications::`
+   `cargo test -p xai-grok-pager --test settings_e2e -- hide_title_bar hide_header`
+   `cargo test -p xai-grok-pager --lib -- bubble_copy_ clear_completed_todos`
 4. **Plan soft-park A (shipped; B/C/D parked):**
-   `cargo test -p xai-grok-pager --lib -- plan softer_park toast focus_plan plan_approval`
+   `cargo test -p xai-grok-pager --lib -- plan softer_park toast focus_plan plan_approval soft_park`
 5. **session_reader / plan_validate / bulk_edit intercepts (A4 shipped; named tools parked):**
    `cargo test -p xai-grok-tools --lib -- session_reader plan_validate bulk_edit_policy implement_memory opencode edit`
+5b. **TUI self-screenshot (v1 + F9 + plan auto-attach shipped; font soft):**
+   `cargo test -p xai-grok-pager-render --lib -- tui_screenshot`
+   `cargo test -p xai-grok-pager --lib -- screenshot:: capture_tui_screenshot try_attach_tui_screenshot`
+5c. **Stuck Retrying chrome + stream headers timeout + transport footer (shipped):**
+   `cargo test -p xai-grok-pager --lib -- retry_chrome_clears clip_retry_reason retrying_activity_label`
+   `cargo test -p xai-grok-shell --lib -- stream_started_emits_retry_state_stream_resumed`
+   `cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason stream_headers_timeout_defaults`
+   `cargo test -p xai-grok-sampler --test stream_headers_timeout`
+   `cargo test -p xai-grok-pager --lib -- shell_collision`  # includes clear-completed-todos SHELL_RESERVED
 
 **Shipped neighbors (smoke if touching shared files)**
 

@@ -69,13 +69,20 @@ impl MvpAgent {
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
-        let (disable_api_key_auth, alpha_test_key, client_version, preferred_method) = {
+        let (
+            disable_api_key_auth,
+            alpha_test_key,
+            client_version,
+            preferred_method,
+            auto_use_included_limits,
+        ) = {
             let cfg = self.cfg.borrow();
             (
                 cfg.grok_com_config.api_key_auth_disabled(),
                 cfg.endpoints.alpha_test_key.clone(),
                 cfg.client_version.clone(),
                 cfg.grok_com_config.preferred_method,
+                cfg.grok_com_config.auto_use_included_limits,
             )
         };
         let config = match crate::agent::config::resolve_aux_model_sampling_config_preferring(
@@ -87,6 +94,7 @@ impl MvpAgent {
             alpha_test_key,
             client_version,
             preferred_method,
+            auto_use_included_limits,
         ) {
             Some(mut cfg) => {
                 crate::agent::config::stamp_session_local_sampler_fields(
@@ -1226,16 +1234,20 @@ impl MvpAgent {
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
+        let auto_use_included_limits =
+            self.cfg.borrow().grok_com_config.auto_use_included_limits;
         // Always surface a live/expired session when present so dual-auth
         // resolve can place console keys in failover (or session in failover
         // under preferred_method=api_key). Exclusive api_key pin with *no*
         // console key is still fail-closed inside resolve_credentials_preferring.
         let session = self.auth_manager.current_or_expired();
         let has_session_key = session.is_some();
-        let mut credentials = crate::agent::config::resolve_credentials_preferring(
+        let mut credentials =
+            crate::agent::config::resolve_credentials_preferring_with_rank(
             model,
             session.as_ref().map(|a| a.key.as_str()),
             preferred,
+            auto_use_included_limits,
         );
         if matches!(preferred, Some(crate::auth::PreferredAuthMethod::Oidc))
             && !model.has_own_credentials()
@@ -1481,13 +1493,21 @@ impl MvpAgent {
         let model_id = self.cfg.borrow().web_search_model.clone();
         let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
-        let (disable_api_key_auth, alpha_test_key, client_version, preferred_method, endpoints) = {
+        let (
+            disable_api_key_auth,
+            alpha_test_key,
+            client_version,
+            preferred_method,
+            auto_use_included_limits,
+            endpoints,
+        ) = {
             let cfg = self.cfg.borrow();
             (
                 cfg.grok_com_config.api_key_auth_disabled(),
                 cfg.endpoints.alpha_test_key.clone(),
                 cfg.client_version.clone(),
                 cfg.grok_com_config.preferred_method,
+                cfg.grok_com_config.auto_use_included_limits,
                 cfg.endpoints.clone(),
             )
         };
@@ -1500,6 +1520,7 @@ impl MvpAgent {
             client_version,
             &endpoints,
             preferred_method,
+            auto_use_included_limits,
         )?;
         inject_proxy_headers(
             &mut cfg.extra_headers,

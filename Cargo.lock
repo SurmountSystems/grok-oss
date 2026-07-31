@@ -13840,6 +13840,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "similar",
+ "tokio",
  "tracing",
  "uuid",
  "xai-grok-pager",

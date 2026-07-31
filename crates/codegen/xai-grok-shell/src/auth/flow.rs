@@ -769,11 +769,43 @@ async fn persist_or_use_minted(auth_manager: &AuthManager, new_auth: GrokAuth) -
 }
 
 /// Print the CLI "signed in" confirmation, clearing the spinner line first.
+///
+/// When more than one SuperGrok principal is stored (personal + Business),
+/// also lists role labels and fingerprints only (no secrets) so the second
+/// OIDC login is visible without `/doctor`.
 fn report_signed_in(auth: &GrokAuth) {
     eprint!("\r\x1b[K");
     match auth.email {
         Some(ref email) => eprintln!("✓ Signed in as {email}"),
         None => eprintln!("✓ Signed in"),
+    }
+    report_stored_supergrok_principals_if_multi();
+}
+
+/// After login, if auth.json holds 2+ SuperGrok principals, print labels +
+/// fingerprints (same honesty as console multi-add / doctor). No-op on one.
+fn report_stored_supergrok_principals_if_multi() {
+    let home = crate::util::grok_home::grok_home();
+    let path = home.join("auth.json");
+    let Ok(map) = super::storage::read_auth_json(&path) else {
+        return;
+    };
+    let listings = super::model::list_supergrok_principal_listings(&map);
+    if listings.len() < 2 {
+        return;
+    }
+    eprintln!(
+        "SuperGrok sessions stored ({}): labels and fingerprints only",
+        listings.len()
+    );
+    for (i, p) in listings.iter().enumerate() {
+        eprintln!(
+            "  {}. {} ({}) · fingerprint {}",
+            i + 1,
+            p.role_label,
+            p.mode_label,
+            p.fingerprint
+        );
     }
 }
 
@@ -915,13 +947,22 @@ pub async fn run_cli_login(
         // so abandoning logs you out — unlike the device branch above.
         // Already resolved/logged above; pass `Preresolved(false)` so the inner
         // flow honors loopback without a duplicate `cli`-attributed log.
-        ensure_authenticated_with_override(
+        //
+        // Multi SuperGrok: do **not** wipe a sibling principal. `reauth=true`
+        // still clears only the active base scope + its multi-slot (see
+        // AuthManager::write_scope_removal); Business/personal siblings stay
+        // so a second OIDC login can coexist.
+        let auth = ensure_authenticated_with_override(
             &config.grok_com_config,
             true,
             None,
             LoginTransportOverride::Preresolved(false),
         )
-        .await?
+        .await?;
+        // ensure_authenticated may not call report_signed_in on all paths;
+        // surface multi SuperGrok fingerprints after successful CLI login.
+        report_stored_supergrok_principals_if_multi();
+        auth
     };
 
     // Sync this principal's config now rather than waiting for the background
@@ -991,6 +1032,16 @@ pub fn perform_logout(
         if let Some(scope) = scope {
             auth_manager.remove_scope(scope)?;
         } else {
+            // Logout of current SuperGrok identity: drop its multi-slot too.
+            // Sibling SuperGrok principals (other multi-slots) stay so personal
+            // + Business multi-login is not wiped by logging out only one.
+            if let Some(ref a) = auth {
+                let base = auth_manager.grok_com_config().auth_scope();
+                let multi = super::model::multi_slot_scope_for_auth(&base, a);
+                if multi != base {
+                    let _ = auth_manager.remove_scope(&multi);
+                }
+            }
             auth_manager.clear()?;
         }
         // Clear the synced files if no principal remains to own them. A scoped

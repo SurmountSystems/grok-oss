@@ -150,6 +150,39 @@
         );
     }
 
+    /// Contract: once the next sample stream is open after a retry, chrome must
+    /// leave `TurnActivity::Retrying` so the footer does not freeze on
+    /// "Retrying (attempt 1)" across a live post-retry stream / TTFB window.
+    #[test]
+    fn retry_chrome_clears_when_retry_stream_starts() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Retrying {
+                attempt: 1,
+                max_retries: u32::MAX,
+                reason: "connection interrupted".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match session.tracker.activity() {
+            Some(TurnActivity::Retrying { attempt: 1, .. }) => {}
+            other => panic!("expected Retrying attempt 1, got {other:?}"),
+        }
+
+        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
+        assert!(
+            !matches!(
+                session.tracker.activity(),
+                Some(TurnActivity::Retrying { .. })
+            ),
+            "StreamResumed must clear sticky Retrying chrome, got {:?}",
+            session.tracker.activity()
+        );
+    }
+
     /// Dual-auth D3: hop reason is status chrome (and toast-eligible) with no raw keys.
     #[test]
     fn dual_auth_hop_reason_is_status_chrome_not_raw_key() {

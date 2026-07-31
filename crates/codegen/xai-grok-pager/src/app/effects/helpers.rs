@@ -821,6 +821,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "hide_title_bar" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("hide_title_bar", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_hide_title_bar(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "show_timestamps" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_timestamps", "Bool", &value));
@@ -1545,6 +1553,15 @@ pub(super) async fn fetch_openrouter_credit_balance(
     Some(crate::views::credit_bar::OpenRouterCreditBalance {
         balance_cents: cents,
     })
+}
+
+/// Fetch console team prepaid balance (Management API) when key + team_id are
+/// configured. Returns absolute remaining cents; `None` keeps prior UI cache
+/// and leaves process-cache / honest absence paths alone.
+pub(super) async fn fetch_console_team_prepaid_cents() -> Option<i64> {
+    xai_grok_shell::auth::fetch_console_team_prepaid_balance_default()
+        .await
+        .map(|m| m.balance_cents)
 }
 /// Fetch the user's auto top-up rule via the `x.ai/auto-topup-rule` extension.
 /// A transport failure yields [`AutoTopupFetch::Unchanged`] so the caller keeps

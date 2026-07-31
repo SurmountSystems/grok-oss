@@ -153,9 +153,15 @@ pub struct ScrollbackDisplayConfig {
     pub expandable_indicator_running: bool,
     /// Character to use as the expand indicator. Default: "›".
     pub expandable_indicator_char: String,
-    /// Show ⧉ (copy) and ↗ (view) buttons on the selection box.
-    /// Default: false (opt-in while testing).
+    /// Show ⧉ (copy) and ↗ (view) buttons on the selection box when a
+    /// copyable/viewable block is selected.
+    /// Default: true (one-click copy chrome).
     pub selection_buttons: bool,
+    /// Always-visible ⧉ on user and assistant message bubbles (no select-first).
+    /// Independent of `selection_buttons`. When on, selection-box omits its ⧉
+    /// (Policy A: one icon per bubble; ↗ view chrome stays on the selection box).
+    /// Default: true.
+    pub bubble_copy_buttons: bool,
     /// Pin user prompts as sticky headers when scrolled past.
     /// Default: true.
     pub sticky_headers: bool,
@@ -181,7 +187,8 @@ impl Default for ScrollbackDisplayConfig {
             expandable_indicator: true,
             expandable_indicator_running: true,
             expandable_indicator_char: "›".to_string(),
-            selection_buttons: false,
+            selection_buttons: true,
+            bubble_copy_buttons: true,
             sticky_headers: true,
             tab_width: 4,
             group_max_visible: 10,
@@ -868,8 +875,11 @@ pub struct RawScrollbackDisplayConfig {
     pub expandable_indicator_running: Option<bool>,
     /// Character for the expand indicator. Default: "›".
     pub expandable_indicator_char: Option<String>,
-    /// Show ⧉/↗ buttons on the selection box. Default: false.
+    /// Show ⧉/↗ buttons on the selection box when a block is selected.
+    /// Default: true.
     pub selection_buttons: Option<bool>,
+    /// Always-visible ⧉ on user and assistant message bubbles. Default: true.
+    pub bubble_copy_buttons: Option<bool>,
     /// Pin user prompts as sticky headers when scrolled past. Default: true.
     pub sticky_headers: Option<bool>,
     /// Number of spaces to use when expanding tab characters (\t) in content.
@@ -892,7 +902,8 @@ impl Default for RawScrollbackDisplayConfig {
             expandable_indicator: Some(true),
             expandable_indicator_running: Some(true),
             expandable_indicator_char: Some("›".to_string()),
-            selection_buttons: Some(false),
+            selection_buttons: Some(true),
+            bubble_copy_buttons: Some(true),
             sticky_headers: Some(true),
             tab_width: Some(4),
             group_max_visible: Some(10),
@@ -1419,7 +1430,8 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
                         .display
                         .expandable_indicator_char
                         .unwrap_or_else(|| "›".to_string()),
-                    selection_buttons: raw.scrollback.display.selection_buttons.unwrap_or(false),
+                    selection_buttons: raw.scrollback.display.selection_buttons.unwrap_or(true),
+                    bubble_copy_buttons: raw.scrollback.display.bubble_copy_buttons.unwrap_or(true),
                     sticky_headers: raw.scrollback.display.sticky_headers.unwrap_or(true),
                     tab_width: raw.scrollback.display.tab_width.unwrap_or(4),
                     group_max_visible: raw.scrollback.display.group_max_visible.unwrap_or(10),
@@ -2036,6 +2048,47 @@ fn annotate_table<T: DocumentedFields>(table: &mut toml_edit::Table) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Named contract: selection-box ⧉/↗ chrome is on by default so a
+    /// selected copyable block gets one-click copy without a config flip.
+    #[test]
+    fn selection_buttons_default_on() {
+        assert!(
+            ScrollbackDisplayConfig::default().selection_buttons,
+            "selection_buttons must default true for one-click copy chrome"
+        );
+        assert_eq!(
+            RawScrollbackDisplayConfig::default().selection_buttons,
+            Some(true)
+        );
+        // Omitted key in TOML uses the same default as runtime.
+        let raw: RawAppearanceConfig = toml::from_str("").unwrap();
+        let cfg: AppearanceConfig = raw.into();
+        assert!(
+            cfg.scrollback.display.selection_buttons,
+            "empty appearance TOML must enable selection_buttons"
+        );
+    }
+
+    /// Named contract: always-on per-bubble ⧉ chrome defaults on so user and
+    /// assistant messages get copy without select-first.
+    #[test]
+    fn bubble_copy_buttons_default_on() {
+        assert!(
+            ScrollbackDisplayConfig::default().bubble_copy_buttons,
+            "bubble_copy_buttons must default true for always-on bubble copy"
+        );
+        assert_eq!(
+            RawScrollbackDisplayConfig::default().bubble_copy_buttons,
+            Some(true)
+        );
+        let raw: RawAppearanceConfig = toml::from_str("").unwrap();
+        let cfg: AppearanceConfig = raw.into();
+        assert!(
+            cfg.scrollback.display.bubble_copy_buttons,
+            "empty appearance TOML must enable bubble_copy_buttons"
+        );
+    }
 
     #[test]
     fn test_parse_hex_color() {

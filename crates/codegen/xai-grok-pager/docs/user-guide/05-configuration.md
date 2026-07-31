@@ -41,6 +41,8 @@ inference_idle_timeout_secs = 600
 stream_tool_calls = true
 
 [ui]
+theme = "doge"                         # default theme when unset is also DOGE; "groknight" for
+                                       # the previous neutral dark default (see 06-theming.md)
 simple_mode = true                     # readline-style prompt editing (default); false = vim editing in the prompt
 vim_mode = false                       # vim-style scrollback navigation keys (default: false)
 max_thoughts_width = 120               # max column width for reasoning display
@@ -68,6 +70,11 @@ economic_mode = true                   # soft-cap effective context at 200k (Gro
                                        # for compaction / context bar; also clamps auto-run
                                        # /implement --effort above 1 to 1 (default: true).
                                        # Override one conversation with /economic-mode
+hide_header = false                    # hide in-app status / welcome / dashboard headers only
+                                       # (default: false). Not the desktop/terminal window title.
+hide_title_bar = false                 # clear terminal/tab window title + skip dynamic title
+                                       # updates (default: false = titles on: session, activity,
+                                       # N agents, grok-oss). See 06-theming.md Hide window title.
 
 [features]
 telemetry = false                      # anonymous usage telemetry
@@ -464,13 +471,15 @@ progress_bar = true       # show tab progress bar (OSC 9;4)
 
 [ui.notifications.title]
 enabled = true
-items = ["action-required", "spinner", "activity", "session-name", "grok"]
+items = ["action-required", "spinner", "activity", "session-name", "agents", "grok"]
 ```
 
 The `grok` entry in `title.items` is the **product brand** slot (config name kept
 for compatibility). In Grok OSS it renders as **`grok-oss`** in the terminal/tab
-title (for example `Thinking - my-session - grok-oss`), matching the install
-binary. Session titles set outside the notifications path use the same suffix.
+title (for example `Thinking - my-session - 2 agents - grok-oss`), matching the
+install binary. Session titles set outside the notifications path use the same
+suffix. The `agents` item shows `N agents` when more than one top-level agent is
+busy.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -480,8 +489,8 @@ binary. Session titles set outside the notifications path use the same suffix.
 | `events` | array | `["turn_complete", "approval_required"]` | Events that trigger notifications. Options: `turn_complete`, `approval_required`, `session_ready`, `task_complete`, `agent_error`. |
 | `sleep_prevention` | bool | `true` | Keep the display awake while the agent works (macOS/Linux). |
 | `progress_bar` | bool | `true` | Show a progress indicator in the terminal tab (OSC 9;4). |
-| `title.enabled` | bool | `true` | Set the terminal title to reflect agent state. |
-| `title.items` | array | (see above) | Items shown in the title bar. Options: `action-required`, `spinner`, `activity`, `session-name`, `cwd`, `model`, `turn-timer`, `grok` (displays as `grok-oss`). |
+| `title.enabled` | bool | `true` | Set the terminal/tab **window title** to reflect agent state. Also gated by `[ui] hide_title_bar` (default off = titles on; set true to clear window title + skip dynamic updates; not the in-app header). |
+| `title.items` | array | (see above) | Items shown in the title bar. Options: `action-required`, `spinner`, `activity`, `session-name`, `agents`, `cwd`, `model`, `turn-timer`, `grok` (displays as `grok-oss`). |
 
 #### Terminal support matrix
 
@@ -706,7 +715,8 @@ tab_width = 4                         # spaces per tab character
 expandable_indicator = true           # show expand indicator on foldable entries
 expandable_indicator_running = true   # show indicator on running entries
 expandable_indicator_char = "›"       # character for the expand indicator (default: "›")
-selection_buttons = false             # show copy/view buttons on selection
+selection_buttons = true              # show ⧉/↗ on selection box (default on)
+bubble_copy_buttons = true            # always-on ⧉ on user/assistant bubbles (default on; no select-first)
 line_under_last_entry = false         # horizontal line below last entry
 group_selection_split = true          # split selection box for expanded blocks
 highlight_overlays_border = false     # highlight extends over selection box border
@@ -746,7 +756,7 @@ badge_format = "default"              # "default", "colon", or "comma"
 
 Badge format examples:
 
-- `default`: `2/5` — a `done/total` progress fraction (done = completed, total = all tasks except cancelled).
+- `default`: `2/5` — a `done/total` progress fraction (done = completed, total = all tasks except cancelled). When any non-cancelled **leaf** has a Fibonacci `size` of 1 or 2, the badge switches to points mode and shows **`N/M pts`** (completed leaf points / total leaf points). Parents never count toward points.
 - `colon`: `[>:1 [ ]:4 ok:3 x:2]` — icon:count.
 - `comma`: `[1 >, 4 [ ], 3 ok, 2 x]` — count icon, comma-separated.
 

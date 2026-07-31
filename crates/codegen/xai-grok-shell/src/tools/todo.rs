@@ -10,9 +10,11 @@ pub use xai_grok_tools::implementations::grok_build::todo::TodoState;
 pub use xai_grok_tools::implementations::grok_build::todo::TodoStatus;
 pub use xai_grok_tools::implementations::grok_build::todo::{
     ASK_CONTENT_MAX_CHARS, ASK_TODO_PREFIX, MAX_ASK_TODOS, PROTECTED_TODO_PREFIXES, ask_todo_id,
-    effective_todo_state_on_resume, is_protected_todo_id, is_slash_shaped_user_text,
-    plan_json_snapshot_after_compact, prune_old_ask_todos, seed_ask_todo, truncate_ask_content,
+    clear_completed_todos, effective_todo_state_on_resume, is_protected_todo_id,
+    is_slash_shaped_user_text, plan_json_snapshot_after_compact, prune_old_ask_todos,
+    seed_ask_todo, truncate_ask_content,
 };
+pub use xai_grok_tools::implementations::grok_build::todo::{ClearedReason, ClearedTodo};
 
 use agent_client_protocol as acp;
 

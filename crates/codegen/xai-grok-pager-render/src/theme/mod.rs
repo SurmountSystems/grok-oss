@@ -1,14 +1,15 @@
 //! Theming for the pager.
 //!
 //! All colors come from the `Theme` struct. No hardcoded colors elsewhere.
-//! The default theme is GrokNight (neutral gray base with TokyoNight accents).
+//! The default theme is DOGE (pure black/white + classic 8 ANSI primaries).
 //!
 //! ## Color support
 //!
-//! GrokNight is defined in `Color::Rgb` (truecolor). At startup,
+//! Most themes are defined in `Color::Rgb` (truecolor). At startup,
 //! [`Theme::current()`] quantizes every color to the terminal's detected
 //! capability level via [`Theme::quantized`]. Runtime-generated colors (syntax
 //! highlighting, blending) are also quantized via [`color_support::quantize`].
+//! DOGE is pure 8-colour and does not require truecolor.
 
 pub mod cache;
 pub mod color_support;

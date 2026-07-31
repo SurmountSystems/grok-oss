@@ -701,14 +701,18 @@ impl SessionActor {
             .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
-        let (disable_api_key_auth, preferred_method) = self
+        let (disable_api_key_auth, preferred_method, auto_use_included_limits) = self
             .auth_manager
             .as_ref()
             .map(|am| {
                 let gc = am.grok_com_config();
-                (gc.api_key_auth_disabled(), gc.preferred_method)
+                (
+                    gc.api_key_auth_disabled(),
+                    gc.preferred_method,
+                    gc.auto_use_included_limits,
+                )
             })
-            .unwrap_or((false, None));
+            .unwrap_or((false, None, false));
         crate::agent::config::resolve_aux_model_sampling_config_preferring(
             slug,
             &models,
@@ -718,6 +722,7 @@ impl SessionActor {
             creds.alpha_test_key.clone(),
             creds.client_version.clone(),
             preferred_method,
+            auto_use_included_limits,
         )
     }
     /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,

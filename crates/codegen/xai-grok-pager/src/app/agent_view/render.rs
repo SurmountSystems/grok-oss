@@ -113,6 +113,29 @@ impl AgentView {
                 ]
             }
             PlanApprovalFocus::Prompt => {
+                // Soft-park (no panel): free typing, no empty-Enter approve
+                // hint. Mouse footer CTAs + `/view-plan` for decisions.
+                if self.line_viewer.is_none() {
+                    let has_content =
+                        !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
+                    if has_content {
+                        use crate::views::plan_approval_view::PlanPromptIntent;
+                        let enter_label = match pav.prompt_intent {
+                            PlanPromptIntent::ApproveNotes => "approve w/ comment",
+                            PlanPromptIntent::Questions => "clarify",
+                            PlanPromptIntent::Revise => "revise",
+                        };
+                        return vec![
+                            HintItem::new(key!(Enter), enter_label),
+                            HintItem::new(key!(Tab), "plan"),
+                            HintItem::new(key!(Esc), "back"),
+                        ];
+                    }
+                    return vec![
+                        HintItem::new(key!(Tab), "plan"),
+                        HintItem::new(key!(Esc), "back"),
+                    ];
+                }
                 let has_content = !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
                 if has_content {
                     use crate::views::plan_approval_view::PlanPromptIntent;
@@ -134,16 +157,11 @@ impl AgentView {
                     ]
                 }
             }
-            // Soft-park Preview (no side panel yet): advertise the same CTAs as
-            // the transcript card so the footer is not empty while keys work.
-            // When the line viewer is open, the panel footer paints the buttons.
+            // Soft-park Preview: mouse footer CTAs only — no exclusive key
+            // accelerators (L1 modal-free). Cheatsheet points at Tab/panel.
             PlanApprovalFocus::Preview if self.line_viewer.is_none() => vec![
-                HintItem::new(key!(Enter), "approve"),
-                HintItem::new(key!('a'), "approve"),
-                HintItem::new(key!('A'), "approve w/ comment"),
-                HintItem::new(key!('?'), "clarify"),
-                HintItem::new(key!('s'), "revise"),
-                HintItem::new(key!('q'), "quit"),
+                HintItem::new(key!(Tab), "plan"),
+                HintItem::new(key!(Esc), "back"),
             ],
             PlanApprovalFocus::Preview => vec![],
         }
@@ -802,10 +820,19 @@ impl AgentView {
             .unwrap_or_else(|| "unknown".to_string());
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         let casual_commenting = self.is_casual_commenting();
+        // Soft-park (plan approval, no side panel): keep the composer visually
+        // focused when the Prompt pane is active, even if plan focus is still
+        // Preview (footer CTAs). Dogfood 2026-07-29: Preview-only paint showed
+        // the "Build anything" placeholder and looked like typing was dead.
         let prompt_focused = if self.plan_approval_view.is_some() {
-            self.plan_approval_view
+            let plan_prompt = self
+                .plan_approval_view
                 .as_ref()
-                .is_some_and(|pav| pav.focus != PlanApprovalFocus::Preview)
+                .is_some_and(|pav| pav.focus != PlanApprovalFocus::Preview);
+            let soft_park_prompt_pane = self.line_viewer.is_none()
+                && self.active_pane == AgentPane::Prompt
+                && !overlay_focused;
+            plan_prompt || soft_park_prompt_pane
         } else if casual_commenting {
             true
         } else {
@@ -1437,10 +1464,8 @@ impl AgentView {
                 }
             });
             if let Some(git_text) = git_text {
-                let git_style = Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_base)
-                    .add_modifier(ratatui::style::Modifier::DIM);
+                // Branch glyph + name: primary white (no DIM — too much gray chrome).
+                let git_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
                 path_offset += git_text.width() as u16;
                 parts.push(Span::styled(git_text, git_style));
                 path_offset += 1;
@@ -1704,20 +1729,26 @@ impl AgentView {
             );
             let any_drag_active =
                 self.drag_selection.is_some() || self.block_drag_selection.is_some();
-            if !any_drag_active
-                && !overlay_focused
-                && let Some(ref selection_box) = sb_output.selection_box
-            {
-                selection_box.render(buf);
-                self.render_selection_buttons(
-                    buf,
-                    selection_box,
-                    sb_output.selected_entry_area,
-                    &theme,
-                );
+            if !any_drag_active && !overlay_focused {
+                if let Some(ref selection_box) = sb_output.selection_box {
+                    selection_box.render(buf);
+                    self.render_selection_buttons(
+                        buf,
+                        selection_box,
+                        sb_output.selected_entry_area,
+                        &theme,
+                    );
+                } else {
+                    self.hit_sb_copy.clear();
+                    self.hit_sb_view.clear();
+                }
+                // Always-on bubble ⧉ after selection chrome (sibling pass).
+                self.render_bubble_copy_buttons(buf, &theme);
             } else {
                 self.hit_sb_copy.clear();
                 self.hit_sb_view.clear();
+                self.bubble_copy_hits.clear();
+                self.hovered_bubble_copy = None;
             }
             let rail_shown = self.timeline_rail.is_some();
             if !rail_shown {
@@ -1885,7 +1916,15 @@ impl AgentView {
         if todo_height > 0 {
             let todo_focused = self.active_pane == ActivePane::Todo && !overlay_focused;
             self.todo.render(layout.todo, buf, todo_focused, layout_cfg);
-            let close_rect = agent::render_todo_chrome(
+            // Show Clear done when focused and the board has finished rows.
+            let clear_label = if todo_focused
+                && self.todo.counts().completed + self.todo.counts().cancelled > 0
+            {
+                Some("Clear done")
+            } else {
+                None
+            };
+            let sel = agent::render_todo_chrome_with_close_label(
                 buf,
                 layout.todo,
                 layout_cfg,
@@ -1893,11 +1932,17 @@ impl AgentView {
                 false,
                 self.hit_todo_close.hovered,
                 &theme,
-            )
-            .and_then(|sel| sel.close_button_rect());
-            self.hit_todo_close.set(close_rect);
+                None,
+                clear_label,
+                self.hit_todo_clear_done.hovered,
+            );
+            self.hit_todo_close
+                .set(sel.as_ref().and_then(|s| s.close_button_rect()));
+            self.hit_todo_clear_done
+                .set(sel.as_ref().and_then(|s| s.action_button_rect()));
         } else {
             self.hit_todo_close.clear();
+            self.hit_todo_clear_done.clear();
         }
         if queue_height > 0 {
             let queue_focused = self.active_pane == ActivePane::Queue && !overlay_focused;
@@ -1919,6 +1964,8 @@ impl AgentView {
                 self.hit_queue_close.hovered,
                 &theme,
                 Some(crate::glyphs::ballot_x_button()),
+                None,
+                false,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_queue_close.set(close_rect);
@@ -2311,15 +2358,56 @@ impl AgentView {
             .models
             .current_model_id_str()
             .is_some_and(xai_grok_shell::auth::is_openrouter_catalog_id);
-        let warning = crate::views::credit_bar::usage_warning_for_session_with_identity(
-            self.credit_balance.as_ref(),
-            self.auto_topup.as_ref(),
-            self.openrouter_credit_balance.as_ref(),
-            self.billing_surface_visible,
-            self.chat_kind,
-            openrouter_model,
-            self.sampling_identity,
-        );
+        // Meter = live spend pool. Silent sticky console (SuperGrok still
+        // memoized out of allowance) must not keep SuperGrok extras as the
+        // footer when tracked identity is still the default SuperGrokSession.
+        // Probe only while tracked is SuperGrok; on hit, pin ConsoleKey so
+        // later frames skip dual-auth/disk work.
+        if !self.sampling_identity.is_console() {
+            let grok_home = xai_grok_shell::util::grok_home::grok_home();
+            if xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(&grok_home) {
+                self.sampling_identity = crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
+            }
+        }
+        // When dual SuperGrok principals exist, name which role's included pool
+        // the footer is talking about (active base identity).
+        let live_principal_role = if self.sampling_identity.is_console() {
+            None
+        } else {
+            let grok_home = xai_grok_shell::util::grok_home::grok_home();
+            xai_grok_shell::auth::active_supergrok_identity_id(&grok_home).and_then(|aid| {
+                let map =
+                    xai_grok_shell::auth::read_auth_json(&grok_home.join("auth.json")).ok()?;
+                let listings = xai_grok_shell::auth::list_supergrok_principal_listings(&map);
+                if listings.len() < 2 {
+                    return None;
+                }
+                listings
+                    .into_iter()
+                    .find(|p| p.identity_id == aid)
+                    .map(|p| p.role_label.to_string())
+            })
+        };
+        // Console team prepaid: agent field, else process cache when team_id set.
+        let console_prepaid = self
+            .console_team_prepaid_cents
+            .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+        // Honest gap when cents unknown (not soft "no $ meter yet").
+        let console_prepaid_gap =
+            crate::views::credit_bar::resolve_console_team_prepaid_gap_default();
+        let warning =
+            crate::views::credit_bar::usage_warning_for_session_with_identity_principal_and_gap(
+                self.credit_balance.as_ref(),
+                self.auto_topup.as_ref(),
+                self.openrouter_credit_balance.as_ref(),
+                self.billing_surface_visible,
+                self.chat_kind,
+                openrouter_model,
+                self.sampling_identity,
+                live_principal_role.as_deref(),
+                console_prepaid,
+                console_prepaid_gap,
+            );
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
         let usage_warning_critical = warning.is_some_and(|(_, critical)| critical);
@@ -3179,6 +3267,9 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
+        if self.plan_approval_view.is_none() {
+            self.hit_soft_park_ctas.clear();
+        }
         if let Some(ref viewer) = self.block_viewer {
             let hints = viewer.shortcuts_hints();
             ShortcutsBar::new(&hints)
@@ -3224,12 +3315,37 @@ impl AgentView {
             ShortcutsBar::new(&hints)
                 .with_pending(pending_hint)
                 .render(layout.shortcuts, buf);
-        } else if let Some(ref pav) = self.plan_approval_view {
-            let hints = self.plan_approval_shortcut_hints(pav);
-            if !hints.is_empty() {
-                ShortcutsBar::new(&hints)
-                    .with_pending(pending_hint)
-                    .render(layout.shortcuts, buf);
+        } else if self.plan_approval_view.is_some() {
+            // Soft-park (no side panel): always paint real clickable footer CTAs
+            // so a draft or Prompt focus never strands the user without mouse
+            // Approve/Quit. Panel open (`line_viewer`) paints its own footer.
+            let soft_park_no_panel = self.line_viewer.is_none();
+            if soft_park_no_panel {
+                // FileBacked: refresh soft-park transcript card from live plan.md
+                // while parked so dogfood does not show park-time freeze.
+                self.commit_parked_plan_card();
+                use crate::views::plan_approval_view::{
+                    SoftParkCtaHovers, paint_soft_park_cta_buttons,
+                };
+                let hovers = SoftParkCtaHovers {
+                    approve: self.hit_soft_park_ctas.approve.hovered,
+                    notes: self.hit_soft_park_ctas.notes.hovered,
+                    clarify: self.hit_soft_park_ctas.clarify.hovered,
+                    revise: self.hit_soft_park_ctas.revise.hovered,
+                    quit: self.hit_soft_park_ctas.quit.hovered,
+                };
+                let areas = paint_soft_park_cta_buttons(buf, layout.shortcuts, &theme, hovers);
+                self.hit_soft_park_ctas.apply_areas(areas);
+            } else {
+                self.hit_soft_park_ctas.clear();
+                if let Some(ref pav) = self.plan_approval_view {
+                    let hints = self.plan_approval_shortcut_hints(pav);
+                    if !hints.is_empty() {
+                        ShortcutsBar::new(&hints)
+                            .with_pending(pending_hint)
+                            .render(layout.shortcuts, buf);
+                    }
+                }
             }
         } else if self.line_viewer.is_some() && self.is_plan_viewer() {
             let suppress_shortcuts = self

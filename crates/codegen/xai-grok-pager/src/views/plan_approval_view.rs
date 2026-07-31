@@ -1,10 +1,15 @@
 use agent_client_protocol as acp;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::Span;
 use xai_acp_lib::AcpResult;
 
 pub use xai_grok_tools::implementations::grok_build::exit_plan_mode::{
     ExitPlanModeExtRequest, ExitPlanModeExtResponse,
 };
 
+use crate::theme::Theme;
 use crate::views::prompt_widget::StashedPrompt;
 
 /// Placeholder body for the plan-approval preview when `exit_plan_mode` parks
@@ -17,11 +22,7 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 
 The agent exited plan mode without writing a plan.
 
-- **Approve** (`a`) — leave plan mode and start implementing
-- **Approve w/ comment** (`A`) — approve and attach notes
-- **Clarify** (`?`) — ask about the plan without rewriting it
-- **Revise** (`s`) — send the agent back to planning
-- **Quit** (`q`) — abandon and turn plan mode off
+Use the footer buttons below, or open /view-plan for the full panel.
 ";
 
 /// Toast shown when `exit_plan_mode` soft-parks approval without opening the
@@ -29,7 +30,8 @@ The agent exited plan mode without writing a plan.
 ///
 /// The approval surface stays reachable via `/view-plan`, the status-line
 /// click target, or `ShowPlan` / reopen paths (side panel by default).
-pub const PLAN_PARKED_TOAST: &str = "Plan parked — press /view-plan or click status to review";
+pub const PLAN_PARKED_TOAST: &str =
+    "Plan parked. Click Approve/Quit below, or /view-plan for the full panel";
 
 /// Header line for the inline transcript plan card (option C).
 pub const PLAN_CARD_HEADER: &str = "Plan ready for review";
@@ -37,17 +39,20 @@ pub const PLAN_CARD_HEADER: &str = "Plan ready for review";
 /// Empty-plan header for the inline transcript card.
 pub const PLAN_CARD_HEADER_EMPTY: &str = "No plan written yet";
 
-/// CTA legend painted on the soft-park transcript card (keys work with an
-/// empty prompt; `/view-plan` opens the side panel).
-pub const PLAN_CARD_CTAS: &str = "Enter/a approve · A approve w/ comment · ? clarify · s revise · q quit · /view-plan open panel";
+/// Plain footer pointer on the soft-park transcript card (not a button row).
+///
+/// Real clickable CTAs live only on soft-park footer chrome (`paint_soft_park_cta_buttons`).
+/// This string must not look like dead clickable buttons or an AI-Dungeon option list.
+pub const PLAN_CARD_CTAS: &str =
+    "Use the footer buttons below, or open /view-plan for the full panel.";
 
 /// Max body lines embedded in the soft-park transcript card before ellipsis.
 pub const PLAN_CARD_PREVIEW_LINES: usize = 12;
 
 /// Build the scrollback body for a soft-parked plan (option C).
 ///
-/// Header + truncated plan preview + CTA legend. Chat remains usable; CTAs
-/// fire from an empty prompt without opening the side panel.
+/// Header + truncated plan preview + plain review pointer. Real clickable CTAs
+/// live on soft-park footer chrome only; the card body must not fake a button row.
 pub fn format_parked_plan_card(plan_content: Option<&str>) -> String {
     let has_plan = plan_content.is_some_and(|s| !s.trim().is_empty());
     let header = if has_plan {
@@ -75,6 +80,238 @@ pub fn format_parked_plan_card(plan_content: Option<&str>) -> String {
     }
     out.push_str(PLAN_CARD_CTAS);
     out
+}
+
+/// Hit rects for soft-park footer CTA buttons (mouse primary).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SoftParkCtaAreas {
+    pub approve: Option<Rect>,
+    pub notes: Option<Rect>,
+    pub clarify: Option<Rect>,
+    pub revise: Option<Rect>,
+    pub quit: Option<Rect>,
+}
+
+/// Hover flags for soft-park footer CTA paint (mirrors panel footer).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SoftParkCtaHovers {
+    pub approve: bool,
+    pub notes: bool,
+    pub clarify: bool,
+    pub revise: bool,
+    pub quit: bool,
+}
+
+fn soft_park_button_spans<'a>(
+    key: char,
+    rest: &str,
+    hovered: bool,
+    theme: &Theme,
+) -> Vec<Span<'a>> {
+    let bg = if hovered {
+        theme.bg_highlight
+    } else {
+        theme.bg_base
+    };
+    let key_style = Style::default()
+        .fg(theme.text_primary)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    if rest.is_empty() {
+        return vec![Span::styled(key.to_string(), key_style)];
+    }
+    let label_style = Style::default().fg(theme.gray).bg(bg);
+    vec![
+        Span::styled(key.to_string(), key_style),
+        Span::styled(format!(" {rest}"), label_style),
+    ]
+}
+
+/// Paint soft-park plan-approval CTA buttons into `area` (usually the
+/// shortcuts row). Returns hit rects for mouse dispatch.
+///
+/// Same five actions as the side-panel footer. Tries full labels → compact
+/// → key-only, denser separators, then multi-row wrap when `area.height >= 2`,
+/// so **Revise** (and every other button) stays hit-testable on narrow rows.
+///
+/// Separator width uses **display** columns (`UnicodeWidthStr`), never
+/// `str::len()` bytes — middle-dot `" · "` is 3 cols / 4 UTF-8 bytes, and
+/// byte width used to over-count packing and drop later buttons.
+pub fn paint_soft_park_cta_buttons(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    hovers: SoftParkCtaHovers,
+) -> SoftParkCtaAreas {
+    if area.width == 0 || area.height == 0 {
+        return SoftParkCtaAreas::default();
+    }
+    use unicode_width::UnicodeWidthStr;
+
+    let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+    let keys = ['a', 'A', '?', 's', 'q'];
+    let hovers_arr = [
+        hovers.approve,
+        hovers.notes,
+        hovers.clarify,
+        hovers.revise,
+        hovers.quit,
+    ];
+    // Prefer readable separators, fall back to denser packing so all five fit.
+    let separators = [" · ", " ", ""];
+    let label_modes: [[&str; 5]; 3] = [
+        ["approve", "approve w/ comment", "clarify", "revise", "quit"],
+        ["approve", "notes", "clarify", "revise", "quit"],
+        ["", "", "", "", ""],
+    ];
+
+    for labels in &label_modes {
+        let span_sets: Vec<Vec<Span>> = keys
+            .iter()
+            .zip(labels.iter())
+            .zip(hovers_arr.iter())
+            .map(|((&k, &lab), &hov)| soft_park_button_spans(k, lab, hov, theme))
+            .collect();
+        let widths: Vec<u16> = span_sets
+            .iter()
+            .map(|s| s.iter().map(|sp| sp.width() as u16).sum())
+            .collect();
+
+        for separator in separators {
+            let sep_w = UnicodeWidthStr::width(separator) as u16;
+            let mut total_w = widths.iter().copied().sum::<u16>();
+            total_w = total_w.saturating_add(sep_w.saturating_mul(4));
+            if total_w > area.width {
+                continue;
+            }
+            let y = area.y;
+            let mut x = area.x + (area.width - total_w) / 2;
+            let mut areas = [None; 5];
+            for i in 0..5 {
+                if i > 0 {
+                    if sep_w > 0 {
+                        buf.set_string(x, y, separator, sep_style);
+                    }
+                    x = x.saturating_add(sep_w);
+                }
+                let start = x;
+                let bw = widths[i].max(1);
+                for span in &span_sets[i] {
+                    let w = span.width() as u16;
+                    buf.set_span(x, y, span, w);
+                    x = x.saturating_add(w);
+                }
+                areas[i] = Some(Rect::new(start, y, bw, 1));
+            }
+            return SoftParkCtaAreas {
+                approve: areas[0],
+                notes: areas[1],
+                clarify: areas[2],
+                revise: areas[3],
+                quit: areas[4],
+            };
+        }
+    }
+
+    // Multi-row wrap (when footer grants height > 1): left-align key-only
+    // buttons so every CTA remains hit-testable.
+    if area.height >= 2 {
+        let mut areas = [None; 5];
+        let mut x = area.x;
+        let mut y = area.y;
+        let row_end = area.x.saturating_add(area.width);
+        let y_max = area.y.saturating_add(area.height.saturating_sub(1));
+        let sep = " ";
+        let sep_w = 1u16;
+        for (i, &k) in keys.iter().enumerate() {
+            let spans = soft_park_button_spans(k, "", hovers_arr[i], theme);
+            let w: u16 = spans.iter().map(|s| s.width() as u16).sum::<u16>().max(1);
+            let need = if x == area.x {
+                w
+            } else {
+                sep_w.saturating_add(w)
+            };
+            if x.saturating_add(need) > row_end {
+                if y >= y_max {
+                    // Last row full: still place remaining keys by restarting
+                    // the row (prefer clipped hits over None).
+                    y = y_max;
+                } else {
+                    y = y.saturating_add(1);
+                }
+                x = area.x;
+            } else if x != area.x {
+                buf.set_string(x, y, sep, sep_style);
+                x = x.saturating_add(sep_w);
+            }
+            // If even a single key won't fit, force it at row start.
+            if x.saturating_add(w) > row_end {
+                x = area.x;
+            }
+            let start = x;
+            for span in &spans {
+                let sw = span.width() as u16;
+                buf.set_span(x, y, span, sw);
+                x = x.saturating_add(sw);
+            }
+            areas[i] = Some(Rect::new(start, y, w, 1));
+        }
+        return SoftParkCtaAreas {
+            approve: areas[0],
+            notes: areas[1],
+            clarify: areas[2],
+            revise: areas[3],
+            quit: areas[4],
+        };
+    }
+
+    // Height-1 extreme narrow: partition the row into five non-empty slots so
+    // **Revise** (index 3) is never dropped. Paint key-only glyphs when a slot
+    // has room; hit rects cover each slot (no zero-width / no full drop).
+    let mut areas = [None; 5];
+    let n = 5u16;
+    let base = (area.width / n).max(1);
+    let mut rem = area
+        .width
+        .saturating_sub(base.saturating_mul(n.min(area.width)));
+    // When width < 5, stack remaining keys on the last column (still Some).
+    let mut x = area.x;
+    for (i, &k) in keys.iter().enumerate() {
+        let extra = if rem > 0 {
+            rem -= 1;
+            1
+        } else {
+            0
+        };
+        let slot_w = if area.width >= 5 {
+            base.saturating_add(extra).max(1)
+        } else {
+            1
+        };
+        let start = if area.width >= 5 {
+            x
+        } else {
+            // Overlap last columns rather than leave None.
+            area.x
+                .saturating_add((i as u16).min(area.width.saturating_sub(1)))
+        };
+        let spans = soft_park_button_spans(k, "", hovers_arr[i], theme);
+        for span in &spans {
+            let sw = (span.width() as u16).min(slot_w).max(1);
+            buf.set_span(start, area.y, span, sw);
+        }
+        areas[i] = Some(Rect::new(start, area.y, slot_w, 1));
+        if area.width >= 5 {
+            x = x.saturating_add(slot_w);
+        }
+    }
+    SoftParkCtaAreas {
+        approve: areas[0],
+        notes: areas[1],
+        clarify: areas[2],
+        revise: areas[3],
+        quit: areas[4],
+    }
 }
 
 /// Status-line label while plan approval is parked (soft or modal).
@@ -529,10 +766,42 @@ mod tests {
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());
         assert!(
-            EMPTY_PLAN_PLACEHOLDER.contains("Clarify")
-                && EMPTY_PLAN_PLACEHOLDER.contains("Revise")
-                && EMPTY_PLAN_PLACEHOLDER.contains("Approve w/ comment"),
-            "empty-plan CTA copy should list the four primary actions"
+            EMPTY_PLAN_PLACEHOLDER.contains("/view-plan")
+                || EMPTY_PLAN_PLACEHOLDER.contains("footer"),
+            "empty-plan copy must point at real review paths; got {EMPTY_PLAN_PLACEHOLDER:?}"
+        );
+        assert!(
+            !EMPTY_PLAN_PLACEHOLDER.contains("(`a`)")
+                && !EMPTY_PLAN_PLACEHOLDER.contains("- **Approve**")
+                && !EMPTY_PLAN_PLACEHOLDER.contains("Approve w/ comment"),
+            "empty-plan body must not fake a key/option menu; got {EMPTY_PLAN_PLACEHOLDER:?}"
+        );
+    }
+
+    /// Named contract: scrollback plan card is preview + plain pointer only.
+    /// No dead "Approve · Notes · …" button row or "keys when prompt empty" theater.
+    #[test]
+    fn parked_plan_card_has_no_fake_button_chrome() {
+        let card = format_parked_plan_card(Some("# Title\n\nLine two\nLine three"));
+        assert!(card.starts_with(PLAN_CARD_HEADER));
+        assert!(card.contains("# Title") && card.contains("Line two"));
+        assert!(
+            card.contains(PLAN_CARD_CTAS),
+            "card must keep plain review pointer; got {card:?}"
+        );
+        assert!(
+            !card.contains("Approve ·")
+                && !card.contains("when prompt empty")
+                && !card.contains("a/A/?/s/q")
+                && !card.contains("Click footer: Approve"),
+            "card must not look like dead clickable CTAs; got {card:?}"
+        );
+        let empty = format_parked_plan_card(None);
+        assert!(empty.starts_with(PLAN_CARD_HEADER_EMPTY));
+        assert!(empty.contains(PLAN_CARD_CTAS));
+        assert!(
+            !empty.contains("Approve ·") && !empty.contains("a/A/?/s/q"),
+            "empty card must not fake button chrome; got {empty:?}"
         );
     }
 
@@ -714,5 +983,81 @@ mod tests {
             !feedback.contains("@plan.md:3"),
             "cursor selection must not double-attach when comments exist: {feedback}"
         );
+    }
+
+    /// Named contract (dogfood 2026-07-29): all five soft-park footer CTAs get
+    /// non-empty hit rects after paint — including Revise — on typical and
+    /// narrow rows. Hit rects must not zero-width and must not overlap.
+    #[test]
+    fn soft_park_paint_all_five_cta_hit_areas_wide_and_narrow() {
+        let theme = Theme::current();
+        for width in [80u16, 52, 40, 24, 17, 12, 9, 5] {
+            let area = Rect::new(0, 3, width, 1);
+            let mut buf = Buffer::empty(Rect::new(0, 0, width.max(1), 6));
+            let areas =
+                paint_soft_park_cta_buttons(&mut buf, area, &theme, SoftParkCtaHovers::default());
+            let rects = [
+                ("approve", areas.approve),
+                ("notes", areas.notes),
+                ("clarify", areas.clarify),
+                ("revise", areas.revise),
+                ("quit", areas.quit),
+            ];
+            for (name, r) in &rects {
+                let r = r.unwrap_or_else(|| panic!("{name} hit missing at width={width}"));
+                assert!(
+                    r.width >= 1 && r.height >= 1,
+                    "{name} zero-sized hit at width={width}: {r:?}"
+                );
+            }
+            // No pairwise overlap on a single-row paint (width >= 5 partitions).
+            if width >= 5 {
+                let filled: Vec<Rect> = rects.iter().filter_map(|(_, r)| *r).collect();
+                for i in 0..filled.len() {
+                    for j in (i + 1)..filled.len() {
+                        let a = filled[i];
+                        let b = filled[j];
+                        let x_overlap =
+                            a.x < b.x.saturating_add(b.width) && b.x < a.x.saturating_add(a.width);
+                        let y_overlap = a.y < b.y.saturating_add(b.height)
+                            && b.y < a.y.saturating_add(a.height);
+                        assert!(
+                            !(x_overlap && y_overlap),
+                            "CTA hits overlap at width={width}: {a:?} vs {b:?}"
+                        );
+                    }
+                }
+            }
+            // Revise specifically: non-empty and inside the paint area.
+            let revise = areas.revise.expect("revise");
+            assert!(
+                revise.y >= area.y && revise.y < area.y.saturating_add(area.height),
+                "revise y out of area at width={width}"
+            );
+            assert!(
+                revise.x >= area.x && revise.x < area.x.saturating_add(area.width.max(1)),
+                "revise x out of area at width={width}: {revise:?}"
+            );
+        }
+    }
+
+    /// Multi-row wrap still exposes all five when height allows.
+    #[test]
+    fn soft_park_paint_wraps_when_height_allows() {
+        let theme = Theme::current();
+        // Width too narrow for one key-only row with middle-dot seps in old code;
+        // height 2 must still yield five hits.
+        let area = Rect::new(2, 1, 10, 2);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 6));
+        let areas =
+            paint_soft_park_cta_buttons(&mut buf, area, &theme, SoftParkCtaHovers::default());
+        assert!(areas.approve.is_some());
+        assert!(areas.notes.is_some());
+        assert!(areas.clarify.is_some());
+        assert!(
+            areas.revise.is_some(),
+            "wrap path must keep Revise hit-testable"
+        );
+        assert!(areas.quit.is_some());
     }
 }

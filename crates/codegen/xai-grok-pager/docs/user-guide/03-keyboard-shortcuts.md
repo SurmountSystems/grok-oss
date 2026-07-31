@@ -78,7 +78,7 @@ prompt. `⇧E` clears all pins, and `Ctrl+E` clears pins on thinking blocks.
 
 | Key | Action |
 |-----|--------|
-| `y` | Copy block content to clipboard |
+| `y` | Copy block content to clipboard (also: selection-box **`⧉`** when a copyable block is selected; default on via `selection_buttons`. Mouse: click always-on **`⧉`** on a user or assistant message bubble to copy that bubble without selecting first; `bubble_copy_buttons`, default on) |
 | `⇧Y` | Copy block metadata (e.g., the shell command) to clipboard |
 | `Enter` | Open block content in fullscreen viewer |
 | `Ctrl+F` | Open block content in fullscreen viewer (alt binding) |
@@ -134,6 +134,8 @@ Actions that affect the agent session, available from the agent screen.
 | `Shift+Tab` | Prompt focused | Cycle mode (Normal → Plan → Always-approve) |
 | `Ctrl+B` | Agent screen | Send the running foreground command to the background |
 | `Ctrl+T` | Agent screen | Toggle the todos pane |
+| `h` | Todo pane focused | Hide or show completed/cancelled rows in the pane only (view filter; does not change the board or badge) |
+| `X` | Todo pane focused | **Clear done** — remove completed and cancelled items from the live session board and archive them (badge and pane update). Same as the pane chrome control and `/clear-completed-todos` |
 | `Ctrl+G` | Agent screen (full TUI) | Toggle the tasks pane |
 | `Ctrl+G` | Ordinary composer (minimal mode) | Edit the current draft in an external editor without sending it. If the terminal reserves this chord, choose **Edit Prompt in External Editor** from the command palette. |
 | `Ctrl+L` | Agent screen | Open the extensions modal (**non–VS Code family only**; on VS Code / Cursor / Windsurf / Zed, `Ctrl+L` is mid-turn **interject** and extensions open via `/plugins` / `/hooks`) |
@@ -220,6 +222,7 @@ Actions available from any screen.
 |-----|---------|--------|-------------|
 | `Ctrl+N` | | Create a new session (optionally in a git worktree) | Yes (double-press within 1000ms) |
 | `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes (double-press within 1000ms) |
+| `F9` | | Capture the current TUI frame as a PNG (`/screenshot`) | No |
 
 **VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grok makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
 
@@ -273,6 +276,7 @@ The bottom of the TUI displays a contextual shortcuts bar showing the most relev
 The TUI supports mouse interaction:
 
 - **Click** on a scrollback entry to select it
+- **Click** always-on **`⧉`** on a user or assistant message bubble to copy that bubble without selecting it first (default on via `scrollback.display.bubble_copy_buttons`)
 - **Scroll wheel** to scroll through the scrollback
 - **Click** on the prompt area to focus it
 - **Hover** over the prompt to see a highlight (configurable via `pager.toml`)
@@ -310,6 +314,7 @@ Multiline:        Ctrl+M (toggle)
 Paste:            Ctrl+V (text, files, screenshots on macOS/Linux)
 Selected text:    Middle click or Shift+Insert (Linux X11/XWayland PRIMARY)
 Paste image:      Alt+V (Windows only — for screenshots / "Copy Image")
+Copy draft:       click ⧉ on the prompt top border (full composer plain text)
 Select all:       Cmd+A (macOS, Ghostty only — see note below)
 Leave:            Tab (back to scrollback)
 Cancel (running): Ctrl+C (empty prompt; non-empty draft clears first)

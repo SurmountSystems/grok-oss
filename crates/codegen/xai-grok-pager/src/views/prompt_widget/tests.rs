@@ -4499,77 +4499,203 @@
         }
     }
 
-    /// Draw a bordered prompt into a fresh `width`×4 buffer and return it.
-    fn draw_bordered(width: u16, style: &PromptStyle) -> Buffer {
-        let mut pw = PromptWidget::new();
-        let area = Rect::new(0, 0, width, 4);
-        let mut buf = Buffer::empty(area);
-        pw.draw(&mut buf, area, None, style, None, None);
-        buf
-    }
-
     #[test]
     fn title_renders_on_top_border_with_corners_intact() {
-        let buf = draw_bordered(40, &title_test_style(Some("my session")));
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(Some("my session"));
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
 
-        // ` my session ` is 12 cols, right-aligned ending 2 cells before ╮:
-        // label at x 25..=36, dashes at 37..=38, corner at 39.
-        assert_eq!(buf_text_at(&buf, 25, 37, 0), " my session ");
+        // Copy chrome sits near the top-right corner (`[⧉]` + pad before ╮).
+        let copy = pw.copy_button_area().expect("copy chrome on bordered prompt");
+        assert_eq!(copy.y, 0);
+        assert_eq!(copy.width, 3);
+        assert_eq!(
+            buf.cell((copy.x, 0)).unwrap().symbol(),
+            "[",
+            "copy button opens with '['"
+        );
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
-        assert_eq!(buf_text_at(&buf, 37, 39, 0), "\u{2500}\u{2500}");
 
-        // Info-line treatment: dimmed secondary text on the prompt bg (same
-        // blend as `render_info_line`'s model name), no bold, no inverse.
+        // Title sits left of the copy chrome.
+        let row = buf_text_at(&buf, 0, 40, 0);
+        assert!(
+            row.contains("my session"),
+            "session title must still paint left of copy chrome; row={row:?}"
+        );
+
+        // Top-border session title stays dimmed secondary caption chrome
+        // (model name on the bottom info line uses `accent_model` instead).
         let theme = Theme::current();
         let expected_fg =
             crate::render::color::blend_color(theme.bg_base, theme.text_secondary, 0.6)
                 .unwrap_or(theme.gray);
-        let title_cell = buf.cell((26, 0)).unwrap().style();
+        // Find a title letter cell.
+        let title_x = (0..area.width)
+            .find(|&x| buf.cell((x, 0)).is_some_and(|c| c.symbol() == "m"))
+            .expect("title 'm' cell");
+        let title_cell = buf.cell((title_x, 0)).unwrap().style();
         assert_eq!(title_cell.fg, Some(expected_fg));
         assert_eq!(title_cell.bg, Some(theme.bg_base));
         assert!(!title_cell.add_modifier.contains(Modifier::BOLD));
         assert!(!title_cell.add_modifier.contains(Modifier::REVERSED));
         let border = buf.cell((1, 0)).unwrap().style();
         assert_eq!(border.bg, title_cell.bg);
-        // Fg delta vs the border rule (like the bottom info line vs its ╰─╯
-        // rule) — only meaningful with color support, same guard as the
-        // slash-highlight test above (monochrome themes resolve to Reset).
         if theme.text_secondary != ratatui::style::Color::Reset {
             assert_ne!(border.fg, title_cell.fg);
         }
     }
 
+    /// Focused info-line model label paints `theme.accent_model` (magenta on DOGE).
     #[test]
-    fn no_title_keeps_plain_top_border() {
-        let buf = draw_bordered(40, &title_test_style(None));
+    fn info_line_model_name_uses_accent_model_not_gray() {
+        use crate::views::prompt_widget::{PromptFlag, PromptInfo, PromptWidget};
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::doge();
+        let pw = PromptWidget::new();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        let info = PromptInfo {
+            model_name: "Grok 4.5 (high)",
+            flags: &[] as &[PromptFlag],
+            multiline: false,
+            usage_warning: None,
+            usage_warning_critical: false,
+        };
+        pw.render_info_line(&mut buf, area, &info, theme.bg_base, &theme, true);
+
+        // Info line is right-aligned: find the 'G' of "Grok 4.5 (high)".
+        let model_cell = (0..area.width)
+            .find_map(|x| {
+                let c = buf.cell((x, 0))?;
+                (c.symbol() == "G").then_some(c.clone())
+            })
+            .expect("model text 'G' cell");
+        assert_eq!(
+            model_cell.style().fg,
+            Some(theme.accent_model),
+            "model label must use accent_model (magenta on DOGE), got {:?}",
+            model_cell.style().fg
+        );
+        assert_ne!(
+            model_cell.style().fg,
+            Some(theme.gray),
+            "model label must not be gray secondary chrome"
+        );
+    }
+
+    /// Named contract: bordered prompt top bar paints a ⧉ hit target for
+    /// one-click draft copy (payload is composer plain text).
+    #[test]
+    fn bordered_prompt_top_bar_sets_copy_button_hit_area() {
+        let mut pw = PromptWidget::new();
+        pw.set_text("draft body with [Image #1] chip label");
+        let style = title_test_style(None);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        let copy = pw
+            .copy_button_area()
+            .expect("bordered prompt must expose ⧉ draft-copy hit target");
+        assert_eq!(copy.height, 1);
+        assert_eq!(copy.y, area.y);
+        assert!(
+            copy.x + copy.width < area.x + area.width,
+            "copy button must sit inside the top border before ╮"
+        );
+        assert_eq!(
+            pw.draft_plain_text(),
+            "draft body with [Image #1] chip label",
+            "draft plain text keeps multimodal chip labels as typed"
+        );
+        // Corners intact.
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
+        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+    }
+
+    #[test]
+    fn chromeless_prompt_skips_copy_button() {
+        let mut pw = PromptWidget::new();
+        let style = PromptStyle::overlay();
+        let area = Rect::new(0, 0, 40, 2);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        assert!(
+            pw.copy_button_area().is_none(),
+            "overlay/chromeless prompts have no top-bar copy chrome"
+        );
+    }
+
+    #[test]
+    fn no_title_keeps_corners_and_copy_chrome() {
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(None);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
 
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
-        assert_eq!(buf_text_at(&buf, 1, 39, 0), "\u{2500}".repeat(38));
+        assert!(pw.copy_button_area().is_some());
+        // Left of copy chrome is still the border rule.
+        let copy = pw.copy_button_area().unwrap();
+        assert_eq!(
+            buf.cell((1, 0)).unwrap().symbol(),
+            "\u{2500}",
+            "border dash left of chrome"
+        );
+        assert_eq!(buf.cell((copy.x, 0)).unwrap().symbol(), "[");
     }
 
     #[test]
     fn long_title_truncates_on_top_border_and_keeps_corners() {
         let long = "a".repeat(60);
-        let buf = draw_bordered(40, &title_test_style(Some(&long)));
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(Some(&long));
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
 
-        // max_w = 40 - 6 = 34: label spans x 3..=36 with a trailing ellipsis.
         let row = buf_text_at(&buf, 0, 40, 0);
         assert!(row.contains('\u{2026}'), "expected ellipsis in: {row}");
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+        assert!(
+            pw.copy_button_area().is_some(),
+            "copy chrome remains with a long title"
+        );
         assert_eq!(buf_text_at(&buf, 1, 3, 0), "\u{2500}\u{2500}");
-        assert_eq!(buf_text_at(&buf, 37, 39, 0), "\u{2500}\u{2500}");
     }
 
     #[test]
     fn blank_title_or_narrow_area_skips_border_title() {
-        // Whitespace-only titles never paint on the border.
-        let buf = draw_bordered(40, &title_test_style(Some("   ")));
-        assert_eq!(buf_text_at(&buf, 1, 39, 0), "\u{2500}".repeat(38));
+        // Whitespace-only titles never paint; copy chrome still may.
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(Some("   "));
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        let row = buf_text_at(&buf, 0, 40, 0);
+        assert!(
+            !row.contains("session"),
+            "blank title must not invent text; row={row:?}"
+        );
+        assert!(pw.copy_button_area().is_some());
 
-        // Too narrow for the min label width (max_w < 6): plain border, no panic.
-        let buf = draw_bordered(11, &title_test_style(Some("my session")));
-        assert_eq!(buf_text_at(&buf, 1, 10, 0), "\u{2500}".repeat(9));
+        // Very narrow: no panic; corners stay.
+        let mut pw = PromptWidget::new();
+        let buf = {
+            let style = title_test_style(Some("my session"));
+            let area = Rect::new(0, 0, 11, 4);
+            let mut buf = Buffer::empty(area);
+            pw.draw(&mut buf, area, None, &style, None, None);
+            buf
+        };
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
+        assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "\u{256e}");
     }

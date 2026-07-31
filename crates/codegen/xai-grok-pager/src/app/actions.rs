@@ -314,6 +314,9 @@ pub enum Action {
     ToggleScrollDebugHud,
     /// Toggle the release-safe FPS HUD (`/debug fps`).
     ToggleFpsHud,
+    /// Capture the current rendered TUI frame as a PNG under
+    /// `$GROK_HOME/screenshots/` (toast shows the path). Slash: `/screenshot`.
+    CaptureTuiScreenshot,
     /// Toggle the scroll flight recorder at runtime (`/debug log`;
     /// `GROK_SCROLL_LOG=1` enables it from startup).
     ToggleScrollLog,
@@ -321,6 +324,11 @@ pub enum Action {
     ShowDebugStatus,
     /// Copy selected block's content to clipboard.
     CopyBlockContent,
+    /// Copy the scrollback entry at `idx` (mouse always-on bubble ⧉). Does not
+    /// change selection. Keyboard `y` stays on [`Self::CopyBlockContent`].
+    CopyEntryContent {
+        idx: usize,
+    },
     /// Copy the Nth most recent assistant message (1 = latest).
     /// `None` => clipboard (with file fallback on failure); `Some(p)` => write UTF-8 file.
     CopyAssistantMessage {
@@ -542,6 +550,8 @@ pub enum Action {
     SetCompactMode(bool),
     /// Hide the top agent status bar (`[ui].hide_header`).
     SetHideHeader(bool),
+    /// Hide terminal/tab title updates (`[ui].hide_title_bar`).
+    SetHideTitleBar(bool),
     /// Set timestamp display on messages.
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).
@@ -700,6 +710,9 @@ pub enum Action {
     ShowContextInfo,
     /// `/usage` — session token/cost, plus consumer credits when visible.
     ShowUsage,
+    /// `/limits` — SuperGrok included / dollar extras / console path detail
+    /// from cached billing (not session token ledger).
+    ShowLimits,
     /// `/usage manage` — open consumer billing (no-op if surface hidden).
     ManageBilling,
     /// Commit a read-only list of the queued prompts as a system block
@@ -709,6 +722,8 @@ pub enum Action {
     /// tasks as a system block (`/tasks`). The surface minimal mode uses in
     /// place of the `TasksPane`.
     ShowTasks,
+    /// Archive completed/cancelled todos (shell `x.ai/todo/clear_completed`).
+    ClearCompletedTodos,
     /// Store an operator mid-session note (`/note <text>`). Does **not**
     /// enqueue a user turn or touch the pending-prompt queue.
     AddSessionNote {
@@ -1572,6 +1587,8 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Operator clear of completed/cancelled todos via shell ext method.
+    ClearCompletedTodos { session_id: acp::SessionId },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -2400,6 +2417,11 @@ pub enum TaskResult {
         agent_id: AgentId,
         result: Result<(), String>,
     },
+    /// Operator clear completed todos finished.
+    ClearCompletedTodosComplete {
+        cleared: usize,
+        error: Option<String>,
+    },
     /// Background task kill result. `outcome` is `None` when the agent
     /// returned an error envelope or an unparseable payload (treated as
     /// "clear pending state, keep the row").
@@ -2812,6 +2834,9 @@ pub enum TaskResult {
         autotopup: crate::views::credit_bar::AutoTopupFetch,
         /// OpenRouter account credits when a key is available (`None` = keep cache).
         openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+        /// Console team prepaid remaining cents when Management fetch succeeded
+        /// (`None` = keep prior app/agent cache).
+        console_team_prepaid_cents: Option<i64>,
     },
     /// App-level billing data (welcome screen).
     AppBillingFetched {
@@ -2819,6 +2844,9 @@ pub enum TaskResult {
         autotopup: crate::views::credit_bar::AutoTopupFetch,
         /// OpenRouter account credits when a key is available (`None` = keep cache).
         openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+        /// Console team prepaid remaining cents when Management fetch succeeded
+        /// (`None` = keep prior cache).
+        console_team_prepaid_cents: Option<i64>,
     },
     GateRefreshed {
         settings: Option<xai_grok_shell::util::config::RemoteSettings>,

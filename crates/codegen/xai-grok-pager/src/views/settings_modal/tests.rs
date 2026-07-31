@@ -619,6 +619,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "compact_mode",
             // SHARED hide_header (Appearance; default off).
             "hide_header",
+            // SHARED hide_title_bar (Appearance; default off = titles on).
+            "hide_title_bar",
             "screen_mode",
             "show_timestamps",
             "show_timeline",
@@ -2298,8 +2300,8 @@ fn int_editing_value_click_on_value_text_is_noop() {
 #[test]
 fn picking_enum_esc_dispatches_preview_revert_for_each_key() {
     let cases: &[(&str, &str)] = &[
-        ("theme", "groknight"),
-        ("auto_dark_theme", "groknight"),
+        ("theme", "doge"),
+        ("auto_dark_theme", "doge"),
         ("auto_light_theme", "grokday"),
     ];
     for &(key, original) in cases {
@@ -2337,16 +2339,16 @@ fn picking_enum_esc_dispatches_preview_revert_for_each_key() {
 #[test]
 fn picking_enum_esc_returns_to_browse() {
     let mut s = make_state();
-    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("groknight"), true);
+    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("doge"), true);
     let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(
-                name, "groknight",
+                name, "doge",
                 "Esc revert must dispatch the original canonical"
             );
         }
-        other => panic!("expected Action::PreviewTheme(\"groknight\") on Esc, got {other:?}"),
+        other => panic!("expected Action::PreviewTheme(\"doge\") on Esc, got {other:?}"),
     }
     assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
@@ -6063,17 +6065,17 @@ fn click_settings_breadcrumb_collapses_picker_to_browse() {
     // For preview-supporting enums (theme), the breadcrumb-
     // click revert dispatches `Action::PreviewTheme(original)`.
     // The original canonical for the default theme is
-    // `"groknight"`. Tightened from the previous `Action(_) |
+    // `"doge"`. Tightened from the previous `Action(_) |
     // Changed` to lock in the revert contract.
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(orig)) => {
             assert_eq!(
-                orig, "groknight",
+                orig, "doge",
                 "breadcrumb-click revert must carry the original canonical",
             );
         }
         other => panic!(
-            "expected Action(PreviewTheme(\"groknight\")) — the keyboard \
+            "expected Action(PreviewTheme(\"doge\")) — the keyboard \
              Esc-equivalent revert — got {other:?}",
         ),
     }
@@ -6117,9 +6119,9 @@ fn click_settings_breadcrumb_after_nav_reverts_to_original() {
         }
         other => panic!("expected PickingEnum, got {other:?}"),
     };
-    // Pick a different index. The default theme is `groknight`
-    // (index 1 per the registry); advance to index 0 to ensure
-    // we're navigating to a different value.
+    // Pick a different index. The default theme is `doge`
+    // (last concrete choice in the registry); advance away from
+    // the current index to ensure we're navigating to a different value.
     let target_idx = if advanced_idx == 0 { 1 } else { 0 };
     match s.mode() {
         SettingsModalMode::PickingEnum {
@@ -6177,11 +6179,11 @@ fn d_key_in_picking_enum_dispatches_open_reset_confirm() {
                 key, "theme",
                 "OpenResetConfirm key must be the active picker setting",
             );
-            // Default theme is `groknight`; entering the picker
-            // captures `original_value = current value = groknight`,
+            // Default theme is `doge`; entering the picker
+            // captures `original_value = current value = doge`,
             // so the revert dispatches with that canonical.
             assert_eq!(
-                orig, "groknight",
+                orig, "doge",
                 "PreviewTheme revert must carry the original canonical",
             );
         }
@@ -6649,6 +6651,11 @@ fn max_thoughts_width_preview_content_is_italic() {
 /// now matches that contract.
 #[test]
 fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
+    // Hermetic: ambient ~/.grok theme may be monochrome (DOGE has
+    // bg_visual == bg_highlight == black). Pin GrokNight so the two-tone
+    // preview contract is exercised against a palette that has distinct
+    // tokens. DOGE relies on UNDERLINED (asserted below) instead of bg.
+    let _theme = crate::theme::cache::pin_theme();
     let area = Rect {
         x: 0,
         y: 0,

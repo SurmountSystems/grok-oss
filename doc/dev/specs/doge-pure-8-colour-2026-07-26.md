@@ -40,8 +40,13 @@ It does **not** claim compliance with any ECMA colour standard.
 
 | Document | Role |
 |----------|------|
+| [Surmount specs `0001_DOGE.md`](https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md) (v1.0.0) | **External SoT** for the pure 3-bit RGBCMYKW palette (no gray/alpha as palette colours). Product semantic roles are application-defined (Clause 8 MAY). |
 | ECMA-48 / ISO/IEC 6429 | Select Graphic Rendition (SGR) colour *names* and index order (RGB not fixed by the standard) |
-| This note | Fixes pure digital RGB for product use |
+| This note | Project annex: SGR index order, quantisation helpers, and **Grok OSS** semantic role map |
+
+**Index-order note:** external `0001_DOGE.md` may list colours in RGBCMYKW
+table order. This note and product code use classic **ANSI SGR name order**
+(Black=0 … White=7). Same eight hex values; do not mix index formulas blindly.
 
 Historical CGA/VGA IRGB attribute numbering (BGR bit order, ~`#AA` levels,
 brown yellow) is **informative only** and **shall not** be used as the
@@ -184,12 +189,32 @@ callers that already hold `(R,G,B)` triples.
 | Display name | “DOGE” — OLED is design motivation only |
 | Black background | `#000000` (pixel-off design intent; no power claims) |
 | Helper crate / module | Hard-threshold §6.1 unit-tested; §6.2 optional |
+| External palette SoT | https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md |
 
-### 7.1 Design notes (non-normative)
+### 7.1 Grok OSS semantic roles (application layer)
+
+Built on top of pure §4 colours. Not part of the external palette law;
+product chrome only (user-guide `06-theming` DOGE section).
+
+| Colour | Role |
+|--------|------|
+| **Green** | **Human** — user prompt pointer, left accent rail (`┃`), OSC 12 cursor, success, slash skills, links (`accent_user`, `accent_success`, `accent_skill`, `link_fg`) |
+| **Magenta** | **Agent** — running activity, throbbers, model label, assistant/thinking (`accent_running`, `running`, `accent_model`, `accent_assistant`, `accent_thinking`) |
+| **Yellow** | Dates, times, timers, secondary context chrome (`gray` token paints yellow, `command`, `warning`, `accent_plan`) |
+| **Cyan** | System tags, limits, credits, path/meta (`accent_system`, `path`, `gray_dim`, `accent_feedback`, `fuzzy_accent`) |
+| **Red / Blue** | Avoid unless contextually useful (errors: `accent_error` red). Pure blue not used for UI text slots. |
+| **Gray / alpha** | Forbidden as theme palette colours. Runtime dim/blend may still emit non-pure RGB during animation; treat remaining leaks as residual scrub work. |
+
+**Human left rail:** every `UserPromptBlock` returns a static accent in
+`accent_user` (green on DOGE). Paint path is shared with Recap
+(`glyphs::accent_bar()`, `HorizontalLayout::ACCENT`). Idle expanded Recap
+stays white (`accent_tool`).
+
+### 7.2 Design notes (non-normative)
 
 - Prefer cyan over pure blue for long body text or thin links on black
-  (contrast).
-- Reserve pure blue for sparse chrome.
+  (contrast). Links on DOGE use green for luminance.
+- Reserve pure blue for sparse chrome / quantisation only.
 - No mid-gray hex in the theme primary set; dim via modifiers if needed.
 
 ---

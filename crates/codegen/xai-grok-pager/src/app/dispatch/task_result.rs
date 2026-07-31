@@ -298,6 +298,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             subscription_tier,
             autotopup,
             openrouter_balance,
+            console_team_prepaid_cents,
         } => handle_billing_fetched(
             app,
             agent_id,
@@ -306,6 +307,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             subscription_tier,
             autotopup,
             openrouter_balance,
+            console_team_prepaid_cents,
         ),
         TaskResult::BillingError {
             agent_id,
@@ -325,6 +327,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             balance,
             autotopup,
             openrouter_balance,
+            console_team_prepaid_cents,
         } => {
             if let Some(bal) = balance.as_ref() {
                 let grok_home = xai_grok_shell::util::grok_home::grok_home();
@@ -337,6 +340,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             apply_auto_topup(&mut app.auto_topup, &autotopup);
             if let Some(or) = openrouter_balance {
                 app.openrouter_credit_balance = Some(or);
+            }
+            if let Some(cents) = console_team_prepaid_cents {
+                app.console_team_prepaid_cents = Some(cents);
             }
             vec![]
         }
@@ -539,6 +545,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::CompactComplete { agent_id, result } => {
             handle_compact_complete(app, agent_id, result)
+        }
+        TaskResult::ClearCompletedTodosComplete { cleared, error } => {
+            if let Some(agent) = get_active_agent_mut(app) {
+                if let Some(err) = error {
+                    agent.show_toast(&format!("Could not clear completed todos: {err}"));
+                } else if cleared == 0 {
+                    agent.show_toast("No completed todos to clear");
+                } else {
+                    agent.show_toast(&format!("Cleared {cleared} completed"));
+                }
+            }
+            vec![]
         }
         TaskResult::SwitchModelComplete {
             agent_id,

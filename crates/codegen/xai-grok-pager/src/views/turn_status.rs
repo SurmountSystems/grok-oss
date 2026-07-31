@@ -485,8 +485,8 @@ pub fn render_turn_status(
     // ── Render left side: spinner + label (truncated) + phase_timer + queued_hint ──
     let mut left_spans: Vec<Span<'static>> = Vec::with_capacity(5);
 
-    // Spinner color: usually inherits the activity color (green for tools,
-    // secondary for thinking/responding, yellow for retries). While the
+    // Spinner color: usually inherits the activity color (accent_running for
+    // tools, secondary for thinking/responding, yellow for retries). While the
     // tool is parked on the user we render `◆` with a smooth pulse from
     // dim→bright in `accent_user`, matching the drain-blocked and
     // plan-approval indicators so every "your turn" status has the same
@@ -694,10 +694,12 @@ fn compute_activity(
         ),
         (AgentState::TurnRunning, Some(TurnActivity::ToolRunning { title, description })) => {
             // "Ask" tools (AskUserQuestion) use gray spinner like Thinking —
-            // green feels out of place when the user is answering questions.
+            // running green/success feels out of place when the user is answering.
             // Human descriptions (e.g. bash `description`) also use muted
             // secondary — they read as a wait subject (`Wait 5s…`), not a
-            // green `Run <command>` invocation.
+            // running `Run <command>` invocation.
+            // Busy tool chrome (spinner + bare Run title) uses accent_running
+            // (agent activity), not accent_success (skills/success green).
             let is_ask = title.starts_with("Ask: ") || title.starts_with("Ask ");
             let has_desc = description
                 .as_deref()
@@ -706,7 +708,7 @@ fn compute_activity(
             let style = if is_ask || has_desc {
                 Style::default().fg(theme.text_secondary)
             } else {
-                Style::default().fg(theme.accent_success)
+                Style::default().fg(theme.accent_running)
             };
             (style, String::new(), true)
         }
@@ -731,14 +733,11 @@ fn compute_activity(
             };
             let brief = reason.trim();
             if !brief.is_empty() {
-                // Keep status line readable: first line / first 48 chars of reason.
+                // Keep status line readable: first line, prefer meaningful
+                // transport detail over long reqwest/eventsource prefixes that
+                // used to clip to bare "Transport error: error".
                 let one_line = brief.lines().next().unwrap_or(brief);
-                let clipped = if one_line.chars().count() > 48 {
-                    let t: String = one_line.chars().take(45).collect();
-                    format!("{t}…")
-                } else {
-                    one_line.to_string()
-                };
+                let clipped = clip_retry_reason_brief(one_line);
                 label.push_str(" · ");
                 label.push_str(&clipped);
             }
@@ -860,6 +859,50 @@ pub fn should_show(
         || watchers.total() > 0
 }
 
+/// Clip a retry reason for the status footer (~45 visible chars).
+///
+/// Long `reqwest error stream: Transport error: error sending request…`
+/// strings used to clip right after the word `error`, leaving opaque
+/// `Transport error: error`. Strip known outer templates and keep the
+/// meaningful tail (or a short human label when that is all that remains).
+pub(crate) fn clip_retry_reason_brief(one_line: &str) -> String {
+    const MAX: usize = 45;
+    let s = one_line.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    // Already-short human labels from the sampler (preferred).
+    if s.chars().count() <= 48 {
+        return s.to_string();
+    }
+    let mut rest = s;
+    for prefix in [
+        "reqwest error stream: ",
+        "request error: ",
+        "Transport error: ",
+    ] {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped.trim_start();
+        }
+    }
+    // Second pass: eventsource still wraps after stripping the SamplingError prefix.
+    if let Some(stripped) = rest.strip_prefix("Transport error: ") {
+        rest = stripped.trim_start();
+    }
+    if rest.is_empty() {
+        return "connection interrupted".to_string();
+    }
+    if rest.chars().count() <= MAX {
+        return rest.to_string();
+    }
+    let t: String = rest.chars().take(MAX).collect();
+    // Avoid stranding a lone trailing "error" word from "error sending…".
+    if t == "error" || t.ends_with(" error") {
+        return "connection interrupted".to_string();
+    }
+    format!("{t}…")
+}
+
 /// Format a duration for the turn/phase timer.
 ///
 /// Re-exports [`crate::util::format_duration`] under the old name for
@@ -945,6 +988,48 @@ mod tests {
     fn format_subsecond() {
         assert_eq!(format_turn_timer(Duration::from_millis(500)), "0.5s");
         assert_eq!(format_turn_timer(Duration::from_millis(120)), "0.1s");
+    }
+
+    /// Contract: long transport Display templates must not clip to bare
+    /// `Transport error: error` in the footer reason slot.
+    #[test]
+    fn clip_retry_reason_does_not_strand_bare_error_word() {
+        let long = "reqwest error stream: Transport error: error sending request for url (https://api.x.ai/v1/chat/completions)";
+        let clipped = clip_retry_reason_brief(long);
+        assert!(
+            !clipped.eq_ignore_ascii_case("error")
+                && !clipped.ends_with("Transport error: error")
+                && !clipped.ends_with("Transport error: error…"),
+            "clip must not strand bare 'error', got {clipped:?}"
+        );
+        assert!(
+            clipped.contains("sending request") || clipped == "connection interrupted",
+            "expected meaningful transport detail or short label, got {clipped:?}"
+        );
+    }
+
+    #[test]
+    fn clip_retry_reason_keeps_short_human_label() {
+        assert_eq!(
+            clip_retry_reason_brief("connection interrupted"),
+            "connection interrupted"
+        );
+    }
+
+    #[test]
+    fn retrying_activity_label_uses_clipped_reason() {
+        let theme = Theme::current();
+        let activity = Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "connection interrupted".into(),
+        });
+        let (_, label, _) =
+            compute_activity(&theme, &AgentState::TurnRunning, &activity, false, false);
+        assert!(
+            label.starts_with("Retrying (attempt 1) · connection interrupted"),
+            "got {label:?}"
+        );
     }
 
     #[test]
@@ -1039,6 +1124,59 @@ mod tests {
         // label — the view leaves it as `None` rather than Waiting(Model).
         let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, true, false);
         assert_eq!(label, "Running…");
+    }
+
+    /// Lower-left tool/activity throbber uses `accent_running`, not success
+    /// green — under DOGE that is pure magenta (#FF00FF). Skills keep
+    /// `accent_skill` green separately.
+    #[test]
+    fn doge_tool_running_spinner_uses_accent_running_not_success_green() {
+        let doge = Theme::doge();
+        let magenta = ratatui::style::Color::Rgb(255, 0, 255);
+        let green = ratatui::style::Color::Rgb(0, 255, 0);
+        assert_eq!(doge.accent_running, magenta);
+        assert_eq!(
+            doge.accent_success, green,
+            "success/skills family stays green"
+        );
+
+        let tool = TurnActivity::ToolRunning {
+            title: "Bash".into(),
+            description: None,
+        };
+        let (style, _, is_tool) =
+            compute_activity(&doge, &AgentState::TurnRunning, &Some(tool), false, false);
+        assert!(is_tool);
+        assert_eq!(
+            style.fg,
+            Some(doge.accent_running),
+            "tool activity spinner must use accent_running (magenta under DOGE)"
+        );
+        assert_ne!(
+            style.fg,
+            Some(doge.accent_success),
+            "must not paint agent throbber with accent_success green"
+        );
+    }
+
+    /// Shared paint maps to `accent_running`; GrokNight tokens stay as defined
+    /// (success still green; running still its own token).
+    #[test]
+    fn groknight_tool_running_uses_accent_running_tokens_unchanged() {
+        let gn = Theme::groknight();
+        let tool = TurnActivity::ToolRunning {
+            title: "Bash".into(),
+            description: None,
+        };
+        let (style, _, is_tool) =
+            compute_activity(&gn, &AgentState::TurnRunning, &Some(tool), false, false);
+        assert!(is_tool);
+        assert_eq!(style.fg, Some(gn.accent_running));
+        // Token inventory: success ≠ running (green skill/success vs running accent).
+        assert_ne!(
+            gn.accent_success, gn.accent_running,
+            "GrokNight success and running tokens must remain distinct"
+        );
     }
 
     #[test]

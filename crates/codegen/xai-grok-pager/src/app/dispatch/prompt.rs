@@ -187,6 +187,7 @@ pub(super) fn dispatch_clear_prompt(app: &mut AppView) -> Vec<Effect> {
         interject::record_interject_prompt_history(agent, &text);
         // Clears chips/images via PromptWidget::set_text empty path.
         agent.prompt.set_text("");
+        agent.clear_unsent_prompt_draft();
     });
     vec![]
 }
@@ -738,6 +739,7 @@ pub(super) fn dispatch_send_prompt_inner(
             // Drain prompt images before clearing prompt state.
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");
+            agent.clear_unsent_prompt_draft();
         }
         // Every non-enqueue arm returned above. Queued slash work bypasses
         // the picker, so create the deferred session or it never drains.
@@ -745,6 +747,7 @@ pub(super) fn dispatch_send_prompt_inner(
     } else if !literal && matches!(trimmed, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!") {
         if consume_input {
             agent.prompt.set_text("");
+            agent.clear_unsent_prompt_draft();
         }
         return dispatch(Action::Quit, app);
     } else {
@@ -825,6 +828,7 @@ pub(super) fn dispatch_send_prompt_inner(
             let images = agent.prompt.drain_images();
             if consume_input {
                 agent.prompt.set_text("");
+                agent.clear_unsent_prompt_draft();
             }
             // A new prompt is taking the wheel (same contract as the
             // immediate-send branch below).
@@ -854,6 +858,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 // Plain prompt: no images to drain. Clear textarea + record
                 // up-arrow history (same as the local path's history insert).
                 agent.prompt.set_text("");
+                agent.clear_unsent_prompt_draft();
                 let trimmed_key = text.trim().to_string();
                 if !trimmed_key.is_empty() {
                     agent
@@ -903,6 +908,7 @@ pub(super) fn dispatch_send_prompt_inner(
             // Drain prompt images before clearing prompt state.
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");
+            agent.clear_unsent_prompt_draft();
         }
         // Local queue while a turn is running (e.g. images attached): tip after
         // this branch so the agent mut-borrow is released first.
@@ -1020,6 +1026,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
         // deltas ours in the ACP gate once it becomes the running turn.
         agent.note_self_originated_prompt(&prompt_id);
         agent.prompt.set_text("");
+        agent.clear_unsent_prompt_draft();
 
         let sid_str = session_id.0.to_string();
         push_server_queue_echo(app, agent_id, &sid_str, &prompt_id, &command, "bash");
@@ -1038,6 +1045,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
 
     agent.session.enqueue_bash_command(command.clone());
     agent.prompt.set_text("");
+    agent.clear_unsent_prompt_draft();
 
     let drain = maybe_drain_queue(agent);
     note_peek_page_flip(app, id, drain.page_flip_entry);
@@ -1385,7 +1393,7 @@ pub(super) fn handle_prompt_response(
         if let Some(mut pav) = agent.plan_approval_view.take() {
             pav.send_stale_cancel();
             agent.plan_next_comment_id = pav.next_comment_id;
-            agent.prompt.restore(pav.stashed_prompt);
+            agent.restore_plan_stashed_prompt(pav.stashed_prompt);
             agent.line_viewer = None;
         }
 
@@ -1411,24 +1419,29 @@ pub(super) fn handle_prompt_response(
             // mirroring the local non-empty-queue behavior.
             let queue_empty =
                 agent.session.pending_prompts.is_empty() && pending_adoption.is_none();
-            let session_name = agent
-                .display_name
-                .as_deref()
-                .or(agent.generated_session_title.as_deref());
+            let session_name = crate::notifications::title::resolve_session_title_name(
+                agent.display_name.as_deref(),
+                agent.generated_session_title.as_deref(),
+            )
+            .map(str::to_owned);
 
             // Skip idle escapes when queue is non-empty — the next
             // turn starts immediately and would overwrite them (title flicker).
             if queue_empty {
                 let cwd_str = app.cwd.to_string_lossy();
                 let model = agent.session.models.current_model_name();
+                // busy_agent_count left 0 here: this agent just went idle and
+                // we hold &mut AgentView (cannot scan app.agents). The next
+                // update_notifications tick fills the multi-agent count.
                 let idle_title = crate::notifications::TitleState {
-                    session_name,
+                    session_name: session_name.as_deref(),
                     model: model.as_deref(),
                     activity: None,
                     has_pending_permissions: false,
                     cwd: Some(&cwd_str),
                     turn_elapsed: None,
                     is_busy: false,
+                    busy_agent_count: 0,
                     focused: true,
                 };
                 app.pending_notification_escapes =

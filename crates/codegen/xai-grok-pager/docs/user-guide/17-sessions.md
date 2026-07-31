@@ -49,7 +49,13 @@ Grok stores each session in its own directory, grouped by working directory. It 
 | **`plan.json`** | Snapshot mirror of the todo board (written on compact and when asks/todos are seeded). Used as a **fallback** on resume when Resources state is missing or empty. |
 | **ACP `Plan` events** in `updates.jsonl` | Drive the TUI todo pane during the session and on replay. Resume also re-emits `Plan` from durable state so the board survives load. |
 
-Do not treat `plan.json` alone as the full story: if files disagree, prefer non-empty `resources_state.json` (Resources). New sessions start empty until freeform chat seeds `ask:*`, a skill scaffolds namespaces, or the agent calls `todo_write`. Items dropped from the live board (`merge: false` full replace of unprotected ids, or ask-cap prune) stay in a capped off-pane archive on that same Resources state — they do not reappear in the todo pane or ACP Plan list.
+Do not treat `plan.json` alone as the full story: if files disagree, prefer non-empty `resources_state.json` (Resources). New sessions start empty until freeform chat seeds `ask:*`, a skill scaffolds namespaces, or the agent calls `todo_write`. Items dropped from the live board stay in a capped off-pane archive on that same Resources state — they do not reappear in the todo pane or ACP Plan list. Archive reasons include:
+
+- Agent `merge: false` full replace of unprotected unmentioned ids
+- Ask-cap prune of oldest `ask:*` rows
+- **You** clearing finished work: todo pane **Clear done**, focused `X`, or `/clear-completed-todos` (archives completed and cancelled only; pending and in-progress stay)
+
+That operator clear is durable (board + badge update). Pane `h` only hides done rows in the view; it does not archive or change the badge. There is no archive browser UI yet.
 
 ---
 

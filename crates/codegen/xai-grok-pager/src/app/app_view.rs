@@ -718,6 +718,9 @@ pub struct AppView {
     /// OpenRouter account credits (when an OR key is configured). Shown in the
     /// prompt footer when the active model is OpenRouter-backed.
     pub openrouter_credit_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+    /// Console team prepaid remaining USD cents (Management API). Distinct from
+    /// SuperGrok session extras. `None` = honest absence.
+    pub console_team_prepaid_cents: Option<i64>,
     /// Periodic billing poll requested (credits >= 99%).
     pub billing_poll_wanted: bool,
     /// Leader-mode session roster (FleetView dashboard). Populated from
@@ -804,6 +807,10 @@ pub struct AppView {
     /// colors show instead of literal escapes. Plain-text transcripts (`/export`
     /// markdown) leave this false.
     pub pending_pager_ansi: bool,
+    /// When true, the event loop captures the last presented TUI frame to a
+    /// PNG under `$GROK_HOME/screenshots/` after the next present and toasts
+    /// the path. Set by `/screenshot` / [`Action::CaptureTuiScreenshot`].
+    pub pending_tui_screenshot: bool,
     /// Minimal mode only: the Ctrl+T **force-show** pin for the todo panel.
     /// Minimal-mode-only per-session state, consolidated into a single field so
     /// the central `AppView` isn't peppered with loose minimal flags. Default-
@@ -1316,6 +1323,14 @@ impl AppView {
                 .is_some_and(is_api_key_label);
         self.usage_visible = meta.team_name.is_none() && !self.is_api_key_auth;
         self.sync_billing_surface_to_agents();
+        // Console API key primary: meter identity matches live spend pool from
+        // the start (not SuperGrokSession default until a hop toast).
+        if self.is_api_key_auth {
+            for agent in self.agents.values_mut() {
+                agent.sampling_identity =
+                    crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
+            }
+        }
         self.apply_tier_restrictions();
         if self.is_api_key_auth {
             self.ensure_voice_for_api_key();
@@ -1417,6 +1432,7 @@ impl AppView {
             pending_editor: None,
             pending_pager_path: None,
             pending_pager_ansi: false,
+            pending_tui_screenshot: false,
             minimal_state: crate::minimal_api::MinimalState::default(),
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
@@ -1549,6 +1565,7 @@ impl AppView {
             credit_balance: None,
             auto_topup: None,
             openrouter_credit_balance: None,
+            console_team_prepaid_cents: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
@@ -2951,6 +2968,7 @@ impl AppView {
                 git_ref: None,
             },
             ActionId::OpenDashboard => Action::OpenDashboard,
+            ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
             ActionId::VoiceToggle => {
                 if !self.current_ui.voice_keybind_enabled.unwrap_or(true) {
                     return InputOutcome::Unchanged;
@@ -5524,41 +5542,80 @@ impl AppView {
     /// Also clears the permission notification flag when no permissions
     /// remain queued, so the next batch fires a fresh bell/popup.
     pub fn update_notifications(&mut self) {
-        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
-            if let ActiveView::Agent(id) = self.active_view
-                && let Some(agent) = self.agents.get(&id)
-            {
-                let name = agent
-                    .display_name
-                    .as_deref()
-                    .or(agent.generated_session_title.as_deref());
-                let model = agent.session.models.current_model_name();
-                let parked = agent.renders_parked();
-                let activity = if parked {
-                    None
-                } else {
-                    agent.resolve_turn_activity()
-                };
-                let has_perms = !agent.permission_queue.is_empty();
-                let elapsed = if parked { None } else { agent.turn_elapsed() };
-                let is_busy = agent.session.state.is_busy() && !parked;
-                (name, model, activity, has_perms, elapsed, is_busy)
-            } else {
-                (None, None, None, false, None, false)
-            };
+        let busy_agent_count = self
+            .agents
+            .values()
+            .filter(|a| a.session.state.is_busy() && !a.renders_parked())
+            .count();
         let any_agent_has_perms = self.agents.values().any(|a| !a.permission_queue.is_empty());
         if !any_agent_has_perms {
             self.notification_service.clear_permission_notification();
         }
+
+        // Own the session label so later agent-map scans do not conflict
+        // with a borrow into TitleState.
+        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
+            match self.active_view {
+                ActiveView::Agent(id) => {
+                    if let Some(agent) = self.agents.get(&id) {
+                        let name = crate::notifications::title::resolve_session_title_name(
+                            agent.display_name.as_deref(),
+                            agent.generated_session_title.as_deref(),
+                        )
+                        .map(str::to_owned);
+                        let model = agent.session.models.current_model_name();
+                        let parked = agent.renders_parked();
+                        let activity = if parked {
+                            None
+                        } else {
+                            agent.resolve_turn_activity()
+                        };
+                        let has_perms = !agent.permission_queue.is_empty();
+                        let elapsed = if parked { None } else { agent.turn_elapsed() };
+                        let is_busy = agent.session.state.is_busy() && !parked;
+                        (name, model, activity, has_perms, elapsed, is_busy)
+                    } else {
+                        (None, None, None, false, None, false)
+                    }
+                }
+                ActiveView::AgentDashboard => {
+                    // Selected / primary agent session name when available.
+                    let selected_id = self.dashboard.as_ref().and_then(|d| {
+                        d.selected.as_ref().and_then(|row| match row {
+                            crate::views::dashboard::DashboardRowId::TopLevel(id) => Some(*id),
+                            crate::views::dashboard::DashboardRowId::Subagent {
+                                parent, ..
+                            } => Some(*parent),
+                            crate::views::dashboard::DashboardRowId::Roster { .. } => None,
+                        })
+                    });
+                    let agent = selected_id
+                        .and_then(|id| self.agents.get(&id))
+                        .or_else(|| self.agents.values().next());
+                    let name = agent
+                        .and_then(|a| {
+                            crate::notifications::title::resolve_session_title_name(
+                                a.display_name.as_deref(),
+                                a.generated_session_title.as_deref(),
+                            )
+                        })
+                        .map(str::to_owned);
+                    let model = agent.and_then(|a| a.session.models.current_model_name());
+                    let is_busy = busy_agent_count > 0;
+                    (name, model, None, any_agent_has_perms, None, is_busy)
+                }
+                ActiveView::Welcome => (None, None, None, false, None, false),
+            };
         let cwd_str = self.cwd.to_string_lossy();
         let title_state = crate::notifications::TitleState {
-            session_name,
+            session_name: session_name.as_deref(),
             model: model.as_deref(),
             activity: activity.as_ref(),
             has_pending_permissions: has_perms,
             cwd: Some(&cwd_str),
             turn_elapsed,
             is_busy,
+            busy_agent_count,
             focused: self.notification_service.focus_tracker.is_focused(),
         };
         if let Some(esc) = self.notification_service.on_tick(&title_state) {
@@ -5816,6 +5873,7 @@ pub(crate) mod tests {
             pending_editor: None,
             pending_pager_path: None,
             pending_pager_ansi: false,
+            pending_tui_screenshot: false,
             minimal_state: crate::minimal_api::MinimalState::default(),
             reconnect_pending: false,
             show_resolved_model: true,
@@ -5827,6 +5885,7 @@ pub(crate) mod tests {
             credit_balance: None,
             auto_topup: None,
             openrouter_credit_balance: None,
+            console_team_prepaid_cents: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),

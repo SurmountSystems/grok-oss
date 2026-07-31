@@ -248,6 +248,176 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
+/// `/limits` — SuperGrok included / dollar extras / console path detail.
+///
+/// Pure view of the cached billing snapshot + live sampling identity.
+/// When two SuperGrok principals exist in `auth.json`, stacks dual rows
+/// (active principal gets the polled billing cache; siblings honest absence
+/// unless process-local included billing was remembered for them).
+/// Console team prepaid cents come from agent/app cache or Management process
+/// cache; missing → honest not-configured / loading / unavailable (never a soft
+/// "no $ meter yet" placeholder). Empty SuperGrok cache → "no data yet".
+pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.agents.contains_key(&id) {
+        return vec![];
+    }
+    // Clone cache so we can mutably push to scrollback without dual borrows.
+    // Prefer agent-scoped cache (mirrors footer); fall back to app-level.
+    let (balance, autotopup, live, console_prepaid) = {
+        let agent = app.agents.get(&id).expect("checked contains_key");
+        let balance = agent
+            .credit_balance
+            .clone()
+            .or_else(|| app.credit_balance.clone());
+        let autotopup = agent.auto_topup.clone().or_else(|| app.auto_topup.clone());
+        let console_prepaid = agent
+            .console_team_prepaid_cents
+            .or(app.console_team_prepaid_cents)
+            .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+        (balance, autotopup, agent.sampling_identity, console_prepaid)
+    };
+    let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
+    let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
+    let configured = has_mgmt_key && has_mgmt_team;
+    // Cold + configured → show loading and kick silent fetch below.
+    let prepaid_gap = if console_prepaid.is_some() {
+        crate::views::credit_bar::ConsoleTeamPrepaidGap::NotConfigured
+    } else if configured {
+        crate::views::credit_bar::ConsoleTeamPrepaidGap::Loading
+    } else {
+        crate::views::credit_bar::ConsoleTeamPrepaidGap::NotConfigured
+    };
+    let snap = build_limits_snapshot(
+        balance.as_ref(),
+        autotopup.as_ref(),
+        live,
+        console_prepaid,
+        prepaid_gap,
+    );
+    let text = crate::views::limits_snapshot::format_limits_detail(&snap);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(RenderBlock::system(text));
+    }
+    // When Management credentials exist but cents are still cold, kick a silent
+    // billing refresh so the next `/limits` / footer can show prepaid.
+    let mut effects = Vec::new();
+    if console_prepaid.is_none() && configured {
+        effects.push(Effect::FetchBilling {
+            agent_id: id,
+            silent: true,
+        });
+    }
+    effects
+}
+
+/// Build `/limits` view-model: dual SuperGrok rows when multi-principal store.
+fn build_limits_snapshot(
+    balance: Option<&crate::views::credit_bar::CreditBalance>,
+    autotopup: Option<&crate::views::credit_bar::AutoTopupInfo>,
+    live: crate::views::credit_bar::SamplingIdentityKind,
+    console_team_prepaid_cents: Option<i64>,
+    console_team_prepaid_gap: crate::views::credit_bar::ConsoleTeamPrepaidGap,
+) -> crate::views::limits_snapshot::LimitsSnapshot {
+    use crate::views::limits_snapshot::{LimitsSnapshot, PrincipalLimitsInput};
+    use xai_grok_shell::auth::{
+        SupergrokAccountRole, active_supergrok_identity_id, included_billing_fields_snapshot,
+        list_supergrok_principal_listings, principal_limits_label, read_auth_json,
+    };
+
+    let home = xai_grok_shell::util::grok_home::grok_home();
+    let listings = read_auth_json(&home.join("auth.json"))
+        .map(|map| list_supergrok_principal_listings(&map))
+        .unwrap_or_default();
+
+    if listings.len() < 2 {
+        // Single principal (or none): keep classic single SuperGrok section.
+        let mut snap = LimitsSnapshot::from_billing(balance, autotopup, live)
+            .with_console_balance_cents(console_team_prepaid_cents)
+            .with_console_prepaid_gap(console_team_prepaid_gap);
+        if listings.len() == 1 && !live.is_console() {
+            snap.live_principal_label = Some(listings[0].role_label.to_string());
+        }
+        return snap;
+    }
+
+    let active_id = active_supergrok_identity_id(&home);
+    let billing_by_id = included_billing_fields_snapshot();
+
+    // Order: active identity first (gets the live billing cache), then others.
+    let mut ordered = listings;
+    if let Some(ref aid) = active_id {
+        ordered.sort_by_key(|p| if &p.identity_id == aid { 0u8 } else { 1u8 });
+    }
+
+    let inputs: Vec<PrincipalLimitsInput> = ordered
+        .iter()
+        .map(|p| {
+            let role = if p.role_label == "business" {
+                SupergrokAccountRole::Business
+            } else {
+                SupergrokAccountRole::Personal
+            };
+            let is_active = active_id.as_deref() == Some(p.identity_id.as_str());
+            // Active principal: use pager credit cache (full meters).
+            // Others: only included % / reset from process billing memory when
+            // present; no inventing dollar extras from the active poll
+            // (`included_billing_only` keeps extras as honest absence).
+            let (bal, topup, included_billing_only) = if is_active {
+                (balance.cloned(), autotopup.cloned(), false)
+            } else if let Some(fields) = billing_by_id.get(&p.identity_id) {
+                (
+                    fields
+                        .usage_pct
+                        .map(|pct| crate::views::credit_bar::CreditBalance {
+                            usage_pct: pct,
+                            effective_usage_pct: pct,
+                            period_end_display: fields.reset_at.map(|dt| {
+                                dt.with_timezone(&chrono::Local)
+                                    .format("%b %-d, %H:%M")
+                                    .to_string()
+                            }),
+                            pay_as_you_go: false,
+                            on_demand_cap_cents: None,
+                            on_demand_used_cents: None,
+                            prepaid_balance_cents: None,
+                            period_type: None,
+                            is_unified_billing_user: None,
+                        }),
+                    None,
+                    true,
+                )
+            } else {
+                (None, None, false)
+            };
+            PrincipalLimitsInput {
+                label: principal_limits_label(role),
+                role_label: Some(p.role_label.to_string()),
+                balance: bal,
+                autotopup: topup,
+                included_billing_only,
+            }
+        })
+        .collect();
+
+    let live_role = if live.is_console() {
+        None
+    } else {
+        active_id.as_ref().and_then(|aid| {
+            ordered
+                .iter()
+                .find(|p| &p.identity_id == aid)
+                .map(|p| p.role_label)
+        })
+    };
+
+    LimitsSnapshot::from_principals(&inputs, live, live_role)
+        .with_console_balance_cents(console_team_prepaid_cents)
+        .with_console_prepaid_gap(console_team_prepaid_gap)
+}
+
 /// `/usage` — session token/cost, then consumer credits when visible.
 /// Credits are chained after the session block so layout stays ordered.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
@@ -373,6 +543,28 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
         agent.scrollback.push_block(RenderBlock::system(text));
     }
     vec![]
+}
+
+/// Clear completed/cancelled todos from the live board (shell archives + Plan).
+///
+/// No-op toast when the board has nothing finished. Does not use merge:false.
+pub(super) fn dispatch_clear_completed_todos(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        agent.show_toast("No active session");
+        return vec![];
+    };
+    let done = agent.todo.counts().completed + agent.todo.counts().cancelled;
+    if done == 0 {
+        agent.show_toast("No completed todos to clear");
+        return vec![];
+    }
+    vec![Effect::ClearCompletedTodos { session_id }]
 }
 
 /// Open the hidden `/gboom` easter egg as a modal over the active agent

@@ -88,6 +88,8 @@ Copy the most recent response to the clipboard. Pass a number to copy the Nth-la
 
 Every copy is also written to a backup file — `~/.grok/last-copy.txt` by default, or `GROK_COPY_FILE` if set. Confirmed copies toast briefly (e.g. `Copied!`). Unverified OSC 52 deliveries and clipboard-unreachable fallbacks name the backup path so you can recover the text.
 
+One-click **`⧉`** chrome uses the same stack: always-on per-bubble copy on user and assistant messages (`bubble_copy_buttons`, default on; no select-first), selection-box copy when a block is selected (`selection_buttons`, default on; selection-box omits ⧉ when bubble chrome is on so you never see two icons), plan panel top bar (whole plan body, same as **`Y`**), and the prompt top border (full draft plain text, including multimodal chip labels). `/copy` still targets the Nth assistant message only.
+
 ### `/export`
 
 Export the conversation to a file or the clipboard.
@@ -174,6 +176,14 @@ Enter plan mode.
 ### `/view-plan`
 
 Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
+
+### `/clear-completed-todos`
+
+Remove **completed** and **cancelled** items from the live session todo board and archive them (toast reports how many). Pending and in-progress stay. Same as the todo pane **Clear done** chrome control and focused `X`. Not the same as pane `h` (hide done in the view only) and not an agent `merge: false` wipe.
+
+```
+/clear-completed-todos
+```
 
 ---
 
@@ -374,6 +384,10 @@ Open the MCP servers management modal.
 
 Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
 
+The dual-auth block also lists SuperGrok principal(s) (role + fingerprint only
+when two logins are stored) and console key fingerprints. See
+[Authentication → Two SuperGrok logins](02-authentication.md#two-supergrok-logins-personal--business).
+
 ### `/release-notes`
 
 View release notes for the current version. Alias: `/changelog`.
@@ -432,11 +446,42 @@ Log out and return to the login screen.
 
 ### `/usage`
 
-View credit usage or manage billing. Alias: `/cost`.
+View **session** token/cost totals, then SuperGrok billing when the consumer
+surface is visible. Alias: `/cost`.
 
 ```
 /usage
 /usage manage
+```
+
+### `/limits`
+
+Detail view of spend meters from cached billing (not session tokens). Keeps
+each meter distinct:
+
+- SuperGrok **included** weekly/monthly allowance (used % · remaining % · next reset)
+- SuperGrok **dollar extras** (prepaid session balance; separate from included)
+- **Console team prepaid** (Management API balance when a management key and
+  `management_team_id` are configured; otherwise honest `no management key/team id`,
+  or `loading team prepaid...` / `team prepaid unavailable` when configured but
+  cents are unknown). This is **not** SuperGrok extras and **not** a Business
+  SuperGrok OIDC login.
+  Setup: [Authentication → Console team prepaid](02-authentication.md#console-team-prepaid-management-api).
+
+When **two SuperGrok principals** are stored (personal + Business), `/limits`
+stacks a section per principal (for example `SuperGrok (personal)` and
+`SuperGrok (business)`). The live sampling line names which principal (or
+console key) is active when known. The non-active sibling may show **no data
+yet** until its billing pool has been polled. Personal included, Business
+included, SuperGrok dollar extras, and console team prepaid stay separate lines.
+
+The prompt footer stays a one-line summary (console live shows
+`Console key · team prepaid: $N` when known, else the honest gap strings above);
+`/limits` is the multi-line panel. Billing refresh (session start, turn end,
+`/usage`) fills SuperGrok cache and, when configured, Management team prepaid.
+
+```
+/limits
 ```
 
 ### `/privacy`
@@ -462,6 +507,24 @@ Open the settings modal to view and change configuration interactively. Aliases:
 ### `/timestamps`
 
 Toggle message timestamps on or off.
+
+### `/screenshot`
+
+Capture the **current rendered TUI frame** as a PNG (not an OS screenshot of
+other apps). Same action is bound to **F9**. Writes under
+`$GROK_HOME/screenshots/tui-*.png` (default `~/.grok/screenshots/…`) and toasts
+the path. When plan approval is open, the capture also auto-attaches into the
+plan multimodal path; you can still open the toast path and paste manually.
+
+```
+/screenshot
+```
+
+Window title vs in-app chrome: **`[ui] hide_title_bar`** (default off = titles
+on; set true to clear) controls the terminal/tab **window title**;
+**`[ui] hide_header`** hides in-app status / welcome / dashboard headers. They
+are separate. See [Theming → Hide header](06-theming.md#hide-header) and
+[Hide window title](06-theming.md#hide-window-title).
 
 ---
 

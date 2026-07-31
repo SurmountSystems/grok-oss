@@ -81,13 +81,14 @@ use super::settings::setters::{
     set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap, set_contextual_hint_undo,
     set_contextual_hint_word_select, set_default_model, set_default_selected_permission,
     set_display_refresh_auto_cadence, set_economic_mode, set_fork_secondary_model,
-    set_group_tool_verbs, set_hide_header, set_hunk_tracker_mode, set_invert_scroll,
-    set_keep_text_selection, set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send,
-    set_plan_approval_park, set_prompt_suggestions, set_remember_tool_approvals,
-    set_render_mermaid, set_respect_manual_folds, set_screen_mode, set_scroll_lines,
-    set_scroll_mode, set_scroll_speed, set_scrub_ascii_punct, set_show_thinking_blocks,
-    set_show_tips, set_simple_mode, set_theme, set_timeline, set_timestamps, set_vim_mode,
-    set_voice_capture_mode, set_voice_keybind_enabled, set_voice_stt_language,
+    set_group_tool_verbs, set_hide_header, set_hide_title_bar, set_hunk_tracker_mode,
+    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
+    set_page_flip_on_send, set_plan_approval_park, set_prompt_suggestions,
+    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
+    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_scrub_ascii_punct,
+    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
+    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
+    set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -96,17 +97,18 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_tutorial,
-    dispatch_privacy_banner_accept, dispatch_privacy_banner_customize, dispatch_share_session,
-    dispatch_show_context_info, dispatch_show_privacy_info, dispatch_show_queue,
+    dispatch_clear_completed_todos, dispatch_copy_session_id, dispatch_manage_billing,
+    dispatch_open_gboom, dispatch_open_tutorial, dispatch_privacy_banner_accept,
+    dispatch_privacy_banner_customize, dispatch_share_session, dispatch_show_context_info,
+    dispatch_show_limits, dispatch_show_privacy_info, dispatch_show_queue,
     dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
     dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
     dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
-    dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
-    dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
+    dispatch_copy_entry_content, dispatch_dump_input_log, dispatch_export_conversation,
+    dispatch_open_block_viewer, dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
     dispatch_open_transcript_pager,
 };
 use super::turn::{
@@ -533,6 +535,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             app.fps_hud.toggle();
             vec![]
         }
+        Action::CaptureTuiScreenshot => {
+            // Capture runs in the event loop after present, where the
+            // terminal buffer is available. Flag only here (sync dispatch).
+            app.pending_tui_screenshot = true;
+            vec![]
+        }
         Action::ToggleScrollLog => {
             let msg = match app.scroll_state.toggle_scroll_log() {
                 Some(path) => format!("scroll log: recording to {}", path.display()),
@@ -562,6 +570,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::CopyBlockContent => {
             dispatch_copy_block_content(app);
+            vec![]
+        }
+        Action::CopyEntryContent { idx } => {
+            dispatch_copy_entry_content(app, idx);
             vec![]
         }
         Action::CopyAssistantMessage { n, file_path } => {
@@ -939,9 +951,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::RenameSession { title } => dispatch_rename_session(app, title),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
+        Action::ShowLimits => dispatch_show_limits(app),
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
+        Action::ClearCompletedTodos => dispatch_clear_completed_todos(app),
         Action::AddSessionNote { text, tags } => dispatch_add_session_note(app, text, tags),
         Action::ShowNotes => dispatch_show_notes(app),
         Action::ShowPlan => dispatch_show_plan(app),
@@ -991,6 +1005,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),
         Action::SetHideHeader(v) => set_hide_header(app, v),
+        Action::SetHideTitleBar(v) => set_hide_title_bar(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
         Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),

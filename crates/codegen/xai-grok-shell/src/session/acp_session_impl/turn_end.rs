@@ -56,6 +56,40 @@ impl SessionActor {
             .await;
     }
 
+    /// Operator **Clear done**: archive completed/cancelled board rows, persist
+    /// Resources + `plan.json`, re-emit ACP `Plan` (including empty board so the
+    /// pane drops finished items). Returns how many items were cleared.
+    pub(crate) async fn clear_completed_todos(&self) -> usize {
+        use crate::tools::todo::{TodoState, clear_completed_todos, plan_entry_from_todo};
+        use xai_grok_tools::types::resources::State;
+
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let mut state = bridge
+            .read_resource::<State<TodoState>>()
+            .await
+            .map(|s| s.0)
+            .unwrap_or_default();
+        let n = clear_completed_todos(&mut state);
+        if n == 0 {
+            return 0;
+        }
+        bridge.update_resource(State(state.clone())).await;
+        let _ = bridge.toolset().save_and_flush_persistence().await;
+        let _ = self.notifications.persistence_tx.send(
+            crate::session::persistence::PersistenceMsg::PlanState(state.clone()),
+        );
+        let entries: Vec<_> = state
+            .todo_items_with_ids()
+            .map(|(id, item)| plan_entry_from_todo(Some(id.as_str()), item.clone()))
+            .collect();
+        // Always re-emit Plan so the client drops cleared rows even when the
+        // active board is now empty (empty Plan is a valid full replace).
+        self.send_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), None)
+            .await;
+        tracing::info!(cleared = n, "operator clear completed todos");
+        n
+    }
+
     /// Auto-seed a protected `ask:<prompt_id>` todo for a real user turn.
     ///
     /// Merge-only; caps open asks. Updates Resources, flushes

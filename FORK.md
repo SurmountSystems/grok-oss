@@ -77,7 +77,7 @@ list when you ship fork work.
 - [x] **Binary / branding** — `grok-oss` (crate package still `xai-grok-pager-bin`); welcome, terminal/tab titles, resume hints, and docs say Grok OSS / `grok-oss`
 - [x] **OpenRouter** — separate model option (`openrouter-grok-4.5`); login/logout; secret store; optional Zed credential probe (read-only)
 - [x] **Multi-key OpenRouter** — comma lists / failover keys for credit + rate-limit rotation
-- [x] **SuperGrok OAuth ↔ console API key dual-auth** — first-party resolve merge (session primary + console failover by default; `preferred_method=api_key` reverses); identity switch on **credit / SuperGrok Heavy usage-limit** and **plain 429** (session→key clears bearer; key→session via JWT in failover list); also switches API host (SuperGrok proxy ↔ `api.x.ai`); credit/allowance exhausted-fingerprint memo (process cache + durable `$GROK_HOME/exhausted_credits/`, 1h TTL; **console-key success clears**, **session success does not** — extras-paid SuperGrok 200s must not put SuperGrok back) + status/toast (“out of allowance” vs “rate limited”; labels only); when billing included `usage_pct ≥ 100%` + dual-auth, mark SuperGrok used up and prefer console key before the next request (no 402; clear on period reset); rate-limit switch uses temporary shared `grok-rate-limit` cooldown (not credit memo); kill-switch clears key failover + host metadata; console keys in keyring/`provider_credentials.json` + env/auth.json; **live re-bind without prior stash** (`session_bearer_resolver`); **multi-add** `grok login --api-key` + `--list-api-keys` (fingerprints only). Plans: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md), [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md). Residual: multi SuperGrok OAuth failover (personal vs business Heavy session) not built — hop is session ↔ console key only.
+- [x] **SuperGrok OAuth ↔ console API key dual-auth** — first-party resolve merge (session primary + console failover by default; `preferred_method=api_key` reverses); identity switch on **credit / SuperGrok Heavy usage-limit** and **plain 429** (session→key clears bearer; key→session via JWT in failover list); also switches API host (SuperGrok proxy ↔ `api.x.ai`); credit/allowance exhausted-fingerprint memo (process cache + durable `$GROK_HOME/exhausted_credits/`, 1h TTL; **console-key success clears**, **session success does not** — extras-paid SuperGrok 200s must not put SuperGrok back) + status/toast (“out of allowance” vs “rate limited”; labels only); when billing included `usage_pct ≥ 100%` + dual-auth, mark SuperGrok used up and prefer console key before the next request (no 402; clear on period reset); rate-limit switch uses temporary shared `grok-rate-limit` cooldown (not credit memo); kill-switch clears key failover + host metadata; console keys in keyring/`provider_credentials.json` + env/auth.json; **live re-bind without prior stash** (`session_bearer_resolver`); **multi-add** `grok login --api-key` + `--list-api-keys` (fingerprints only). **Also (2026-07-29):** `preferred_method=auto` rank+hop wire (reset-sooner SuperGrok, ExhaustedAll→console; oauth pin fail-closed); sticky-console meter honesty (no SuperGrok extras sell while console live). Plans: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md), [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md), [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md). Limits residual = two halves (2026-07-30): **Half A shipped** (SuperGrok dual `/limits`, sibling poll, footer honesty for included weekly + SuperGrok $ extras) and **kept**; **Half B open** = **console team Grok Business Usage class meter in the TUI** (tokens/spend/team; management key + `team_id` unwired). Half A is not waste and does not close Half B. See `RESIDUAL.md` §4.
 - [x] **Keyring login time-box + fail-loud + secure fallback + TTY progress** — OS keyring get/set/delete wall-clock budget (`KEYRING_OP_TIMEOUT`); interactive `grok login --api-key` / OpenRouter login require a **secure** backend (primary platform store, then on Linux automatic **keyutils** fallback when Secret Service times out/errors). TTY stderr progress counts seconds up to **2× timeout (~6s)** during store RMW+write (suppressed non-TTY / env short-circuit). Only if **all** secure backends fail → clear error, **no** silent `provider_credentials.json` secret dump. File mirror only after successful secure write. `GROK_CREDENTIALS_FORCE_FILE` = tests/CI only (not user recovery).
 - [x] **Economic mode** — soft-cap effective context at the Grok 4.5 long-context price cliff (~200k); `/economic-mode`; settings default on
 - [x] **Auto-compact default 95% + live-apply** — stock Grok 4.5 catalog omits a per-model undercut (was 80); remote `models_cache` undercuts on stock models are dropped so the product default applies; user session/env still win; banner shows usage **and** configured threshold. Settings commit live-applies to open sessions (`restart_required: false`): disk persist → ACP `x.ai/auto_compact_threshold_changed` → `SessionCommand::SetAutoCompactThreshold` → CompactionConfig Cells (same write path as model switch). Live-apply pushes the **committed Settings value** (race-safe vs disk); env `GROK_AUTO_COMPACT_THRESHOLD_*` wins again on the next full resolve (spawn / model switch). Detail: `docs/dev/research/rca-auto-compact-early-fire.md`
@@ -89,7 +89,7 @@ list when you ship fork work.
 - [x] **plan.json honesty + resume board** — compact writes the **live** Resources `TodoState` to `plan.json` (no empty wipe). Resume loads `plan_state` again and re-emits ACP `Plan` from Resources / `plan.json` fallback (`RestoreTodoBoard`). Real SoT: in-memory Resources + on-disk **`resources_state.json`** (bridge path is named `tool_state.json` but registry rewrites to sibling `resources_state.json`); `plan.json` is a mirror + resume fallback. User-guide `17-sessions` documents both.
 - [x] **Auto-seed user asks as todos** — real user turns seed protected `ask:<prompt_id>` (cap 20, truncated content); `ask:` is keep-unless-mentioned on `merge: false`. Helpers + tests in `xai-grok-tools` todo module.
 - [x] **Default agent uses the todo board** — base `prompt.md` teaches `todo_write` (Planning section, gated on plan tool): multi-step / `feat:` / `bug:` / merge upsert / protected prefixes / red/green TDD for user-reported bugs & features / mark complete / Ctrl+T board. First empty→non-empty Plan auto-opens the todo pane once. Fork/copy includes `resources_state.json` (not only `tool_state.json`).
-- [x] **Plan approval CTAs** — primary bar `a` approve · `A` approve w/ comment · `?` clarify · `s` revise · `q` quit (no primary Comment). Wire outcomes: approved / approved+notes / `"questions"` / cancelled / abandoned. Clarify keeps plan Active (answer-only; agent re-`exit_plan_mode`). User-guide `19-plan-mode`.
+- [x] **Plan approval CTAs** — primary bar `a` approve · `A` approve w/ comment · `?` clarify · `s` revise · `q` quit (no primary Comment). Wire outcomes: approved / approved+notes / `"questions"` / cancelled / abandoned. Clarify keeps plan Active (answer-only; agent re-`exit_plan_mode`). Soft-park: hit-tested footer mouse CTAs (draft durable); card + empty placeholder not fake menus; FileBacked preview/card re-read live `plan.md`. User-guide `19-plan-mode`. Residual soft: agent-written plan.md may still invent freeform menus.
 
 ### Packaging and build
 
@@ -164,10 +164,16 @@ list when you ship fork work.
   tools — intercept is the product surface; do not invent unless discoverability
   breaks. Research:
   [`doc/dev/research/python-to-rust-tools-2026-07-26.md`](doc/dev/research/python-to-rust-tools-2026-07-26.md)
-- [x] **Hide header + DOGE theme** — `[ui] hide_header` zeros top agent status
-  bar, welcome location top bar, and dashboard location header; theme `doge`
-  (display “DOGE”, no aliases): pure black/white + 8 pure primaries. Docs:
-  user-guide `06-theming`.
+- [x] **Hide header + DOGE theme** — `[ui] hide_header` (default **false**) zeros
+  top agent status bar, welcome location top bar, and dashboard location header
+  only (in-app chrome). Theme id `doge` (display “DOGE”, no aliases): pure
+  black/white + 8 pure primaries. **Default theme** when unset and on auto-dark
+  (auto-light stays GrokDay; switch back with `theme = "groknight"` or
+  `/theme`). Docs: user-guide `06-theming`.
+- [x] **Window titles on by default** — `[ui] hide_title_bar` default **false**
+  (titles on: session name + activity + agents + `grok-oss` brand via OSC).
+  Distinct from `hide_header` (in-app bars only). Opt out: `true` or Appearance
+  → Hide window title. User-guide `05-configuration` / `06-theming`.
 - [x] **DOGE pure 8-colour palette** — durable pure palette (`#000000`…
   `#FFFFFF` + eight primaries) as product truth for `doge`; hard-threshold
   quantise + optional Floyd–Steinberg helper in
@@ -177,6 +183,25 @@ list when you ship fork work.
 - [x] **DOGE polish (Wave 2)** — context-bar **solid DOGE steps** (no mid-gray
   lerp); pure-primary **`doge.tmTheme`** for DOGE syntax; `hide_header`
   extended to welcome + dashboard headers.
+- [x] **Human green rail + DOGE role map** — every Human prompt paints a static
+  green left `┃` rail (`UserPromptBlock::accent` → `accent_user`); DOGE
+  `accent_user` green / `accent_system` cyan; semantic roles Green=Human,
+  Magenta=Agent, Yellow=context, Cyan=system/limits/credits. External palette
+  SoT: [0001_DOGE.md](https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md).
+  User-guide `06-theming`; project annex
+  [`doc/dev/specs/doge-pure-8-colour-2026-07-26.md`](doc/dev/specs/doge-pure-8-colour-2026-07-26.md).
+- [x] **Stuck Retrying cleared on stream resume** — sticky yellow Retrying chrome
+  clears when the next stream starts (`RetryState::StreamResumed`). Stream
+  response-headers / first-byte timeout default **120s**
+  (`GROK_STREAM_HEADERS_TIMEOUT_SECS`; not connect 10s, not post-headers idle).
+  Cancel-aware shared cooldown wait; short transport footer labels.
+- [x] **Clear done todos** — pane chrome + focused `X` + `/clear-completed-todos`
+  archives completed/cancelled (`ClearedReason::UserClearCompleted`); not `h`
+  hide-done and not `merge: false` wipe. Slash reserved in pager
+  `SHELL_RESERVED` (`shell_collision` contract).
+- [x] **Always-on bubble copy + one-click copy** — selection-box / plan top-bar /
+  prompt draft / per-bubble `⧉` (`bubble_copy_buttons` default on) reuse the
+  clipboard stack; Policy A keeps selection ⧉ off bubble-owned blocks only.
 - [x] **btw Done-panel keys in user-guide** — focused `y` copy full thread, `a`
   follow-up same session, Esc dismiss (`04-slash-commands`).
 - [x] **Plan approval soft park (option A)** — `exit_plan_mode` parks durable
@@ -251,6 +276,42 @@ Detail: `doc/dev/research/fork-paths-hardening-2026-07-24.md`,
 
 Novel Surmount crates use the **`grok-*`** prefix (example: `grok-rate-limit`).
 Upstream crate paths stay **`xai-grok-*`** for mergeability.
+
+### Upstream regression filters
+
+**Process pins** survive import via `FORK_PATHS` restore +
+`assert-process-pins` (path presence and light content sniffs). That gate does
+**not** prove product behavior inside shared `xai-grok-*` crates.
+
+**Product seams** (DOGE default, titles-on, stuck-retry clear, dual-auth,
+OpenRouter, clear-done, bubble copy, …) live inside those crates. They survive
+onto only through **cherry-picks / conflict resolve** and stay honest through
+**cargo tests**. After recon, run the assert **and** the product filter block
+(or at least `just check`).
+
+Full filter catalog (why each exists + every residual Validate honesty block):
+[`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md).
+Open residual still points at the same commands under RESIDUAL § *Validate
+honesty* (D0 can demote; the catalog is durable).
+
+Operator cheat sheet (post-import / post-onto tip):
+
+```bash
+./scripts/assert-process-pins.sh
+./scripts/assert-process-pins.sh HEAD   # or onto tip
+
+# Core product harden (UI / DOGE / Human rail / retry / shell collision)
+cargo test -p xai-grok-shared --lib -- hide_header hide_title
+cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config doge_accent_user_is_pure_green doge_accent_system_is_pure_cyan
+cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_prefix_matches recap_accent
+cargo test -p xai-grok-pager --lib -- hide_header hide_title_bar default_title_items shell_collision retry_chrome_clears
+cargo test -p xai-grok-pager --test settings_e2e -- hide_title_bar hide_header
+cargo test -p xai-grok-shell --lib -- stream_started_emits_retry_state_stream_resumed
+cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason stream_headers_timeout_defaults
+cargo test -p xai-grok-sampler --test stream_headers_timeout
+
+just check   # full gate before push/PR
+```
 
 ## CI and local quality
 

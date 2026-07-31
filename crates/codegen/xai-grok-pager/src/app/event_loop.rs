@@ -1004,6 +1004,10 @@ pub(crate) async fn run(
         if app.is_api_key_auth {
             app.usage_visible = false;
             app.sync_billing_surface_to_agents();
+            for agent in app.agents.values_mut() {
+                agent.sampling_identity =
+                    crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
+            }
         }
     }
 
@@ -1307,6 +1311,8 @@ pub(crate) async fn run(
         config.hide_header = app.current_ui.hide_header;
         app.set_appearance(config);
     }
+    // Seed hide_title_bar into the process-wide OSC 0 gate (default false = titles on).
+    crate::app::set_hide_title_bar_runtime(app.current_ui.hide_title_bar);
     // Single-key load so a malformed unrelated `[ui]` field cannot wipe this.
     let page_flip_on_send = crate::appearance::cache::load_page_flip_on_send();
     app.current_ui.page_flip_on_send = Some(page_flip_on_send);
@@ -2767,11 +2773,68 @@ pub(crate) async fn run(
         }
 
         presenter.present_if_dirty(&mut app, terminal);
+        maybe_capture_tui_screenshot(&mut app, terminal);
     }
 
     app.notification_service.shutdown();
 
     Ok(make_run_result(&app))
+}
+
+/// If `/screenshot` or F9 armed a capture, write the last presented frame to
+/// `$GROK_HOME/screenshots/` and toast the path (or error).
+///
+/// When plan approval is open on the active agent, also attach the PNG to the
+/// plan composer so approve/revise/clarify multimodal drain reuses the P1–P4 path.
+fn maybe_capture_tui_screenshot(app: &mut AppView, terminal: &PagerTerminal) {
+    if !app.pending_tui_screenshot {
+        return;
+    }
+    app.pending_tui_screenshot = false;
+
+    let base = xai_grok_config::grok_home();
+    let path = crate::tui_screenshot::default_screenshot_path(&base);
+    let buffer = terminal.last_presented_buffer();
+    match crate::tui_screenshot::capture_buffer_to_png_file(buffer, &path) {
+        Ok(written) => {
+            let attached = attach_screenshot_to_active_plan(app, &written);
+            if attached {
+                app.show_toast(&format!(
+                    "Screenshot saved and attached to plan: {}",
+                    written.display()
+                ));
+            } else {
+                app.show_toast(&format!("Screenshot saved: {}", written.display()));
+            }
+        }
+        Err(err) => {
+            app.show_toast(&format!("Screenshot failed: {err}"));
+        }
+    }
+}
+
+/// Attach a just-captured PNG to the active agent plan composer when approval
+/// is open. Returns whether a chip was inserted.
+///
+/// Prefers the focused subagent when it has plan approval open; if the child
+/// has no approval view, falls through to the parent so soft-park / panel on
+/// the parent still gets the multimodal chip.
+fn attach_screenshot_to_active_plan(app: &mut AppView, path: &std::path::Path) -> bool {
+    let ActiveView::Agent(id) = app.active_view else {
+        return false;
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return false;
+    };
+    // Prefer the focused subagent view when one is open (same as dispatch).
+    if let Some(child_sid) = agent.active_subagent.clone()
+        && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+        && child.try_attach_tui_screenshot_for_plan(path)
+    {
+        return true;
+    }
+    // Child missing, or child has no plan approval: try parent.
+    agent.try_attach_tui_screenshot_for_plan(path)
 }
 
 /// Load `UiConfig` from the shell's layered config at startup.
@@ -3698,6 +3761,78 @@ fn process_effects(
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
+
+    /// Parent has plan approval open; focused subagent does not. Attach must
+    /// fall through to the parent composer (soft-park / panel on parent).
+    #[test]
+    fn attach_screenshot_falls_through_to_parent_when_child_has_no_plan() {
+        use crate::app::agent::AgentId;
+        use crate::app::app_view::tests::test_app_with_agent;
+        use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
+        use crate::views::prompt_widget::StashedPrompt;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let child_sid = "focused-child-no-plan";
+
+        // Parent: plan approval open.
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            agent.plan_approval_view = Some(PlanApprovalViewState::new(
+                ExitPlanModeExtRequest {
+                    session_id: "s".into(),
+                    tool_call_id: "tc".into(),
+                    plan_content: Some("# Parent plan".into()),
+                },
+                StashedPrompt {
+                    text: String::new(),
+                    cursor: 0,
+                    images: Vec::new(),
+                    chip_elements: Vec::new(),
+                    image_counter: 0,
+                    image_undo_stash: Vec::new(),
+                },
+                tx,
+            ));
+            // Focused subagent without plan approval.
+            let child = crate::app::agent_view::test_fixtures::make_agent();
+            assert!(child.plan_approval_view.is_none());
+            agent
+                .subagent_views
+                .insert(child_sid.to_owned(), Box::new(child));
+            agent.active_subagent = Some(child_sid.to_owned());
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png_path = dir.path().join("tui-shot.png");
+        // Minimal valid 8x8 PNG.
+        {
+            use image::{ImageBuffer, Rgba};
+            let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+                ImageBuffer::from_pixel(8, 8, Rgba([10, 20, 30, 255]));
+            let mut buf = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .expect("encode png");
+            std::fs::write(&png_path, buf).unwrap();
+        }
+
+        assert!(
+            attach_screenshot_to_active_plan(&mut app, &png_path),
+            "must attach to parent when child has no plan approval"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(
+            agent.prompt.images.len(),
+            1,
+            "parent plan composer must hold the chip"
+        );
+        let child = agent.subagent_views.get(child_sid).unwrap();
+        assert!(
+            child.prompt.images.is_empty(),
+            "child without plan must not receive the chip"
+        );
+    }
 
     #[test]
     fn tty_suspend_arm_stops_same_batch_before_later_ownership_changes() {

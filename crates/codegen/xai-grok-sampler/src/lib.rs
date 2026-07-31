@@ -50,8 +50,8 @@ pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, Sampling
 pub use exhausted_identity::{
     AllowanceExhaustAction, CredentialLabel, HopCause, INCLUDED_ALLOWANCE_EXHAUST_PCT, clear_all,
     clear_all_including_durable, clear_exhausted, format_credential_hop_reason, format_hop_reason,
-    format_rate_limit_hop_reason, is_credential_hop_reason, is_exhausted, mark_exhausted,
-    sync_allowance_exhaust_from_usage,
+    format_rate_limit_hop_reason, is_credential_exhausted, is_credential_hop_reason, is_exhausted,
+    mark_exhausted, sync_allowance_exhaust_from_usage,
 };
 pub use handle::SamplerHandle;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};

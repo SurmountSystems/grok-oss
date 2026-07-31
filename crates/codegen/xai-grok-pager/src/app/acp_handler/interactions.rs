@@ -254,10 +254,18 @@ pub(super) fn handle_exit_plan_mode(
         );
     } else {
         // Non-blocking status chrome: toast + status label + transcript card.
-        // Focus Prompt so soft-park CTA keys (a/Enter/…) are not left dead under
-        // a Scrollback-focused read of the plan card (dogfood 2026-07-27).
+        // Focus the Prompt **pane** and plan-approval **Prompt** focus so the
+        // composer paints focused (caret, no "Build anything" dead look) and
+        // typing lands immediately. Soft-park is **non-capturing** for Char
+        // (all printable → composer); CTAs are mouse footer / status /
+        // `/view-plan` panel only (L1 modal-free, 2026-07-29).
         agent.set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        }
         agent.commit_parked_plan_card();
+        // Flush unsent draft so a hard kill after soft-park still recovers text.
+        agent.persist_unsent_prompt_draft();
         agent.show_toast(PLAN_PARKED_TOAST);
         tracing::info!(
             target_active = is_active,

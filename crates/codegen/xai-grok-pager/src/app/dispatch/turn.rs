@@ -258,7 +258,7 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     if let Some(mut pav) = agent.plan_approval_view.take() {
         pav.send_stale_cancel();
         agent.plan_next_comment_id = pav.next_comment_id;
-        agent.prompt.restore(pav.stashed_prompt);
+        agent.restore_plan_stashed_prompt(pav.stashed_prompt);
         agent.line_viewer = None;
     }
 

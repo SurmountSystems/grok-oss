@@ -2583,6 +2583,14 @@ impl SessionActor {
                     cap.start_stream(timestamp_ms);
                 }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
+                // Clear sticky Retrying chrome once the next HTTP stream is open.
+                // RetryState::Retrying is emitted before backoff/rebuild/execute;
+                // without this, the footer freezes on "Retrying (attempt N)" for
+                // the entire post-retry TTFB and early stream (no agent tokens yet).
+                self.send_xai_notification(XaiSessionUpdate::RetryState(
+                    crate::extensions::notification::RetryState::StreamResumed,
+                ))
+                .await;
             }
             SamplingEvent::FirstToken { .. } => {
                 self.emit_event(crate::session::events::Event::FirstToken);
