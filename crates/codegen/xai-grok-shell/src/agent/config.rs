@@ -8016,6 +8016,105 @@ reasoning_effort = "low"
         assert_eq!(creds.failover_api_keys, vec!["console-key".to_string()]);
     }
 
+    /// Named contract: `auto_use_included_limits` + auth.json with live SuperGrok
+    /// Heavy base JWT and stale exhausted multi-slot → resolve primary is the
+    /// live SuperGrok session (proxy host), not console Business API key.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_auto_uses_live_supergrok_heavy_not_console_when_multi_slot_stale() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::{AuthMode, GrokAuth, PreferredAuthMethod};
+        use chrono::{Duration, Utc};
+        use std::collections::BTreeMap;
+        use xai_chat_state::AuthType;
+        use xai_grok_sampler::{clear_all_including_durable, sync_allowance_exhaust_from_usage};
+        use xai_grok_test_support::EnvGuard;
+
+        clear_all_including_durable();
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-biz-api-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let stale = "tok-stale-multi-exhausted";
+        let live = "tok-live-supergrok-heavy";
+        let _ = sync_allowance_exhaust_from_usage(100.0, Some(stale), true);
+
+        let base = "https://auth.x.ai::resolve-heavy";
+        let now = Utc::now();
+        let mut map: BTreeMap<String, GrokAuth> = BTreeMap::new();
+        map.insert(
+            format!("{base}::personal"),
+            GrokAuth {
+                key: stale.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-h".into(),
+                principal_type: Some("User".into()),
+                team_id: Some("team-wp".into()),
+                create_time: now - Duration::hours(5),
+                expires_at: Some(now - Duration::minutes(10)),
+                ..Default::default()
+            },
+        );
+        map.insert(
+            base.to_owned(),
+            GrokAuth {
+                key: live.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-h".into(),
+                principal_type: Some("User".into()),
+                team_id: Some("team-wp".into()),
+                create_time: now,
+                expires_at: Some(now + Duration::hours(6)),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).unwrap(),
+        )
+        .unwrap();
+
+        let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+        let model = test_model_entry("m", proxy, None, None, None);
+        let creds = resolve_credentials_preferring_with_rank(
+            &model,
+            Some(live), // AuthManager active base (also live)
+            Some(PreferredAuthMethod::Oidc),
+            true,
+        );
+        assert_eq!(
+            creds.auth_type,
+            AuthType::SessionToken,
+            "must stay on SuperGrok session auth, not console ApiKey"
+        );
+        assert_eq!(
+            creds.api_key.as_deref(),
+            Some(live),
+            "primary credential must be live SuperGrok Heavy JWT"
+        );
+        assert_eq!(
+            creds.base_url, proxy,
+            "SuperGrok session host (cli-chat-proxy), not api.x.ai console"
+        );
+        assert!(
+            creds
+                .failover_api_keys
+                .iter()
+                .any(|k| k == "console-biz-api-key"),
+            "console Business API key is failover only: {:?}",
+            creds.failover_api_keys
+        );
+        assert!(
+            !creds.failover_api_keys.iter().any(|k| k == stale),
+            "exhausted multi-slot must not remain in failover: {:?}",
+            creds.failover_api_keys
+        );
+
+        clear_all_including_durable();
+    }
+
     /// auto_use_included_limits=false does not take the multi-identity rank path.
     #[test]
     #[serial_test::serial]

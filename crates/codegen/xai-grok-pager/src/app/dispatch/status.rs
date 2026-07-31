@@ -282,13 +282,15 @@ pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
     let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
     let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
     let configured = has_mgmt_key && has_mgmt_team;
-    // Cold + configured → show loading and kick silent fetch below.
+    // Distinct missing key vs missing team vs loading (gap ignored when cents known).
     let prepaid_gap = if console_prepaid.is_some() {
-        crate::views::credit_bar::ConsoleTeamPrepaidGap::NotConfigured
-    } else if configured {
+        // Display uses cents; gap is unused. Harmless default.
         crate::views::credit_bar::ConsoleTeamPrepaidGap::Loading
     } else {
-        crate::views::credit_bar::ConsoleTeamPrepaidGap::NotConfigured
+        crate::views::credit_bar::ConsoleTeamPrepaidGap::from_management_config(
+            has_mgmt_key,
+            has_mgmt_team,
+        )
     };
     let snap = build_limits_snapshot(
         balance.as_ref(),

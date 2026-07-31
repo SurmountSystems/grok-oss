@@ -214,8 +214,54 @@ pub fn diamond_hollow_char() -> char {
     diamond_hollow().chars().next().unwrap_or('\u{25C7}')
 }
 
-/// Rotating braille progress-spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧`) normally; a
-/// 1-column ASCII spinner (`|`, `/`, `-`, `\`) on legacy ConHost.
+/// DOGE pure-palette activity animation: dashed vertical strokes that cycle
+/// downward (a vertical marquee of stripes / dashes).
+///
+/// Replaces braille / pulsing-dot spinners under DOGE so agent activity never
+/// reads as gray/dim fade. Glyphs are pure box-drawing (no braille density
+/// ramp). Every frame is exactly 1 column.
+///
+/// Order reads as a stripe falling through the cell: heavy vertical ->
+/// dashed -> light dashed -> light vertical -> gap -> entering from top.
+pub fn doge_striped_down_frames() -> &'static [&'static str] {
+    // heavy / dashed / light cycle so the marquee reads slow and striped.
+    const FRAMES: &[&str] = &[
+        "\u{2503}", // ┃ heavy vertical
+        "\u{2507}", // ┇ heavy triple-dash vertical
+        "\u{250b}", // ┋ heavy quadruple-dash vertical
+        "\u{250a}", // ┊ light quadruple-dash vertical
+        "\u{2502}", // │ light vertical
+        "\u{2506}", // ┆ light triple-dash vertical
+        "\u{00b7}", // · middle dot (stripe gap)
+        "\u{2577}", // ╷ light down (stripe entering from top)
+    ];
+    FRAMES
+}
+
+/// Legacy-console / ASCII stand-in for [`doge_striped_down_frames`].
+fn doge_striped_down_frames_ascii() -> &'static [&'static str] {
+    // Classic dashed bar scrolling: | ! : . cycling for a downward feel.
+    const FRAMES: &[&str] = &["|", "!", ":", ".", ":", "!", "|", "."];
+    FRAMES
+}
+
+fn prefers_doge_striped_spinners() -> bool {
+    matches!(
+        crate::theme::Theme::current_kind(),
+        crate::theme::ThemeKind::Doge
+    )
+}
+
+/// Left-side / activity progress-spinner frames.
+///
+/// Normally rotating braille (`⠋⠙⠹…`); a 1-column ASCII spinner
+/// (`|`, `/`, `-`, `\`) on legacy ConHost; under DOGE a long striped
+/// downward marquee (see [`doge_striped_down_frames`]) so thinking /
+/// tool-running chrome never reads as a gray braille density fade.
+///
+/// Right-side status sparkles (top-bar busy-agent count, goal chip, row
+/// running icons) use [`dot_spinner_frames`] instead — those keep the
+/// classic density sparkle under DOGE and must not share this marquee.
 ///
 /// The U+2800 Braille Patterns block is not part of CP437 and renders as
 /// tofu on the legacy console raster font, so the turn-status line, the
@@ -228,21 +274,31 @@ pub fn braille_spinner_frames() -> &'static [&'static str] {
         "\u{2827}",
     ];
     const FALLBACK: &[&str] = &["|", "/", "-", "\\"];
-    if is_legacy_windows_console() {
+    if prefers_doge_striped_spinners() {
+        if is_legacy_windows_console() {
+            doge_striped_down_frames_ascii()
+        } else {
+            doge_striped_down_frames()
+        }
+    } else if is_legacy_windows_console() {
         FALLBACK
     } else {
         FANCY
     }
 }
 
-/// Pulsing dot progress-spinner frames (`⋅ : ⸬ ⁙`) normally; a quiet
-/// 1-column dot cycle (`.`, `:`, `·`) on legacy ConHost.
+/// Pulsing "sparky" dot frames (`⋅ : ⸬ ⁙`) for right-side status chrome and
+/// running-row icons — top-bar busy-agent count, goal chip, Tasks/Dashboard
+/// rows, session picker. A quiet 1-column dot cycle on legacy ConHost.
+///
+/// **Not** the left activity throbber. Under DOGE the left turn-status /
+/// thinking spinner uses [`braille_spinner_frames`] (striped downward
+/// marquee). This API keeps the classic density sparkle on every theme so
+/// the top-right cue does not collapse into the same dashed marquee.
 ///
 /// U+22C5 / U+2E2C / U+2059 are absent from the CP437 raster font, so the
-/// running-subagent / task rows (Tasks pane + Dashboard), the dashboard
-/// status chips, and the active-goal indicators fall back to a quiet dot
-/// cycle there — period, colon, and `·` (U+00B7, CP437 `0xFA`) all render
-/// on the raster font. Every frame in both sets is exactly 1 column.
+/// call sites fall back to a quiet dot cycle there. Every frame in both
+/// sets is exactly 1 column.
 pub fn dot_spinner_frames() -> &'static [&'static str] {
     const FANCY: &[&str] = &[
         "\u{22c5}", ":", "\u{2e2c}", "\u{2059}", "\u{22c5}", ":", "\u{2e2c}", "\u{2059}",
@@ -267,6 +323,71 @@ pub fn accent_bar() -> &'static str {
         "\u{2502}"
     } else {
         "\u{2503}"
+    }
+}
+
+/// Static striped (dashed) vertical for Yellow context/time rails.
+///
+/// Solid `┃` is the Human/Agent rail; context meta uses a dashed bar so it
+/// reads as stripes even when not animating. Legacy ConHost keeps light `│`.
+pub fn striped_accent_bar() -> &'static str {
+    if is_legacy_windows_console() {
+        "\u{2502}" // │
+    } else {
+        "\u{2507}" // ┇ heavy triple-dash vertical
+    }
+}
+
+/// Frame from the DOGE striped-down marquee for an animated striped rail.
+///
+/// `tick` advances the marquee; `row` offsets so a multi-row rail reads as
+/// stripes falling downward. Always 1 column.
+pub fn striped_accent_bar_frame(tick: u64, row: u16) -> &'static str {
+    let frames = if is_legacy_windows_console() {
+        doge_striped_down_frames_ascii()
+    } else {
+        doge_striped_down_frames()
+    };
+    // Slow the cycle: advance one frame every 4 ticks so the marquee is
+    // readable (~7.5 fps at the default 30fps animation clock).
+    let n = frames.len() as u64;
+    let idx = ((tick / 4) + u64::from(row)) % n;
+    frames[idx as usize]
+}
+
+/// Composer caret: filled box half of the slow green blink.
+pub fn cursor_box_filled() -> &'static str {
+    if is_legacy_windows_console() {
+        "#"
+    } else {
+        "\u{2588}" // █ FULL BLOCK
+    }
+}
+
+/// Composer caret: hollow box half of the slow green blink.
+pub fn cursor_box_hollow() -> &'static str {
+    if is_legacy_windows_console() {
+        "o"
+    } else {
+        "\u{25a1}" // □ WHITE SQUARE
+    }
+}
+
+/// Half-period for the composer filled↔hollow box blink (milliseconds).
+/// ~600ms keeps the blink slow and readable (not seizure-fast).
+pub const CURSOR_BOX_BLINK_HALF_MS: u64 = 600;
+
+/// Whether the filled box phase is showing at `now_ms` (monotonic millis).
+pub fn cursor_box_filled_phase(now_ms: u64) -> bool {
+    (now_ms / CURSOR_BOX_BLINK_HALF_MS).is_multiple_of(2)
+}
+
+/// Glyph for the composer caret at `now_ms`: filled box or hollow box.
+pub fn cursor_box_glyph(now_ms: u64) -> &'static str {
+    if cursor_box_filled_phase(now_ms) {
+        cursor_box_filled()
+    } else {
+        cursor_box_hollow()
     }
 }
 
@@ -664,6 +785,8 @@ mod tests {
         for frame in braille_spinner_frames()
             .iter()
             .chain(dot_spinner_frames().iter())
+            .chain(doge_striped_down_frames().iter())
+            .chain(doge_striped_down_frames_ascii().iter())
             .chain(monitor_icon_frames().iter())
             .chain(
                 [
@@ -676,18 +799,130 @@ mod tests {
         }
     }
 
+    /// Striped accent bars and composer box cursors are 1 column.
+    #[test]
+    fn striped_rail_and_cursor_box_glyphs_are_one_column() {
+        assert_eq!(striped_accent_bar().width(), 1);
+        assert_eq!(cursor_box_filled().width(), 1);
+        assert_eq!(cursor_box_hollow().width(), 1);
+        assert_ne!(
+            cursor_box_filled(),
+            cursor_box_hollow(),
+            "filled and hollow composer boxes must differ"
+        );
+        for t in 0..32u64 {
+            assert_eq!(striped_accent_bar_frame(t, 0).width(), 1);
+            assert_eq!(cursor_box_glyph(t * CURSOR_BOX_BLINK_HALF_MS).width(), 1);
+        }
+    }
+
+    /// Composer caret phase slowly alternates filled ↔ hollow (~600ms half).
+    #[test]
+    fn cursor_box_blink_alternates_filled_and_hollow() {
+        let half = CURSOR_BOX_BLINK_HALF_MS;
+        assert!(
+            half >= 500 && half <= 800,
+            "half-period must be slow/readable"
+        );
+        assert!(cursor_box_filled_phase(0));
+        assert_eq!(cursor_box_glyph(0), cursor_box_filled());
+        assert!(!cursor_box_filled_phase(half));
+        assert_eq!(cursor_box_glyph(half), cursor_box_hollow());
+        assert!(cursor_box_filled_phase(half * 2));
+        assert_eq!(cursor_box_glyph(half * 2), cursor_box_filled());
+    }
+
+    /// Under DOGE, the *left* activity spinner (braille API) uses the striped
+    /// downward marquee — not braille density ramps.
+    #[test]
+    fn doge_activity_spinners_use_striped_down_marquee_not_braille() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        assert!(!is_legacy_windows_console());
+        let striped = doge_striped_down_frames();
+        assert!(
+            striped.len() >= 6,
+            "striped marquee must be a long cycle, got {}",
+            striped.len()
+        );
+        assert_eq!(braille_spinner_frames(), striped);
+        // Must not be the legacy braille first frame.
+        assert_ne!(striped[0], "\u{280b}");
+        // Must include dashed verticals (the stripe look).
+        assert!(
+            striped
+                .iter()
+                .any(|f| *f == "\u{2507}" || *f == "\u{250b}" || *f == "\u{250a}"),
+            "expected dashed vertical stripe glyphs in {striped:?}"
+        );
+    }
+
+    /// Under DOGE, right-side status sparkles keep the classic density
+    /// frames (`⋅ : ⸬ ⁙`) and must not share the left dashed marquee.
+    ///
+    /// Top-bar busy-agent count, goal chip, and Tasks/Dashboard row icons
+    /// all call [`dot_spinner_frames`]; collapsing them onto
+    /// [`doge_striped_down_frames`] made the right chrome look like a second
+    /// copy of the left activity throbber.
+    #[test]
+    fn doge_right_status_sparkle_keeps_classic_dot_frames_not_striped() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        assert!(!is_legacy_windows_console());
+        let sparkle = dot_spinner_frames();
+        let striped = doge_striped_down_frames();
+        assert_ne!(
+            sparkle, striped,
+            "right-side sparkle must not reuse the left dashed marquee"
+        );
+        // Classic density sparkle: middle-dot · density ramp · four-dot cluster.
+        assert_eq!(sparkle[0], "\u{22c5}"); // ⋅
+        assert_eq!(sparkle[1], ":");
+        assert_eq!(sparkle[2], "\u{2e2c}"); // ⸬
+        assert_eq!(sparkle[3], "\u{2059}"); // ⁙
+        // No dashed vertical box-drawing in the sparkle set.
+        assert!(
+            sparkle.iter().all(|f| {
+                *f != "\u{2503}"
+                    && *f != "\u{2507}"
+                    && *f != "\u{250b}"
+                    && *f != "\u{250a}"
+                    && *f != "\u{2502}"
+                    && *f != "\u{2506}"
+                    && *f != "\u{2577}"
+            }),
+            "sparkle frames must not include striped-marquee glyphs: {sparkle:?}"
+        );
+    }
+
+    /// Non-DOGE themes keep classic braille / dot fancy frames.
+    #[test]
+    fn non_doge_spinners_keep_braille_and_dot_frames() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        assert!(!is_legacy_windows_console());
+        assert_eq!(braille_spinner_frames()[0], "\u{280b}");
+        assert_eq!(dot_spinner_frames()[2], "\u{2e2c}");
+    }
+
     // On the (non-Windows) test host the helpers must return the fancy
     // glyphs, and the `char` helpers must agree with their `&str` siblings.
     #[test]
     fn glyph_helpers_return_fancy_on_non_legacy() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
         assert!(!is_legacy_windows_console());
         assert_eq!(diamond_filled(), "\u{25C6}");
         assert_eq!(diamond_hollow(), "\u{25C7}");
         assert_eq!(diamond_dotted(), "\u{25C8}");
         assert_eq!(diamond_filled_char(), '\u{25C6}');
         assert_eq!(diamond_hollow_char(), '\u{25C7}');
-        assert_eq!(braille_spinner_frames()[0], "\u{280b}");
+        // Left activity under DOGE → striped marquee (not braille).
+        assert_eq!(braille_spinner_frames(), doge_striped_down_frames());
+        // Right sparkle under DOGE → classic density frames (not striped).
+        assert_eq!(dot_spinner_frames()[0], "\u{22c5}");
         assert_eq!(dot_spinner_frames()[2], "\u{2e2c}");
+        assert_ne!(dot_spinner_frames(), doge_striped_down_frames());
         assert_eq!(
             monitor_icon_frames(),
             ["\u{25CB}", "\u{25CE}", "\u{25C9}", "\u{25CE}"]

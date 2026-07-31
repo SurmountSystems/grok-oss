@@ -30,7 +30,6 @@ use xai_grok_shell::agent::config::UiConfig;
 const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compact_mode",
     "hide_header",
-    "hide_title_bar",
     "screen_mode",
     "show_timestamps",
     "show_timeline",
@@ -221,9 +220,6 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("hide_header", Action::SetHideHeader(b)) => {
             assert_eq!(b, expected, "SetHideHeader value differs from expected")
-        }
-        ("hide_title_bar", Action::SetHideTitleBar(b)) => {
-            assert_eq!(b, expected, "SetHideTitleBar value differs from expected")
         }
         ("show_timestamps", Action::SetTimestamps(b)) => {
             assert_eq!(b, expected, "SetTimestamps value differs from expected")
@@ -1845,7 +1841,6 @@ fn registry_kind_membership_through_pr_14() {
         vec![
             "compact_mode",
             "hide_header",
-            "hide_title_bar",
             "group_tool_verbs",
             "collapsed_edit_blocks",
             "invert_scroll",
@@ -2016,7 +2011,6 @@ fn defaults_round_trip_through_registry() {
         match key {
             "compact_mode" => SettingValue::Bool(false),
             "hide_header" => SettingValue::Bool(false),
-            "hide_title_bar" => SettingValue::Bool(false),
             "screen_mode" => SettingValue::Enum("fullscreen"),
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
@@ -2124,7 +2118,6 @@ fn settings_value_payload_matches_kind() {
         match outcome {
             SettingsKeyOutcome::Action(Action::SetCompactMode(_))
             | SettingsKeyOutcome::Action(Action::SetHideHeader(_))
-            | SettingsKeyOutcome::Action(Action::SetHideTitleBar(_))
             | SettingsKeyOutcome::Action(Action::SetTimestamps(_))
             | SettingsKeyOutcome::Action(Action::SetTimeline(_))
             | SettingsKeyOutcome::Action(Action::SetPageFlipOnSend(_))
@@ -8243,70 +8236,5 @@ fn hide_header_renders_under_appearance_category_shared() {
     match &meta.kind {
         SettingKind::Bool { default } => assert!(!*default, "default must be false"),
         other => panic!("expected Bool kind for hide_header, got {other:?}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// hide_title_bar — SHARED Bool (Appearance, default false = titles on)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn hide_title_bar_space_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "hide_title_bar");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    // Default is false (titles visible); Space toggles to true (hide).
-    assert_set_bool_action(outcome, "hide_title_bar", true);
-}
-
-#[test]
-fn hide_title_bar_enter_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "hide_title_bar");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "hide_title_bar", true);
-}
-
-#[test]
-fn hide_title_bar_mouse_click_two_stage_toggles() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "hide_title_bar") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "first click on a different row body should only select, got: {outcome:?}"
-    );
-    assert_eq!(s.selected, row_y as usize);
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert_set_bool_action(outcome, "hide_title_bar", true);
-}
-
-#[test]
-fn hide_title_bar_renders_under_appearance_category_shared_default_false() {
-    // Named contract: titles visible by default for discoverability.
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("hide_title_bar")
-        .expect("hide_title_bar must be registered");
-    assert_eq!(meta.category, SettingCategory::Appearance);
-    assert_eq!(meta.owner, SettingOwner::Shared);
-    match &meta.kind {
-        SettingKind::Bool { default } => {
-            assert!(!*default, "default must be false (window titles on)")
-        }
-        other => panic!("expected Bool kind for hide_title_bar, got {other:?}"),
     }
 }

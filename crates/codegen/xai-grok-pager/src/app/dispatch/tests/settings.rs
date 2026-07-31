@@ -1418,10 +1418,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "hide_header" => {
             let _ = dispatch(Action::SetHideHeader(true), app);
         }
-        "hide_title_bar" => {
-            // Default is true (hidden); move away by showing titles.
-            let _ = dispatch(Action::SetHideTitleBar(false), app);
-        }
         "show_timestamps" => {
             let _ = dispatch(Action::SetTimestamps(false), app);
         }

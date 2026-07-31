@@ -64,25 +64,29 @@ The plan file contains:
 
 ## Plan Approval
 
-When the agent finishes planning, it calls the `exit_plan_mode` tool. By default the TUI **soft-parks** the plan:
+When the agent finishes planning, it calls the `exit_plan_mode` tool. By default the TUI **soft-parks** the plan and **auto-opens the side panel**:
 
-- Toast + status chip (“Plan parked — click or `/view-plan`…”) without taking over the screen
+- Toast + status chip (“Plan ready. Side panel open”) without a fullscreen takeover
+- The **side panel** opens beside chat immediately (same surface as `/view-plan`)
 - An **inline plan card** in the transcript (preview only; not a fake button menu)
-- **Clickable footer buttons** (Approve / Notes / Clarify / Revise / Quit) as the primary path. Mouse works even when the prompt has draft text.
-- With an empty prompt, **`Enter` / `a` / `A` / `?` / `s` / `q`** are keyboard accelerators (no modal required). Bare **Enter** and **`a`** both approve immediately.
+- **Clickable footer buttons** (Approve / Notes / Clarify / Revise / Quit). Mouse works even when the prompt has draft text.
+- Live draft text is **kept** (not stashed/cleared). Prompt stays focused so typing is live.
+- Soft-park is **non-capturing** for the main thread when the panel is dismissed: bare printable keys type into the composer.
 
-Open the full review surface on demand with **`/view-plan`**, the status chip, or **`ShowPlan`**. That opens a **side panel** beside chat with **clickable CTA buttons** in the panel footer (Approve / Approve w/ comment / Clarify / Revise / Quit). Keys `a` / `A` / `?` / `s` / `q` remain accelerators. On a narrow side panel the footer uses shorter labels (or key-only) so the hit targets always stay clickable. **Ctrl+F** enlarges the panel to fullscreen and back. The panel always re-reads the latest session `plan.md` when you open it (so rewrites while parked show up — not a frozen snapshot from park time).
+The side panel has **clickable CTA buttons** in the panel footer (Approve / Approve w/ comment / Clarify / Revise / Quit). With an **empty** prompt and Preview focus, keys `a` / `A` / `?` / `s` / `q` are accelerators **in the panel**. On a narrow side panel the footer uses shorter labels (or key-only) so the hit targets always stay clickable. **Ctrl+F** enlarges the panel to fullscreen and back. The panel always re-reads the latest session `plan.md` when you open it (so rewrites while parked show up, not a frozen snapshot from park time).
 
-To open a full-screen plan modal immediately every time, set:
+If you dismiss the panel, reopen with **`/view-plan`**, the status chip, or **`ShowPlan`**.
+
+To open a full-screen plan modal immediately every time (and stash the live draft), set:
 
 ```toml
 [ui]
 plan_approval_park = "modal"   # default is "soft"
 ```
 
-(Settings UI: **Plan approval park** — Soft (toast) vs Modal.)
+(Settings UI: **Plan approval park** — Soft (side panel) vs Modal.)
 
-If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens (on demand, or immediately when modal is configured) with a clear empty-state message so you can approve and start implementing, clarify, revise (send the agent back to planning), or quit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
+If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens (auto side panel, or fullscreen when modal is configured) with a clear empty-state message so you can approve and start implementing, clarify, revise (send the agent back to planning), or quit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
 
 ### Reviewing the Plan
 

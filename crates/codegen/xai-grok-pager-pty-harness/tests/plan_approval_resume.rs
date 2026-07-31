@@ -1,6 +1,7 @@
 //! Integration test: the shell re-parks `exit_plan_mode` on
 //! resume, so approval chrome reappears after quit/`--continue` and approving
-//! leaves plan mode + starts the implement turn.
+//! via the soft-park footer mouse CTA leaves plan mode + starts the implement
+//! turn (soft-park is non-capturing for bare `a`).
 //!
 //! CI stages the pager binary via `PAGER_BINARY`. Also runs under plain cargo
 //! (which builds the pager on demand):

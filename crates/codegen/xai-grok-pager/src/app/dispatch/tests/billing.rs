@@ -844,7 +844,12 @@ fn usage_billing_console_live_without_prepaid_honest_gap_not_supergrok_extras() 
         "soft placeholder retired: {text}"
     );
     assert!(
-        lower.contains("no management key/team id")
+        !text.contains("no management key/team id"),
+        "mushy combined gap retired: {text}"
+    );
+    assert!(
+        lower.contains("no management key")
+            || lower.contains("no management team id")
             || lower.contains("team prepaid unavailable")
             || lower.contains("loading team prepaid")
             || lower.contains("console team prepaid"),

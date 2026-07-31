@@ -980,7 +980,9 @@ impl RenderBlock {
         match self {
             // Finish-flash / lookup: same Human token as live UserPrompt rail.
             RenderBlock::UserPrompt(_) => Some(theme.accent_user),
-            RenderBlock::AgentMessage(_) => None, // No accent for agent messages
+            // Finished agent messages paint no left rail (active-only magenta).
+            // No finish-flash on AgentMessage; keep None so lookups match paint.
+            RenderBlock::AgentMessage(_) => None,
             RenderBlock::Workflow(_) => None,
             RenderBlock::ToolCall(block) => {
                 // Execute: Green for success, red for failure

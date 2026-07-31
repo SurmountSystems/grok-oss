@@ -3781,6 +3781,19 @@
             .collect()
     }
 
+    /// Software composer caret glyph (filled or hollow box) at the insertion cell.
+    fn is_composer_box_caret(sym: &str) -> bool {
+        sym == crate::glyphs::cursor_box_filled() || sym == crate::glyphs::cursor_box_hollow()
+    }
+
+    /// True when `region` is empty/whitespace or only the software box caret.
+    /// Ghost-suppressed / empty-ghost asserts use this so the insertion-cell
+    /// caret is not mistaken for ghost content.
+    fn region_is_empty_or_box_caret(region: &str) -> bool {
+        let t = region.trim();
+        t.is_empty() || is_composer_box_caret(t)
+    }
+
     #[test]
     fn set_and_has_ghost_text() {
         let mut pw = PromptWidget::new();
@@ -3835,16 +3848,26 @@
 
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
+        // Capture theme on this thread immediately around draw so fg matches
+        // whatever ambient Theme::current() the paint path saw.
+        let theme = Theme::current();
+        let ghost_fg = theme.ghost_text_style().fg;
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        // "hello" occupies x=0..5, ghost " world" at x=5..11
-        assert_eq!(buf_text_at(&buf, 5, 11, 0), " world");
+        // "hello" at x=0..5. Insertion cell x=5 holds the software box caret
+        // (ghost's leading space is blank, so the caret owns that column).
+        // Ghost body "world" follows at x=6..11.
+        let at_cursor = buf.cell((5, 0)).unwrap().symbol();
+        assert!(
+            is_composer_box_caret(at_cursor),
+            "insertion cell must be the filled/hollow box caret, got {at_cursor:?}"
+        );
+        assert_eq!(buf_text_at(&buf, 6, 11, 0), "world");
 
-        // Verify ghost cells have the correct style (dimmed italic).
-        let theme = Theme::current();
-        let cell = buf.cell((5, 0)).unwrap();
+        // Ghost body cells stay dimmed italic (caret style is only on x=5).
+        let cell = buf.cell((6, 0)).unwrap();
         let cell_style = cell.style();
-        assert_eq!(cell_style.fg, Some(theme.gray_dim),);
+        assert_eq!(cell_style.fg, ghost_fg);
         assert!(cell_style.add_modifier.contains(Modifier::ITALIC));
     }
 
@@ -3878,7 +3901,11 @@
         let mut buf = Buffer::empty(area);
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        assert_eq!(buf_text_at(&buf, 5, 10, 0).trim(), "");
+        // No ghost body — insertion cell may still hold the software box caret.
+        assert!(
+            region_is_empty_or_box_caret(&buf_text_at(&buf, 5, 10, 0)),
+            "slash-active must suppress ghost text (caret alone ok)"
+        );
     }
 
     #[test]
@@ -3920,9 +3947,14 @@
         let mut buf = Buffer::empty(area);
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        // truncate_str(" world and more stuff", 7) -> " world…"
-        let ghost = buf_text_at(&buf, 5, 12, 0);
-        assert_eq!(ghost, " world…");
+        // truncate_str(" world and more stuff", 7) -> " world…"; caret owns the
+        // leading blank column, body + ellipsis remain.
+        let at_cursor = buf.cell((5, 0)).unwrap().symbol();
+        assert!(
+            is_composer_box_caret(at_cursor),
+            "insertion cell must be the box caret, got {at_cursor:?}"
+        );
+        assert_eq!(buf_text_at(&buf, 6, 12, 0), "world…");
     }
 
     #[test]
@@ -3998,7 +4030,11 @@
         let mut buf = Buffer::empty(area);
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        assert_eq!(buf_text_at(&buf, 5, 10, 0).trim(), "");
+        // Empty ghost paints nothing; software box caret may occupy x=5.
+        assert!(
+            region_is_empty_or_box_caret(&buf_text_at(&buf, 5, 10, 0)),
+            "empty ghost must not paint ghost body (caret alone ok)"
+        );
     }
 
     // --- paint_slash_token_highlight (wrap-aware token painting) ---
@@ -4501,6 +4537,11 @@
 
     #[test]
     fn title_renders_on_top_border_with_corners_intact() {
+        use crate::theme::cache;
+        // Continuous caption fade is non-DOGE (DOGE solid-steps at 0.6 → full
+        // secondary, same as border). Pin GrokNight for hermetic blend asserts.
+        let _pin = cache::pin_theme();
+
         let mut pw = PromptWidget::new();
         let style = title_test_style(Some("my session"));
         let area = Rect::new(0, 0, 40, 4);
@@ -4698,4 +4739,58 @@
         };
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "\u{256e}");
+    }
+
+    /// Focused composer paints a green filled/hollow box caret and hides the
+    /// terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
+    #[test]
+    fn focused_composer_paints_green_box_caret_hides_terminal_cursor() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("");
+        let style = PromptStyle {
+            focused: true,
+            chrome: true,
+            show_borders: true,
+            show_prefix: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        let result = pw.draw(&mut buf, area, None, &style, None, None);
+        assert!(
+            result.cursor_pos.is_none(),
+            "software box caret hides the terminal cursor"
+        );
+
+        let filled = crate::glyphs::cursor_box_filled();
+        let hollow = crate::glyphs::cursor_box_hollow();
+        let theme = crate::theme::Theme::current();
+        let mut found = false;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    let sym = cell.symbol();
+                    if sym == filled || sym == hollow {
+                        assert_eq!(
+                            cell.fg,
+                            theme.accent_user,
+                            "composer caret must be Human green under DOGE"
+                        );
+                        assert_eq!(theme.accent_user, Color::Rgb(0, 255, 0));
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            found,
+            "expected filled or hollow green box caret in the prompt buffer"
+        );
     }

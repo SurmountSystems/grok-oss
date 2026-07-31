@@ -821,14 +821,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "hide_title_bar" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("hide_title_bar", "Bool", &value));
-            };
-            xai_grok_shell::util::config::set_hide_title_bar(b)
-                .await
-                .map_err(|e| e.to_string())
-        }
         "show_timestamps" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_timestamps", "Bool", &value));

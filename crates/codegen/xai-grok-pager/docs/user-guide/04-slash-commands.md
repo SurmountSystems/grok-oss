@@ -462,10 +462,10 @@ each meter distinct:
 - SuperGrok **included** weekly/monthly allowance (used % · remaining % · next reset)
 - SuperGrok **dollar extras** (prepaid session balance; separate from included)
 - **Console team prepaid** (Management API balance when a management key and
-  `management_team_id` are configured; otherwise honest `no management key/team id`,
-  or `loading team prepaid...` / `team prepaid unavailable` when configured but
-  cents are unknown). This is **not** SuperGrok extras and **not** a Business
-  SuperGrok OIDC login.
+  `management_team_id` are configured; otherwise distinct honest gaps:
+  `no management key`, `no management team id`, `loading team prepaid...`, or
+  `team prepaid unavailable`). This is **not** SuperGrok extras and **not** a
+  Business SuperGrok OIDC login.
   Setup: [Authentication → Console team prepaid](02-authentication.md#console-team-prepaid-management-api).
 
 When **two SuperGrok principals** are stored (personal + Business), `/limits`
@@ -520,11 +520,11 @@ plan multimodal path; you can still open the toast path and paste manually.
 /screenshot
 ```
 
-Window title vs in-app chrome: **`[ui] hide_title_bar`** (default off = titles
-on; set true to clear) controls the terminal/tab **window title**;
-**`[ui] hide_header`** hides in-app status / welcome / dashboard headers. They
-are separate. See [Theming → Hide header](06-theming.md#hide-header) and
-[Hide window title](06-theming.md#hide-window-title).
+Window title vs in-app chrome: **`[ui.notifications.title] enabled`** (default
+true) controls dynamic terminal/tab **window titles**; **`[ui] hide_header`**
+hides in-app status / welcome / dashboard headers. They are separate. See
+[Theming → Hide header](06-theming.md#hide-header) and
+[Window title](06-theming.md#window-title).
 
 ---
 

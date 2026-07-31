@@ -22,16 +22,16 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 
 The agent exited plan mode without writing a plan.
 
-Use the footer buttons below, or open /view-plan for the full panel.
+Use the footer buttons below to approve, revise, or quit.
 ";
 
-/// Toast shown when `exit_plan_mode` soft-parks approval without opening the
-/// full-screen plan modal (option A — non-blocking status chrome).
+/// Toast shown when `exit_plan_mode` parks approval and auto-opens the
+/// non-capturing side panel (default soft park).
 ///
-/// The approval surface stays reachable via `/view-plan`, the status-line
-/// click target, or `ShowPlan` / reopen paths (side panel by default).
+/// Fullscreen modal is still opt-in via `[ui] plan_approval_park = "modal"`.
+/// `/view-plan` / status click / `ShowPlan` reopen the panel if dismissed.
 pub const PLAN_PARKED_TOAST: &str =
-    "Plan parked. Click Approve/Quit below, or /view-plan for the full panel";
+    "Plan ready. Review the side panel, or click Approve/Quit below";
 
 /// Header line for the inline transcript plan card (option C).
 pub const PLAN_CARD_HEADER: &str = "Plan ready for review";
@@ -43,8 +43,7 @@ pub const PLAN_CARD_HEADER_EMPTY: &str = "No plan written yet";
 ///
 /// Real clickable CTAs live only on soft-park footer chrome (`paint_soft_park_cta_buttons`).
 /// This string must not look like dead clickable buttons or an AI-Dungeon option list.
-pub const PLAN_CARD_CTAS: &str =
-    "Use the footer buttons below, or open /view-plan for the full panel.";
+pub const PLAN_CARD_CTAS: &str = "Use the footer buttons below to approve, revise, or quit.";
 
 /// Max body lines embedded in the soft-park transcript card before ellipsis.
 pub const PLAN_CARD_PREVIEW_LINES: usize = 12;
@@ -316,14 +315,14 @@ pub fn paint_soft_park_cta_buttons(
 
 /// Status-line label while plan approval is parked (soft or modal).
 ///
-/// Soft park (option A) keeps this non-modal indicator visible until the user
-/// opens the approval surface. Empty plans still name a review path so the
-/// status line never looks stuck with no way forward.
+/// Default soft park auto-opens the side panel; this chip stays until the
+/// user decides. Empty plans still name a review path so the status line
+/// never looks stuck with no way forward.
 pub fn plan_approval_status_label(has_plan: bool) -> &'static str {
     if has_plan {
-        "Plan parked — click or /view-plan to review"
+        "Plan ready. Side panel open"
     } else {
-        "No plan written — click or /view-plan to review"
+        "No plan written. Side panel open"
     }
 }
 
@@ -753,21 +752,24 @@ mod tests {
     fn plan_approval_status_label_distinguishes_empty() {
         assert_eq!(
             plan_approval_status_label(true),
-            "Plan parked — click or /view-plan to review"
+            "Plan ready. Side panel open"
         );
         assert_eq!(
             plan_approval_status_label(false),
-            "No plan written — click or /view-plan to review"
+            "No plan written. Side panel open"
         );
         assert!(
-            PLAN_PARKED_TOAST.contains("Plan parked") && PLAN_PARKED_TOAST.contains("/view-plan"),
-            "soft-park toast must name the non-modal review path"
+            PLAN_PARKED_TOAST.contains("Plan ready") && PLAN_PARKED_TOAST.contains("side panel"),
+            "soft-park toast must name auto-open side panel; got {PLAN_PARKED_TOAST:?}"
+        );
+        assert!(
+            !PLAN_PARKED_TOAST.contains("/view-plan"),
+            "toast must not nudge /view-plan when the panel auto-opens"
         );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());
         assert!(
-            EMPTY_PLAN_PLACEHOLDER.contains("/view-plan")
-                || EMPTY_PLAN_PLACEHOLDER.contains("footer"),
+            EMPTY_PLAN_PLACEHOLDER.contains("footer"),
             "empty-plan copy must point at real review paths; got {EMPTY_PLAN_PLACEHOLDER:?}"
         );
         assert!(

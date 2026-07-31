@@ -19,9 +19,12 @@ pub use config::{
 };
 pub use title::{TitleState, format_busy_agents_title_part, resolve_session_title_name};
 
-/// Pure gate: title OSC only when nested title.enabled and window-title hide is off.
-pub(crate) fn title_updates_should_run(title_enabled: bool, hide_title_bar: bool) -> bool {
-    title_enabled && !hide_title_bar
+/// Pure gate: dynamic title OSC only when `[ui.notifications.title].enabled`.
+///
+/// Window titles are always product-managed on the startup/`set_terminal_title`
+/// path. This gate is the sole opt-out for TitleManager tick updates.
+pub(crate) fn title_updates_should_run(title_enabled: bool) -> bool {
+    title_enabled
 }
 
 pub struct NotificationEvent {
@@ -185,6 +188,15 @@ impl NotificationService {
         if self.title_updates_active()
             && let Some(title_esc) = self.title_manager.update(state)
         {
+            // Apply OSC 0 immediately on the TTY (same path as shutdown /
+            // set_terminal_title). Window titles must not depend only on
+            // draw post_flush: deferred ACP presents and idle frames can
+            // skip or delay pending_notification_escapes.
+            xai_grok_shell::util::with_locked_stderr(|stderr| {
+                use std::io::Write as _;
+                let _ = stderr.write_all(title_esc.as_bytes());
+                let _ = stderr.flush();
+            });
             buf.push_str(&title_esc);
         }
 
@@ -217,8 +229,8 @@ impl NotificationService {
 
     pub fn shutdown(&mut self) {
         // Reset the tab title back to the product brand so it doesn't linger
-        // on the last activity label after exit. Skip when hide_title_bar is
-        // on so we never wrote a Grok title to begin with.
+        // on the last activity label after exit. Skip when title.enabled is
+        // off so we never wrote a dynamic Grok title to begin with.
         if self.title_updates_active() {
             let title_esc = self.title_manager.reset();
             xai_grok_shell::util::with_locked_stderr(|stderr| {
@@ -239,13 +251,9 @@ impl NotificationService {
         }
     }
 
-    /// Title OSC updates require both `[ui.notifications.title].enabled` and
-    /// `[ui].hide_title_bar = false`.
+    /// Dynamic title OSC updates require `[ui.notifications.title].enabled`.
     fn title_updates_active(&self) -> bool {
-        title_updates_should_run(
-            self.config.title.enabled,
-            crate::app::hide_title_bar_runtime(),
-        )
+        title_updates_should_run(self.config.title.enabled)
     }
 
     /// Returns `true` if a terminal notification for `ApprovalRequired` has
@@ -587,23 +595,17 @@ mod tests {
     }
 
     #[test]
-    fn title_updates_inactive_when_hide_title_bar() {
-        // Named contract: hide_title_bar true suppresses title OSC even when
-        // [ui.notifications.title].enabled is true. Pure gate (no process
-        // atomic) so parallel tests cannot race HIDE_TITLE_BAR.
+    fn title_updates_gated_only_by_title_enabled() {
+        // Named contract: dynamic TitleManager OSC is gated solely by
+        // [ui.notifications.title].enabled. There is no hide_title_bar gate.
         assert!(
-            !title_updates_should_run(true, true),
-            "hide on must block title updates"
+            title_updates_should_run(true),
+            "title.enabled true must allow dynamic title updates"
         );
         assert!(
-            title_updates_should_run(true, false),
-            "hide off + enabled must allow title updates"
+            !title_updates_should_run(false),
+            "title.enabled false is the opt-out for dynamic titles"
         );
-        assert!(
-            !title_updates_should_run(false, false),
-            "title.enabled false must block even when hide is off"
-        );
-        assert!(!title_updates_should_run(false, true));
     }
 
     #[test]

@@ -3,9 +3,8 @@
 
     #[test]
     fn exit_plan_mode_soft_parks_with_toast_not_modal() {
-        // Option A (feat:plan-modal-softer-park): exit_plan_mode parks durable
-        // approval + toast without hard-opening the line-viewer modal.
-        // Option C: also commits an inline transcript plan card.
+        // Default soft park: durable approval + toast + auto-open non-capturing
+        // side panel (not fullscreen modal). Live draft kept. Option C card too.
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -19,19 +18,35 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
 
         assert!(agent.plan_approval_view.is_some(), "approval must park durably");
+        let viewer = agent
+            .line_viewer
+            .as_ref()
+            .expect("soft park must auto-open the plan side panel");
         assert!(
-            agent.line_viewer.is_none(),
-            "soft park must not auto-open the plan modal"
+            viewer.side_panel && !viewer.fullscreen,
+            "soft park auto-open must be side panel, not fullscreen modal"
+        );
+        assert_eq!(
+            viewer.markdown_content_for_test(),
+            Some("# Cursor Plan")
         );
         assert_eq!(
             agent.active_pane,
             crate::views::agent::ActivePane::Prompt,
-            "soft park must focus Prompt so CTA keys are not dead under Scrollback"
+            "soft park must focus Prompt so typing is not trapped"
+        );
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|p| p.focus),
+            Some(crate::views::plan_approval_view::PlanApprovalFocus::Prompt),
+            "soft park keeps Prompt focus with live draft"
         );
         assert_eq!(
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
             Some(crate::views::plan_approval_view::PLAN_PARKED_TOAST),
-            "soft park must show the non-modal review toast"
+            "soft park must show the review toast"
         );
         assert_eq!(
             agent.prompt.text(),
@@ -40,7 +55,7 @@
         );
         assert_eq!(
             crate::views::plan_approval_view::plan_approval_status_label(true),
-            "Plan parked — click or /view-plan to review"
+            "Plan ready. Side panel open"
         );
         // Option C: transcript card present with plan preview + CTA legend.
         assert!(
@@ -122,8 +137,8 @@
 
     #[test]
     fn exit_plan_mode_soft_park_reopen_opens_side_panel() {
-        // Option B: on-demand reopen docks as a right-hand side panel (not
-        // fullscreen takeover) with approval CTAs and plan body.
+        // Soft park already auto-opens the side panel. Explicit reopen (after
+        // dismiss) still docks as side panel with CTAs — not fullscreen.
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -135,9 +150,13 @@
         assert!(handle_exit_plan_mode(ext, &mut app));
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            assert!(agent.line_viewer.is_none());
+            let viewer = agent.line_viewer.as_ref().expect("auto-open side panel");
+            assert!(viewer.side_panel, "auto-open must dock as side panel");
+            assert!(!viewer.fullscreen, "auto-open must not force fullscreen");
+            // Dismiss then reopen via /view-plan path.
+            agent.line_viewer = None;
             agent.reopen_plan_approval();
-            let viewer = agent.line_viewer.as_ref().expect("side panel");
+            let viewer = agent.line_viewer.as_ref().expect("side panel after reopen");
             assert!(viewer.side_panel, "reopen must dock as side panel");
             assert!(!viewer.fullscreen, "reopen must not force fullscreen");
             assert!(
@@ -190,10 +209,8 @@
             agent.plan_approval_view.as_ref().map(|s| s.source),
             Some(crate::views::plan_approval_view::PlanReviewSource::FileBacked)
         );
-        // Soft park: no auto-open. On demand, file-backed body still opens via
-        // request plan_content even when plan.md is not on disk under the cwd.
-        assert!(agent.line_viewer.is_none());
-        agent.reopen_plan_approval();
+        // Soft park auto-opens; file-backed body comes from request plan_content
+        // even when plan.md is not on disk under the cwd.
         assert_eq!(
             agent
                 .line_viewer
@@ -205,8 +222,8 @@
 
     #[test]
     fn exit_plan_mode_empty_soft_parks_placeholder_on_demand() {
-        // Empty plan.md soft-parks with toast + status; placeholder opens when
-        // the user engages (reopen / /view-plan / status click).
+        // Empty plan still auto-opens the side panel with the empty placeholder
+        // so the decision surface is never missing.
         let mut app = make_app_with_agent("sess-1");
         let (ext, _rx) = make_exit_plan_ext(None);
 
@@ -223,29 +240,24 @@
                 crate::views::plan_approval_view::PlanApprovalFocus::Prompt,
                 "soft park focuses Prompt so L1 typing is live (modal-free)"
             );
-            assert!(agent.line_viewer.is_none());
-            assert_eq!(
-                agent.toast.as_ref().map(|(m, _)| m.as_str()),
-                Some(crate::views::plan_approval_view::PLAN_PARKED_TOAST)
-            );
-        }
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.reopen_plan_approval();
             assert_eq!(
                 agent
                     .line_viewer
                     .as_ref()
                     .and_then(|v| v.markdown_content_for_test()),
-                Some(crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER)
+                Some(crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER),
+                "empty plan auto-opens placeholder panel"
+            );
+            assert_eq!(
+                agent.toast.as_ref().map(|(m, _)| m.as_str()),
+                Some(crate::views::plan_approval_view::PLAN_PARKED_TOAST)
             );
         }
     }
 
     #[test]
-    fn exit_plan_mode_soft_park_preserves_open_modal() {
-        // Soft park must not yank the command palette out from under the user.
-        // Engaging the plan surface (reopen) still dismisses it so the plan paints.
+    fn exit_plan_mode_soft_park_dismisses_open_modal_for_panel() {
+        // Auto-open side panel dismisses competing overlays so the plan paints.
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -267,27 +279,21 @@
         {
             let agent = app.agents.get(&AgentId(0)).unwrap();
             assert!(
-                agent.active_modal.is_some(),
-                "soft park must leave the open modal alone"
+                agent.active_modal.is_none(),
+                "auto-open panel must dismiss the open modal so the plan is visible"
             );
             assert!(agent.plan_approval_view.is_some());
-            assert!(agent.line_viewer.is_none());
-        }
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.reopen_plan_approval();
             assert!(
-                agent.active_modal.is_none(),
-                "reopen must dismiss the modal so the plan preview is visible"
+                agent.line_viewer.as_ref().is_some_and(|v| v.side_panel),
+                "soft park must auto-open side panel"
             );
-            assert!(agent.line_viewer.is_some());
         }
     }
 
     #[test]
-    fn exit_plan_mode_soft_park_preserves_block_viewer_until_reopen() {
-        // Soft park leaves Edit/tool block_viewer alone; reopen dismisses it so
-        // wheel scroll reaches the plan line_viewer.
+    fn exit_plan_mode_soft_park_dismisses_block_viewer_for_panel() {
+        // Auto-open side panel dismisses block_viewer so wheel scroll reaches
+        // the plan line_viewer.
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -305,20 +311,14 @@
         {
             let agent = app.agents.get(&AgentId(0)).unwrap();
             assert!(
-                agent.block_viewer.is_some(),
-                "soft park must leave block_viewer alone"
+                agent.block_viewer.is_none(),
+                "auto-open panel must dismiss block_viewer so the plan can scroll"
             );
             assert!(agent.plan_approval_view.is_some());
-            assert!(agent.line_viewer.is_none());
-        }
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.reopen_plan_approval();
             assert!(
-                agent.block_viewer.is_none(),
-                "reopen must dismiss block_viewer so the plan can scroll"
+                agent.line_viewer.as_ref().is_some_and(|v| v.side_panel),
+                "soft park must auto-open side panel"
             );
-            assert!(agent.line_viewer.is_some());
         }
     }
 
@@ -343,13 +343,23 @@
         }
         assert!(handle_exit_plan_mode(second, &mut app));
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        // Empty exit must clear the prior inline body (not leave "# First Plan").
         assert!(agent.latest_inline_plan_content.is_none());
-        // Soft park: empty approval parks without auto-opening; toast still fires.
-        assert!(agent.line_viewer.is_none());
+        // Soft park auto-opens the side panel for empty plans too (placeholder
+        // body). Stale first-plan chrome must not remain in the viewer.
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .and_then(|v| v.markdown_content_for_test()),
+            Some(crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER),
+            "empty exit auto-opens placeholder; must not keep prior plan body"
+        );
         assert_eq!(
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
             Some(crate::views::plan_approval_view::PLAN_PARKED_TOAST)
         );
+        agent.line_viewer = None;
         agent.reopen_plan_approval();
         assert_eq!(
             agent

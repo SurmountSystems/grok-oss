@@ -130,9 +130,12 @@ SuperGrok limits (personal and/or Business) before SuperGrok dollar extras /
 console API $. When more than one SuperGrok login identity is available, both
 pools' headroom are considered and ranked among included pools (sooner reset is
 a ranking heuristic). Exhausted included pool fails over to another with
-included headroom, then console. This is **not** a `preferred_method` value
-(`preferred_method` stays `api_key` / `oauth` / `oidc` only, matching ordinary
-grok).
+included headroom, then console. For a single principal, if the active base
+session was refreshed but a multi-slot copy is still stale or marked out of
+allowance, ranking uses the **live** SuperGrok JWT (including SuperGrok Heavy
+tier sessions) rather than silently staying on the console API key. This is
+**not** a `preferred_method` value (`preferred_method` stays `api_key` /
+`oauth` / `oidc` only, matching ordinary grok).
 
 When SuperGrok **included** weekly/monthly usage is marked used up and at least
 one console key is bound, sampling **prefers the first live console key** (and
@@ -185,11 +188,17 @@ When both are set, billing refresh (session start, turn end, `/usage`) fetches
 - Footer when console is live: `Console key · team prepaid: $N`
 - `/limits` Console section: `Balance (console team prepaid): $N`
 
-Without a management key **or** without `management_team_id`, `/limits` and the
-footer show an honest **no management key/team id** line (no invented balance).
-When both are set but balance is still unknown after a refresh, copy says
-**team prepaid unavailable** (or **loading team prepaid...** while a fetch is
-kicked). Token / spend **series** charts are not wired yet (POST usage analytics;
+Honest gap copy is **distinct** by what is missing (no invented balance):
+
+| State | Footer / `/limits` Balance line |
+|-------|----------------------------------|
+| No management key | **no management key** |
+| Key set, no `management_team_id` | **no management team id** |
+| Both set, fetch in flight / cold | **loading team prepaid...** |
+| Both set, fetch done but no balance | **team prepaid unavailable** |
+| Balance known | **team prepaid: $N** / **Balance (console team prepaid): $N** |
+
+Token / spend **series** charts are not wired yet (POST usage analytics;
 dogfood later). Enterprise `GROK_DEPLOYMENT_KEY` is a different surface (managed
 config / attribution), not a substitute for this meter.
 

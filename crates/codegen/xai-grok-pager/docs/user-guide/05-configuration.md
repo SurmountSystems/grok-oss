@@ -72,9 +72,7 @@ economic_mode = true                   # soft-cap effective context at 200k (Gro
                                        # Override one conversation with /economic-mode
 hide_header = false                    # hide in-app status / welcome / dashboard headers only
                                        # (default: false). Not the desktop/terminal window title.
-hide_title_bar = false                 # clear terminal/tab window title + skip dynamic title
-                                       # updates (default: false = titles on: session, activity,
-                                       # N agents, grok-oss). See 06-theming.md Hide window title.
+                                       # Window titles: [ui.notifications.title] enabled (default true).
 
 [features]
 telemetry = false                      # anonymous usage telemetry
@@ -489,7 +487,7 @@ busy.
 | `events` | array | `["turn_complete", "approval_required"]` | Events that trigger notifications. Options: `turn_complete`, `approval_required`, `session_ready`, `task_complete`, `agent_error`. |
 | `sleep_prevention` | bool | `true` | Keep the display awake while the agent works (macOS/Linux). |
 | `progress_bar` | bool | `true` | Show a progress indicator in the terminal tab (OSC 9;4). |
-| `title.enabled` | bool | `true` | Set the terminal/tab **window title** to reflect agent state. Also gated by `[ui] hide_title_bar` (default off = titles on; set true to clear window title + skip dynamic updates; not the in-app header). |
+| `title.enabled` | bool | `true` | Set the terminal/tab **window title** to reflect agent state (session, activity, agents, brand). Sole opt-out for dynamic titles; never emits empty SetTitle. Not the in-app header (`hide_header`). |
 | `title.items` | array | (see above) | Items shown in the title bar. Options: `action-required`, `spinner`, `activity`, `session-name`, `agents`, `cwd`, `model`, `turn-timer`, `grok` (displays as `grok-oss`). |
 
 #### Terminal support matrix

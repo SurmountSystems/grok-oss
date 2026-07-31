@@ -657,6 +657,24 @@ impl AgentView {
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
+        // Ctrl/Cmd+V: full clipboard attachment path (screenshot raster +
+        // file URLs). Must not fall through to the prompt widget's text-only
+        // paste — plan review screenshots ride approve/revise/clarify.
+        if crate::input::key::is_paste_key(key) {
+            if self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview)
+            {
+                if let Some(ref mut pav) = self.plan_approval_view {
+                    pav.focus = PlanApprovalFocus::Prompt;
+                }
+            }
+            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                crate::clipboard::system_clipboard_read_text(),
+            );
+            return self.handle_paste_key_deferred(clipboard_text);
+        }
         // Soft-park (no side panel): **non-capturing** for Char / empty Enter.
         // L1 main thread stays modal-free (operator 2026-07-29): all printable
         // keys go to the composer; CTAs are mouse footer / status / `/view-plan`
@@ -3829,6 +3847,93 @@ mod approve_plan_flush_tests {
             agent.prompt.text(),
             agent.prompt.images.len()
         );
+    }
+
+    /// Drive Ctrl+V with a clipboard raster through `handle_input` (shipped
+    /// path), complete the deferred probe, and assert a plan-composer chip.
+    fn plan_ctrl_v_clipboard_image(agent: &mut AgentView) {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::Event;
+
+        crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+            text: None,
+            ..crate::clipboard::ClipboardProbeHook::with_raster(None)
+        });
+        let outcome = agent.handle_input(
+            &Event::Key(crate::key!('v', CONTROL).to_key_event()),
+            &ActionRegistry::defaults(),
+        );
+        let ctx = agent.pending_effects.iter().find_map(|e| match e {
+            crate::app::actions::Effect::ProbeClipboardAttachment { ctx, .. } => Some(ctx.clone()),
+            _ => None,
+        });
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Ctrl+V under plan review must be handled; got {outcome:?}"
+        );
+        let ctx = ctx.expect("plan Ctrl+V with clipboard image must defer a probe");
+        let pasted = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: vec![
+                0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            mime_type: "image/png".to_string(),
+        });
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert!(
+            !agent.prompt.images.is_empty() || agent.prompt.text().contains("[Image"),
+            "clipboard screenshot must land on plan composer; text={:?} n={}",
+            agent.prompt.text(),
+            agent.prompt.images.len()
+        );
+    }
+
+    /// Named contract: Ctrl+V clipboard screenshot while plan side panel is
+    /// open on Preview must attach (not swallow into the line viewer).
+    #[test]
+    fn plan_panel_preview_ctrl_v_clipboard_image_attaches() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Plan\n\nCtrl+V shot");
+        agent.show_plan_preview();
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(agent.line_viewer.is_some());
+        plan_ctrl_v_clipboard_image(&mut agent);
+    }
+
+    /// Named contract: soft-park (no panel) Prompt focus Ctrl+V clipboard
+    /// screenshot attaches for approve/revise/clarify multimodal drain.
+    #[test]
+    fn soft_park_prompt_ctrl_v_clipboard_image_attaches() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Plan\n\nSoft Ctrl+V");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        assert!(agent.line_viewer.is_none());
+        plan_ctrl_v_clipboard_image(&mut agent);
+    }
+
+    /// Named contract: plan panel with Prompt focus still routes Ctrl+V
+    /// clipboard image through the deferred probe (not text-only widget paste).
+    #[test]
+    fn plan_panel_prompt_ctrl_v_clipboard_image_attaches() {
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, "# Plan\n\nPanel Prompt Ctrl+V");
+        agent.show_plan_preview();
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        assert!(agent.line_viewer.is_some());
+        plan_ctrl_v_clipboard_image(&mut agent);
     }
 }
 #[cfg(test)]

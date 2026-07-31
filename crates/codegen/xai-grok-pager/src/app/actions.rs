@@ -550,8 +550,6 @@ pub enum Action {
     SetCompactMode(bool),
     /// Hide the top agent status bar (`[ui].hide_header`).
     SetHideHeader(bool),
-    /// Hide terminal/tab title updates (`[ui].hide_title_bar`).
-    SetHideTitleBar(bool),
     /// Set timestamp display on messages.
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).

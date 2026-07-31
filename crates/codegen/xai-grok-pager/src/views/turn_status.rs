@@ -49,17 +49,30 @@ pub(crate) const USER_WAITING_PULSE_SPEED: f32 = 0.08;
 
 /// Compute the pulsing diamond color for any "waiting on you" cue.
 ///
-/// Blends `accent` toward `theme.bg_base` using a `sin²` pulse driven by
-/// [`USER_WAITING_PULSE_SPEED`]. Brightness ranges from 0.3 (dim) to 1.0
-/// (full accent) so the diamond stays visible at the trough.
+/// Default themes blend `accent` toward `theme.bg_base` using a `sin²`
+/// pulse driven by [`USER_WAITING_PULSE_SPEED`]. Brightness ranges from
+/// 0.3 (dim) to 1.0 (full accent) so the diamond stays visible at the
+/// trough.
+///
+/// Under DOGE, solid steps only: full `accent` on the bright half of the
+/// cycle, pure black (`bg_base`) on the dim half — no mid-channel gray
+/// blend (pure 8-colour law).
 ///
 /// Pass `theme.accent_user` for user-input waits (permission prompts,
 /// `ask_user_question`, the drain-blocked idle status) and
 /// `theme.accent_plan` for plan-approval waits.
 pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> Color {
     let brightness = crate::theme::pulse_brightness(tick, USER_WAITING_PULSE_SPEED);
-    crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
-        .unwrap_or(accent)
+    if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
+        if brightness >= 0.5 {
+            accent
+        } else {
+            theme.bg_base
+        }
+    } else {
+        crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
+            .unwrap_or(accent)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1852,5 +1865,52 @@ mod tests {
         // so this assertion guards against an accidental tweak that
         // would silently change the cadence of every "your turn" cue.
         assert_eq!(USER_WAITING_PULSE_SPEED, 0.08);
+    }
+
+    /// DOGE waiting diamond must solid-step between pure primaries — never
+    /// mid-channel gray from `blend_color` alpha fade.
+    #[test]
+    fn doge_pending_diamond_color_stays_on_pure_palette_no_gray_blend() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::doge();
+        let accent = theme.accent_user; // pure green
+        let is_pure = |c: Color| -> bool {
+            matches!(
+                c,
+                Color::Rgb(0, 0, 0)
+                    | Color::Rgb(255, 0, 0)
+                    | Color::Rgb(0, 255, 0)
+                    | Color::Rgb(255, 255, 0)
+                    | Color::Rgb(0, 0, 255)
+                    | Color::Rgb(255, 0, 255)
+                    | Color::Rgb(0, 255, 255)
+                    | Color::Rgb(255, 255, 255)
+            )
+        };
+        let mut saw_accent = false;
+        let mut saw_black = false;
+        for tick in 0..200u64 {
+            let c = pending_diamond_color(&theme, accent, tick);
+            assert!(
+                is_pure(c),
+                "tick {tick}: diamond color {c:?} must be a DOGE pure primary (no gray blend)"
+            );
+            if c == accent {
+                saw_accent = true;
+            }
+            if c == theme.bg_base {
+                saw_black = true;
+            }
+            // Reject equal-channel mid grays explicitly.
+            if let Color::Rgb(r, g, b) = c {
+                assert!(
+                    !(r == g && g == b && r > 0 && r < 255),
+                    "tick {tick}: mid-gray RGB({r},{g},{b}) forbidden under DOGE"
+                );
+            }
+        }
+        assert!(saw_accent, "cycle must hit full accent");
+        assert!(saw_black, "cycle must hit pure black trough (solid step)");
     }
 }

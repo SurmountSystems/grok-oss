@@ -127,12 +127,13 @@ pub(crate) fn handle_ask_user_question(
 
 /// Handle an `x.ai/exit_plan_mode` ext_method request.
 ///
-/// Soft-parks a durable `PlanApprovalViewState` (option A): status chrome +
-/// toast, **no** hard modal takeover. The full approval surface opens on
-/// demand via `/view-plan`, status click, or `ShowPlan` / `reopen_plan_approval`.
+/// Soft-parks a durable `PlanApprovalViewState`: status chrome + toast +
+/// auto-open non-capturing **side panel** (not fullscreen). Live draft is
+/// kept. Fullscreen modal remains opt-in via `[ui] plan_approval_park=modal`.
+/// `/view-plan` / status / `ShowPlan` reopen the panel if the user dismissed it.
 ///
-/// Parse → cancel old (if any) → park state → toast → return whether the
-/// active view needs a redraw.
+/// Parse → cancel old (if any) → park state → open panel → toast → return
+/// whether the active view needs a redraw.
 pub(super) fn handle_exit_plan_mode(
     ext: xai_acp_lib::AcpArgs<acp::ExtRequest>,
     app: &mut AppView,
@@ -237,9 +238,10 @@ pub(super) fn handle_exit_plan_mode(
     agent.casual_commenting_range = None;
     agent.casual_editing_comment_id = None;
 
-    // Option D: force-modal opens the line-viewer immediately (fullscreen);
-    // default soft park is toast + status + inline transcript card (option A/C),
-    // with side-panel review on demand (option B via /view-plan / status).
+    // Option D: force-modal opens the line-viewer immediately (fullscreen) and
+    // stashes the live draft. Default soft park auto-opens the non-capturing
+    // side panel (same surface as /view-plan) while keeping the live draft and
+    // Prompt focus so L1 stays modal-free.
     if force_modal {
         agent.reopen_plan_approval();
         // reopen opens the side panel by default; force-modal upgrades to
@@ -253,15 +255,21 @@ pub(super) fn handle_exit_plan_mode(
             "Force-modal plan approval from ext_method ([ui] plan_approval_park=modal)"
         );
     } else {
-        // Non-blocking status chrome: toast + status label + transcript card.
-        // Focus the Prompt **pane** and plan-approval **Prompt** focus so the
-        // composer paints focused (caret, no "Build anything" dead look) and
-        // typing lands immediately. Soft-park is **non-capturing** for Char
-        // (all printable → composer); CTAs are mouse footer / status /
-        // `/view-plan` panel only (L1 modal-free, 2026-07-29).
+        // Auto-open side panel + toast + status + transcript card.
+        // Keep the live prompt (do not stash/clear like reopen). Dismiss
+        // competing overlays so the panel is actually visible. Prompt pane +
+        // Prompt focus so typing lands immediately; printable keys stay on the
+        // composer. Panel CTAs are mouse/footer primary; empty-prompt key
+        // accelerators work when Preview is focused (L1 modal-free).
+        agent.active_modal = None;
+        agent.block_viewer = None;
         agent.set_active_pane(crate::views::agent::ActivePane::Prompt, false);
         if let Some(ref mut pav) = agent.plan_approval_view {
             pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        }
+        agent.show_plan_preview_if_available();
+        if let Some(ref mut viewer) = agent.line_viewer {
+            viewer.plan_mut().feedback_active = true;
         }
         agent.commit_parked_plan_card();
         // Flush unsent draft so a hard kill after soft-park still recovers text.
@@ -269,7 +277,7 @@ pub(super) fn handle_exit_plan_mode(
         agent.show_toast(PLAN_PARKED_TOAST);
         tracing::info!(
             target_active = is_active,
-            "Soft-parked plan approval from ext_method (side panel on demand)"
+            "Soft-parked plan approval from ext_method (auto-open side panel)"
         );
     }
 

@@ -1883,6 +1883,9 @@ impl AgentView {
                 &self.subagent_sessions,
                 &self.session.scheduled_tasks,
             );
+            // Always-on magenta agent rail (like Human green gutter).
+            agent::paint_side_pane_agent_rail(buf, layout.tasks, theme.accent_running);
+            // Agent / subagent list: magenta focus rails (`accent_running`).
             let close_rect = agent::render_todo_chrome(
                 buf,
                 layout.tasks,
@@ -1891,6 +1894,7 @@ impl AgentView {
                 false,
                 self.hit_bg_close.hovered,
                 &theme,
+                theme.accent_running,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_bg_close.set(close_rect);
@@ -1899,6 +1903,8 @@ impl AgentView {
             let cat_focused = self.active_pane == ActivePane::Catalog && !overlay_focused;
             self.catalog
                 .render(layout.catalog, buf, cat_focused, layout_cfg);
+            agent::paint_side_pane_agent_rail(buf, layout.catalog, theme.accent_running);
+            // Agent definitions catalog shares agent chrome (magenta).
             let close_rect = agent::render_todo_chrome(
                 buf,
                 layout.catalog,
@@ -1907,6 +1913,7 @@ impl AgentView {
                 false,
                 self.hit_catalog_close.hovered,
                 &theme,
+                theme.accent_running,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_catalog_close.set(close_rect);
@@ -1916,6 +1923,8 @@ impl AgentView {
         if todo_height > 0 {
             let todo_focused = self.active_pane == ActivePane::Todo && !overlay_focused;
             self.todo.render(layout.todo, buf, todo_focused, layout_cfg);
+            // Always-on magenta agent rail on the status board.
+            agent::paint_side_pane_agent_rail(buf, layout.todo, theme.accent_running);
             // Show Clear done when focused and the board has finished rows.
             let clear_label = if todo_focused
                 && self.todo.counts().completed + self.todo.counts().cancelled > 0
@@ -1924,6 +1933,7 @@ impl AgentView {
             } else {
                 None
             };
+            // Status board tracks agent work → magenta agent rails.
             let sel = agent::render_todo_chrome_with_close_label(
                 buf,
                 layout.todo,
@@ -1935,6 +1945,7 @@ impl AgentView {
                 None,
                 clear_label,
                 self.hit_todo_clear_done.hovered,
+                theme.accent_running,
             );
             self.hit_todo_close
                 .set(sel.as_ref().and_then(|s| s.close_button_rect()));
@@ -1955,6 +1966,7 @@ impl AgentView {
                 // Mid-turn soft interject, or idle force-drain while children hold.
                 self.session.state.is_turn_running() || self.holds_queue_for_background(),
             );
+            // Queued human prompts → Human green rail (not agent magenta).
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,
                 layout.queue,
@@ -1966,6 +1978,7 @@ impl AgentView {
                 Some(crate::glyphs::ballot_x_button()),
                 None,
                 false,
+                theme.accent_user,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_queue_close.set(close_rect);
@@ -4451,12 +4464,12 @@ impl AgentView {
                 );
             }
         }
-        let on_link = self.hovered_link_idx.is_some();
-        if supports_osc22() && on_link != self.last_pointer_on_link {
-            self.last_pointer_on_link = on_link;
+        let want_pointer = self.mouse_wants_pointer_cursor();
+        if supports_osc22() && want_pointer != self.last_pointer_cursor {
+            self.last_pointer_cursor = want_pointer;
             use crossterm::Command;
             let mut seq = String::new();
-            if on_link {
+            if want_pointer {
                 let _ = crate::terminal::SetPointerCursor.write_ansi(&mut seq);
             } else {
                 let _ = crate::terminal::SetDefaultCursor.write_ansi(&mut seq);

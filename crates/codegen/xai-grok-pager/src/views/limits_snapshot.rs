@@ -155,8 +155,10 @@ impl LimitsSnapshot {
                 is_live: live_identity.is_console(),
                 // Callers attach Management prepaid via
                 // [`Self::with_console_balance_cents`] when known.
+                // Default gap = missing management key (most common dogfood miss);
+                // wire real gap via [`Self::with_console_prepaid_gap`].
                 balance_cents: None,
-                prepaid_gap: ConsoleTeamPrepaidGap::NotConfigured,
+                prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
             },
         }
     }
@@ -236,7 +238,7 @@ impl LimitsSnapshot {
             console: ConsoleMeter {
                 is_live: live_identity.is_console(),
                 balance_cents: None,
-                prepaid_gap: ConsoleTeamPrepaidGap::NotConfigured,
+                prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
             },
         }
     }
@@ -470,8 +472,12 @@ mod tests {
         assert!(out.contains("Console API:"), "console section: {out}");
         assert!(out.contains("Path: not live"), "console not live: {out}");
         assert!(
-            out.contains("Balance: no management key/team id"),
-            "honest console not-configured: {out}"
+            out.contains("Balance: no management key"),
+            "honest console missing key: {out}"
+        );
+        assert!(
+            !out.contains("no management key/team id"),
+            "mushy combined gap retired: {out}"
         );
         assert!(
             !out.contains("no $ meter yet"),
@@ -492,8 +498,12 @@ mod tests {
         assert!(out.contains("Live sampling: console key"), "live: {out}");
         assert!(out.contains("Path: live"), "console live: {out}");
         assert!(
-            out.contains("Balance: no management key/team id"),
+            out.contains("Balance: no management key"),
             "no fake console $: {out}"
+        );
+        assert!(
+            !out.contains("no management key/team id"),
+            "mushy combined gap retired: {out}"
         );
         assert!(
             !out.contains("no $ meter yet"),
@@ -526,7 +536,10 @@ mod tests {
             "real management prepaid dollars: {out}"
         );
         assert!(
-            !out.contains("no $ meter yet") && !out.contains("no management key/team id"),
+            !out.contains("no $ meter yet")
+                && !out.contains("no management key/team id")
+                && !out.contains("no management key")
+                && !out.contains("no management team id"),
             "must not claim absence when cents present: {out}"
         );
         // SuperGrok personal extras stay SuperGrok-labeled, not sold as console $.
@@ -551,18 +564,38 @@ mod tests {
             out.contains("SuperGrok dollar extras: none on file"),
             "{out}"
         );
-        assert!(out.contains("Balance: no management key/team id"), "{out}");
+        assert!(out.contains("Balance: no management key"), "{out}");
+        assert!(!out.contains("no management key/team id"), "{out}");
         assert!(!out.contains("no $ meter yet"), "{out}");
     }
 
     #[test]
-    fn format_console_section_distinguishes_unconfigured_from_unavailable() {
-        let unconfigured =
+    fn format_console_section_distinguishes_missing_key_team_loading_unavailable() {
+        // Named contract: five operator-visible console prepaid states stay distinct.
+        let missing_key =
             LimitsSnapshot::from_billing(None, None, SamplingIdentityKind::ConsoleKey);
-        let out_u = format_limits_detail(&unconfigured);
+        let out_k = format_limits_detail(&missing_key);
         assert!(
-            out_u.contains("Balance: no management key/team id"),
-            "{out_u}"
+            out_k.contains("Balance: no management key"),
+            "default missing key: {out_k}"
+        );
+        assert!(
+            !out_k.contains("no management key/team id"),
+            "mushy combined retired: {out_k}"
+        );
+
+        let missing_team =
+            LimitsSnapshot::from_billing(None, None, SamplingIdentityKind::ConsoleKey)
+                .with_console_prepaid_gap(ConsoleTeamPrepaidGap::MissingTeamId);
+        let out_t = format_limits_detail(&missing_team);
+        assert!(
+            out_t.contains("Balance: no management team id"),
+            "missing team: {out_t}"
+        );
+        assert!(
+            !out_t.contains("Balance: no management key\n")
+                && !out_t.contains("Balance: no management key"),
+            "must not mash missing team into missing key: {out_t}"
         );
 
         let unavailable =
@@ -582,6 +615,17 @@ mod tests {
             out_l.contains("Balance: loading team prepaid..."),
             "{out_l}"
         );
+
+        let with_dollars =
+            LimitsSnapshot::from_billing(None, None, SamplingIdentityKind::ConsoleKey)
+                .with_console_balance_cents(Some(2500));
+        let out_d = format_limits_detail(&with_dollars);
+        assert!(
+            out_d.contains("Balance (console team prepaid): $25"),
+            "{out_d}"
+        );
+        assert!(!out_d.contains("no management key"), "{out_d}");
+        assert!(!out_d.contains("no management team id"), "{out_d}");
     }
 
     #[test]
@@ -713,7 +757,8 @@ mod tests {
             "personal extras stay SuperGrok-labeled: {out}"
         );
         // Console separate.
-        assert!(out.contains("Balance: no management key/team id"), "{out}");
+        assert!(out.contains("Balance: no management key"), "{out}");
+        assert!(!out.contains("no management key/team id"), "{out}");
         assert!(!out.contains("no $ meter yet"), "{out}");
         // Must not mash meters.
         assert!(!out.to_lowercase().contains("credits left:"), "{out}");

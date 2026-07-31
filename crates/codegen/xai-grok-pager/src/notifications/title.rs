@@ -311,10 +311,18 @@ fn write_truncated(buf: &mut String, s: &str, max: usize) {
 /// Control characters are stripped here: title parts include remote-sourced
 /// strings (e.g. grok.com conversation titles), which must not terminate the
 /// OSC sequence early or inject escapes into the terminal.
+///
+/// Empty or all-control input falls back to the product binary name so we
+/// never emit `SetTitle("")` (blank DE switcher / Alt-~ entry).
 fn build_title_escape(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
+    let payload = if sanitized.is_empty() {
+        PRODUCT_CLI_NAME
+    } else {
+        sanitized.as_str()
+    };
     let mut buf = Vec::new();
-    let _ = crossterm::queue!(&mut buf, SetTitle(sanitized));
+    let _ = crossterm::queue!(&mut buf, SetTitle(payload));
     String::from_utf8(buf).expect("crossterm SetTitle produces valid UTF-8")
 }
 
@@ -938,6 +946,32 @@ mod tests {
             "title payload must be control-free: {inner:?}"
         );
         assert_eq!(inner, "evil]0;pwnedtitle");
+    }
+
+    /// Named contract (blank switcher): dynamic title OSC never carries an
+    /// empty payload. All-control or empty composition falls back to brand.
+    #[test]
+    fn title_escape_never_empty_payload() {
+        for seed in ["", "\x07\x1b\x00", "\u{7}"] {
+            let esc = build_title_escape(seed);
+            let inner = esc
+                .strip_prefix("\u{1b}]0;")
+                .and_then(|s| s.strip_suffix('\u{7}'))
+                .unwrap_or_else(|| panic!("crossterm OSC 0 framing for seed={seed:?}: {esc:?}"));
+            assert!(
+                !inner.is_empty(),
+                "empty OSC title blanks DE switcher; seed={seed:?}"
+            );
+            assert_eq!(inner, PRODUCT_CLI_NAME);
+        }
+        // Session-shaped title stays non-empty and unbranded here (branding
+        // is composition's job via TitleItem::Grok).
+        let esc = build_title_escape("my session");
+        let inner = esc
+            .strip_prefix("\u{1b}]0;")
+            .and_then(|s| s.strip_suffix('\u{7}'))
+            .expect("framing");
+        assert_eq!(inner, "my session");
     }
 
     // --- Session name resolution (display rename > generated) ---

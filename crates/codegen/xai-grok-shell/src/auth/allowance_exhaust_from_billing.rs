@@ -255,6 +255,40 @@ pub fn load_all_session_access_tokens(grok_home: &Path) -> Vec<(String, String)>
     out
 }
 
+/// Whether `next` should replace `prev` when both map to the same SuperGrok
+/// identity_id (base active + multi-slot for one principal).
+///
+/// Preference (routing correctness under `auto_use_included_limits`):
+/// 1. Live (not memoized out of allowance) over exhausted.
+/// 2. Later `expires_at` (fresh refresh) over earlier.
+/// 3. Later `create_time` when expiry is tied/unknown.
+/// 4. Multi-slot over base only as a weak tie-break (store shape).
+///
+/// Dogfood bug: stale exhausted multi-slot won over a refreshed base SuperGrok
+/// Heavy JWT → ranking treated SuperGrok as dead and stuck on console API.
+fn prefer_supergrok_store_entry(
+    prev: &super::model::GrokAuth,
+    prev_is_multi: bool,
+    next: &super::model::GrokAuth,
+    next_is_multi: bool,
+) -> bool {
+    let prev_exh = xai_grok_sampler::is_credential_exhausted(prev.key.trim());
+    let next_exh = xai_grok_sampler::is_credential_exhausted(next.key.trim());
+    if prev_exh != next_exh {
+        return !next_exh;
+    }
+    match (prev.expires_at, next.expires_at) {
+        (Some(a), Some(b)) if a != b => return b > a,
+        (None, Some(_)) => return true,
+        (Some(_), None) => return false,
+        _ => {}
+    }
+    if next.create_time != prev.create_time {
+        return next.create_time > prev.create_time;
+    }
+    next_is_multi && !prev_is_multi
+}
+
 /// Build SuperGrok session candidates for auto ranking from `auth.json`.
 ///
 /// Default remaining: `0` when the token fingerprint is memoized exhausted,
@@ -264,11 +298,12 @@ pub fn load_all_session_access_tokens(grok_home: &Path) -> Vec<(String, String)>
 /// `reset_at` from the period end (honest `None` when never polled / unparseable).
 ///
 /// Dedupes by `identity_id` so base active + multi-slot for the same principal
-/// count once (multi SuperGrok store writes both).
+/// count once. When both exist, prefer the **live / fresher** token (not a
+/// stale multi-slot that was left behind after base refresh).
 pub fn load_supergrok_session_candidates(
     grok_home: &Path,
 ) -> Vec<super::supergrok_identity_rank::SupergrokSessionCandidate> {
-    use super::model::{is_supergrok_session_mode, supergrok_identity_id_from_auth};
+    use super::model::{GrokAuth, is_supergrok_session_mode, supergrok_identity_id_from_auth};
     use super::supergrok_identity_rank::{
         SupergrokIdentityHeadroom, SupergrokSessionCandidate, role_from_session_fields,
     };
@@ -277,8 +312,8 @@ pub fn load_supergrok_session_candidates(
     let Ok(map) = read_auth_json(&path) else {
         return Vec::new();
     };
-    // identity_id → candidate; prefer multi-slot scopes over base duplicates.
-    let mut by_id: BTreeMap<String, (bool, SupergrokSessionCandidate)> = BTreeMap::new();
+    // identity_id → (is_multi, auth chosen for that principal).
+    let mut by_id: BTreeMap<String, (bool, GrokAuth)> = BTreeMap::new();
     for (scope, auth) in &map {
         if scope == API_KEY_SCOPE {
             continue;
@@ -290,36 +325,41 @@ pub fn load_supergrok_session_candidates(
         if token.is_empty() {
             continue;
         }
-        let remaining = if xai_grok_sampler::is_credential_exhausted(token) {
-            0
-        } else {
-            1
-        };
-        let role =
-            role_from_session_fields(auth.principal_type.as_deref(), auth.team_id.as_deref());
         let identity_id = supergrok_identity_id_from_auth(auth, scope);
         let is_multi = scope.contains("::personal") || scope.contains("::team::");
-        let candidate = SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: identity_id.clone(),
-                role,
-                included_remaining: remaining,
-                reset_at: None,
-            },
-            access_token: token.to_owned(),
-        };
         match by_id.get(&identity_id) {
             None => {
-                by_id.insert(identity_id, (is_multi, candidate));
+                by_id.insert(identity_id, (is_multi, auth.clone()));
             }
-            Some((prev_multi, _)) => {
-                if is_multi && !*prev_multi {
-                    by_id.insert(identity_id, (is_multi, candidate));
+            Some((prev_multi, prev_auth)) => {
+                if prefer_supergrok_store_entry(prev_auth, *prev_multi, auth, is_multi) {
+                    by_id.insert(identity_id, (is_multi, auth.clone()));
                 }
             }
         }
     }
-    let mut candidates: Vec<_> = by_id.into_values().map(|(_, c)| c).collect();
+    let mut candidates: Vec<SupergrokSessionCandidate> = by_id
+        .into_iter()
+        .map(|(identity_id, (_is_multi, auth))| {
+            let token = auth.key.trim();
+            let remaining = if xai_grok_sampler::is_credential_exhausted(token) {
+                0
+            } else {
+                1
+            };
+            let role =
+                role_from_session_fields(auth.principal_type.as_deref(), auth.team_id.as_deref());
+            SupergrokSessionCandidate {
+                headroom: SupergrokIdentityHeadroom {
+                    identity_id,
+                    role,
+                    included_remaining: remaining,
+                    reset_at: None,
+                },
+                access_token: token.to_owned(),
+            }
+        })
+        .collect();
     let billing = included_billing_fields_snapshot();
     if !billing.is_empty() {
         enrich_candidates_with_included_billing(&mut candidates, &billing, |tok| {
@@ -495,6 +535,165 @@ mod tests {
         );
         write_auth_json(&path, &map).unwrap();
         assert!(load_session_access_token(dir.path()).is_none());
+    }
+
+    /// Named contract (Business / SuperGrok Heavy routing): when base holds a
+    /// **live** SuperGrok JWT and the multi-slot for the same principal still
+    /// has a stale token memoized out of allowance, ranking must use the live
+    /// base token — not treat SuperGrok as exhausted and hand primary to console.
+    ///
+    /// Dogfood: refreshed SuperGrok Heavy (tier 5) on base + exhausted multi-slot
+    /// + `auto_use_included_limits` silently stayed on console Business API.
+    #[test]
+    #[serial_test::serial]
+    fn load_candidates_prefers_live_base_over_stale_exhausted_multi_slot() {
+        use crate::auth::model::{SUPERGROK_PERSONAL_MULTI_SLOT, multi_slot_scope_for_auth};
+        use crate::auth::supergrok_identity_rank::order_credentials_for_preferred_auto;
+        use chrono::{Duration, Utc};
+        use xai_grok_sampler::{clear_all_including_durable, sync_allowance_exhaust_from_usage};
+
+        clear_all_including_durable();
+        clear_included_billing_cache();
+
+        let dir = TempDir::new().unwrap();
+        let base = "https://auth.x.ai::heavy-client";
+        let stale = "tok-stale-exhausted-multi-slot";
+        let live = "tok-live-supergrok-heavy-base";
+        // dual-auth ready + 100% → mark stale SuperGrok fingerprint out of allowance
+        let _ = sync_allowance_exhaust_from_usage(100.0, Some(stale), true);
+
+        let now = Utc::now();
+        let mut map = AuthStore::default();
+        // Stale multi-slot (older expiry, exhausted memo) + fresher base active.
+        // Manual inserts on purpose: upsert would keep them in lockstep.
+        let multi_key = format!("{base}::{SUPERGROK_PERSONAL_MULTI_SLOT}");
+        map.insert(
+            multi_key,
+            GrokAuth {
+                key: stale.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-heavy".into(),
+                principal_type: Some("User".into()),
+                team_id: Some("team-workplace".into()),
+                create_time: now - Duration::hours(6),
+                expires_at: Some(now - Duration::minutes(5)),
+                ..Default::default()
+            },
+        );
+        map.insert(
+            base.to_owned(),
+            GrokAuth {
+                key: live.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-heavy".into(),
+                principal_type: Some("User".into()),
+                team_id: Some("team-workplace".into()),
+                create_time: now,
+                expires_at: Some(now + Duration::hours(6)),
+                ..Default::default()
+            },
+        );
+        // Sanity: multi-slot helper names match store shape.
+        let _ = multi_slot_scope_for_auth(base, map.get(base).expect("base"));
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let candidates = load_supergrok_session_candidates(dir.path());
+        assert_eq!(
+            candidates.len(),
+            1,
+            "same identity once; got {:?}",
+            candidates
+                .iter()
+                .map(|c| (&c.headroom.identity_id, c.access_token.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            candidates[0].access_token.as_str(),
+            live,
+            "must pick live SuperGrok Heavy base JWT, not exhausted multi-slot"
+        );
+        assert!(
+            candidates[0].headroom.included_remaining > 0,
+            "live token must not inherit exhausted remaining=0"
+        );
+
+        let order = order_credentials_for_preferred_auto(&candidates, &["console-biz-key".into()]);
+        assert_eq!(
+            order.primary.as_deref(),
+            Some(live),
+            "auto rank primary must be SuperGrok Heavy session, not console"
+        );
+        assert!(
+            order.primary_is_supergrok_included,
+            "SuperGrok included primary (not console Business API)"
+        );
+        assert!(
+            order.failover.iter().any(|k| k == "console-biz-key"),
+            "console remains failover only: {:?}",
+            order.failover
+        );
+
+        clear_all_including_durable();
+        clear_included_billing_cache();
+    }
+
+    /// Business SuperGrok (Team principal) live base wins over exhausted multi-slot.
+    #[test]
+    #[serial_test::serial]
+    fn load_candidates_prefers_live_business_base_over_exhausted_team_multi_slot() {
+        use chrono::{Duration, Utc};
+        use xai_grok_sampler::{clear_all_including_durable, sync_allowance_exhaust_from_usage};
+
+        clear_all_including_durable();
+        clear_included_billing_cache();
+
+        let dir = TempDir::new().unwrap();
+        let base = "https://auth.x.ai::biz-heavy";
+        let stale = "tok-biz-stale-exhausted";
+        let live = "tok-biz-live-heavy";
+        let _ = sync_allowance_exhaust_from_usage(100.0, Some(stale), true);
+        let now = Utc::now();
+        let mut map = AuthStore::default();
+        let team_id = "team-surmount-biz";
+        map.insert(
+            format!("{base}::team::{team_id}"),
+            GrokAuth {
+                key: stale.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some(team_id.into()),
+                create_time: now - Duration::hours(3),
+                expires_at: Some(now - Duration::minutes(1)),
+                ..Default::default()
+            },
+        );
+        map.insert(
+            base.to_owned(),
+            GrokAuth {
+                key: live.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some(team_id.into()),
+                create_time: now,
+                expires_at: Some(now + Duration::hours(5)),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let candidates = load_supergrok_session_candidates(dir.path());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].access_token.as_str(), live);
+        assert_eq!(
+            candidates[0].headroom.role,
+            crate::auth::SupergrokAccountRole::Business
+        );
+        assert!(candidates[0].headroom.included_remaining > 0);
+
+        clear_all_including_durable();
+        clear_included_billing_cache();
     }
 
     /// Hermetic: two SuperGrok principals in auth.json load as two rank candidates

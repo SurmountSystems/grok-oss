@@ -199,7 +199,7 @@ Use compact mode on small screens to maximize content area.
 
 Hide **in-app** chrome headers (status / welcome / dashboard) to reclaim vertical
 space. This is **not** the desktop or terminal **window title** (see
-[Hide window title](#hide-window-title) below).
+[Window title](#window-title) below).
 
 ```toml
 [ui]
@@ -219,14 +219,13 @@ Hiding is intentional opt-in: you lose those clicks and labels. Minimal mode has
 
 ---
 
-## Hide window title
+## Window title
 
-Controls the **desktop or terminal tab/window title text** (OSC SetTitle), the
-line your OS or terminal shows on the window. This is **not** the in-app agent
+Grok **always manages** the desktop or terminal tab/window title text (OSC
+SetTitle) when dynamic titles are enabled. This is **not** the in-app agent
 status bar and **not** the same as [Hide header](#hide-header).
 
-**Default is off** (`hide_title_bar = false`): Grok **manages the title** so you
-see session name, activity, and busy agent count out of the box. Examples:
+Examples:
 
 | Situation | Example title |
 |-----------|----------------|
@@ -235,23 +234,25 @@ see session name, activity, and busy agent count out of the box. Examples:
 
 `N agents` appears only when more than one top-level agent is busy. Startup
 always writes a product-managed title (session or `grok-oss`), never raw process
-argv like `grok-oss --resume …`.
+argv like `grok-oss --resume …`, and never an empty title (empty OSC blanks DE
+switchers).
 
-### Turn titles off
+### Turn dynamic titles off
+
+Opt out with nested notification title config (not a separate hide flag):
 
 ```toml
-[ui]
-hide_title_bar = true
+[ui.notifications.title]
+enabled = false
 ```
 
-Or toggle **Hide window title** under Appearance in `/settings`. That clears the
-title and skips dynamic updates.
+That stops session/activity title updates. Product never blanks the window with
+an empty SetTitle.
 
 ### Customize title items
 
-When hide is off, Grok sets the title when
-`[ui.notifications.title] enabled = true`. Layout is controlled by
-`title.items` (defaults include `session-name` and `agents`):
+When `title.enabled` is true (default), layout is controlled by `title.items`
+(defaults include `session-name` and `agents`):
 
 ```toml
 [ui.notifications.title]

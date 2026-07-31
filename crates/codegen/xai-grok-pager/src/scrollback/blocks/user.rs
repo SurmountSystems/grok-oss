@@ -210,6 +210,14 @@ impl UserPromptBlock {
         terminal_native: bool,
     ) -> Option<ratatui::style::Color> {
         use ratatui::style::Color;
+        // DOGE pure 8-colour: never ANSI Gray / DarkGray band. Follow theme
+        // surfaces (pure black) so Human chrome stays green rail + black canvas.
+        if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
+            return match theme.bg_light {
+                Color::Reset => None,
+                c => Some(c),
+            };
+        }
         if terminal_native {
             Some(if is_selected {
                 Color::Gray
@@ -1197,6 +1205,10 @@ mod tests {
     fn prompt_band_color_native_vs_rgb() {
         use ratatui::style::Color;
 
+        // ANSI Gray elevate is non-DOGE terminal-native chrome.
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let theme = Theme::groknight();
         assert_eq!(
             UserPromptBlock::prompt_band_color_for(&theme, false, true),
@@ -1222,6 +1234,32 @@ mod tests {
             UserPromptBlock::prompt_band_color_for(&native, false, true),
             Some(Color::DarkGray)
         );
+    }
+
+    /// DOGE pure 8-colour: prompt band never paints ANSI Gray / DarkGray,
+    /// even when `terminal_native` is requested (minimal / NO_COLOR path).
+    #[test]
+    fn prompt_band_color_doge_never_uses_ansi_gray() {
+        use ratatui::style::Color;
+
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let doge = Theme::doge();
+        for terminal_native in [false, true] {
+            for is_selected in [false, true] {
+                let band =
+                    UserPromptBlock::prompt_band_color_for(&doge, is_selected, terminal_native);
+                if let Some(c) = band {
+                    assert!(
+                        !matches!(c, Color::Gray | Color::DarkGray),
+                        "DOGE prompt band must not be ANSI gray (native={terminal_native} sel={is_selected}): {c:?}"
+                    );
+                    // Pure black surface on DOGE.
+                    assert_eq!(c, Color::Rgb(0, 0, 0));
+                }
+            }
+        }
     }
 
     /// Applied band is semantic (not a panel) so minimal `flat_background`

@@ -619,8 +619,6 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "compact_mode",
             // SHARED hide_header (Appearance; default off).
             "hide_header",
-            // SHARED hide_title_bar (Appearance; default off = titles on).
-            "hide_title_bar",
             "screen_mode",
             "show_timestamps",
             "show_timeline",
@@ -1003,12 +1001,46 @@ fn selected_browse_row_label_is_bold() {
 
 #[test]
 fn settings_list_row_bg_terminal_native_elevates_selection() {
+    // ANSI DarkGray elevate is for non-DOGE terminal-native chrome.
+    let _pin = crate::theme::cache::pin_theme();
+    crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
     let theme = Theme::terminal_default();
     assert!(matches!(theme.bg_visual, Color::Reset));
     assert_eq!(settings_list_row_bg(&theme, true, false), Color::DarkGray);
     assert_eq!(settings_list_row_bg(&theme, false, true), Color::DarkGray);
     assert_eq!(settings_list_row_bg(&theme, false, false), Color::Reset);
     assert_eq!(settings_list_row_bg(&theme, true, true), Color::DarkGray);
+}
+
+/// DOGE pure 8-colour: settings rows must never paint ANSI Gray / DarkGray.
+#[test]
+fn settings_list_row_bg_doge_never_uses_ansi_gray() {
+    let _pin = crate::theme::cache::pin_theme();
+    crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+    let theme = Theme::doge();
+    for (sel, hov) in [(false, false), (true, false), (false, true), (true, true)] {
+        let bg = settings_list_row_bg(&theme, sel, hov);
+        assert!(
+            !matches!(bg, Color::Gray | Color::DarkGray),
+            "DOGE settings row bg must stay on pure palette, got {bg:?} (sel={sel} hov={hov})"
+        );
+        // Surfaces are pure black on DOGE.
+        assert_eq!(bg, Color::Rgb(0, 0, 0));
+    }
+
+    // Even with a terminal-native-looking theme struct (Reset surfaces), live
+    // DOGE kind must not fall through to ANSI DarkGray elevate.
+    let native_looking = Theme::terminal_default();
+    assert!(matches!(native_looking.bg_visual, Color::Reset));
+    for (sel, hov) in [(true, false), (false, true), (true, true)] {
+        let bg = settings_list_row_bg(&native_looking, sel, hov);
+        assert!(
+            !matches!(bg, Color::Gray | Color::DarkGray),
+            "DOGE kind + Reset surfaces must not invent DarkGray, got {bg:?}"
+        );
+    }
 }
 
 /// `MouseEventKind::Moved` over a setting row's hit-rect sets

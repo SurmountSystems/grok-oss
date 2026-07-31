@@ -9,6 +9,17 @@
 //!
 //! This FAILS without the shell re-park (PR2 product change): no reverse-request
 //! reaches the resumed pager, so no approval chrome appears.
+//!
+//! ## Named contract (soft-park approve path)
+//!
+//! Soft-park is **non-capturing** for keyboard CTAs (L1 modal-free, 2026-07-29):
+//! empty-prompt `a` / `A` / `?` / `s` / `q` / Enter type into the composer or
+//! no-op; they do **not** exclusive-approve. Product approve paths after resume:
+//!
+//! 1. **Mouse** footer soft-park CTAs (primary) — works with draft text too
+//! 2. **`/view-plan`** (or status chip) side panel, then empty-prompt `a`
+//!
+//! This scenario uses path (1): click the painted footer **approve** label.
 
 use std::path::Path;
 use std::time::Duration;
@@ -16,7 +27,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use super::wait_for_welcome;
-use crate::{ContentController, PtyHarness, pager_binary};
+use crate::{ContentController, MousePoint, PtyHarness, pager_binary};
 
 const DEFAULT_ROWS: u16 = 50;
 const DEFAULT_COLS: u16 = 120;
@@ -35,8 +46,8 @@ const PLAN_BODY: &str = "\
 3. Resume and expect restored approval chrome
 ";
 
-/// Regression: the shell re-parks `exit_plan_mode` on resume; pressing
-/// approve leaves plan mode and starts the implement turn.
+/// Regression: the shell re-parks `exit_plan_mode` on resume; approving via the
+/// soft-park footer mouse CTA leaves plan mode and starts the implement turn.
 pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     let content = ContentController::start()
         .await
@@ -124,17 +135,72 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         bail!("pager panicked\n{screen}");
     }
 
-    // Approve: the shell leaves plan mode and injects the implement turn.
-    resumed.inject_keys(b"a").context("press 'a' to approve")?;
+    // Soft-park is non-capturing: bare `a` types into the composer (see screen
+    // dump with `❯ a` under the prompt). Approve via the painted footer CTA —
+    // mouse primary product path. First "approve" is the primary button; the
+    // second is "approve w/ comment".
+    click_screen_text(&mut resumed, "approve", 0).context("click soft-park footer Approve CTA")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))
-        .context("approve must leave plan mode and start the implement turn")?;
+        .context("footer Approve must leave plan mode and start the implement turn")?;
     tokio::time::timeout(Duration::from_secs(10), implement_turn.wait_satisfied())
         .await
         .context("implement turn expectation timeout")?;
 
     resumed.quit().context("quit resumed pager")?;
     Ok(())
+}
+
+/// Click the `occurrence`-th on-screen match of `text` (0-indexed), SGR mouse.
+///
+/// Coordinates match scripted runner convention: 0-indexed row/col from the
+/// visible screen text snapshot, converted to 1-indexed SGR in the wire bytes.
+fn click_screen_text(harness: &mut PtyHarness, text: &str, occurrence: usize) -> Result<()> {
+    let point = locate_screen_text(harness, text, occurrence)?;
+    // Click slightly into the label (not the leading key glyph) so the hit
+    // lands inside the soft-park button rect painted around "approve".
+    let col = point.col.saturating_add(1);
+    let click = format!(
+        "{}{}",
+        sgr_mouse(0, point.row, col, 'M'),
+        sgr_mouse(0, point.row, col, 'm'),
+    );
+    harness
+        .inject_keys(click.as_bytes())
+        .with_context(|| format!("inject click at row={} col={col}", point.row))?;
+    harness.update(Duration::from_millis(150));
+    Ok(())
+}
+
+fn locate_screen_text(harness: &PtyHarness, text: &str, occurrence: usize) -> Result<MousePoint> {
+    if text.is_empty() {
+        bail!("cannot locate empty text");
+    }
+    let output = harness.screen_output();
+    let mut seen = 0usize;
+    for (row, line) in output.lines.iter().enumerate() {
+        let mut start_byte = 0usize;
+        while let Some(rel_byte) = line[start_byte..].find(text) {
+            let byte = start_byte + rel_byte;
+            if seen == occurrence {
+                let col = line[..byte].chars().count();
+                return Ok(MousePoint {
+                    row: row as u16,
+                    col: col as u16,
+                });
+            }
+            seen += 1;
+            start_byte = byte + text.len();
+        }
+    }
+    bail!(
+        "could not locate occurrence {occurrence} of {text:?} on screen\n{}",
+        harness.screen_contents()
+    )
+}
+
+fn sgr_mouse(button: u16, row: u16, col: u16, suffix: char) -> String {
+    format!("\x1b[<{button};{};{}{suffix}", col + 1, row + 1)
 }
 
 /// Mark the persisted session as having a parked plan approval: write `plan.md`

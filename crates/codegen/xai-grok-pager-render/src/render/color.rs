@@ -185,9 +185,23 @@ pub fn blend_channel(base: u8, original: u8, opacity: f32) -> u8 {
 /// `Color::Indexed`, the blended result is quantized back to the nearest
 /// 256-color index so the output stays terminal-compatible.
 ///
+/// Under [`crate::theme::ThemeKind::Doge`], opacity is a **solid step** instead
+/// of a continuous lerp: `opacity >= 0.5` keeps `original`, otherwise `base`.
+/// That stops activity chrome from inventing mid-channel grays between pure
+/// primaries (DOGE pure 8-colour law). Non-DOGE themes keep continuous lerp.
+///
 /// Returns `None` for named ANSI colors (Color::Red, etc.) since their RGB
 /// values are terminal-dependent.
 pub fn blend_color(base: Color, original: Color, opacity: f32) -> Option<Color> {
+    // DOGE: solid steps only (full original ↔ base). Continuous alpha invents
+    // mid-channel RGB off the pure 8-colour palette.
+    if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
+        // Still require blendable inputs so named ANSI colors return None.
+        let _ = color_to_rgb(base)?;
+        let _ = color_to_rgb(original)?;
+        return Some(if opacity >= 0.5 { original } else { base });
+    }
+
     let (base_r, base_g, base_b) = color_to_rgb(base)?;
     let (orig_r, orig_g, orig_b) = color_to_rgb(original)?;
 
@@ -396,6 +410,11 @@ mod tests {
 
     #[test]
     fn test_blend_color_rgb() {
+        // Continuous lerp is for non-DOGE themes; default kind is DOGE which
+        // solid-steps (see doge_blend_color_solid_steps_no_mid_channel_gray).
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let base = Color::Rgb(0, 0, 0);
         let original = Color::Rgb(100, 150, 200);
 
@@ -432,6 +451,12 @@ mod tests {
 
     #[test]
     fn test_blend_color_mixed_returns_indexed() {
+        // Continuous lerp + quantize is non-DOGE only. Default theme is DOGE,
+        // which solid-steps and returns the chosen endpoint as-is (Rgb stays
+        // Rgb). Pin a continuous-lerp theme for this terminal-compat contract.
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let rgb = Color::Rgb(100, 100, 100);
         let indexed = Color::Indexed(5); // magenta (128, 0, 128)
 
@@ -460,8 +485,66 @@ mod tests {
         assert_eq!(blend_color(rgb, named, 0.5), None);
     }
 
+    /// Under DOGE, opacity blends must solid-step (full original ↔ base) — never
+    /// invent mid-channel RGB grays between pure primaries.
+    #[test]
+    fn doge_blend_color_solid_steps_no_mid_channel_gray() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let base = Color::Rgb(0, 0, 0);
+        let magenta = Color::Rgb(255, 0, 255);
+
+        // Bright half / full: keep pure accent.
+        assert_eq!(blend_color(base, magenta, 1.0), Some(magenta));
+        assert_eq!(blend_color(base, magenta, 0.5), Some(magenta));
+        assert_eq!(blend_color(base, magenta, 0.75), Some(magenta));
+
+        // Dim half: snap to pure base (not mid-channel #7F007F-style grayish).
+        assert_eq!(blend_color(base, magenta, 0.0), Some(base));
+        assert_eq!(blend_color(base, magenta, 0.45), Some(base));
+        assert_eq!(blend_color(base, magenta, 0.49), Some(base));
+
+        for opacity in [0.0, 0.25, 0.45, 0.5, 0.75, 1.0] {
+            let c = blend_color(base, magenta, opacity).expect("blendable");
+            match c {
+                Color::Rgb(r, g, b) => {
+                    for ch in [r, g, b] {
+                        assert!(
+                            ch == 0 || ch == 255,
+                            "DOGE blend at opacity {opacity} invented mid-channel {c:?}"
+                        );
+                    }
+                }
+                other => panic!("expected Rgb under truecolor DOGE, got {other:?}"),
+            }
+        }
+    }
+
+    /// Non-DOGE themes keep continuous lerp (GrokNight braille/dots/blends).
+    #[test]
+    fn non_doge_blend_color_keeps_continuous_lerp() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
+        let base = Color::Rgb(0, 0, 0);
+        let original = Color::Rgb(100, 150, 200);
+        assert_eq!(
+            blend_color(base, original, 0.5),
+            Some(Color::Rgb(50, 75, 100))
+        );
+        assert_eq!(
+            blend_color(base, original, 0.45),
+            Some(Color::Rgb(45, 68, 90))
+        );
+    }
+
     #[test]
     fn test_fade_region() {
+        // Continuous fade math is non-DOGE; pin GrokNight (DOGE solid-steps).
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let mut buf = Buffer::empty(Rect::new(0, 0, 3, 2));
 
         // Set up some RGB colors
@@ -520,6 +603,9 @@ mod tests {
 
     #[test]
     fn test_blend_area_fg_only() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
         let fg = Color::Rgb(200, 100, 0);
         let bg = Color::Rgb(10, 10, 10);
@@ -541,6 +627,10 @@ mod tests {
 
     #[test]
     fn test_blend_area_bg_only() {
+        // Continuous lerp math is non-DOGE; pin GrokNight (DOGE solid-steps).
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
         let fg = Color::Rgb(200, 200, 200);
         let bg = Color::Rgb(100, 100, 100);
@@ -562,6 +652,10 @@ mod tests {
 
     #[test]
     fn test_blend_area_both() {
+        // Continuous lerp math is non-DOGE; pin GrokNight (DOGE solid-steps).
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
         if let Some(cell) = buf.cell_mut((0, 0)) {
             cell.set_fg(Color::Rgb(100, 200, 0));
@@ -581,6 +675,35 @@ mod tests {
         assert_eq!(buf.cell((0, 0)).unwrap().fg, Color::Rgb(75, 150, 0));
         // bg: 75% of (50,50,50) + 25% of (20,20,20) = (42.5, 42.5, 42.5) → (43,43,43)
         assert_eq!(buf.cell((0, 0)).unwrap().bg, Color::Rgb(43, 43, 43));
+    }
+
+    /// DOGE: blend_area inherits solid-step from blend_color (opacity ≥ 0.5
+    /// keeps original cell colours; no mid-channel invent).
+    #[test]
+    fn doge_blend_area_solid_steps_keeps_original_at_half_opacity() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        let fg = Color::Rgb(255, 0, 255);
+        let bg = Color::Rgb(0, 255, 0);
+        for x in 0..2 {
+            if let Some(cell) = buf.cell_mut((x, 0)) {
+                cell.set_fg(fg);
+                cell.set_bg(bg);
+            }
+        }
+
+        let target = Color::Rgb(0, 0, 0);
+        blend_area(
+            &mut buf,
+            Rect::new(0, 0, 2, 1),
+            Some((target, 0.5)),
+            Some((target, 0.5)),
+        );
+
+        assert_eq!(buf.cell((0, 0)).unwrap().fg, fg);
+        assert_eq!(buf.cell((0, 0)).unwrap().bg, bg);
     }
 
     #[test]

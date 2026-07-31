@@ -671,7 +671,38 @@ pub fn render_hook_hover_popup(
         buf.set_line_safe(inner.x, y, &line.content, inner.width);
     }
 }
+/// Paint a static left accent rail (`┃`) in the pane's accent column.
+///
+/// Mirrors the Human green gutter on user prompts: agent-associated side
+/// panes (tasks/subagents, status board) pass `theme.accent_running`
+/// (magenta under DOGE). Always on while the pane is open, not only when
+/// focused — focus chrome still draws the outer selection box separately.
+pub fn paint_side_pane_agent_rail(
+    buf: &mut Buffer,
+    pane_area: Rect,
+    rail_color: ratatui::style::Color,
+) {
+    if pane_area.width == 0 || pane_area.height == 0 {
+        return;
+    }
+    let style = Style::default().fg(rail_color);
+    let bar = crate::glyphs::accent_bar();
+    for y in pane_area.y..pane_area.y.saturating_add(pane_area.height) {
+        if let Some(cell) = buf.cell_mut((pane_area.x, y)) {
+            cell.set_symbol(bar);
+            cell.set_style(style);
+        }
+    }
+}
+
 /// Selection/hover chrome for a side pane (todo / queue / tasks). Focused panes get a dismiss control.
+///
+/// `focus_border` is the left/right rail colour while **focused** (role chrome:
+/// agent magenta / queue green). Hovered-but-unfocused uses `theme.hover_border`
+/// so soft hover cue stays distinct from keyboard focus.
+/// Agent-associated panes (tasks/subagents, status board, catalog) pass
+/// `theme.accent_running` (magenta under DOGE). Human queue keeps
+/// `theme.selection_border` / `theme.accent_user` as the caller prefers.
 pub fn render_todo_chrome(
     buf: &mut Buffer,
     todo_area: Rect,
@@ -680,6 +711,7 @@ pub fn render_todo_chrome(
     hovered: bool,
     close_hovered: bool,
     theme: &Theme,
+    focus_border: ratatui::style::Color,
 ) -> Option<SelectionBox> {
     render_todo_chrome_with_close_label(
         buf,
@@ -692,11 +724,14 @@ pub fn render_todo_chrome(
         None,
         None,
         false,
+        focus_border,
     )
 }
 /// Like [`render_todo_chrome`], with optional close label (queue uses `[close]`).
 ///
 /// `action_label` is an optional chrome control left of close (todo **Clear done**).
+/// `focus_border` paints the side rails when focused; hover-only uses
+/// `theme.hover_border` (see [`render_todo_chrome`]).
 #[allow(clippy::too_many_arguments)]
 pub fn render_todo_chrome_with_close_label(
     buf: &mut Buffer,
@@ -709,12 +744,16 @@ pub fn render_todo_chrome_with_close_label(
     close_label: Option<&'static str>,
     action_label: Option<&'static str>,
     action_hovered: bool,
+    focus_border: ratatui::style::Color,
 ) -> Option<SelectionBox> {
     if todo_area.area() == 0 {
         return None;
     }
+    // Focus gets the role colour (magenta agent / green queue). Hover-only
+    // keeps the softer theme.hover_border so the two cues stay distinct on
+    // GrokNight and DOGE alike.
     let color = if focused {
-        theme.selection_border
+        focus_border
     } else if hovered {
         theme.hover_border
     } else {
@@ -2372,6 +2411,130 @@ mod tests {
                 &theme
             )
             .is_none()
+        );
+    }
+
+    /// Agent / subagent list and status board always-on left rail is magenta
+    /// (`accent_running`) under DOGE — not cyan system chrome and not white
+    /// `selection_border`.
+    #[test]
+    fn agent_side_pane_rail_is_magenta_under_doge() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let magenta = ratatui::style::Color::Rgb(255, 0, 255);
+        let cyan = ratatui::style::Color::Rgb(0, 255, 255);
+        let white = ratatui::style::Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.accent_running, magenta,
+            "DOGE accent_running must be pure magenta under TrueColor pin"
+        );
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
+        let area = Rect::new(2, 2, 30, 6);
+        paint_side_pane_agent_rail(&mut buf, area, theme.accent_running);
+
+        for y in area.y..area.y + area.height {
+            let cell = buf.cell((area.x, y)).expect("rail cell");
+            assert_eq!(
+                cell.fg, theme.accent_running,
+                "agent rail y={y} must be accent_running magenta"
+            );
+            assert_ne!(cell.fg, cyan, "agent rail must not be system cyan");
+            assert_ne!(
+                cell.fg, white,
+                "agent rail must not be white selection_border"
+            );
+            assert_eq!(
+                cell.symbol(),
+                crate::glyphs::accent_bar(),
+                "agent rail paints accent_bar glyph"
+            );
+        }
+    }
+
+    /// Focused status-board / tasks chrome left border uses the caller-supplied
+    /// agent magenta, not white `selection_border`.
+    #[test]
+    fn agent_side_pane_focus_chrome_uses_magenta_not_white() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let magenta = ratatui::style::Color::Rgb(255, 0, 255);
+        assert_eq!(theme.accent_running, magenta);
+        assert_eq!(
+            theme.selection_border,
+            ratatui::style::Color::Rgb(255, 255, 255)
+        );
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
+        let area = Rect::new(2, 2, 30, 6);
+        let layout_cfg = LayoutConfig::default();
+        render_todo_chrome(
+            &mut buf,
+            area,
+            &layout_cfg,
+            true, // focused
+            false,
+            false,
+            &theme,
+            theme.accent_running,
+        )
+        .expect("focused chrome renders");
+
+        let layout = HorizontalLayout::new(area, &layout_cfg);
+        let sel = layout.selection_area();
+        let left = buf.cell((sel.x, sel.y)).expect("left border cell");
+        assert_eq!(
+            left.fg, magenta,
+            "focused agent pane left border must be magenta"
+        );
+        assert_ne!(
+            left.fg, theme.selection_border,
+            "must not use white selection_border for agent panes"
+        );
+    }
+
+    /// Hovered-but-unfocused side-pane chrome uses soft `hover_border`, not the
+    /// role `focus_border` (magenta). Focus and hover cues stay distinct.
+    #[test]
+    fn agent_side_pane_hover_chrome_uses_hover_border_not_focus_border() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let magenta = ratatui::style::Color::Rgb(255, 0, 255);
+        assert_eq!(theme.accent_running, magenta);
+        // DOGE hover_border is pure white — distinct from magenta focus.
+        assert_eq!(
+            theme.hover_border,
+            ratatui::style::Color::Rgb(255, 255, 255)
+        );
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
+        let area = Rect::new(2, 2, 30, 6);
+        let layout_cfg = LayoutConfig::default();
+        render_todo_chrome(
+            &mut buf,
+            area,
+            &layout_cfg,
+            false, // not focused
+            true,  // hovered
+            false,
+            &theme,
+            theme.accent_running, // focus_border would be magenta if wrongly used
+        )
+        .expect("hovered chrome renders");
+
+        let layout = HorizontalLayout::new(area, &layout_cfg);
+        let sel = layout.selection_area();
+        let left = buf.cell((sel.x, sel.y)).expect("left border cell");
+        assert_eq!(
+            left.fg, theme.hover_border,
+            "hover-only chrome must use theme.hover_border"
+        );
+        assert_ne!(
+            left.fg, magenta,
+            "hover-only must not paint focus_border (accent_running)"
         );
     }
 }

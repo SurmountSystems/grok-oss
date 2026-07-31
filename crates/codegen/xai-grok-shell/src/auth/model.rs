@@ -458,11 +458,15 @@ pub struct SupergrokPrincipalListing {
 
 /// List SuperGrok principals from an auth store map (deduped by identity_id).
 ///
-/// Skips API-key scope and WebLogin. Prefer multi-slot entries over a
-/// duplicate base active when both hold the same identity. Order: identity_id
-/// (BTreeMap). Safe for doctor: no secrets beyond fingerprints.
+/// Skips API-key scope and WebLogin. When base + multi-slot hold the same
+/// identity, prefer the **fresher** entry (later `expires_at` / `create_time`)
+/// so doctor fingerprints match the live JWT used for ranking/inference — not
+/// a stale multi-slot left behind after base refresh. Multi-slot wins only on
+/// a true tie. Order: identity_id (BTreeMap). Safe for doctor: no secrets
+/// beyond fingerprints.
 pub fn list_supergrok_principal_listings(map: &AuthStore) -> Vec<SupergrokPrincipalListing> {
-    let mut by_identity: BTreeMap<String, SupergrokPrincipalListing> = BTreeMap::new();
+    let mut by_identity: BTreeMap<String, (bool, &GrokAuth, SupergrokPrincipalListing)> =
+        BTreeMap::new();
 
     for (scope, auth) in map {
         if scope == API_KEY_SCOPE {
@@ -496,24 +500,32 @@ pub fn list_supergrok_principal_listings(map: &AuthStore) -> Vec<SupergrokPrinci
             store_scope: scope.clone(),
             identity_id: identity_id.clone(),
         };
-        // Prefer multi-slot keys over base: multi-slots contain `::personal` or
-        // `::team::` and are the durable second-login slots.
         let is_multi = scope.contains("::personal") || scope.contains("::team::");
         match by_identity.get(&identity_id) {
             None => {
-                by_identity.insert(identity_id, listing);
+                by_identity.insert(identity_id, (is_multi, auth, listing));
             }
-            Some(prev) => {
-                let prev_is_multi = prev.store_scope.contains("::personal")
-                    || prev.store_scope.contains("::team::");
-                if is_multi && !prev_is_multi {
-                    by_identity.insert(identity_id, listing);
+            Some((prev_multi, prev_auth, _)) => {
+                let take = match (prev_auth.expires_at, auth.expires_at) {
+                    (Some(a), Some(b)) if a != b => b > a,
+                    (None, Some(_)) => true,
+                    (Some(_), None) => false,
+                    _ if auth.create_time != prev_auth.create_time => {
+                        auth.create_time > prev_auth.create_time
+                    }
+                    _ => is_multi && !*prev_multi,
+                };
+                if take {
+                    by_identity.insert(identity_id, (is_multi, auth, listing));
                 }
             }
         }
     }
 
-    by_identity.into_values().collect()
+    by_identity
+        .into_values()
+        .map(|(_, _, listing)| listing)
+        .collect()
 }
 
 /// Early-invalidation buffer. Override with `GROK_AUTH_EARLY_INVALIDATION_SECS`

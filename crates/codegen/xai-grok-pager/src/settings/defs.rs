@@ -224,13 +224,13 @@ const PLAN_MODE_CHOICES: &[EnumChoice] = &[
 const PLAN_APPROVAL_PARK_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "soft",
-        display: "Soft (toast)",
-        description: "Park durable approval + toast; open modal on demand (/view-plan).",
+        display: "Soft (side panel)",
+        description: "Park durable approval, auto-open the side panel, and toast. Keep the live draft.",
     },
     EnumChoice {
         canonical: "modal",
         display: "Modal",
-        description: "Open the plan approval modal immediately when the agent exits plan mode.",
+        description: "Open the fullscreen plan approval modal immediately when the agent exits plan mode.",
     },
 ];
 
@@ -641,33 +641,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
-        },
-        SettingMeta {
-            key: "hide_title_bar",
-            category: SettingCategory::Appearance,
-            owner: SettingOwner::Shared,
-            label: "Hide window title",
-            description: "Clear the terminal/tab window title and stop Grok from \
-                          updating it (OSC 0). Opt out of session/activity titles \
-                          (on by default for discoverability). Distinct from Hide \
-                          header (in-app status chrome). Off by default.",
-            keywords: &[
-                "title",
-                "title bar",
-                "tab",
-                "window",
-                "window title",
-                "osc",
-                "hide",
-                "chrome",
-                "terminal title",
-                "resume",
-            ],
-            kind: SettingKind::Bool {
-                default: ui_default.hide_title_bar,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
         },
         SettingMeta {
             key: "screen_mode",
@@ -1417,8 +1390,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Agent,
             owner: SettingOwner::Shared,
             label: "Plan approval park",
-            description: "When the agent finishes planning: soft parks with a toast \
-                          (open on demand via /view-plan), or opens the approval modal immediately.",
+            description: "When the agent finishes planning: soft parks with a side panel \
+                          + toast (default), or opens the fullscreen approval modal immediately.",
             keywords: &[
                 "plan",
                 "approval",

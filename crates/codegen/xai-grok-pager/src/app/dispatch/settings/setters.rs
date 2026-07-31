@@ -985,35 +985,6 @@ pub(in crate::app::dispatch) fn set_hide_header(app: &mut AppView, new: bool) ->
     }]
 }
 
-/// State-only mutation for `hide_title_bar`. Updates `current_ui` and the
-/// process-wide OSC 0 gate used by `set_terminal_title` / title manager.
-/// Turning hide **on** clears the window title immediately so process/argv
-/// noise does not linger until the next title path.
-pub(super) fn set_hide_title_bar_inner(app: &mut AppView, new: bool) {
-    app.current_ui.hide_title_bar = new;
-    crate::app::set_hide_title_bar_runtime(new);
-    if new {
-        crate::app::set_terminal_title("");
-    }
-}
-
-/// Set hide-title-bar. Idempotent: skips if `new == prev`.
-pub(in crate::app::dispatch) fn set_hide_title_bar(app: &mut AppView, new: bool) -> Vec<Effect> {
-    let prev = app.current_ui.hide_title_bar;
-    if prev == new {
-        return vec![];
-    }
-    set_hide_title_bar_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(target: "settings", key = "hide_title_bar", value = new, "setting changed");
-    app.show_toast(&save_success_toast("Hide window title", new));
-    vec![Effect::PersistSetting {
-        key: "hide_title_bar",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
 /// State-only mutation for `show_timestamps`. Idempotent fast path
 /// mirrors `set_compact_mode_inner`.
 pub(super) fn set_timestamps_inner(app: &mut AppView, new: bool) {

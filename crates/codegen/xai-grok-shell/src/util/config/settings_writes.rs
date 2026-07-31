@@ -16,11 +16,6 @@ pub async fn set_hide_header(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.hide_header = value).await
 }
 
-/// Persist `[ui].hide_title_bar` via `update_config`.
-pub async fn set_hide_title_bar(value: bool) -> Result<()> {
-    update_config(|cfg| cfg.ui.hide_title_bar = value).await
-}
-
 /// Persist `[ui].show_timestamps` via `update_config`. `UiConfig::show_timestamps`
 /// is `Option<bool>` — pager-side `None` means "use default" — so we wrap.
 pub async fn set_show_timestamps(value: bool) -> Result<()> {

@@ -1311,8 +1311,7 @@ pub(crate) async fn run(
         config.hide_header = app.current_ui.hide_header;
         app.set_appearance(config);
     }
-    // Seed hide_title_bar into the process-wide OSC 0 gate (default false = titles on).
-    crate::app::set_hide_title_bar_runtime(app.current_ui.hide_title_bar);
+
     // Single-key load so a malformed unrelated `[ui]` field cannot wipe this.
     let page_flip_on_send = crate::appearance::cache::load_page_flip_on_send();
     app.current_ui.page_flip_on_send = Some(page_flip_on_send);

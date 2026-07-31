@@ -1103,10 +1103,16 @@ fn show_limits_pushes_cached_snapshot_block() {
     assert!(text.contains("Next reset: Jul 30, 12:00"), "{text}");
     // Honest gap family (host may or may not have management config).
     assert!(
-        text.contains("Balance: no management key/team id")
+        text.contains("Balance: no management key")
+            || text.contains("Balance: no management team id")
             || text.contains("Balance: loading team prepaid...")
-            || text.contains("Balance: team prepaid unavailable"),
+            || text.contains("Balance: team prepaid unavailable")
+            || text.contains("Balance (console team prepaid):"),
         "honest console prepaid gap: {text}"
+    );
+    assert!(
+        !text.contains("no management key/team id"),
+        "mushy combined gap retired: {text}"
     );
     assert!(
         !text.contains("no $ meter yet"),
@@ -1139,10 +1145,16 @@ fn show_limits_console_live_keeps_meters_distinct() {
     assert!(text.contains("Live sampling: console key"), "{text}");
     assert!(text.contains("Path: live"), "{text}");
     assert!(
-        text.contains("Balance: no management key/team id")
+        text.contains("Balance: no management key")
+            || text.contains("Balance: no management team id")
             || text.contains("Balance: loading team prepaid...")
-            || text.contains("Balance: team prepaid unavailable"),
+            || text.contains("Balance: team prepaid unavailable")
+            || text.contains("Balance (console team prepaid):"),
         "honest console prepaid gap: {text}"
+    );
+    assert!(
+        !text.contains("no management key/team id"),
+        "mushy combined gap retired: {text}"
     );
     assert!(
         !text.contains("no $ meter yet"),

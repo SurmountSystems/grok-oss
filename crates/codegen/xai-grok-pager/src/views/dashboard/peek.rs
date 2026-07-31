@@ -1593,7 +1593,7 @@ mod tests {
     }
 
     /// The reply input renders the typed draft (not the dim
-    /// placeholder) and reports a caret position.
+    /// placeholder) and paints the software box caret (hardware unreported).
     #[test]
     fn render_peek_shows_typed_reply_and_caret() {
         use ratatui::buffer::Buffer;
@@ -1604,6 +1604,10 @@ mod tests {
         panel.focused = true;
         let mut reply = test_reply();
         reply.set_text("ship it");
+        // set_text preserves cursor; park at end so the insertion cell is
+        // blank and the software box caret paints there (not reverse-video
+        // on a grapheme).
+        reply.set_cursor(reply.text().len());
         let res = render_peek_panel(
             &mut buf,
             Rect::new(0, 0, 80, 5),
@@ -1627,7 +1631,18 @@ mod tests {
         assert!(content.contains("ship it"), "got: {content:?}");
         // No placeholder once the user has typed.
         assert!(!content.contains("reply\u{2026}"), "got: {content:?}");
-        assert!(res.caret.is_some(), "reply input must report a caret");
+        // Software box caret owns the insertion cell; hardware cursor stays
+        // hidden (`PromptRenderResult::cursor_pos` is None → peek caret None).
+        assert!(
+            res.caret.is_none(),
+            "focused reply paints the software box caret; hardware caret unreported"
+        );
+        let filled = crate::glyphs::cursor_box_filled();
+        let hollow = crate::glyphs::cursor_box_hollow();
+        assert!(
+            content.contains(filled) || content.contains(hollow),
+            "focused reply must paint filled or hollow box caret, got: {content:?}"
+        );
         assert!(res.reply_rect.is_some(), "reply rect must be reported");
     }
 
@@ -1936,7 +1951,7 @@ mod tests {
 
     /// When the reject option is highlighted, the panel renders an inline
     /// feedback field (the typed text), hides the `❯ reply` row, and
-    /// reports a caret into the feedback.
+    /// paints the software box caret on the feedback field.
     #[test]
     fn render_peek_reject_option_shows_inline_feedback() {
         use ratatui::buffer::Buffer;
@@ -1963,6 +1978,7 @@ mod tests {
         panel.focused = true;
         let mut reply = test_reply();
         reply.set_text("do it differently");
+        reply.set_cursor(reply.text().len());
         let res = render_peek_panel(
             &mut buf,
             Rect::new(0, 0, 80, 8),
@@ -1991,8 +2007,17 @@ mod tests {
         );
         // The `❯ reply` row is hidden while answering.
         assert!(!content.contains("reply"), "got: {content:?}");
-        // Caret reports into the feedback field.
-        assert!(res.caret.is_some(), "feedback input must report a caret");
+        // Software box caret on the feedback field; hardware caret unreported.
+        assert!(
+            res.caret.is_none(),
+            "focused feedback paints the software box caret; hardware caret unreported"
+        );
+        let filled = crate::glyphs::cursor_box_filled();
+        let hollow = crate::glyphs::cursor_box_hollow();
+        assert!(
+            content.contains(filled) || content.contains(hollow),
+            "focused feedback must paint filled or hollow box caret, got: {content:?}"
+        );
         assert!(
             res.reply_rect.is_some(),
             "feedback slot rect must be reported for mouse routing"

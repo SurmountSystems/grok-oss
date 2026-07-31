@@ -78,11 +78,15 @@ impl SamplingIdentityKind {
 /// "feature unfinished" placeholder).
 ///
 /// When Management GET balance succeeds, surfaces show real `$N` instead.
+/// Missing key and missing team id are **distinct** plain copy so the operator
+/// knows which credential to add (never one mushy "key/team id" line).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConsoleTeamPrepaidGap {
-    /// No management API key and/or no `[endpoints] management_team_id`.
+    /// No management API key (config or keyring). Team id may still be set.
     #[default]
-    NotConfigured,
+    MissingManagementKey,
+    /// Management key present; `[endpoints] management_team_id` unset/blank.
+    MissingTeamId,
     /// Key + team id set; balance not in cache yet (fetch may be in flight).
     Loading,
     /// Key + team id set; balance still unknown (fetch failed or never succeeded).
@@ -93,36 +97,42 @@ impl ConsoleTeamPrepaidGap {
     /// Short honest phrase for footer / `/usage` / `/limits` (ASCII `...` only).
     pub fn as_display_str(self) -> &'static str {
         match self {
-            Self::NotConfigured => "no management key/team id",
+            Self::MissingManagementKey => "no management key",
+            Self::MissingTeamId => "no management team id",
             Self::Loading => "loading team prepaid...",
             Self::Unavailable => "team prepaid unavailable",
         }
     }
 
-    /// From whether both Management credentials are present.
+    /// From whether Management key and team id are each present.
     ///
-    /// Configured but cents unknown defaults to [`Self::Loading`] (cold / fetch
-    /// may be in flight). There is no process-wide "last fetch failed" bit yet,
-    /// so surfaces that just finished a billing fetch and still have no cents
-    /// should pass [`Self::Unavailable`] explicitly (see
-    /// [`Self::after_billing_fetch`]).
+    /// | key | team | gap |
+    /// |-----|------|-----|
+    /// | no  | *    | [`Self::MissingManagementKey`] (key is the first blocker) |
+    /// | yes | no   | [`Self::MissingTeamId`] |
+    /// | yes | yes  | [`Self::Loading`] (cold / fetch may be in flight) |
+    ///
+    /// There is no process-wide "last fetch failed" bit yet, so surfaces that
+    /// just finished a billing fetch and still have no cents should pass
+    /// [`Self::Unavailable`] explicitly (see [`Self::after_billing_fetch`]).
     pub fn from_management_config(has_management_key: bool, has_management_team_id: bool) -> Self {
-        if has_management_key && has_management_team_id {
-            Self::Loading
-        } else {
-            Self::NotConfigured
+        match (has_management_key, has_management_team_id) {
+            (false, _) => Self::MissingManagementKey,
+            (true, false) => Self::MissingTeamId,
+            (true, true) => Self::Loading,
         }
     }
 
     /// Gap after a completed billing fetch when cents are still unknown.
     ///
     /// Configured → [`Self::Unavailable`] (fetch ran; still no balance).
-    /// Unconfigured → [`Self::NotConfigured`].
+    /// Missing key / team → same distinct unconfigured variants as
+    /// [`Self::from_management_config`].
     pub fn after_billing_fetch(has_management_key: bool, has_management_team_id: bool) -> Self {
-        if has_management_key && has_management_team_id {
-            Self::Unavailable
-        } else {
-            Self::NotConfigured
+        match (has_management_key, has_management_team_id) {
+            (false, _) => Self::MissingManagementKey,
+            (true, false) => Self::MissingTeamId,
+            (true, true) => Self::Unavailable,
         }
     }
 }
@@ -357,7 +367,9 @@ pub fn format_usage_summary_with_live_identity(
         autotopup,
         sampling_identity,
         console_team_prepaid_cents,
-        ConsoleTeamPrepaidGap::NotConfigured,
+        // Callers that know config should pass an explicit gap; default is the
+        // most common dogfood miss (no management key stored yet).
+        ConsoleTeamPrepaidGap::MissingManagementKey,
     )
 }
 
@@ -464,8 +476,8 @@ pub fn usage_warning_for_session_with_openrouter(
 /// When live primary is a **console key**, never presents SuperGrok prepaid
 /// extras as the spend meter (personal SuperGrok $ is a different pool). Shows
 /// console team prepaid dollars when Management API cents are known, else an
-/// honest gap (`console key · no management key/team id` / loading /
-/// unavailable).
+/// honest gap (`console key · no management key` / `no management team id` /
+/// loading / unavailable).
 ///
 /// When live primary is SuperGrok, prepaid is labeled **SuperGrok extras left**
 /// — never generic "Credits left".
@@ -497,7 +509,7 @@ pub fn usage_warning_for_session_with_identity(
 /// `console_team_prepaid_cents` is Management API team prepaid remaining
 /// (absolute USD cents). Only used when live identity is console; never mixed
 /// with SuperGrok session extras. When cents are `None`, uses
-/// [`ConsoleTeamPrepaidGap::NotConfigured`] — prefer
+/// [`ConsoleTeamPrepaidGap::MissingManagementKey`] — prefer
 /// [`usage_warning_for_session_with_identity_principal_and_gap`] when the
 /// caller knows the real gap reason.
 pub fn usage_warning_for_session_with_identity_and_principal(
@@ -521,7 +533,7 @@ pub fn usage_warning_for_session_with_identity_and_principal(
         sampling_identity,
         live_principal_role,
         console_team_prepaid_cents,
-        ConsoleTeamPrepaidGap::NotConfigured,
+        ConsoleTeamPrepaidGap::MissingManagementKey,
     )
 }
 
@@ -1100,17 +1112,41 @@ mod tests {
             None,
             SamplingIdentityKind::ConsoleKey,
             None,
-            ConsoleTeamPrepaidGap::NotConfigured,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
         );
         assert!(
-            text.contains("Console team prepaid: no management key/team id"),
+            text.contains("Console team prepaid: no management key"),
             "{text}"
         );
         assert!(
             !text.contains("no $ meter yet"),
             "soft placeholder retired: {text}"
         );
+        assert!(
+            !text.contains("no management key/team id"),
+            "mushy combined gap retired: {text}"
+        );
         assert!(!text.contains("SuperGrok extras"), "{text}");
+    }
+
+    #[test]
+    fn usage_summary_console_live_missing_team_id_distinct_from_missing_key() {
+        let text = format_usage_summary_with_live_identity_and_gap(
+            None,
+            None,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            ConsoleTeamPrepaidGap::MissingTeamId,
+        );
+        assert!(
+            text.contains("Console team prepaid: no management team id"),
+            "{text}"
+        );
+        assert!(!text.contains("no management key/team id"), "{text}");
+        assert!(
+            !text.contains("no management key\n") && !text.ends_with("no management key"),
+            "missing team must not read as missing key alone: {text}"
+        );
     }
 
     #[test]
@@ -1160,9 +1196,15 @@ mod tests {
 
     #[test]
     fn console_team_prepaid_gap_display_strings_are_honest() {
+        // Named contract: missing key vs missing team vs loading vs unavailable
+        // are distinct plain operator-visible strings (no mushy key/team mash).
         assert_eq!(
-            ConsoleTeamPrepaidGap::NotConfigured.as_display_str(),
-            "no management key/team id"
+            ConsoleTeamPrepaidGap::MissingManagementKey.as_display_str(),
+            "no management key"
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::MissingTeamId.as_display_str(),
+            "no management team id"
         );
         assert_eq!(
             ConsoleTeamPrepaidGap::Loading.as_display_str(),
@@ -1172,32 +1214,51 @@ mod tests {
             ConsoleTeamPrepaidGap::Unavailable.as_display_str(),
             "team prepaid unavailable"
         );
+        // Distinct config → distinct variants.
         assert_eq!(
             ConsoleTeamPrepaidGap::from_management_config(false, false),
-            ConsoleTeamPrepaidGap::NotConfigured
-        );
-        assert_eq!(
-            ConsoleTeamPrepaidGap::from_management_config(true, false),
-            ConsoleTeamPrepaidGap::NotConfigured
+            ConsoleTeamPrepaidGap::MissingManagementKey
         );
         assert_eq!(
             ConsoleTeamPrepaidGap::from_management_config(false, true),
-            ConsoleTeamPrepaidGap::NotConfigured
+            ConsoleTeamPrepaidGap::MissingManagementKey
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::from_management_config(true, false),
+            ConsoleTeamPrepaidGap::MissingTeamId
         );
         // Configured + cents unknown (cold) → Loading, not unavailable.
         assert_eq!(
             ConsoleTeamPrepaidGap::from_management_config(true, true),
             ConsoleTeamPrepaidGap::Loading
         );
-        // Post-fetch miss → Unavailable; unconfigured stays NotConfigured.
+        // Post-fetch miss → Unavailable; unconfigured stays distinct miss.
         assert_eq!(
             ConsoleTeamPrepaidGap::after_billing_fetch(true, true),
             ConsoleTeamPrepaidGap::Unavailable
         );
         assert_eq!(
             ConsoleTeamPrepaidGap::after_billing_fetch(false, true),
-            ConsoleTeamPrepaidGap::NotConfigured
+            ConsoleTeamPrepaidGap::MissingManagementKey
         );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::after_billing_fetch(true, false),
+            ConsoleTeamPrepaidGap::MissingTeamId
+        );
+        // Never emit the retired mushy combined string.
+        for gap in [
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            ConsoleTeamPrepaidGap::MissingTeamId,
+            ConsoleTeamPrepaidGap::Loading,
+            ConsoleTeamPrepaidGap::Unavailable,
+        ] {
+            assert!(
+                !gap.as_display_str().contains("key/team"),
+                "retired mushy gap: {:?}",
+                gap
+            );
+            assert!(!gap.as_display_str().contains("no $ meter yet"));
+        }
     }
 
     #[test]
@@ -1212,12 +1273,52 @@ mod tests {
             SamplingIdentityKind::ConsoleKey,
             None,
             None,
-            ConsoleTeamPrepaidGap::NotConfigured,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
         );
         let (text, critical) = w.expect("console gap");
         assert!(
-            text.contains("no management key/team id"),
-            "unconfigured: {text}"
+            text.contains("no management key"),
+            "missing key footer: {text}"
+        );
+        assert!(
+            !text.contains("no management key/team id"),
+            "mushy combined gap retired: {text}"
+        );
+        assert!(!text.contains("no $ meter yet"), "{text}");
+        assert!(!text.contains('$'), "must not invent dollars: {text}");
+        assert!(!critical);
+    }
+
+    #[test]
+    fn footer_console_live_missing_team_id_distinct_from_missing_key() {
+        // Named contract: key present, team_id absent → plain "no management team id".
+        let gap = ConsoleTeamPrepaidGap::from_management_config(true, false);
+        assert_eq!(gap, ConsoleTeamPrepaidGap::MissingTeamId);
+        let w = usage_warning_for_session_with_identity_principal_and_gap(
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            None,
+            gap,
+        );
+        let (text, critical) = w.expect("team gap");
+        assert!(
+            text.contains("Console key · no management team id"),
+            "missing team footer: {text}"
+        );
+        assert!(
+            !text.contains("no management key/team id"),
+            "mushy combined retired: {text}"
+        );
+        // Must not be the missing-key line (operator needs team_id, not another key).
+        assert!(
+            !text.ends_with("no management key"),
+            "must distinguish missing team from missing key: {text}"
         );
         assert!(!text.contains("no $ meter yet"), "{text}");
         assert!(!text.contains('$'), "must not invent dollars: {text}");

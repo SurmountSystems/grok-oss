@@ -23,14 +23,6 @@ pub struct UiConfig {
     /// Fullscreen agent chrome only; default false. Read by pager.
     #[serde(default)]
     pub hide_header: bool,
-    /// Clear the terminal/tab **window title** (OSC 0) and skip dynamic
-    /// agent-state title updates. Distinct from `hide_header` (in-app
-    /// status/location chrome). Default **false**: Grok manages the title
-    /// (session name + activity + brand) so tabs stay discoverable; first
-    /// write is always product-managed (never raw `grok-oss --resume …`
-    /// argv). Opt out with `true`. Read by pager.
-    #[serde(default)]
-    pub hide_title_bar: bool,
     /// Simple mode. Read by pager, declared here for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simple_mode: Option<bool>,
@@ -205,11 +197,13 @@ pub struct UiConfig {
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
     pub display_refresh: DisplayRefreshSettings,
-    /// How `exit_plan_mode` presents plan approval (option D).
+    /// How `exit_plan_mode` presents plan approval.
     ///
-    /// - `"soft"` / unset — park durable approval + toast; modal on demand
-    ///   (`/view-plan`, status click). Default.
-    /// - `"modal"` — open the plan line-viewer immediately (force modal).
+    /// - `"soft"` / unset: park durable approval, auto-open the non-capturing
+    ///   side panel + toast (keep live draft). Default. `/view-plan` reopens
+    ///   if dismissed.
+    /// - `"modal"`: open the fullscreen plan line-viewer immediately and stash
+    ///   the live draft.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_approval_park: Option<String>,
 }
@@ -291,7 +285,6 @@ impl Default for UiConfig {
             ui_theme: None,
             compact_mode: false,
             hide_header: false,
-            hide_title_bar: false,
             simple_mode: None,
             permission_mode: None,
             approval_mode: None,
@@ -459,25 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn hide_title_bar_defaults_false() {
-        // Named contract: window titles visible by default for discoverability
-        // (session name + agent activity via OSC 0). Opt out with hide_title_bar = true.
-        assert!(
-            !UiConfig::default().hide_title_bar,
-            "default must show managed window titles"
-        );
-        let on: UiConfig = serde_json::from_value(serde_json::json!({ "hide_title_bar": true }))
-            .expect("UiConfig deserializes hide_title_bar true");
-        assert!(on.hide_title_bar);
-        let off: UiConfig = serde_json::from_value(serde_json::json!({ "hide_title_bar": false }))
-            .expect("UiConfig deserializes hide_title_bar false");
-        assert!(!off.hide_title_bar);
-        let missing: UiConfig = serde_json::from_value(serde_json::json!({}))
-            .expect("UiConfig defaults missing hide_title_bar");
-        assert!(
-            !missing.hide_title_bar,
-            "missing field must default false (titles on for discoverability)"
-        );
+    fn stale_hide_title_bar_key_is_ignored() {
+        // Named contract: hide_title_bar was removed. Stale config keys must
+        // not fail deserialize (serde ignores unknown fields). Dynamic title
+        // opt-out is `[ui.notifications.title].enabled` only.
+        let stale: UiConfig = serde_json::from_value(serde_json::json!({ "hide_title_bar": true }))
+            .expect("stale hide_title_bar must not break UiConfig deserialize");
+        assert!(!stale.hide_header);
+        let _ = stale;
     }
 
     #[test]

@@ -118,6 +118,19 @@ impl AgentView {
             .as_ref()
             .is_some_and(|v| v.list_state.input_mode().is_some());
 
+        // Plan approval Preview: Ctrl/Cmd+V must attach clipboard screenshots
+        // to the plan composer (same deferred probe as the main prompt). Do
+        // not swallow into the line-viewer list search path.
+        if in_plan_approval && !input_bar_active && crate::input::key::is_paste_key(key) {
+            if let Some(ref mut pav) = self.plan_approval_view {
+                pav.focus = PlanApprovalFocus::Prompt;
+            }
+            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                crate::clipboard::system_clipboard_read_text(),
+            );
+            return self.handle_paste_key_deferred(clipboard_text);
+        }
+
         // When the search/filter/goto input bar is active, let ListPane
         // handle everything. Comment mode is special: Enter/Esc are not
         // consumed by the list state (it returns false), so we handle

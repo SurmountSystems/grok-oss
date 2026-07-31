@@ -556,6 +556,128 @@ fn supports_osc22() -> bool {
         .hyperlink_capabilities()
         .osc22_cursor
 }
+
+/// Whether the mouse is over a hit target that should request OSC 22 pointer
+/// (hand) cursor. Links already did; one-click copy chrome (selection-box ⧉,
+/// always-on bubble ⧉, prompt draft ⧉, plan/line-viewer ⧉) must match so hover
+/// reads as clickable like other CTAs.
+///
+/// Pure flags so unit tests do not need a live terminal OSC 22 capability bit.
+pub(crate) fn wants_pointer_cursor(
+    on_link: bool,
+    selection_copy_hovered: bool,
+    bubble_copy_hovered: bool,
+    prompt_copy_hovered: bool,
+    line_viewer_copy_hovered: bool,
+) -> bool {
+    on_link
+        || selection_copy_hovered
+        || bubble_copy_hovered
+        || prompt_copy_hovered
+        || line_viewer_copy_hovered
+}
+
+impl AgentView {
+    /// Live hover state → OSC 22 pointer request (links + one-click copy chrome).
+    pub(crate) fn mouse_wants_pointer_cursor(&self) -> bool {
+        wants_pointer_cursor(
+            self.hovered_link_idx.is_some(),
+            self.hit_sb_copy.hovered,
+            self.hovered_bubble_copy.is_some(),
+            self.prompt.copy_hovered(),
+            self.line_viewer.as_ref().is_some_and(|v| v.copy_hovered),
+        )
+    }
+}
+
+#[cfg(test)]
+mod pointer_cursor_tests {
+    use super::{test_agent_view, wants_pointer_cursor};
+
+    #[test]
+    fn link_hover_wants_pointer() {
+        assert!(wants_pointer_cursor(true, false, false, false, false));
+    }
+
+    #[test]
+    fn idle_pointer_is_default() {
+        assert!(!wants_pointer_cursor(false, false, false, false, false));
+    }
+
+    /// Named contract: mouse over any one-click copy chrome hit requests pointer.
+    #[test]
+    fn selection_box_copy_hover_wants_pointer() {
+        assert!(
+            wants_pointer_cursor(false, true, false, false, false),
+            "selection-box ⧉ hover must request pointer cursor"
+        );
+    }
+
+    #[test]
+    fn bubble_copy_hover_wants_pointer() {
+        assert!(
+            wants_pointer_cursor(false, false, true, false, false),
+            "always-on bubble ⧉ hover must request pointer cursor"
+        );
+    }
+
+    #[test]
+    fn prompt_draft_copy_hover_wants_pointer() {
+        assert!(
+            wants_pointer_cursor(false, false, false, true, false),
+            "prompt top-bar ⧉ hover must request pointer cursor"
+        );
+    }
+
+    #[test]
+    fn line_viewer_plan_copy_hover_wants_pointer() {
+        assert!(
+            wants_pointer_cursor(false, false, false, false, true),
+            "plan/line-viewer ⧉ hover must request pointer cursor"
+        );
+    }
+
+    /// Field wiring: agent hover flags feed the same contract as the pure helper.
+    #[test]
+    fn agent_view_copy_hover_fields_request_pointer() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        assert!(
+            !agent.mouse_wants_pointer_cursor(),
+            "idle agent must not request pointer"
+        );
+
+        agent.hit_sb_copy.hovered = true;
+        assert!(
+            agent.mouse_wants_pointer_cursor(),
+            "selection-box ⧉ hover field must request pointer"
+        );
+        agent.hit_sb_copy.hovered = false;
+
+        agent.hovered_bubble_copy = Some(0);
+        assert!(
+            agent.mouse_wants_pointer_cursor(),
+            "bubble ⧉ hover field must request pointer"
+        );
+        agent.hovered_bubble_copy = None;
+
+        // Prompt draft ⧉: set hit rect then move mouse onto it.
+        agent
+            .prompt
+            .force_copy_button_area_for_test(ratatui::layout::Rect::new(10, 5, 3, 1));
+        assert!(agent.prompt.update_copy_hover(11, 5));
+        assert!(
+            agent.prompt.copy_hovered(),
+            "update_copy_hover must mark prompt ⧉ hovered"
+        );
+        assert!(
+            agent.mouse_wants_pointer_cursor(),
+            "prompt ⧉ hover field must request pointer"
+        );
+        assert!(agent.prompt.update_copy_hover(0, 0));
+        assert!(!agent.mouse_wants_pointer_cursor());
+    }
+}
+
 pub(super) fn has_native_link_hover() -> bool {
     crate::terminal::terminal_context()
         .hyperlink_capabilities()
@@ -1102,7 +1224,8 @@ pub struct AgentView {
     /// Link index under the mouse cursor (for hover highlight).
     pub hovered_link_idx: Option<usize>,
     /// Last emitted OSC 22 pointer state (avoids re-emitting every frame).
-    pub last_pointer_on_link: bool,
+    /// True when the previous frame requested the hand/pointer shape.
+    pub last_pointer_cursor: bool,
     /// Selection model for the /btw overlay panel (populated each frame).
     pub last_btw_selection_model: ResolvedSelectionModel,
     /// Cached screen rect of the /btw overlay panel from the last render.

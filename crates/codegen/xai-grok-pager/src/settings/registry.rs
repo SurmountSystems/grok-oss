@@ -597,7 +597,6 @@ pub fn current_value_for(
         // SHARED — UiConfig source of truth, pager keeps a cache.
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         "hide_header" => Some(SettingValue::Bool(ui.hide_header)),
-        "hide_title_bar" => Some(SettingValue::Bool(ui.hide_title_bar)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
         // Cache is the send-path source of truth (same pattern as group_tool_verbs).
@@ -864,12 +863,6 @@ mod tests {
                     assert_eq!(
                         *default, ui.hide_header,
                         "hide_header default drifts from UiConfig::default()"
-                    );
-                }
-                ("hide_title_bar", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default, ui.hide_title_bar,
-                        "hide_title_bar default drifts from UiConfig::default()"
                     );
                 }
                 // Per-tip contextual hints: `None` (inherit) → default ON.

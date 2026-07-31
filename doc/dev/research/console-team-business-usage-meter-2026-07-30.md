@@ -103,7 +103,7 @@ Third-party notes (e.g. CodexBar docs) also read prepaid balance from the Manage
 | Management key store | **Shipped** — keyring URL `https://management-api.x.ai` (not inference `xai_console`) |
 | `[endpoints] management_team_id` | **Shipped** — explicit pin; not SuperGrok OIDC team |
 | `GET …/billing/teams/{team_id}/prepaid/balance` | **Shipped** — hermetic client → `ConsoleTeamPrepaidMeter` + ~60s process cache |
-| Footer / `/limits` console prepaid | **Shipped** — `Console key · team prepaid: $N` / `Balance (console team prepaid): $N` when console live + cents known; honest `no management key/team id` / `loading team prepaid...` / `team prepaid unavailable` when unknown (soft `no $ meter yet` retired) |
+| Footer / `/limits` console prepaid | **Shipped** — `Console key · team prepaid: $N` / `Balance (console team prepaid): $N` when console live + cents known; distinct honest gaps when unknown: `no management key` / `no management team id` / `loading team prepaid...` / `team prepaid unavailable` (soft `no $ meter yet` + mushy `key/team id` retired) |
 | `POST …/billing/teams/{team_id}/usage` series | **Not wired** (documented; ship only if dogfood needs charts) |
 | Soft `/usage` under console live | **Shipped** — names console team prepaid / honest gap; does not sell SuperGrok session billing as live console spend (join `/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`) |
 | Prepaid cache freshness | Known UX: ≤60s process TTL + last-good on fetch miss/error (poll does not bust cache) |
@@ -138,9 +138,11 @@ Do **not** re-claim load-only stub / no HTTP / no keyring for management prepaid
 3. Hermetic HTTP client: `GET …/prepaid/balance` → cents on `ConsoleTeamPrepaidMeter` (+ process cache).
 4. Footer + `/limits` when console live **and** management meter present; plain labels: **console team prepaid**.
 5. Half A SuperGrok rows kept; SuperGrok dollar extras are not sold as console live spend.
-6. Honest gap when key/team/fetch absent: `no management key/team id` /
-   `loading team prepaid...` / `team prepaid unavailable` (soft `no $ meter yet`
-   retired — join `/tmp/grok-join-impl-no-dollar-meter-real-0c6a7911.md`).
+6. Honest **distinct** gaps when key/team/fetch absent: `no management key` /
+   `no management team id` / `loading team prepaid...` /
+   `team prepaid unavailable` (soft `no $ meter yet` + mushy combined line
+   retired — joins `/tmp/grok-join-impl-no-dollar-meter-real-0c6a7911.md`,
+   `/tmp/grok-join-impl-console-meter-footer-honesty.md`).
 7. Soft `/usage` under console live: live line + console team prepaid / honest gap (not SuperGrok-as-live). Join: `/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`.
 
 ### Still open (documented, not invented as shipped)
@@ -173,7 +175,8 @@ Do not hardcode Surmount’s team id in product; operator supplies it.
 2. Note console team id (team UUID used in Management paths).
 3. Put key + team id in grok config / keyring (`management_api_key`, `management_team_id`).
 4. Refresh billing → `/limits` / footer show console team prepaid.
-5. Without key: still `no management key/team id` (no invented $).
+5. Without key: `no management key`; key without team id: `no management team id`
+   (no invented $).
 
 ## Next agent-doable steps (after core prepaid + `/usage` honesty)
 

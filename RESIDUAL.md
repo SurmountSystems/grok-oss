@@ -6,18 +6,13 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
-- **Plan approval UI dead after soft-park (2026-07-27) — fixed + soft-park mouse
-  CTAs (2026-07-29):** keys no longer die when reading the parked card; soft-park
-  footer is hit-tested (mouse primary, works with draft / Prompt focus); scrollback
-  card is preview + plain pointer only (no fake button row); empty placeholder
-  points at real footer / `/view-plan` (not AI-Dungeon key menu). Card body
-  re-reads live `plan.md` (panel + soft-park commit). Keys still need empty
-  prompt (intentional; mouse / status / `/view-plan` escape). Joins:
-  `join-plan-ctas-dead.md`, `/tmp/grok-join-impl-plan-ux-no-lockup-2026-07-29.md`,
-  `/tmp/grok-join-impl-soft-park-card-freshness-2026-07-29.md`.
-  **Still soft:** agent-written `plan.md` can invent freeform "reply approve /
-  options 1–5" (product chrome does not; process law = product CTAs only).
-  Process: `bug:exit-plan-mode-false-approve` — host pin § Plan approval item 7.
+- **Plan approval UI (product chrome shipped → FORK; agent freeform still soft):**
+  soft-park **auto-opens** the plan side panel; footer mouse CTAs hit-tested;
+  card re-reads live `plan.md`; L1 typing stays modal-free. `/view-plan` still
+  reopens if dismissed. Lasting truth: [`FORK.md`](FORK.md). Joins under
+  `/tmp/grok-join-impl-*plan*`. **Still soft:** agent-written `plan.md` can
+  invent freeform "reply approve / options 1–5" (product chrome does not;
+  process law = product CTAs only). Process: `bug:exit-plan-mode-false-approve`.
 
 - **Stuck Retrying / stream headers (shipped → FORK; soft dogfood only):**
   product truth in [`FORK.md`](FORK.md) (StreamResumed clear, 120s headers
@@ -53,24 +48,18 @@ or code — not only here. Closed campaign history:
    dogfood finds a new model-facing JSON chokepoint. Detail:
    [`doc/dev/research/udax-json-toon-2026-07-26.md`](doc/dev/research/udax-json-toon-2026-07-26.md).
 
-2. **Plan approval soft park (option A shipped; non-capturing Char 2026-07-29;
-   B/C/D parked)**
-   **Shipped:** when `exit_plan_mode` parks, durable approval + status chrome +
-   toast (“Plan parked — press /view-plan or click status to review”) without
-   auto-opening the line-viewer modal; modal still on demand via `/view-plan`,
-   status click, or `ShowPlan` / `reopen_plan_approval`. Track
-   `feat:plan-modal-softer-park`. Design note:
+2. **Plan approval soft park (side panel auto-open shipped → FORK; freeform soft)**
+   **Shipped:** `exit_plan_mode` soft path parks durable approval, keeps draft,
+   **auto-opens** non-capturing plan **side panel** (toast/status name side
+   panel, not a `/view-plan` nudge). L1 stays modal-free (printable → composer).
+   Approve/quit via **mouse footer CTAs**, side panel, status chip; `/view-plan`
+   reopens if dismissed. Force fullscreen: `plan_approval_park = "modal"`.
+   Lasting truth: [`FORK.md`](FORK.md). Design note (historical):
    [`doc/dev/research/plan-modal-softer-park-2026-07-26.md`](doc/dev/research/plan-modal-softer-park-2026-07-26.md).
-   **Operator rejects stuck soft-park (2026-07-29):** main thread (**agent L1**)
-   must stay **modal-free**. Product: soft-park is **non-capturing** for Char /
-   empty Enter (all printable → composer; no exclusive a/A/s/?/q/Enter approve).
-   Approve/quit via **mouse footer CTAs**, status chip, or `/view-plan` panel
-   (panel keeps empty-prompt accelerators). Join:
-   `/tmp/grok-join-impl-l1-modal-free-plan-2026-07-29.md`. Process pin: project
-   `AGENTS.md` § *Agent depth L1 / L2 / L3*.
-   **Still soft:** footer CTA legend / toast wording may still *feel* modal;
-   full “no soft-park mode at all” (toast + chip only, zero exclusive key route)
-   is polish if dogfood still jars. **Parked (do not invent):** options B/C/D.
+   Joins: `/tmp/grok-join-impl-plan-paste-and-auto-open.md`,
+   `/tmp/grok-join-impl-l1-modal-free-plan-2026-07-29.md`.
+   **Still soft:** agent-written `plan.md` freeform menus; toast may still
+   *feel* modal to some operators. Do not invent a third park mode.
 
 2d. **Plan approval: real clickable CTAs + fresh plan.md (product chrome shipped
    2026-07-29; agent plan.md freeform still open)**
@@ -185,8 +174,8 @@ or code — not only here. Closed campaign history:
    [`doc/dev/research/ascii-scrub-assistant-2026-07-26.md`](doc/dev/research/ascii-scrub-assistant-2026-07-26.md).
 
 3. **UI chrome + window title + DOGE default (shipped → FORK 2026-07-30)**
-   Lasting product truth: [`FORK.md`](FORK.md) (hide_header vs hide_title_bar
-   titles-on, DOGE default theme, always-on bubble copy). Spec:
+   Lasting product truth: [`FORK.md`](FORK.md) (hide_header vs window titles /
+   `title.enabled`, DOGE default theme, always-on bubble copy). Spec:
    [`doc/dev/specs/doge-pure-8-colour-2026-07-26.md`](doc/dev/specs/doge-pure-8-colour-2026-07-26.md).
    **Host frame / edgeless (docs only, not open code):** TUI cannot force OS
    decorations off via OSC; user-guide
@@ -196,23 +185,54 @@ or code — not only here. Closed campaign history:
    chrome that *removes* clicks stays default off (`hide_header`). Regression
    filters: [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md).
 
-3b. **Human green gutter + DOGE semantic roles (shipped 2026-07-30; gray/alpha scrub open)**
+3b. **Human green gutter + Agent magenta rail + DOGE roles (shipped 2026-07-30;
+   gray/alpha runtime scrub largely shipped same day; active-only agent rail +
+   yellow stripes + green box caret 2026-07-30)**
    **Shipped:** every Human prompt static green left `┃` rail (`accent_user`);
-   DOGE `accent_user` → green, `accent_system` → cyan; role map Green=Human,
-   Magenta=Agent, Yellow=context, Cyan=system/limits/credits; user-guide
-   `06-theming` + in-tree doge annex + FORK; external SoT
+   Agent message magenta left `┃` rail (`accent_running`) **only while the
+   turn is active** (`is_running`); finished agent scrollback has no coloured
+   rail (black/absent). Side-pane agent rails stay magenta for **running**
+   tasks; finished side-pane rows keep pure role colours. Yellow context/time
+   rails (credit limit, re-auth / context-too-large / compaction-failed,
+   loading recap) use **striped** dashed glyphs (`AccentStyle::striped` /
+   `striped_animated`), not solid pink/green. Composer caret: slow green
+   filled-box ↔ hollow-box blink (`cursor_box_*`, ~600ms half), terminal
+   hardware cursor hidden while the box caret paints. DOGE `accent_user` →
+   green, `accent_system` → cyan, `accent_running` → magenta; role map
+   Green=Human, Magenta=Agent (active), Yellow=context/time, Cyan=system,
+   White=info rails OK. user-guide `06-theming` + in-tree doge annex + FORK;
+   external SoT
    [0001_DOGE.md](https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md).
-   Join: `/tmp/grok-join-impl-human-gutter-doge-roles-2026-07-30.md`.
-   **Still open (gray/alpha leak scrub, not blocking Human rail):**
-   - Runtime `blend_color` opacity (animated accents, collapsed dim) can emit
-     mid-channel RGB off pure primaries under truecolor DOGE.
-   - UserPrompt terminal-native band still uses ANSI `Gray` / `DarkGray`.
-   - Settings / list chrome hard-coded `DarkGray` row backgrounds.
-   - Token names `gray` / `gray_dim` / `gray_bright` paint chromatic on DOGE
-     but the names still imply gray.
-   - Optional Agent message left rail (magenta) parked unless a later slice
-     wants symmetry with green=Human.
-   Board: `feat:doge-gray-alpha-scrub` (park; free with nearby chrome work).
+   Joins: `/tmp/grok-join-impl-human-gutter-doge-roles-2026-07-30.md`,
+   `/tmp/grok-join-impl-agent-magenta-doge-stripes.md`,
+   `/tmp/grok-join-impl-rail-done-cursor-blink.md`,
+   `/tmp/grok-1000/grok-impl-summary-1665494a.md`.
+   **Also shipped (gray/alpha scrub + DOGE activity glyphs 2026-07-30):**
+   - `blend_color` under `ThemeKind::Doge` solid-steps (opacity ≥ 0.5 → original,
+     else base) so collapsed dim / wave / recede paths cannot invent mid-channel
+     RGB; GrokNight keeps continuous lerp.
+   - Activity spinners (left): `braille_spinner_frames` returns striped
+     downward marquee under DOGE (not braille density). Right-side status
+     sparkle (`dot_spinner_frames`, top-bar busy-agent count / goal chip /
+     row icons) keeps classic density frames (`⋅ : ⸬ ⁙`) under DOGE too —
+     must not share the left dashed marquee (restored 2026-07-31).
+     GrokNight keeps classic braille + dot frames.
+   - Tasks pane finished-agent / finished-workflow labels keep pure role
+     primaries under DOGE (0.45 recede would solid-step to black and hide text).
+   - UserPrompt band never uses ANSI `Gray` / `DarkGray` under DOGE (follows
+     pure black `bg_light`).
+   - Settings list row bg never uses ANSI `DarkGray` under DOGE (theme surfaces).
+   - Waiting diamond solid-steps pure accent ↔ black under DOGE.
+   **Still open (cosmetic / rename only, not blocking):**
+   - Token **names** `gray` / `gray_dim` / `gray_bright` still say “gray” while
+     DOGE paints them chromatic (cyan/yellow/white). Rename is optional API
+     churn; values already pure.
+   - Monitor pulse keeps circle glyph set (`○ ◎ ◉`); colour is already pure
+     cyan/yellow under DOGE (not alpha-fade). Striped marquee is for left
+     activity (`braille_spinner_frames`) only — not the right sparkle, not
+     the monitor cue.
+   Board: `feat:doge-gray-alpha-scrub` (close when rename optional accepted or
+   declined).
 
 4. **OAuth SuperGrok ↔ console API key failover (limits residual = two halves;
    Half A shipped; Half B core prepaid shipped 2026-07-30; series / dogfood open)**
@@ -281,6 +301,13 @@ or code — not only here. Closed campaign history:
    `/tmp/grok-join-impl-live-ranking-dual-limits-2026-07-29.md`,
    `/tmp/grok-join-impl-limits-a1-2026-07-29.md`,
    `/tmp/grok-join-impl-sibling-billing-poll-2026-07-29.md`.
+   **Also shipped (SuperGrok Heavy routing — 2026-07-31):** when base active
+   SuperGrok JWT is live/refreshed but multi-slot still holds a stale token
+   memoized out of allowance, `auto_use_included_limits` ranking and doctor
+   listings prefer the **live/fresher** token (not blind multi-slot). Stops
+   silent stick on console Business API while SuperGrok Heavy session is
+   usable. Enrichment write keeps multi-slot in lockstep with base. Join:
+   `/tmp/grok-join-impl-business-supergrok-heavy-routing.md`.
 
    **Shipped (Half B core prepaid — 2026-07-30):**
    - Management key store (keyring URL `https://management-api.x.ai`, not
@@ -290,9 +317,10 @@ or code — not only here. Closed campaign history:
      `ConsoleTeamPrepaidMeter` + 60s process cache
    - TUI wire: billing refresh populates cents; footer
      `Console key · team prepaid: $N` when console live; `/limits`
-     `Balance (console team prepaid): $N`; honest gap when unknown:
-     `no management key/team id` / `loading team prepaid...` /
-     `team prepaid unavailable` (soft `no $ meter yet` retired)
+     `Balance (console team prepaid): $N`; honest **distinct** gaps when
+     unknown: `no management key` | `no management team id` |
+     `loading team prepaid...` | `team prepaid unavailable` (soft
+     `no $ meter yet` and mushy `no management key/team id` retired)
    - User-guide: `02-authentication` + `04-slash-commands` `/limits`
    Joins: `/tmp/grok-join-impl-mgmt-key-team-fetch-2026-07-30.md`,
    `/tmp/grok-join-impl-console-meter-tui-2026-07-30.md`,
@@ -411,10 +439,10 @@ implement-memory + plan_validate intercepts). **Also shipped 2026-07-29+30:**
 dual-auth core + auto rank/hop + meter honesty sticky console; multi SuperGrok
 login; live ranking headroom + dual SuperGrok `/limits`; non-active SuperGrok
 billing poll; `/limits` panel; TUI `/screenshot` + F9 + plan auto-attach;
-**window titles on by default** (`hide_title_bar = false`; session + `agents`
-items; distinct from `hide_header`); **DOGE default theme**; always-on bubble
-`⧉`; **Clear done** todos (focused `X` / chrome / slash); edgeless = host docs
-only.
+**window titles on by default** (`title.enabled` default true; session +
+`agents` items; no `hide_title_bar`; distinct from `hide_header`); **DOGE
+default theme**; always-on bubble `⧉`; **Clear done** todos (focused `X` /
+chrome / slash); edgeless = host docs only.
 
 **Limits residual = two halves (both intended; pin 2026-07-30):**
 **Half A shipped** (SuperGrok session meters: dual principals, sibling poll,
@@ -423,9 +451,10 @@ Not wrong-target waste; keep it. **Half B core prepaid shipped (2026-07-30):**
 management key store, `management_team_id`, GET prepaid/balance, footer +
 `/limits` console team prepaid labels (see §4). **Soft `/usage` console-live
 honesty also shipped** (join
-`/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`). Honest gaps when
-unknown: `no management key/team id` | `loading team prepaid...` |
-`team prepaid unavailable` | else `$N` (soft `no $ meter yet` retired).
+`/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`). Honest **distinct**
+gaps when unknown: `no management key` | `no management team id` |
+`loading team prepaid...` | `team prepaid unavailable` | else `$N` (soft
+`no $ meter yet` and mushy `key/team id` line retired).
 `just check` green at least once after this meter wave. Remaining Half B =
 **operator dogfood** (rank 1) + optional series UI (behind dogfood). Half A
 alone was never full limits done; core prepaid closes the main meter gap, not
@@ -471,7 +500,8 @@ Do not parallel two writers on the same dual-auth hop / resolve files.
 
 **Not "parked forever":** Half B core prepaid is **shipped**. Soft `/usage`
 console-live honesty is **shipped**. Soft `"no $ meter yet"` is **retired**;
-honest gaps = `no management key/team id` | `loading team prepaid...` |
+mushy `"no management key/team id"` is **retired** in favor of distinct
+`no management key` | `no management team id` | `loading team prepaid...` |
 `team prepaid unavailable` | `$N`. With config + successful fetch, surfaces show
 console team prepaid `$N`. One-click copy chrome (§13) is **shipped**. Main
 leftover independent of credentials is optional series UI after dogfood
@@ -515,14 +545,16 @@ need the cargo blocks below or `just check`. Full historical closed block:
 2b. **Multi SuperGrok principals + live ranking + dual `/limits` + sibling poll (shipped):**
    `cargo test -p xai-grok-shell --lib -- upsert_personal_then_business team_login_then_personal_keeps dual_supergrok load_supergrok_candidates two_principals_billing enrich_candidates principal_limits_label non_active_poll_targets remember_both_principals included_usage poll_non_active_remembers`
    `cargo test -p xai-grok-pager --lib -- format_dual_principals live_console_omits extra_principals_hook show_limits format_supergrok_session footer_names_live_principal`
-3. **DOGE default / hide_header / hide_title_bar titles-on / title items (shipped regression):**
-   `cargo test -p xai-grok-shared --lib -- hide_header hide_title`
+2c. **SuperGrok Heavy fresher-slot load (shipped):**
+   `cargo test -p xai-grok-shell --lib -- load_candidates_prefers_live resolve_auto_uses_live_supergrok`
+3. **DOGE default / hide_header / window titles / title items (shipped regression):**
+   `cargo test -p xai-grok-shared --lib -- hide_header stale_hide_title`
    `cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config theme doge`
-   `cargo test -p xai-grok-pager --lib -- hide_header hide_title_bar default_title_items title_state notifications::`
-   `cargo test -p xai-grok-pager --test settings_e2e -- hide_title_bar hide_header`
-   `cargo test -p xai-grok-pager --lib -- bubble_copy_ clear_completed_todos`
-4. **Plan soft-park A (shipped; B/C/D parked):**
-   `cargo test -p xai-grok-pager --lib -- plan softer_park toast focus_plan plan_approval soft_park`
+   `cargo test -p xai-grok-pager --lib -- hide_header window_title titles_on_session default_title_items title_state notifications::`
+   `cargo test -p xai-grok-pager --test settings_e2e -- hide_header`
+   `cargo test -p xai-grok-pager --lib -- bubble_copy_ pointer_cursor clear_completed_todos`
+4. **Plan soft-park side panel auto-open (shipped → FORK):**
+   `cargo test -p xai-grok-pager --lib -- exit_plan_mode_soft plan_panel_preview_ctrl_v soft_park_prompt_ctrl_v plan softer_park toast focus_plan plan_approval soft_park`
 5. **session_reader / plan_validate / bulk_edit intercepts (A4 shipped; named tools parked):**
    `cargo test -p xai-grok-tools --lib -- session_reader plan_validate bulk_edit_policy implement_memory opencode edit`
 5b. **TUI self-screenshot (v1 + F9 + plan auto-attach shipped; font soft):**

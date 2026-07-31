@@ -6804,10 +6804,16 @@ mod tests {
     fn render_row_two_line_layout_paints_title_and_secondary() {
         use std::path::PathBuf;
         use std::time::SystemTime;
+
+        // Layout geometry under classic dot spinner frames — pin GrokNight so
+        // DOGE striped marquee does not change the fixed glyph at tick=8.
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.spinner_tick = 8; // → dot_spinner_frames()[2] = `⸬`.
+        state.spinner_tick = 8; // → dot_spinner_frames()[2] = `⸬` (non-DOGE).
         let row = DashboardRow {
             id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
             label: "who are you?".to_string(),
@@ -6957,6 +6963,9 @@ mod tests {
     fn render_row_needs_input_yellow_blink_no_badge_pending_prefix() {
         use std::path::PathBuf;
         use std::time::SystemTime;
+        // Dim blink uses continuous blend; DOGE solid-steps so half-opacity
+        // stays full yellow. Pin GrokNight for a hermetic fade assert.
+        let _pin = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let make_row = || DashboardRow {
             id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),

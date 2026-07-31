@@ -263,6 +263,34 @@ pub enum TickDemand {
 /// `SHIMMER_FPS` so slow ticks sample every shimmer frame, and bounds the
 /// latency of the macOS Cmd link-hover underline.
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
+
+/// Whether the agent composer would paint the software green box caret.
+///
+/// Used by [`AppView::tick_demand`] so idle sessions with a focused prompt
+/// keep Slow redraws for the filled↔hollow blink without a Fast 30fps loop.
+fn agent_wants_composer_cursor_blink(agent: &crate::app::agent_view::AgentView) -> bool {
+    use crate::views::agent::ActivePane;
+    // Modals / viewers own focus; no composer caret then.
+    if agent.active_modal.is_some()
+        || agent.block_viewer.is_some()
+        || agent.line_viewer.is_some()
+        || agent.image_viewer.is_some()
+        || agent.video_viewer.is_some()
+        || agent.gboom.is_some()
+        || !agent.permission_queue.is_empty()
+    {
+        return false;
+    }
+    // Soft-park plan approval can still leave the composer focused (Prompt pane).
+    if let Some(pav) = agent.plan_approval_view.as_ref() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+        if pav.focus != PlanApprovalFocus::Preview {
+            return true;
+        }
+        return agent.active_pane == ActivePane::Prompt;
+    }
+    agent.active_pane == ActivePane::Prompt
+}
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
 const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(4);
@@ -4119,6 +4147,13 @@ impl AppView {
     /// synchronized output, cursor blink preservation). See that module's
     /// docs for the full rationale.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
+        // Refresh title/progress OSC on every present when nothing is pending.
+        // Covers deferred ACP draws and other present paths that never called
+        // update_notifications; avoids double-ticking when tick/ACP already
+        // filled pending_notification_escapes this cycle.
+        if self.pending_notification_escapes.is_none() {
+            self.update_notifications();
+        }
         self.draw_inner(terminal);
         crate::memory_release::run_deferred_release();
     }
@@ -5236,6 +5271,13 @@ impl AppView {
             self.bootstrap_acp_commands = commands;
         }
         self.update_notifications();
+        // Title/progress OSC lives in pending_notification_escapes and only
+        // flushes on draw. Force a present when escapes are queued even if the
+        // cell buffer is visually unchanged (idle session title, progress
+        // keepalive) so DE window titles stay live.
+        if self.pending_notification_escapes.is_some() {
+            needs_redraw = true;
+        }
         if let Some((_, remaining)) = self.deferred_notification.as_mut() {
             if *remaining == 0 {
                 let event = self.deferred_notification.take().unwrap().0;
@@ -5507,6 +5549,12 @@ impl AppView {
                 {
                     return TickDemand::Slow;
                 }
+                // Composer green box caret blinks filled↔hollow on a slow
+                // wall-clock phase; Slow ticks keep it alive without a 30fps spin
+                // while the agent is idle and the prompt is focused.
+                if agent_wants_composer_cursor_blink(agent) {
+                    return TickDemand::Slow;
+                }
                 TickDemand::None
             }
             ActiveView::AgentDashboard => {
@@ -5604,7 +5652,22 @@ impl AppView {
                     let is_busy = busy_agent_count > 0;
                     (name, model, None, any_agent_has_perms, None, is_busy)
                 }
-                ActiveView::Welcome => (None, None, None, false, None, false),
+                ActiveView::Welcome => {
+                    // Prefer a live agent's session name when one exists so
+                    // Welcome still brands the DE title with the session
+                    // (resume/fork flows, multi-agent return to welcome).
+                    let agent = self.agents.values().next();
+                    let name = agent
+                        .and_then(|a| {
+                            crate::notifications::title::resolve_session_title_name(
+                                a.display_name.as_deref(),
+                                a.generated_session_title.as_deref(),
+                            )
+                        })
+                        .map(str::to_owned);
+                    let model = agent.and_then(|a| a.session.models.current_model_name());
+                    (name, model, None, false, None, busy_agent_count > 0)
+                }
             };
         let cwd_str = self.cwd.to_string_lossy();
         let title_state = crate::notifications::TitleState {
@@ -6323,6 +6386,7 @@ pub(crate) mod tests {
     fn tick_demand_fast_while_modal_session_picker_loads() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        // test_app_with_agent parks on Scrollback (no composer caret).
         assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
         app.agents.get_mut(&id).unwrap().active_modal =
             Some(crate::views::modal::ActiveModal::SessionPicker {
@@ -6381,6 +6445,34 @@ pub(crate) mod tests {
             "settled picker must not keep demanding ticks"
         );
     }
+    /// Focused composer demands Slow ticks for the filled↔hollow box caret
+    /// blink without upgrading to Fast.
+    #[test]
+    fn tick_demand_slow_while_composer_caret_blinks() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        assert_eq!(app.tick_demand(), TickDemand::None, "scrollback pane parks");
+        app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Slow,
+            "focused prompt must Slow-tick for green box caret blink"
+        );
+        assert!(app.needs_animation());
+        // Modal steals focus → park again (no software caret).
+        app.agents.get_mut(&id).unwrap().active_modal =
+            Some(crate::views::modal::ActiveModal::CommandPalette {
+                entries: Vec::new(),
+                state: crate::views::picker::PickerState::default(),
+                window: crate::views::modal_window::ModalWindowState::new(),
+            });
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "modal open suppresses composer caret ticks"
+        );
+    }
+
     /// An idle agent view demands no ticks at all; the macOS Cmd link-hover
     /// poll (when it is the only pending work) demands Slow, never Fast.
     #[test]
@@ -9800,6 +9892,74 @@ pub(crate) mod tests {
         let result = AppView::merge_escapes(None, None);
         assert!(result.is_none());
     }
+
+    #[test]
+    fn welcome_update_notifications_includes_agent_session_name_in_escapes() {
+        // Named contract: Welcome still applies session name to the window
+        // title when an agent exists (resume / multi-agent return to welcome).
+        // OSC payload must carry the session substring so DE switchers show it.
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("welcome-session".into());
+        app.active_view = ActiveView::Welcome;
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        let esc = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("TitleManager must emit OSC on first welcome tick with session");
+        assert!(
+            esc.contains("welcome-session"),
+            "welcome title OSC must include session name, got {esc:?}"
+        );
+        assert!(
+            esc.contains('\u{1b}') || esc.contains("\x1b"),
+            "expected OSC escape framing, got {esc:?}"
+        );
+    }
+
+    #[test]
+    fn agent_update_notifications_osc_includes_session_name() {
+        // Named contract: Agent view TitleManager path includes session in OSC.
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("dash session".into());
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        let esc = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("agent title OSC");
+        assert!(
+            esc.contains("dash session"),
+            "agent title OSC must include session, got {esc:?}"
+        );
+    }
+
+    #[test]
+    fn pending_notification_escapes_force_tick_redraw() {
+        // Named contract: title/progress OSC only flushes on draw. When tick
+        // queues pending_notification_escapes, needs_redraw must be true even
+        // if the cell buffer is otherwise static.
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("force-draw-session".into());
+        // First update fills last_title; clear pending then force a new title
+        // by changing the name so tick sees a fresh escape.
+        app.update_notifications();
+        app.pending_notification_escapes = None;
+        app.agents.get_mut(&id).unwrap().display_name = Some("force-draw-session-2".into());
+        let needs = app.tick();
+        assert!(
+            app.pending_notification_escapes.is_some(),
+            "tick must queue title escapes when session name changes"
+        );
+        assert!(
+            needs,
+            "pending notification escapes must force tick redraw so OSC flushes"
+        );
+    }
+
     #[test]
     fn dashboard_stale_clears_modal_placement_under_kitty() {
         use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};

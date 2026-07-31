@@ -358,8 +358,8 @@ with a clean tree.
   - [ ] `scripts/put-history-on-xai.sh` + other import/sync scripts already in `FORK_PATHS`
   - [ ] `docs/upstream-history.md` (+ import/onto logs)
   - [ ] Review `FORK_PATHS` in `scripts/import-upstream-export.sh` only if the assert failed or a new process path is needed
-- [ ] **Product regression filters** (assert is path-only; seams inside `xai-grok-*` need cargo). After process-pin assert, run the core block in [`doc/dev/upstream-regression-filters.md`](../doc/dev/upstream-regression-filters.md) (or FORK § *Upstream regression filters*), **or at least `just check` / `just ci`**. Smoke: DOGE default, `hide_title_bar` titles-on, stuck-retry / StreamResumed, `shell_collision`, dual-auth if those areas churned.
-- [ ] **User-guide conflict resolve** — shared path `crates/codegen/xai-grok-pager/docs/user-guide/` is **not** in `FORK_PATHS`. On onto, re-check DOGE default theme, window titles / `hide_title_bar` vs `hide_header`, and Grok OSS / `grok-oss` branding sections against xAI base; do not drop fork copy for a clean merge alone.
+- [ ] **Product regression filters** (assert is path-only; seams inside `xai-grok-*` need cargo). After process-pin assert, run the core block in [`doc/dev/upstream-regression-filters.md`](../doc/dev/upstream-regression-filters.md) (or FORK § *Upstream regression filters*), **or at least `just check` / `just ci`**. Smoke: DOGE default, window titles / `title.enabled`, stuck-retry / StreamResumed, `shell_collision`, dual-auth if those areas churned.
+- [ ] **User-guide conflict resolve** — shared path `crates/codegen/xai-grok-pager/docs/user-guide/` is **not** in `FORK_PATHS`. On onto, re-check DOGE default theme, window titles / `title.enabled` vs `hide_header`, and Grok OSS / `grok-oss` branding sections against xAI base; do not drop fork copy for a clean merge alone.
 - [ ] `just ci` or at least `just check` (prefer full gate before PR); if skipping full gate, the product filter block above is the minimum besides assert
 - [ ] `docs/upstream-import-log.md` updated
 - [ ] Signed commit on Surmount (no signing bypass)

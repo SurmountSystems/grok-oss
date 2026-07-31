@@ -1486,6 +1486,11 @@ impl PromptWidget {
         self.copy_button_area
     }
 
+    /// Whether the draft-copy (`⧉`) button is currently hovered.
+    pub fn copy_hovered(&self) -> bool {
+        self.copy_hovered
+    }
+
     /// Update hover for the draft-copy button. Returns `true` if changed.
     pub fn update_copy_hover(&mut self, col: u16, row: u16) -> bool {
         let new = self
@@ -1494,6 +1499,12 @@ impl PromptWidget {
         let changed = new != self.copy_hovered;
         self.copy_hovered = new;
         changed
+    }
+
+    /// Test helper: inject a top-bar ⧉ hit rect without a full prompt draw.
+    #[cfg(test)]
+    pub fn force_copy_button_area_for_test(&mut self, area: Rect) {
+        self.copy_button_area = Some(area);
     }
 
     /// Plain text of the current draft (includes multimodal chip labels like
@@ -2835,6 +2846,59 @@ impl PromptWidget {
     }
 }
 
+/// Paint the Human green composer caret as a slow filled↔hollow box blink.
+///
+/// Uses wall-clock millis so any redraw cadence (including Slow ticks) advances
+/// the phase. Colour is `theme.accent_user` (green under DOGE).
+///
+/// On an empty / space insertion cell the caret is the filled or hollow box
+/// glyph. On a cell that already has a visible grapheme (typed text, ghost
+/// body, slash inline suffix) the grapheme is kept and only restyled so the
+/// block caret never eats characters under the cursor.
+fn paint_composer_box_cursor(
+    buf: &mut Buffer,
+    cx: u16,
+    cy: u16,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let filled_phase = crate::glyphs::cursor_box_filled_phase(now_ms);
+    let accent = match theme.accent_user {
+        // Reset→Cyan so NO_COLOR still shows a visible caret (mirrors Human rail).
+        ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
+        c => c,
+    };
+
+    let Some(cell) = buf.cell_mut((cx, cy)) else {
+        return;
+    };
+    // Treat blank / empty cells as the insertion-point affordance (box glyph).
+    // Any other grapheme stays readable under the block caret.
+    let blank = {
+        let sym = cell.symbol();
+        sym.is_empty() || sym == " " || sym == "\u{00a0}"
+    };
+    if blank {
+        let glyph = if filled_phase {
+            crate::glyphs::cursor_box_filled()
+        } else {
+            crate::glyphs::cursor_box_hollow()
+        };
+        cell.set_symbol(glyph);
+        cell.set_style(Style::default().fg(accent).bg(bg));
+    } else if filled_phase {
+        // Classic block: invert — green plate, canvas-coloured ink.
+        cell.set_style(Style::default().fg(bg).bg(accent));
+    } else {
+        // Hollow half: keep canvas bg, green ink on the same grapheme.
+        cell.set_style(Style::default().fg(accent).bg(bg));
+    }
+}
+
 /// Paint slash/skill accent color on a byte range, using textarea screen coords
 /// so highlighting works on any visual row — including the continuation rows
 /// of a token that soft-wraps at the line end.
@@ -3265,7 +3329,7 @@ impl PromptWidget {
         // the box is empty and interim is standing in for it.
         let hide_caret_for_empty_interim = self.textarea.text().is_empty()
             && voice.is_some_and(|v| v.interim.is_some_and(|t| !t.trim().is_empty()));
-        let cursor_pos = if style.focused && !hide_caret_for_empty_interim {
+        let layout_cursor_pos = if style.focused && !hide_caret_for_empty_interim {
             self.textarea
                 .cursor_pos_with_state(ta_area, self.textarea_state)
         } else {
@@ -3279,7 +3343,7 @@ impl PromptWidget {
                 && self.textarea.cursor() == self.textarea.text().len()
                 && !slash_active
                 && !slash_has_inline_ghost
-                && let Some((cx, cy)) = cursor_pos
+                && let Some((cx, cy)) = layout_cursor_pos
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3289,7 +3353,7 @@ impl PromptWidget {
             }
 
             if let Some(ghost) = self.prompt_suggestion_ghost()
-                && let Some((cx, cy)) = cursor_pos
+                && let Some((cx, cy)) = layout_cursor_pos
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3298,6 +3362,17 @@ impl PromptWidget {
                 }
             }
         }
+
+        // Software green caret: slow filled-box ↔ hollow-box blink (Human
+        // accent). Terminal hardware cursor stays hidden so we do not stack
+        // two carets; phase is wall-clock so Slow redraw ticks are enough.
+        let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {
+            paint_composer_box_cursor(buf, cx, cy, &theme, bg);
+            // Hide the terminal caret — the painted box *is* the cursor.
+            None
+        } else {
+            None
+        };
 
         // Paste preview overlay: show when cursor is on or right after a paste element
         if style.focused

@@ -187,18 +187,6 @@ pub fn set_voice_mode_enabled_for_test(on: bool) {
 /// updated live by the settings setter; unlike [`VOICE_MODE_ENABLED`] it only
 /// silences the keybinding — `/voice` and the other voice surfaces stay up.
 pub(crate) static VOICE_KEYBIND_ENABLED: AtomicBool = AtomicBool::new(true);
-/// When true, skip OSC 0 terminal/tab title writes (opt-out).
-/// Default false so session/activity titles show out of the box.
-/// Seeded from `[ui].hide_title_bar` at startup; live-updated from settings.
-static HIDE_TITLE_BAR: AtomicBool = AtomicBool::new(false);
-/// Process-wide gate for terminal title updates (`[ui].hide_title_bar`).
-pub(crate) fn set_hide_title_bar_runtime(hidden: bool) {
-    HIDE_TITLE_BAR.store(hidden, Ordering::Release);
-}
-/// Whether dynamic terminal/tab title updates are suppressed.
-pub(crate) fn hide_title_bar_runtime() -> bool {
-    HIDE_TITLE_BAR.load(Ordering::Acquire)
-}
 pub(crate) fn voice_keybind_enabled() -> bool {
     VOICE_KEYBIND_ENABLED.load(Ordering::Acquire)
 }
@@ -723,8 +711,6 @@ pub async fn run(
     let (frame_tx, writer_sync, writer_event_rx, writer_thread) =
         crate::render::draw::spawn_writer_thread();
     let initial_ui = event_loop::load_initial_ui_config();
-    // Seed before init_terminal / session title: both may write OSC 0.
-    set_hide_title_bar_runtime(initial_ui.hide_title_bar);
     let cursor_blink = initial_ui.cursor_blink;
     let (mut terminal, screen_mode) = init_terminal(
         screen_mode,
@@ -1415,32 +1401,45 @@ fn restore_terminal(
 }
 /// What to write for the terminal/tab window title (OSC 0 / crossterm SetTitle).
 ///
-/// Distinct from in-app chrome (`[ui] hide_header`). Under
-/// `[ui] hide_title_bar` we **clear** the title so process/argv noise like
-/// `grok-oss --resume … ~/…` does not stick, and dynamic agent-state titles
-/// stay off (see notifications title manager).
+/// Distinct from in-app chrome (`[ui] hide_header`). Product always manages
+/// the window title on this path: never push `SetTitle("")` (empty payload
+/// blanks Alacritty + GNOME Alt-~ / overview). Dynamic agent-state titles are
+/// gated only by `[ui.notifications.title].enabled` (see TitleManager).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TerminalTitleAction {
-    /// Empty SetTitle — wipe host process title and Grok-driven titles.
-    Clear,
-    /// SetTitle with a sanitized product-branded string.
+    /// SetTitle with a sanitized non-empty product-branded string.
     Set(String),
 }
 
 /// Pure decision for window-title writes (hermetic tests; no TTY).
-fn terminal_title_action(title: &str, hide_title_bar: bool) -> TerminalTitleAction {
-    if hide_title_bar {
-        TerminalTitleAction::Clear
-    } else {
-        TerminalTitleAction::Set(terminal_title_string(title))
+///
+/// Always `Set` a non-empty branded string. There is no skip/hide gate on
+/// this path anymore; opt out of *dynamic* titles via `title.enabled`.
+fn terminal_title_action(title: &str) -> TerminalTitleAction {
+    TerminalTitleAction::Set(terminal_title_string(title))
+}
+
+/// OSC SetTitle payload. Named contract: never empty.
+///
+/// Empty strings blank DE switchers (Alacritty + GNOME overview/Alt-~).
+/// Always brand-fallback via [`terminal_title_string`].
+fn terminal_title_osc_payload(title: &str) -> String {
+    match terminal_title_action(title) {
+        TerminalTitleAction::Set(s) if s.is_empty() => {
+            // Belt-and-suspenders: `terminal_title_string` is non-empty, but
+            // never allow a blank OSC through if that invariant slips.
+            crate::client_identity::PRODUCT_CLI_NAME.into()
+        }
+        TerminalTitleAction::Set(s) => s,
     }
 }
 
 pub(crate) fn set_terminal_title(title: &str) {
-    let payload = match terminal_title_action(title, hide_title_bar_runtime()) {
-        TerminalTitleAction::Clear => String::new(),
-        TerminalTitleAction::Set(full) => full,
-    };
+    let payload = terminal_title_osc_payload(title);
+    debug_assert!(
+        !payload.is_empty(),
+        "refusing empty SetTitle (blank DE switcher)"
+    );
     xai_grok_shell::util::with_locked_stderr(|stderr| {
         let _ = execute!(stderr, SetTitle(payload));
     });
@@ -1454,8 +1453,6 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// Empty or all-control titles fall back to the product binary name
 /// ([`crate::client_identity::PRODUCT_CLI_NAME`]); non-empty titles get
 /// `" - {product}"` appended (Surmount: `grok-oss`).
-///
-/// Only used when `[ui] hide_title_bar` is **false**.
 fn terminal_title_string(title: &str) -> String {
     use crate::client_identity::PRODUCT_CLI_NAME;
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
@@ -1550,40 +1547,60 @@ mod tests {
     }
 
     #[test]
-    fn hide_title_bar_clears_window_title_not_product_brand() {
-        // Named contract: hide_title_bar is the *window/tab title* control
-        // (OSC 0), not in-app hide_header. When on, startup and session-title
-        // paths clear the title. When off (default), titles are
-        // product-branded (`… - grok-oss`) — never raw process argv.
+    fn window_title_always_manages_non_empty_branded_osc() {
+        // Named contract: product always manages the window/tab title (OSC 0)
+        // on this path — no hide_title_bar skip gate. Payloads are always
+        // non-empty and product-branded (`… - grok-oss` or bare brand).
+        // Never raw process argv. Distinct from in-app hide_header.
         assert_eq!(
-            terminal_title_action("session name", true),
-            TerminalTitleAction::Clear
-        );
-        assert_eq!(terminal_title_action("", true), TerminalTitleAction::Clear);
-        assert_eq!(
-            terminal_title_action("session name", false),
+            terminal_title_action("session name"),
             TerminalTitleAction::Set("session name - grok-oss".into())
         );
         assert_eq!(
-            terminal_title_action("", false),
+            terminal_title_action(""),
             TerminalTitleAction::Set("grok-oss".into())
         );
-        // Must never compose resume/argv-shaped titles through this path.
-        let set = terminal_title_action("my chat", false);
-        if let TerminalTitleAction::Set(s) = set {
-            assert!(!s.contains("--resume"), "got {s}");
-            assert!(!s.contains("~/"), "got {s}");
-        } else {
-            panic!("expected Set when hide_title_bar is false");
+        let TerminalTitleAction::Set(s) = terminal_title_action("my chat");
+        assert!(!s.contains("--resume"), "got {s}");
+        assert!(!s.contains("~/"), "got {s}");
+    }
+
+    #[test]
+    fn window_title_osc_payload_never_empty_string() {
+        // Named contract (blank switcher failure mode): every managed OSC 0
+        // write carries a non-empty payload. Empty SetTitle blanks Alacritty
+        // + GNOME overview/Alt-~.
+        let seeds = ["", "   ", "my session", "agents busy", "\x07\x1b", "a\0b"];
+        for seed in seeds {
+            let payload = terminal_title_osc_payload(seed);
+            assert!(
+                !payload.is_empty(),
+                "empty OSC payload blanks DE switcher; seed={seed:?}"
+            );
+            assert!(
+                payload == "grok-oss" || payload.ends_with(" - grok-oss"),
+                "seed={seed:?} got {payload}"
+            );
         }
     }
 
     #[test]
-    fn startup_title_never_contains_resume_argv_when_hide_off() {
-        // Named contract: with titles on, first product write is session or
-        // brand only — never leftover `grok-oss --resume …` argv noise.
+    fn titles_on_session_name_osc_is_non_empty_branded() {
+        // Named contract: a session name becomes a non-empty OSC payload the
+        // host DE can show (session - grok-oss). Empty seed → brand only.
+        let payload = terminal_title_osc_payload("dash session");
+        assert!(!payload.is_empty());
+        assert_eq!(payload, "dash session - grok-oss");
+        let idle = terminal_title_osc_payload("");
+        assert_eq!(idle, "grok-oss");
+    }
+
+    #[test]
+    fn startup_title_never_contains_resume_argv() {
+        // Named contract: first product write is session or brand only —
+        // never leftover `grok-oss --resume …` argv noise.
         for seed in ["", "my chat", "rename me"] {
-            match terminal_title_action(seed, false) {
+            match terminal_title_action(seed) {
                 TerminalTitleAction::Set(s) => {
                     assert!(!s.contains("--resume"), "seed={seed:?} got {s}");
                     assert!(!s.contains("~/"), "seed={seed:?} got {s}");
@@ -1592,43 +1609,8 @@ mod tests {
                         "seed={seed:?} got {s}"
                     );
                 }
-                TerminalTitleAction::Clear => panic!("hide off must Set, seed={seed:?}"),
             }
         }
-    }
-
-    #[test]
-    fn hide_title_bar_runtime_gates_set_terminal_title() {
-        // Runtime gate matches hide_title_bar; default is false (titles on).
-        // Restore after so other tests in this process are not poisoned.
-        let prev = hide_title_bar_runtime();
-        set_hide_title_bar_runtime(true);
-        assert!(hide_title_bar_runtime());
-        assert_eq!(
-            terminal_title_action("should-clear", hide_title_bar_runtime()),
-            TerminalTitleAction::Clear
-        );
-        // Live write path still callable (clears); no panic / no product brand.
-        set_terminal_title("should-clear");
-        set_hide_title_bar_runtime(false);
-        assert!(!hide_title_bar_runtime());
-        assert_eq!(
-            terminal_title_action("open", hide_title_bar_runtime()),
-            TerminalTitleAction::Set("open - grok-oss".into())
-        );
-        set_hide_title_bar_runtime(prev);
-    }
-
-    #[test]
-    fn hide_title_bar_defaults_false() {
-        // Process atomic default matches UiConfig: titles on for discoverability.
-        // Do not flip the live atomic here — only assert the static initial
-        // matches product intent when no setter has run in a fresh process.
-        // Cross-crate: UiConfig default is the SoT; runtime is seeded at startup.
-        assert!(
-            !xai_grok_shell::agent::config::UiConfig::default().hide_title_bar,
-            "UiConfig hide_title_bar default must be false"
-        );
     }
 
     #[test]
