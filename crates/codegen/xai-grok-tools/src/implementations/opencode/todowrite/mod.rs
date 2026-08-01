@@ -337,7 +337,7 @@ impl xai_tool_runtime::Tool for TodoWriteTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let (summary_for_prompt, todos, state_snapshot) = {
+        let (summary_for_prompt, todos, state_snapshot, progress) = {
             let mut res = resources.lock().await;
             let todo_state = res.get_or_default::<State<TodoState>>();
 
@@ -358,21 +358,26 @@ impl xai_tool_runtime::Tool for TodoWriteTool {
                         priority,
                         status,
                         meta: None,
+                        size: None,
                     },
                 );
             }
 
             let todos: Vec<TodoItem> = todo_state.0.todo_items().cloned().collect();
             let state_snapshot = todo_state.0.clone();
+            let progress =
+                crate::implementations::grok_build::todo::compute_leaf_progress(&todo_state.0);
             let summary_for_prompt = summarize(&todos);
 
-            (summary_for_prompt, todos, state_snapshot)
+            (summary_for_prompt, todos, state_snapshot, progress)
         };
 
         Ok(TodoWriteOutput::TodosUpdated(TodoWriteSuccess {
             summary_for_prompt,
             todos,
             state: state_snapshot,
+            progress,
+            warning: None,
         }))
     }
 }

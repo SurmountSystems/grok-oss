@@ -2057,6 +2057,7 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/interject" => crate::extensions::interject::handle(self, &args).await,
+            "x.ai/todo/clear_completed" => crate::extensions::todo::handle(self, &args).await,
             "x.ai/feedback" | "x.ai/feedback/dismiss" | "x.ai/feedback/drafts/list"
             | "x.ai/feedback/drafts/get" | "x.ai/feedback/drafts/delete"
             | "x.ai/feedback/drafts/update" | "x.ai/feedback/upload-trace"
@@ -2463,6 +2464,54 @@ impl acp::Agent for MvpAgent {
                 total_sessions = self.resident_count(),
                 "Permission state reset for matching sessions"
             );
+        }
+        if args.method.as_ref() == "x.ai/auto_compact_threshold_changed"
+            && let Ok(params) = serde_json::from_str::<serde_json::Value>(args.params.get())
+        {
+            let sender_id = params.get("clientIdentifier").and_then(|v| v.as_str());
+            let tokens = params
+                .get("auto_compact_threshold_tokens")
+                .and_then(|v| v.as_u64())
+                .filter(|&t| t > 0);
+            let percent = params
+                .get("auto_compact_threshold_percent")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u8::try_from(n).ok())
+                .unwrap_or(crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
+            let has_percent_key = params.get("auto_compact_threshold_percent").is_some();
+            let has_tokens_key = params
+                .get("auto_compact_threshold_tokens")
+                .is_some_and(|v| !v.is_null());
+            if has_percent_key || has_tokens_key {
+                let matches_sender = |h: &crate::session::SessionHandle| -> bool {
+                    sender_id.is_none()
+                        || h.origin_client.as_ref().map(|c| c.product.as_str()) == sender_id
+                };
+                let total_sessions = self.resident_count();
+                let mut updated = 0;
+                self.session_registry.for_each_resident(|_, h| {
+                    if !matches_sender(h) {
+                        return;
+                    }
+                    if h.cmd_tx
+                        .send(crate::session::SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent: percent,
+                            auto_compact_threshold_tokens: tokens,
+                        })
+                        .is_ok()
+                    {
+                        updated += 1;
+                    }
+                });
+                tracing::info!(
+                    percent,
+                    ?tokens,
+                    sender = ?sender_id,
+                    target_sessions = updated,
+                    total_sessions,
+                    "Live-applying auto_compact_threshold to matching sessions"
+                );
+            }
         }
         if args.method.as_ref() == InternalMethod::EvictSessions.name() {
             self.handle_evict_sessions(&args.params).await;

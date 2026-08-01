@@ -167,7 +167,8 @@ async fn compute_all_changes(
                 let resolved = cwd.join(path);
                 changes.push(FileChange::Add {
                     path: resolved,
-                    content: contents.clone(),
+                    // Post-edit trailing-ws strip (default ON; env override).
+                    content: crate::util::trailing_ws::prepare_for_write(contents.clone()),
                 });
             }
             Hunk::DeleteFile { path } => {
@@ -195,6 +196,8 @@ async fn compute_all_changes(
                         ApplyPatchError::ComputeReplacements(msg) => msg,
                         other => other.to_string(),
                     })?;
+                // Post-edit trailing-ws strip (default ON; env override).
+                let new_content = crate::util::trailing_ws::prepare_for_write(new_content);
 
                 if let Some(dest) = move_path {
                     let resolved_dest = cwd.join(dest);

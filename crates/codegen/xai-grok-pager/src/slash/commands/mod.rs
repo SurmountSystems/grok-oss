@@ -4,6 +4,7 @@ pub mod announcements;
 pub mod auto;
 pub mod btw;
 pub mod cd;
+pub mod clear_completed_todos;
 pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
@@ -33,6 +34,7 @@ pub mod imagine;
 pub mod imagine_video;
 pub mod import_claude;
 pub mod jump;
+pub mod limits;
 pub mod login;
 pub mod logout;
 pub mod loop_cmd;
@@ -251,6 +253,7 @@ mod tests {
             "changelog",
             "chat",
             "clear",
+            "clear-completed-todos",
             "cloud",
             "compact",
             "compact-mode",
@@ -287,6 +290,7 @@ mod tests {
             "imagine-video",
             "import-claude",
             "jump",
+            "limits",
             "login",
             "logout",
             "log",
@@ -302,6 +306,7 @@ mod tests {
             "note",
             "notes",
             "onboarding",
+            "options",
             "personas",
             "plan",
             "plan-view",
@@ -318,6 +323,7 @@ mod tests {
             "resume",
             "rewind",
             "scroll-debug",
+            "screenshot",
             "session-info",
             "sessions",
             "settings",

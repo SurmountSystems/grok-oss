@@ -11,7 +11,7 @@
 //! Grok never writes into Zed's stores. See `harness_secrets` for how other
 //! harness authors should document their locations.
 
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
 use super::credentials_store::{BEARER_USERNAME, CredentialsStore, CredentialsStoreError};
@@ -245,7 +245,8 @@ pub enum OpenRouterAuthError {
 
 /// `grok login --openrouter` — store an OpenRouter API key.
 ///
-/// When `api_key` is `Some`, use it; otherwise prompt on stdin (TTY).
+/// When `api_key` is `Some`, use it (library / stdin materialize only — never
+/// argv secrets). When `None`, no-echo TTY prompt (or env short-circuit).
 pub fn run_openrouter_login(
     grok_home: &Path,
     api_key: Option<&str>,
@@ -261,14 +262,17 @@ pub fn run_openrouter_login(
         eprintln!("OpenRouter authentication ready via {OPENROUTER_API_KEY_ENV}.");
         return Ok(());
     } else {
-        eprint!("Enter your OpenRouter API key (https://openrouter.ai/keys): ");
-        io::stderr().flush()?;
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        line.trim().to_owned()
+        super::secret_entry::prompt_api_key_no_echo(
+            "Enter your OpenRouter API key (https://openrouter.ai/keys): ",
+        )?
     };
 
-    store_openrouter_api_key(&store, &key)?;
+    // After secret accept: dual-backend budget progress on TTY stderr while
+    // keyring write blocks (same contract as console login).
+    let show_progress = super::secret_store_progress::should_show_secret_store_progress();
+    super::secret_store_progress::with_secret_store_progress(show_progress, || {
+        store_openrouter_api_key(&store, &key)
+    })?;
     eprintln!("OpenRouter API key saved to the secret store.");
     eprintln!(
         "Select the model with `/model {OPENROUTER_GROK_45_CATALOG_ID}` or \

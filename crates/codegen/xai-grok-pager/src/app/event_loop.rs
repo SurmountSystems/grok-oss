@@ -1309,6 +1309,10 @@ pub(crate) async fn run(
         if !app.consumer_account() {
             app.usage_visible = false;
             app.sync_billing_surface_to_agents();
+            for agent in app.agents.values_mut() {
+                agent.sampling_identity =
+                    crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
+            }
         }
     }
     let voice_mode_enabled = crate::app::resolve_voice_mode_live(

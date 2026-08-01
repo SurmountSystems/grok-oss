@@ -45,6 +45,23 @@ Grok stores each session in its own directory, grouped by working directory. It 
 
 The session title shown in the dashboard and `/resume` is generated automatically from the conversation. The prompt border shows a title only after a manual `/rename`, alongside the `Stashed` caption when a draft is stashed. Title generation starts right after your first prompt so a session always has a title, and then the title is regenerated from the whole conversation at a couple of early turns and frozen. This lets the title move past a vague first prompt to reflect what the session is really about, while staying stable afterward so you don't lose track of your sessions. A manual `/rename` always wins: once you rename a session, automatic generation never overrides it. Use `/rename --auto` to hand the title back to automatic generation.
 
+### TODO board on disk (`resources_state.json` vs `plan.json`)
+
+| File | Role |
+|------|------|
+| **`resources_state.json`** | **Source of truth** for tool Resources, including the live session todo list (`todo_write` / `ask:*` seeds). The session actor registers tools with a bridge path named `tool_state.json`, but the registry **rewrites** that to sibling `resources_state.json` and loads/saves there. |
+| **`tool_state.json`** | Historical / bridge basename only. Rarely present on disk for local TUI sessions. Fork/copy still copies it **if** present, plus `resources_state.json`. |
+| **`plan.json`** | Snapshot mirror of the todo board (written on compact and when asks/todos are seeded). Used as a **fallback** on resume when Resources state is missing or empty. |
+| **ACP `Plan` events** in `updates.jsonl` | Drive the TUI todo pane during the session and on replay. Resume also re-emits `Plan` from durable state so the board survives load. |
+
+Do not treat `plan.json` alone as the full story: if files disagree, prefer non-empty `resources_state.json` (Resources). New sessions start empty until freeform chat seeds `ask:*`, a skill scaffolds namespaces, or the agent calls `todo_write`. Items dropped from the live board stay in a capped off-pane archive on that same Resources state — they do not reappear in the todo pane or ACP Plan list. Archive reasons include:
+
+- Agent `merge: false` full replace of unprotected unmentioned ids
+- Ask-cap prune of oldest `ask:*` rows
+- **You** clearing finished work: todo pane **clear-finished icon** (`[−]`, when the todo board is open and finished rows exist; quiet idle paint; does not block tasks subagent chrome), optional focused `X`, or `/clear-completed-todos` (archives completed and cancelled only; pending and in-progress stay)
+
+That operator clear is durable (board + badge update). Pane `h` only hides done rows in the view; it does not archive or change the badge. There is no archive browser UI yet.
+
 ---
 
 ## Starting and Ending Sessions

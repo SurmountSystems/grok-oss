@@ -243,14 +243,13 @@
             agent.session.current_prompt_id = Some("running-turn".into());
             agent.set_active_pane(crate::app::agent_view::ActivePane::Prompt, true);
         }
-        // Enter #1: bash typed mid-turn goes server-authoritative.
-        let effects =
-            crate::app::dispatch::dispatch(Action::SendBashCommand("echo hi".into()), app);
+        // Enter #1: plain follow-up mid-turn goes server-authoritative.
+        let effects = crate::app::dispatch::dispatch(Action::SendPrompt("follow up".into()), app);
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::SendBashCommand { .. })),
-            "mid-turn bash must send server-authoritatively; effects = {effects:?}"
+                .any(|e| matches!(e, Effect::SendPrompt { .. })),
+            "mid-turn prompt must send server-authoritatively; effects = {effects:?}"
         );
         let echo_id = test_agent(app, AgentId(0))
             .optimistic_queue_ids
@@ -268,11 +267,15 @@
             .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
             matches!(outcome, InputOutcome::Changed),
-            "the send-now against an unconfirmed row must park, got {outcome:?}"
+            "interject against an unconfirmed row must park, got {outcome:?}"
         );
         assert_eq!(
             test_agent(app, AgentId(0)).send_now_awaiting_confirm.as_deref(),
             Some(echo_id.as_str())
+        );
+        assert!(
+            app.agents[&AgentId(0)].expect_send_now_cancel.is_none(),
+            "park must not arm cancel"
         );
         echo_id
     }
@@ -285,7 +288,7 @@
         use crate::app::actions::Effect;
 
         let mut app = make_app_with_agent("sess-1");
-        let echo_id = park_send_now_on_optimistic_bash_row(&mut app);
+        let echo_id = park_interject_on_optimistic_prompt_row(&mut app);
         assert!(
             app.pending_effects.is_empty(),
             "nothing may fire before the row is confirmed"
@@ -295,7 +298,7 @@
         assert!(handle_ext_notification(
             &queue_changed_versioned(
                 "sess-1",
-                &[(echo_id.as_str(), 3, "bash")],
+                &[(echo_id.as_str(), 3, "prompt")],
                 Some("running-turn"),
             ),
             &mut app,
@@ -306,10 +309,13 @@
             agent.optimistic_queue_ids.is_empty(),
             "the broadcast confirms the echo"
         );
-        assert_eq!(
-            agent.expect_send_now_cancel.as_deref(),
-            Some(echo_id.as_str()),
-            "the fired send-now arms the cancel expectation"
+        assert!(
+            agent.expect_send_now_cancel.is_none(),
+            "soft queue interject must never arm send-now cancel on confirm"
+        );
+        assert!(
+            agent.send_now_painted_blocks.is_empty(),
+            "soft confirm must not paint a cancel-and-send user block"
         );
         assert!(
             app.pending_effects.iter().any(|e| matches!(
@@ -317,8 +323,12 @@
                 Effect::QueueInterject { id, expected_version, new_text: None, .. }
                     if *id == echo_id && *expected_version == 3
             )),
-            "the parked send-now must fire with the authoritative version; effects = {:?}",
+            "the parked interject must fire with the authoritative version; effects = {:?}",
             app.pending_effects
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Interjection sent"),
         );
     }
 
@@ -329,7 +339,7 @@
         use crate::app::actions::Effect;
 
         let mut app = make_app_with_agent("sess-1");
-        let echo_id = park_send_now_on_optimistic_bash_row(&mut app);
+        let echo_id = park_interject_on_optimistic_prompt_row(&mut app);
 
         assert!(handle_ext_notification(
             &queue_changed_versioned("sess-1", &[], Some(echo_id.as_str())),
@@ -337,6 +347,7 @@
         ));
         let agent = test_agent(&app, AgentId(0));
         assert!(agent.send_now_awaiting_confirm.is_none());
+        assert!(agent.expect_send_now_cancel.is_none());
         assert!(
             !app.pending_effects
                 .iter()
@@ -352,7 +363,7 @@
         use crate::app::actions::Effect;
 
         let mut app = make_app_with_agent("sess-1");
-        let echo_id = park_send_now_on_optimistic_bash_row(&mut app);
+        let echo_id = park_interject_on_optimistic_prompt_row(&mut app);
 
         // Unrelated broadcast (another client's row): the park must survive.
         assert!(handle_ext_notification(
@@ -374,11 +385,11 @@
                 .any(|e| matches!(e, Effect::QueueInterject { .. }))
         );
 
-        // The row's own confirmation still fires it.
+        // The row's own confirmation still fires it (soft, no cancel arm).
         assert!(handle_ext_notification(
             &queue_changed_versioned(
                 "sess-1",
-                &[("other-row", 1, "prompt"), (echo_id.as_str(), 1, "bash")],
+                &[("other-row", 1, "prompt"), (echo_id.as_str(), 1, "prompt")],
                 Some("running-turn"),
             ),
             &mut app,

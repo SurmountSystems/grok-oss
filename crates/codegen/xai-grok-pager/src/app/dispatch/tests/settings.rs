@@ -1,5 +1,58 @@
 //! Tests for settings setters, toggles, resets, and rollback.
 use super::*;
+/// Product contract: built-in default preference is 95 percent, not a token preset.
+#[test]
+fn auto_compact_threshold_default_is_95_percent() {
+    use crate::settings::{AutoCompactThresholdChoice, SettingValue, canonical_auto_compact_threshold};
+    assert_eq!(
+        xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+        95
+    );
+    assert_eq!(canonical_auto_compact_threshold(None, None), "95");
+    assert_eq!(
+        crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL,
+        "95"
+    );
+    let mut app = test_app_with_agent();
+    let _ = dispatch(
+        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(95)),
+        &mut app,
+    );
+    assert_eq!(app.auto_compact_threshold_percent, Some(95));
+    assert_eq!(app.auto_compact_threshold_tokens, None);
+    let effects = dispatch(
+        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Tokens(200_000)),
+        &mut app,
+    );
+    assert_eq!(app.auto_compact_threshold_tokens, Some(200_000));
+    assert_eq!(app.auto_compact_threshold_percent, None);
+    match &effects[0] {
+        Effect::PersistSetting { value, .. } => {
+            assert_eq!(*value, SettingValue::Enum("200k"));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_auto_compact_threshold_toast_no_restart() {
+    use crate::settings::AutoCompactThresholdChoice;
+    let mut app = test_app_with_agent();
+    let _ = dispatch(
+        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
+        &mut app,
+    );
+    let toast = read_toast(&app);
+    assert!(
+        toast.contains("98%"),
+        "toast must include the value, got {toast:?}"
+    );
+    assert!(
+        !toast.contains("restart to apply"),
+        "live-applied setting must not toast restart, got {toast:?}"
+    );
+}
+
 fn expect_agent(app: &AppView, id: AgentId) -> &AgentView {
     let Some(agent) = app.agents.get(&id) else {
         panic!("expected agent {id:?}");
@@ -624,6 +677,32 @@ fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
     assert_eq!(app.current_ui.page_flip_on_send, Some(!default_on));
     assert_eq!(
         crate::appearance::cache::load_page_flip_on_send(),
+        !default_on
+    );
+}
+#[test]
+fn set_scrub_ascii_punct_emits_persist_setting_with_correct_payload() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let default_on = app.current_ui.scrub_ascii_punct_enabled();
+    crate::appearance::cache::set_scrub_ascii_punct(default_on);
+    let effects = dispatch(Action::SetScrubAsciiPunct(!default_on), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "scrub_ascii_punct");
+            assert_eq!(value, &SettingValue::Bool(!default_on));
+            assert_eq!(rollback_value, &SettingValue::Bool(default_on));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert_eq!(app.current_ui.scrub_ascii_punct, Some(!default_on));
+    assert_eq!(
+        crate::appearance::cache::load_scrub_ascii_punct(),
         !default_on
     );
 }
@@ -1633,6 +1712,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "compact_mode" => {
             let _ = dispatch(Action::SetCompactMode(true), app);
         }
+        "hide_header" => {
+            let _ = dispatch(Action::SetHideHeader(true), app);
+        }
         "show_timestamps" => {
             let _ = dispatch(Action::SetTimestamps(false), app);
         }
@@ -1739,6 +1821,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
+        "plan_approval_park" => {
+            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_owned()), app);
+        }
         "show_tips" => {
             let _ = dispatch(Action::SetShowTips(false), app);
         }
@@ -1814,6 +1899,29 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 ),
                 app,
             );
+        }
+        "bubble_copy_buttons" => {
+            let _ = dispatch(
+                Action::SetBubbleCopyButtons(
+                    !crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
+                ),
+                app,
+            );
+        }
+        "cancel_subagents_on_turn_cancel" => {
+            let _ = dispatch(
+                Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
+                app,
+            );
+        }
+        "notifications.session_recap" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecap(false), app);
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecapThresholdSecs(90), app);
+        }
+        "features.session_recap" => {
+            let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
         }
         "hunk_tracker_mode" => {
             let _ = dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
@@ -3239,7 +3347,7 @@ fn set_auto_dark_theme_emits_persist_setting_with_correct_payload() {
             }) => {
                 assert_eq!(*key, "auto_dark_theme");
                 assert_eq!(*value, SettingValue::Enum("grokday"));
-                assert_eq!(*rollback_value, SettingValue::Enum("groknight"));
+                assert_eq!(*rollback_value, SettingValue::Enum("doge"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
@@ -3352,9 +3460,10 @@ fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetTheme("auto".into()), &mut app);
         assert!(crate::theme::cache::is_auto_mode());
+        // Product default auto-dark mapping is DOGE.
         assert_eq!(
             crate::theme::cache::current_kind(),
-            crate::theme::ThemeKind::GrokNight,
+            crate::theme::ThemeKind::Doge,
         );
         let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
         assert_eq!(

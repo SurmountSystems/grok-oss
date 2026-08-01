@@ -532,6 +532,8 @@ pub enum Action {
     ToggleCompactMode,
     /// Set compact mode (reduce user message padding).
     SetCompactMode(bool),
+    /// Hide the top agent status bar (`[ui].hide_header`).
+    SetHideHeader(bool),
     /// Set timestamp display on messages.
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).
@@ -595,7 +597,7 @@ pub enum Action {
     /// Commit auto-compact threshold: percent of window **or** absolute tokens.
     /// Persists `[session].auto_compact_threshold_percent` or
     /// `[session].auto_compact_threshold_tokens` (clearing the sibling field).
-    /// Restart-required — sessions resolve the threshold at build time.
+    /// Live-applied to open sessions via ACP after disk persist.
     SetAutoCompactThreshold(crate::settings::AutoCompactThresholdChoice),
     /// Commit `[ui.display_refresh].auto_cadence_enabled`. Restart-required —
     /// cadence is pinned once at startup.
@@ -700,6 +702,8 @@ pub enum Action {
     /// Commit a read-only list of background tasks, subagents, and scheduled tasks as a system block (`/tasks`).
     /// This is what minimal mode uses in place of the `TasksPane`.
     ShowTasks,
+    /// Archive completed/cancelled todos (shell `x.ai/todo/clear_completed`).
+    ClearCompletedTodos,
     /// Store an operator mid-session note (`/note <text>`). Does **not**
     /// enqueue a user turn or touch the pending-prompt queue.
     AddSessionNote {
@@ -1618,6 +1622,8 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Operator clear of completed/cancelled todos via shell ext method.
+    ClearCompletedTodos { session_id: acp::SessionId },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -3081,6 +3087,8 @@ pub enum TaskResult {
     BtwResponse {
         agent_id: AgentId,
         result: Result<String, String>,
+        /// Shell-issued (or reused) btw thread id for follow-ups + history.
+        btw_session_id: Option<String>,
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
         /// Set when attached images were left out of the side question.

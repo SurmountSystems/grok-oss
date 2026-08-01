@@ -153,6 +153,7 @@ mod tests {
             priority: TodoPriority::default(),
             status,
             meta: None,
+            size: None,
         }
     }
 

@@ -151,7 +151,13 @@ pub fn braille_spinner_frames() -> &'static [&'static str] {
         "\u{2827}",
     ];
     const FALLBACK: &[&str] = &["|", "/", "-", "\\"];
-    if is_legacy_windows_console() {
+    if prefers_doge_striped_spinners() {
+        if is_legacy_windows_console() {
+            doge_striped_down_frames_ascii()
+        } else {
+            doge_striped_down_frames()
+        }
+    } else if is_legacy_windows_console() {
         FALLBACK
     } else {
         FANCY
@@ -467,6 +473,12 @@ mod tests {
                 "fallback {fallback:?} must be 1 column"
             );
         }
+        // Live helper (legacy or fancy) stays 1 col so fixed `[⧉]` hit widths hold.
+        assert_eq!(
+            copy_icon().width(),
+            1,
+            "copy_icon() must stay 1 column wide"
+        );
     }
 
     // Every diamond glyph and its legacy fallback must be exactly one column so the call sites keep their layout on every platform
@@ -512,6 +524,8 @@ mod tests {
         for frame in braille_spinner_frames()
             .iter()
             .chain(dot_spinner_frames().iter())
+            .chain(doge_striped_down_frames().iter())
+            .chain(doge_striped_down_frames_ascii().iter())
             .chain(monitor_icon_frames().iter())
             .chain(
                 [
@@ -527,6 +541,8 @@ mod tests {
     // On the (non-Windows) test host the helpers must return the fancy glyphs, and the `char` helpers must agree with their `&str` siblings
     #[test]
     fn glyph_helpers_return_fancy_on_non_legacy() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
         assert!(!is_legacy_windows_console());
         assert_eq!(diamond_filled(), "\u{25C6}");
         assert_eq!(diamond_hollow(), "\u{25C7}");
@@ -547,6 +563,7 @@ mod tests {
         for (fancy, fallback, cols) in [
             ("[\u{2717}]", "[x]", 3), // ballot_x_button
             ("[\u{2197}]", "[o]", 3), // enlarge_button
+            ("[\u{2212}]", "[-]", 3), // clear_finished_button
         ] {
             assert_eq!(fancy.width(), cols, "button {fancy:?} must be {cols} cols");
             assert_eq!(

@@ -79,8 +79,15 @@ pub fn highlight_bash_command(command: &str) -> Vec<Span<'static>> {
     }
 }
 /// Dim highlighted spans by blending each color toward background.
+///
+/// Under DOGE, skip alpha blend (solid-step at the usual 0.45 recede factor
+/// would snap to black and hide the command). Keep pure span colours; the
+/// finished-vs-running distinction still comes from the spinner/status chrome.
 fn dim_spans(spans: &[Span<'static>], blend_factor: f32) -> Vec<Span<'static>> {
     let theme = Theme::current();
+    if Theme::current_kind() == ThemeKind::Doge {
+        return spans.to_vec();
+    }
     spans
         .iter()
         .map(|span| {
@@ -303,8 +310,7 @@ impl TaskEntry {
         let type_color = if info.is_running() || info.attempt.pending_kill {
             raw_type_color
         } else {
-            crate::render::color::blend_color(theme.bg_base, raw_type_color, 0.45)
-                .unwrap_or(raw_type_color)
+            finished_type_color(&theme, raw_type_color)
         };
         let type_style = Style::default().fg(type_color);
         let desc_style = if info.is_running() {
@@ -373,8 +379,7 @@ impl TaskEntry {
         let tag_color = if running {
             raw_tag_color
         } else {
-            crate::render::color::blend_color(theme.bg_base, raw_tag_color, 0.45)
-                .unwrap_or(raw_tag_color)
+            finished_type_color(&theme, raw_tag_color)
         };
         let name_style = if running {
             Style::default().fg(theme.text_primary)
@@ -1458,6 +1463,7 @@ impl TasksPane {
             ));
         }
         rx = rx.saturating_sub(3);
+        let view_x = rx;
         let is_view_hovered = matches!(
             &self.hovered_view,
             Some(TaskEntryId::Agent(sid)) if sid == subagent_id

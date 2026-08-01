@@ -2935,9 +2935,11 @@ mod tests {
             .count()
     }
 
-    /// Queue-row send-now paints at dispatch; the adoption reuses the block.
+    /// Soft queue interject never paints at dispatch — multi-client paint is
+    /// the shell's `x.ai/session/interjection` broadcast (see
+    /// `dispatch_queue_interject_shared`). Cancel-and-send paint is gone.
     #[test]
-    fn queue_interject_shared_paints_user_block_at_arm() {
+    fn interject_contract_queue_shared_no_paint_at_dispatch() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         {
@@ -2969,20 +2971,21 @@ mod tests {
         let agent = app.agents.get_mut(&id).unwrap();
         assert_eq!(
             user_prompt_count(agent, "ty"),
-            1,
-            "send-now must paint the user block at dispatch"
+            0,
+            "soft queue interject must not paint a user block at dispatch"
         );
-        // The adoption shim reuses the painted block instead of double-pushing.
-        agent.note_self_originated_prompt("p-ty");
-        apply_turn_start_shim(agent, "p-ty".into(), Some("ty".into()), "prompt", None);
+        assert!(
+            agent.expect_send_now_cancel.is_none(),
+            "soft queue interject must not arm send-now cancel"
+        );
         assert_eq!(
-            user_prompt_count(agent, "ty"),
-            1,
-            "turn-start adoption must reuse the dispatch-painted block"
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("Interjection sent"),
         );
     }
 
-    /// No paint when idle (adoption renders the drain) or for bash rows.
+    /// No paint when idle (adoption renders the drain) or for bash rows;
+    /// no false "Interjection sent" toast either (shell would no-op).
     #[test]
     fn queue_interject_shared_skips_paint_when_not_arming_or_bash() {
         let mut app = test_app_with_agent();
@@ -3009,10 +3012,12 @@ mod tests {
         );
         assert_eq!(user_prompt_count(test_agent(&app, id), "idle row"), 0);
 
-        // Bash row mid-turn: armed, but its adoption paints no user block.
+        // Bash row mid-turn: effect may still fire (legacy callers), but no
+        // paint and no success toast (UI refuses bash before dispatch).
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
+            agent.toast = None;
             agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
                 id: "p-bash".into(),
                 version: 1,
@@ -3173,40 +3178,24 @@ mod tests {
     }
 
     /// Edited paint outranks the adoption's stale mirror text.
+    ///
+    /// Soft `QueueInterjectShared` no longer paints optimistically (shell
+    /// broadcast owns multi-client paint). Set up an edited painted block the
+    /// same way other shim paint tests do (`push_send_now_user_block` with
+    /// `edited = true`) so this asserts adoption-shim law only.
     #[test]
     fn shim_keeps_edited_paint_over_stale_adoption_text() {
         let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        {
-            let agent = app.agents.get_mut(&id).unwrap();
-            agent.session.state = AgentState::TurnRunning;
-            agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
-                id: "p-ed".into(),
-                version: 1,
-                owner: None,
-                last_editor: None,
-                kind: "prompt".into(),
-                text: "original".into(),
-                position: 0,
-                combined_texts: None,
-            }];
-        }
-        let _ = dispatch(
-            Action::QueueInterjectShared {
-                id: "p-ed".into(),
-                expected_version: 1,
-                new_text: Some("edited body".into()),
-            },
-            &mut app,
-        );
-        let agent = app.agents.get_mut(&id).unwrap();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_self_originated_prompt("p-ed");
+        // Edited override: paint carries fresher text than the mirror adoption.
+        push_send_now_user_block(agent, "p-ed", "prompt", "edited body", true);
         assert_eq!(
             user_prompt_count(agent, "edited body"),
             1,
             "the paint must show the edited text the shell will run"
         );
         // Adoption captures the pre-edit mirror text; the edited paint wins.
-        agent.note_self_originated_prompt("p-ed");
         apply_turn_start_shim(
             agent,
             "p-ed".into(),
@@ -3906,7 +3895,7 @@ mod tests {
         assert_eq!(agent.held_queue_count(), 1);
         assert!(
             !agent.held_queue_top_sendable(),
-            "a bash top row must not advertise Enter-send-now"
+            "a bash top row must not advertise Enter-to-interject"
         );
 
         agent.session.pending_prompts.clear();
@@ -3914,17 +3903,17 @@ mod tests {
         assert!(agent.held_queue_top_sendable());
 
         // Deferred enter-plan is prompt-like for display but refuses force —
-        // do not advertise "Enter to send now".
+        // do not advertise "Enter to interject".
         agent.session.pending_prompts.clear();
         agent
             .session
             .enqueue_enter_plan_prompt("plan follow-up".into(), Vec::new());
         assert!(
             !agent.held_queue_top_sendable(),
-            "enter-plan top row must not advertise send-now"
+            "enter-plan top row must not advertise interject"
         );
 
-        // A server row (renders first in the merge) is always sendable.
+        // Server bash top: refuse soft interject (same as local bash).
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
             id: "srv-1".into(),
             version: 0,
@@ -3938,8 +3927,16 @@ mod tests {
         agent.session.pending_prompts.clear();
         agent.session.enqueue_bash_command("still bash".into());
         assert!(
+            !agent.held_queue_top_sendable(),
+            "server bash top must not advertise Enter-to-interject"
+        );
+
+        // Server plain prompt top: advertise.
+        agent.shared_queue[0].kind = "prompt".into();
+        agent.shared_queue[0].text = "server follow-up".into();
+        assert!(
             agent.held_queue_top_sendable(),
-            "a server top row sends now regardless of kind"
+            "server plain prompt top must advertise Enter-to-interject"
         );
     }
 

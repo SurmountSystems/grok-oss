@@ -35,7 +35,7 @@ assertion `left == right` failed  left: 2  right: 1
 ## Fix
 
 Surgical test change only:
-`/home/hunter/Projects/surmount/grok-build/crates/codegen/xai-grok-pager/src/doctor_cmd/tests.rs`
+`$REPO/crates/codegen/xai-grok-pager/src/doctor_cmd/tests.rs`
 
 - Assert on **view issues**: `Issue` findings excluding `VOICE_NO_INPUT_DEVICE_ID`.
 - Still require exactly one view issue, and that it is `terminal.tmux-clipboard`.

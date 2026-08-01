@@ -707,6 +707,11 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         if self.active_pane == AgentPane::Prompt {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && self.try_copy_prompt_draft_at(mouse.column, mouse.row)
+            {
+                return InputOutcome::Changed;
+            }
             self.prompt.handle_mouse(mouse);
             InputOutcome::Changed
         } else {

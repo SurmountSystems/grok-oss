@@ -20,6 +20,7 @@ pub mod goal_detail;
 pub mod history_search;
 pub mod import_claude_modal;
 pub mod jump;
+pub mod limits_snapshot;
 pub mod list_pane;
 pub(crate) mod location;
 pub mod managed_connectors_wait;

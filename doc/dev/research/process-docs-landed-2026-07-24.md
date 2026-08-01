@@ -14,10 +14,10 @@ No git commit (human-only).
 | Path | What landed |
 |------|-------------|
 | `AGENTS.md` | Parent = HITL UX only; never-assume / docs-lie; skills multi-source table; survive-recon pin list; kept hard stop / never-commit |
-| `FORK.md` | Skills multi-source table; recon keeps/clobbers table; parent HITL pointer; dual-pin note for process vs host skill bodies |
+| `FORK.md` | Skills multi-source table; recon keeps/clobbers table; parent HITL pointer; dual-pin note for process vs host skill packs |
 | `docs/upstream-history.md` | Import checklist process pins + `FORK_PATHS` completeness; brief skills/process survival §; HITL-only + docs-lie under conflict HITL; subagent hard stop strengthened |
 | `RESIDUAL.md` | Open item #6: import recon hardening (`FORK_PATHS` / post-import assert) |
-| `crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md` | Short multi-source load note + process pins vs host skill bodies |
+| `crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md` | Short multi-source load note + process pins vs host skill packs |
 | `~/.grok/docs/user-guide/08-skills.md` | Mirror of product `08-skills.md` |
 
 ## Not done here (still residual / host)

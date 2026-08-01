@@ -42,7 +42,7 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
         x if x == ThemeKind::OscuraMidnight as u8 => ThemeKind::OscuraMidnight,
         x if x == ThemeKind::Terminal as u8 => ThemeKind::Terminal,
         x if x == ThemeKind::Auto as u8 => ThemeKind::Auto,
-        _ => ThemeKind::GrokNight,
+        _ => ThemeKind::Doge,
     }
 }
 
@@ -238,7 +238,7 @@ fn resolve_from_appearance(appearance: Option<system_appearance::SystemAppearanc
     let config = auto_theme_config();
     appearance
         .map(|a| system_appearance::to_theme_kind(a, config.dark_theme, config.light_theme))
-        .unwrap_or(ThemeKind::GrokNight)
+        .unwrap_or(ThemeKind::Doge)
 }
 
 /// Desktop APIs and env hints only (no OSC 11), so it is safe while `EventStream` is active. Detection failure is `GrokNight`.
@@ -323,8 +323,8 @@ pub fn test_lock() -> &'static Mutex<()> {
 
 /// Holds the shared test lock so concurrent `set_theme` cannot change `Theme::current()` mid-assertion. Keep the guard for the whole test.
 #[cfg(any(test, feature = "test-support"))]
-pub fn pin_theme() -> std::sync::MutexGuard<'static, ()> {
-    let guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+pub fn pin_theme() -> ThemePinGuard {
+    let lock = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     set(ThemeKind::GrokNight);
     // Deterministic level regardless of the ambient environment (agent shells export NO_COLOR, which would otherwise win the write-once detection by scheduling)
     super::color_support::set_level_for_test(super::color_support::ColorLevel::TrueColor);
@@ -575,7 +575,7 @@ mod tests {
             );
             assert!(is_auto_mode(), "auto must arm the appearance watcher");
 
-            assert_eq!(resolve_from_config(None, false), ThemeKind::GrokNight);
+            assert_eq!(resolve_from_config(None, false), ThemeKind::Doge);
         });
     }
 
@@ -610,11 +610,11 @@ mod tests {
     // -- resolve_auto --------------------------------------------------------
 
     #[test]
-    fn resolve_auto_dark_system_returns_groknight() {
+    fn resolve_auto_dark_system_returns_doge() {
         with_test_env(|| {
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Dark));
             let result = resolve_auto();
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(result, ThemeKind::Doge);
         });
     }
 
@@ -628,11 +628,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_auto_detection_failure_returns_groknight() {
+    fn resolve_auto_detection_failure_returns_doge() {
         with_test_env(|| {
             system_appearance::set_mock(None);
             let result = resolve_auto();
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(result, ThemeKind::Doge);
         });
     }
 
@@ -658,11 +658,27 @@ mod tests {
 
     // -- resolve_from_config (resolve_initial_theme inner logic) ---------------
 
+    /// Named contract: product default theme is DOGE when `[ui].theme` is unset.
+    /// Discoverability pin (2026-07-30): new features default ON; DOGE is the
+    /// stock theme (users can still pick GrokNight / others in settings).
     #[test]
-    fn resolve_from_config_no_config_returns_groknight() {
+    fn default_theme_is_doge() {
         with_test_env(|| {
             let result = resolve_from_config(None, true);
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(
+                result,
+                ThemeKind::Doge,
+                "unset theme must resolve to DOGE (product default)"
+            );
+            assert!(!is_auto_mode());
+        });
+    }
+
+    #[test]
+    fn resolve_from_config_no_config_returns_doge() {
+        with_test_env(|| {
+            let result = resolve_from_config(None, true);
+            assert_eq!(result, ThemeKind::Doge);
             assert!(!is_auto_mode());
         });
     }
@@ -684,7 +700,7 @@ mod tests {
         with_test_env(|| {
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Dark));
             let result = resolve_from_config(Some(ThemeKind::Auto), true);
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(result, ThemeKind::Doge);
             assert!(is_auto_mode(), "auto config must enable auto mode");
         });
     }
@@ -704,7 +720,7 @@ mod tests {
         with_test_env(|| {
             system_appearance::set_mock(None);
             let result = resolve_from_config(Some(ThemeKind::Auto), true);
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(result, ThemeKind::Doge);
             assert!(is_auto_mode(), "auto mode is set before detection");
         });
     }

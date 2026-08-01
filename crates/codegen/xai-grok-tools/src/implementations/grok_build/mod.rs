@@ -14,6 +14,7 @@ pub mod ask_user_question;
 pub mod bash;
 #[path = "deploy_app_stub.rs"]
 pub mod deploy_app;
+pub mod disable_ascii_scrub;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
 pub mod grep;
@@ -26,6 +27,7 @@ pub mod list_dir;
 pub mod lsp;
 pub mod media_bearer;
 pub mod monitor;
+pub mod plan_validate;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
@@ -57,6 +59,9 @@ pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;
+pub use plan_validate::{
+    PLAN_VALIDATE_TOOL_NAME, PlanValidateInput, PlanValidateOutput, PlanValidateTool,
+};
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{
     SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction, loop_usage_message,

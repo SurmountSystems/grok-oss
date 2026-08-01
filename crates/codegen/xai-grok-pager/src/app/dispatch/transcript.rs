@@ -41,11 +41,10 @@ pub(super) fn dispatch_copy_block_content(app: &mut AppView) {
             entry.block.copy_text(entry.raw)
         };
 
-        if let Some(text) = text
-            && !text.is_empty()
-        {
-            agent.copy_to_clipboard(&text);
-        }
+/// Copy entry `idx` without changing selection (always-on bubble ⧉ mouse path).
+pub(super) fn dispatch_copy_entry_content(app: &mut AppView, idx: usize) {
+    with_active_agent(app, |agent| {
+        agent.copy_entry_content(idx);
     });
 }
 

@@ -292,6 +292,82 @@ async fn create_test_actor(
     }
 }
 #[tokio::test(flavor = "current_thread")]
+/// `apply_auto_compact_threshold` flips the gate at the new boundary.
+#[tokio::test(flavor = "current_thread")]
+async fn apply_auto_compact_threshold_updates_gate() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(94_000, 100_000, 95, gateway_tx, persistence_tx).await;
+            let cw = std::num::NonZeroU64::new(100_000).unwrap();
+            assert!(
+                actor.should_auto_compact(94_000, cw).is_none(),
+                "94k of 100k must not fire at 95%"
+            );
+            assert!(
+                actor.should_auto_compact(95_000, cw).is_some(),
+                "95k of 100k must fire at 95%"
+            );
+            actor.apply_auto_compact_threshold(98, None);
+            assert_eq!(actor.compaction.threshold_percent.get(), 98);
+            assert_eq!(actor.compaction.threshold_tokens.get(), None);
+            assert!(
+                actor.should_auto_compact(95_000, cw).is_none(),
+                "95k of 100k must NOT fire after live-apply to 98%"
+            );
+            assert!(
+                actor.should_auto_compact(98_000, cw).is_some(),
+                "98k of 100k must fire at live-applied 98%"
+            );
+        })
+        .await;
+}
+
+/// `SessionCommand::SetAutoCompactThreshold` updates the same Cells.
+#[tokio::test(flavor = "current_thread")]
+async fn set_auto_compact_threshold_command_updates_gate() {
+    use crate::session::SessionCommand;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(97_000, 100_000, 95, gateway_tx, persistence_tx).await;
+            let cw = std::num::NonZeroU64::new(100_000).unwrap();
+            assert!(
+                actor.should_auto_compact(97_000, cw).is_some(),
+                "precondition: 97% fires at 95%"
+            );
+            let cmd = SessionCommand::SetAutoCompactThreshold {
+                auto_compact_threshold_percent: 98,
+                auto_compact_threshold_tokens: None,
+            };
+            match cmd {
+                SessionCommand::SetAutoCompactThreshold {
+                    auto_compact_threshold_percent,
+                    auto_compact_threshold_tokens,
+                } => {
+                    actor.apply_auto_compact_threshold(
+                        auto_compact_threshold_percent,
+                        auto_compact_threshold_tokens,
+                    );
+                }
+                _ => unreachable!("test constructed SetAutoCompactThreshold"),
+            }
+            assert_eq!(actor.compaction.threshold_percent.get(), 98);
+            assert!(
+                actor.should_auto_compact(97_000, cw).is_none(),
+                "command arm live-apply must move the gate past 97%"
+            );
+            assert!(actor.should_auto_compact(98_000, cw).is_some());
+        })
+        .await;
+}
+
 async fn test_should_auto_compact_triggers_at_threshold() {
     let local = tokio::task::LocalSet::new();
     local

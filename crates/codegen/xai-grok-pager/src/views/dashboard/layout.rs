@@ -276,7 +276,16 @@ pub fn max_peek_content_rows(area: Rect) -> u16 {
 /// Like [`compute_layout`] but with a fixed whole peek-box height (from [`allocate_peek`]).
 /// The list band receives the rest after chrome.
 pub fn compute_layout_with_peek_box(area: Rect, peek_box_h: u16) -> DashboardLayout {
-    compute_layout_with_dispatch_inner(area, true, 0, Some(peek_box_h.max(3)))
+    compute_layout_with_dispatch_inner(area, true, 0, Some(peek_box_h.max(3)), false)
+}
+
+/// Like [`compute_layout_with_peek_box`] with optional header hide.
+pub fn compute_layout_with_peek_box_hide_header(
+    area: Rect,
+    peek_box_h: u16,
+    hide_header: bool,
+) -> DashboardLayout {
+    compute_layout_with_dispatch_inner(area, true, 0, Some(peek_box_h.max(3)), hide_header)
 }
 
 /// Like [`compute_layout`] but lets the caller request a taller dispatch box. `dispatch_text_rows`
@@ -287,7 +296,17 @@ pub fn compute_layout_with_dispatch(
     peek_visible: bool,
     dispatch_text_rows: u16,
 ) -> DashboardLayout {
-    compute_layout_with_dispatch_inner(area, peek_visible, dispatch_text_rows, None)
+    compute_layout_with_dispatch_inner(area, peek_visible, dispatch_text_rows, None, false)
+}
+
+/// Like [`compute_layout_with_dispatch`] with optional header hide.
+pub fn compute_layout_with_dispatch_hide_header(
+    area: Rect,
+    peek_visible: bool,
+    dispatch_text_rows: u16,
+    hide_header: bool,
+) -> DashboardLayout {
+    compute_layout_with_dispatch_inner(area, peek_visible, dispatch_text_rows, None, hide_header)
 }
 
 fn compute_layout_with_dispatch_inner(
@@ -295,6 +314,7 @@ fn compute_layout_with_dispatch_inner(
     peek_visible: bool,
     dispatch_text_rows: u16,
     forced_peek_box_h: Option<u16>,
+    hide_header: bool,
 ) -> DashboardLayout {
     // When `area.height == 0`, every subrect collapses to zero
     // A default `footer_h` of 1 would otherwise produce a non-zero footer rect even on a 0-height area

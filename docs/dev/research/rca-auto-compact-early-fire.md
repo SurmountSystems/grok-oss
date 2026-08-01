@@ -1,7 +1,7 @@
 # RCA: Auto-compact fires ~80% while Settings show 98%
 
 **Session under investigation:** `019f8a78-9d7c-7210-af74-b562f0bb56f0`  
-**Workspace:** `/home/hunter/Projects/surmount/grok-build`  
+**Workspace:** `$REPO`  
 **Date of analysis:** 2026-07-22  
 **Mode:** read-only investigation (no code changes)
 
@@ -224,7 +224,7 @@ Banner string: `Context {percentage}% full. Compacting…` where `percentage` is
 | `crates/codegen/xai-grok-pager/src/settings/registry.rs` | Modal current value from disk/pager snapshot |
 | `crates/codegen/xai-grok-pager/src/scrollback/blocks/session_event.rs` | Banner: `Context {percentage}% full. Compacting…` |
 | `crates/codegen/xai-grok-shell/src/session/acp_types.rs` | `ContextInfo.auto_compact_threshold_percent` (live resolved) |
-| Session transcript | `~/.grok/sessions/%2Fhome%2Fhunter%2FProjects%2Fsurmount%2Fgrok-build/019f8a78-9d7c-7210-af74-b562f0bb56f0/updates.jsonl` |
+| Session transcript | `~/.grok/sessions/%2F%7E%2FProjects%2Fsurmount%2Fgrok-build/019f8a78-9d7c-7210-af74-b562f0bb56f0/updates.jsonl` |
 
 ---
 

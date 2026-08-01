@@ -794,7 +794,13 @@ async fn read_parent_sampling_config(
             );
             let inherited = xai_grok_sampler::SamplerConfig {
                 api_key: creds.api_key,
-                failover_api_keys: Vec::new(),
+                // Keep dual-auth failover so prefer_live / mid-request hop can
+                // leave SuperGrok for the console key (was stripped → subagents
+                // stayed on SuperGrok extras while the parent had already hopped).
+                failover_api_keys: creds.failover_api_keys,
+                failover_base_url: creds.failover_base_url,
+                session_base_url: creds.session_base_url,
+                session_identity_key: creds.session_identity_key,
                 base_url: cfg.base_url,
                 mtls_cert_dir: cfg.mtls_cert_dir,
                 model: cfg.model.clone(),
@@ -841,6 +847,9 @@ async fn read_parent_sampling_config(
                 doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
                 header_injector: ctx.sampling_config.header_injector.clone(),
             };
+            // Same sticky preference as reconstruct_full_config: if SuperGrok is
+            // memoized out of allowance, start the child already on the console key.
+            let _ = xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut inherited);
             let model_id = ctx.model_id.clone();
             let global_model_id = ctx.models_manager.current_model_id();
             xai_grok_telemetry::unified_log::debug(
@@ -2156,6 +2165,53 @@ pub(crate) struct SubagentMeta {
     /// Persisted for durable `resume_from` identity validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model_id: Option<String>,
+}
+
+/// Filename next to `meta.json` and under the child session dir for the work
+/// join key (usage.jsonl / cleared_todos). Kept as a sibling file so resume
+/// can preserve identity without schema churn on [`SubagentMeta`].
+pub(crate) const WORK_ULID_SESSION_FILE: &str = xai_grok_tools::util::ulid::WORK_ULID_FILE;
+
+/// Resolve a work ULID for a subagent spawn: prefer source subagent dir on
+/// `resume_from`, else mint a new id.
+pub(crate) fn resolve_subagent_work_ulid(
+    resume_from: Option<&str>,
+    parent_session_dir: &Path,
+) -> String {
+    if let Some(src) = resume_from {
+        let src_dir = parent_session_dir.join("subagents").join(src);
+        if let Some(wu) = xai_grok_tools::util::ulid::read_work_ulid_file(&src_dir) {
+            return wu;
+        }
+        // Fallback: source child session dir via meta.json child_session_id.
+        let meta_path = src_dir.join("meta.json");
+        if let Ok(data) = std::fs::read_to_string(&meta_path)
+            && let Ok(meta) = serde_json::from_str::<SubagentMeta>(&data)
+        {
+            let src_info = SessionInfo {
+                id: acp::SessionId::new(meta.child_session_id),
+                cwd: meta
+                    .child_cwd
+                    .unwrap_or_else(|| parent_session_dir.to_string_lossy().into_owned()),
+            };
+            let child_dir = crate::session::persistence::session_dir(&src_info);
+            if let Some(wu) = xai_grok_tools::util::ulid::read_work_ulid_file(&child_dir) {
+                return wu;
+            }
+        }
+    }
+    xai_grok_tools::util::ulid::mint()
+}
+
+/// Persist work ULID next to subagent meta and under the child session dir.
+pub(crate) fn persist_subagent_work_ulid(
+    subagent_meta_dir: &Path,
+    child_session_dir: &Path,
+    work_ulid: &str,
+) {
+    let _ = std::fs::create_dir_all(subagent_meta_dir);
+    let _ = std::fs::write(subagent_meta_dir.join(WORK_ULID_SESSION_FILE), work_ulid);
+    let _ = xai_grok_tools::util::ulid::write_work_ulid_file(child_session_dir, work_ulid);
 }
 /// Canonical subagent metadata for GCS persistence (`subagent.json`).
 /// Uploaded to `{session_id}/subagent.json` in GCS and optionally mirrored locally.

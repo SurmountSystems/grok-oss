@@ -635,12 +635,22 @@ pub(crate) fn acp_plan_update(output: &ToolOutput) -> Option<acp::Plan> {
     use xai_grok_tools::types::output::TodoWriteOutput;
     match output {
         ToolOutput::Todo(TodoWriteOutput::TodosUpdated(success)) => {
-            let entries = success
-                .todos
-                .iter()
-                .cloned()
-                .map(plan_entry_from_todo_item)
-                .collect();
+            // Prefer state (has board ids) so Plan meta.id enables leaf-only
+            // badge math; fall back to todos vec without ids.
+            let entries = if !success.state.is_empty() {
+                success
+                    .state
+                    .todo_items_with_ids()
+                    .map(|(id, item)| plan_entry_from_todo(Some(id.as_str()), item.clone()))
+                    .collect()
+            } else {
+                success
+                    .todos
+                    .iter()
+                    .cloned()
+                    .map(plan_entry_from_todo_item)
+                    .collect()
+            };
             Some(acp::Plan::new(entries))
         }
         // Error variants (DuplicateId, etc.) don't produce Plan updates.
@@ -825,6 +835,8 @@ mod tests {
             summary_for_prompt: "tasks".to_string(),
             todos: vec![],
             state: xai_grok_tools::implementations::grok_build::todo::TodoState::default(),
+            progress: Default::default(),
+            warning: None,
         }));
         let update = acp_tool_update(&output, "call-1", None, None).unwrap();
         assert_eq!(update.fields.status, Some(acp::ToolCallStatus::Completed));
@@ -844,18 +856,21 @@ mod tests {
                 priority: TodoPriority::Medium,
                 status: TodoStatus::Completed,
                 meta: None,
+                size: None,
             },
             TodoItem {
                 content: "Dropped".to_string(),
                 priority: TodoPriority::Low,
                 status: TodoStatus::Cancelled,
                 meta: None,
+                size: None,
             },
             TodoItem {
                 content: "Stale spinner".to_string(),
                 priority: TodoPriority::High,
                 status: TodoStatus::InProgress,
                 meta: None,
+                size: None,
             },
         ];
 
@@ -916,9 +931,12 @@ mod tests {
                     status:
                         xai_grok_tools::implementations::grok_build::todo::TodoStatus::Completed,
                     meta: None,
+                    size: None,
                 },
             ],
             state: xai_grok_tools::implementations::grok_build::todo::TodoState::default(),
+            progress: Default::default(),
+            warning: None,
         }));
         let plan = acp_plan_update(&output).unwrap();
         let [entry] = plan.entries.as_slice() else {

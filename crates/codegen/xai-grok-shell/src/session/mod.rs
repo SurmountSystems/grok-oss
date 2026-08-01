@@ -586,6 +586,8 @@ pub mod tool_definitions_artifact;
 pub mod tool_index;
 pub mod turn_completion;
 pub mod unified_list;
+pub mod unsent_prompt_draft;
+pub(crate) mod usage_log;
 pub(crate) mod user_message;
 pub(crate) mod wire_tags;
 pub(crate) mod workflow;

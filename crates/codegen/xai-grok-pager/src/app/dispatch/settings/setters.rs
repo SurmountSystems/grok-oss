@@ -701,9 +701,9 @@ pub(super) fn set_economic_mode_inner(app: &mut AppView, new: bool) {
 /// Set economic mode (soft-cap context at 200K for Grok 4.5 pricing).
 ///
 /// SHELL-OWNED: cache mirror + `[ui].economic_mode` via
-/// `Effect::PersistSetting`. Seeds new sessions' effective context window and
-/// auto-run `/implement` effort clamp (max 1). Use `/economic-mode` for the
-/// current conversation. Default ON.
+/// `Effect::PersistSetting`. Seeds new sessions' effective context window.
+/// Does not rewrite auto-run `/implement --effort`. Use `/economic-mode` for
+/// the current conversation. Default ON.
 pub(in crate::app::dispatch) fn set_economic_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
     let prev = crate::appearance::cache::load_economic_mode();
     if prev == new {
@@ -917,6 +917,194 @@ pub(in crate::app::dispatch) fn set_respect_manual_folds(
     app.show_toast(&save_success_toast("Respect manual folds", new));
     vec![Effect::PersistSetting {
         key: "respect_manual_folds",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_bubble_copy_buttons_inner(app: &mut AppView, new: bool) {
+    let mut config = app.appearance.clone();
+    config.scrollback.display.bubble_copy_buttons = new;
+    app.set_appearance(config);
+}
+
+/// Set always-on bubble ⧉ copy chrome.
+///
+/// PAGER-OWNED: live-applied via `AppView::set_appearance` and persisted to
+/// `[scrollback.display].bubble_copy_buttons` in pager.toml.
+pub(in crate::app::dispatch) fn set_bubble_copy_buttons(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.appearance.scrollback.display.bubble_copy_buttons;
+    if prev == new {
+        return vec![];
+    }
+    set_bubble_copy_buttons_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "bubble_copy_buttons",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Bubble copy buttons", new));
+    vec![Effect::PersistSetting {
+        key: "bubble_copy_buttons",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Set sticky cancel-subagents preference (`ask` | `always_stop` | `always_continue`).
+pub(in crate::app::dispatch) fn set_cancel_subagents_on_turn_cancel(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let canonical = match new.as_str() {
+        "always_stop" => "always_stop",
+        "always_continue" => "always_continue",
+        _ => "ask",
+    };
+    let prev = match app.current_ui.cancel_subagents_on_turn_cancel.as_deref() {
+        Some("always_stop") => "always_stop",
+        Some("always_continue") => "always_continue",
+        _ => "ask",
+    };
+    if prev == canonical {
+        return vec![];
+    }
+    match canonical {
+        "ask" => {
+            app.current_ui.cancel_subagents_on_turn_cancel = None;
+            for agent in app.agents.values_mut() {
+                agent.cancel_subagents_preference = None;
+            }
+        }
+        "always_stop" => {
+            crate::app::dispatch::turn::apply_cancel_subagents_preference_global(app, true);
+        }
+        "always_continue" => {
+            crate::app::dispatch::turn::apply_cancel_subagents_preference_global(app, false);
+        }
+        _ => unreachable!(),
+    }
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "cancel_subagents_on_turn_cancel",
+        value = canonical,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Cancel subagents: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "cancel_subagents_on_turn_cancel",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
+pub(super) fn set_notifications_session_recap_inner(app: &mut AppView, new: bool) {
+    app.notification_service.set_session_recap(new);
+    app.current_ui.notifications.session_recap = Some(new);
+}
+
+/// Auto return-from-away session recap (`[ui.notifications] session_recap`).
+pub(in crate::app::dispatch) fn set_notifications_session_recap(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.notification_service.config().session_recap;
+    if prev == new {
+        return vec![];
+    }
+    set_notifications_session_recap_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "notifications.session_recap",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Auto session recap", new));
+    vec![Effect::PersistSetting {
+        key: "notifications.session_recap",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_notifications_session_recap_threshold_secs_inner(app: &mut AppView, secs: u64) {
+    app.notification_service
+        .set_session_recap_threshold_secs(secs);
+    app.current_ui.notifications.session_recap_threshold_secs = Some(secs);
+}
+
+/// Auto recap debounce (`[ui.notifications] session_recap_threshold_secs`).
+pub(in crate::app::dispatch) fn set_notifications_session_recap_threshold_secs(
+    app: &mut AppView,
+    new: i64,
+) -> Vec<Effect> {
+    let clamped = new.clamp(5, 3600) as u64;
+    let prev = app
+        .notification_service
+        .config()
+        .session_recap_threshold_secs;
+    if prev == clamped {
+        return vec![];
+    }
+    set_notifications_session_recap_threshold_secs_inner(app, clamped);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "notifications.session_recap_threshold_secs",
+        value = clamped,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Auto recap after: {clamped}s"));
+    vec![Effect::PersistSetting {
+        key: "notifications.session_recap_threshold_secs",
+        value: crate::settings::SettingValue::Int(clamped as i64),
+        rollback_value: crate::settings::SettingValue::Int(prev as i64),
+    }]
+}
+
+pub(super) fn set_features_session_recap_inner(app: &mut AppView, new: bool) {
+    app.features_session_recap = new;
+    // Optimistic client gate: off hides /recap UI immediately; on still needs
+    // shell re-advertise (restart) for full ACP availability.
+    if !new {
+        app.session_recap_available = false;
+        for agent in app.agents.values_mut() {
+            agent.set_session_recap_available(false);
+        }
+    }
+}
+
+/// Master `[features] session_recap` (manual `/recap` + auto). Restart-required
+/// for shell ACP re-advertise when turning on.
+pub(in crate::app::dispatch) fn set_features_session_recap(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.features_session_recap;
+    if prev == new {
+        return vec![];
+    }
+    set_features_session_recap_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "features.session_recap",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "{} (restart to fully apply)",
+        save_success_toast("Master session recap", new),
+    ));
+    vec![Effect::PersistSetting {
+        key: "features.session_recap",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]
@@ -1563,8 +1751,8 @@ pub(in crate::app::dispatch) fn set_auto_dark_theme(app: &mut AppView, new: Stri
         .as_deref()
         .and_then(crate::theme::canonical_name)
         .filter(|s| *s != "auto")
-        // No prior config: fall back to GrokNight (the default).
-        .unwrap_or_else(|| crate::theme::ThemeKind::GrokNight.display_name());
+        // No prior config: fall back to DOGE (the product default).
+        .unwrap_or_else(|| crate::theme::ThemeKind::Doge.display_name());
     let new_canonical = match crate::theme::canonical_name(&new) {
         Some(c) if c != crate::theme::ThemeKind::Auto.display_name() => c,
         _ => {
@@ -2099,8 +2287,79 @@ pub(in crate::app::dispatch) fn set_max_thoughts_width(app: &mut AppView, new: i
     }]
 }
 
-// The `auto_compact_threshold_percent` setter was removed alongside its registry entry
-// The mirror field stays for compat
+// auto_compact_threshold is a shell-owned dual preference (percent or tokens).
+// Live-applied: PersistSetting writes disk, then ACP
+// `x.ai/auto_compact_threshold_changed` updates open session Cells.
+
+/// State-only mutation for percent mode (clears tokens mirror).
+pub(super) fn set_auto_compact_threshold_percent_inner(app: &mut AppView, value: u8) {
+    app.auto_compact_threshold_percent = Some(value);
+    app.auto_compact_threshold_tokens = None;
+}
+
+/// State-only mutation for absolute-token mode (clears percent mirror).
+pub(super) fn set_auto_compact_threshold_tokens_inner(app: &mut AppView, value: u64) {
+    app.auto_compact_threshold_tokens = Some(value);
+    app.auto_compact_threshold_percent = None;
+}
+
+/// Outer dispatcher for `Action::SetAutoCompactThreshold`.
+pub(in crate::app::dispatch) fn set_auto_compact_threshold(
+    app: &mut AppView,
+    new: crate::settings::AutoCompactThresholdChoice,
+) -> Vec<Effect> {
+    use crate::settings::AutoCompactThresholdChoice;
+
+    let prev_canonical = crate::settings::canonical_auto_compact_threshold(
+        app.auto_compact_threshold_percent,
+        app.auto_compact_threshold_tokens,
+    );
+    let new_canonical = new.as_canonical();
+    let already = match new {
+        AutoCompactThresholdChoice::Percent(p) => {
+            app.auto_compact_threshold_percent == Some(p)
+                && app.auto_compact_threshold_tokens.is_none()
+        }
+        AutoCompactThresholdChoice::Tokens(t) => {
+            app.auto_compact_threshold_tokens == Some(t)
+                && app.auto_compact_threshold_percent.is_none()
+        }
+    };
+    if already {
+        return vec![];
+    }
+    match new {
+        AutoCompactThresholdChoice::Percent(p) => {
+            set_auto_compact_threshold_percent_inner(app, p.min(100));
+        }
+        AutoCompactThresholdChoice::Tokens(t) => {
+            set_auto_compact_threshold_tokens_inner(app, t);
+        }
+    }
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "auto_compact_threshold_percent",
+        value = new_canonical,
+        "setting changed",
+    );
+    let toast_label = match new {
+        AutoCompactThresholdChoice::Percent(p) => format!("{p}%"),
+        AutoCompactThresholdChoice::Tokens(t) => {
+            if t >= 1000 {
+                format!("{}k tokens", t / 1000)
+            } else {
+                format!("{t} tokens")
+            }
+        }
+    };
+    app.show_toast(&format!("\u{2713} Auto-compact at: {toast_label}"));
+    vec![Effect::PersistSetting {
+        key: "auto_compact_threshold_percent",
+        value: crate::settings::SettingValue::Enum(new_canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev_canonical),
+    }]
+}
 
 // show_tips and auto_update are SHELL-OWNED `Option<bool>` setters
 // Changes take effect on next session start (restart_required: true).

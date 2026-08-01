@@ -773,9 +773,9 @@ impl BlockContent for SessionEventBlock {
             // Loading: animated sidebar so there's feedback that the recap is being generated
             // Gray rather than the magenta `accent_running`: the recap is a passive marker, not an active tool turn
             if ctx.is_running {
-                return Some(AccentStyle::animated(theme.gray));
+                return Some(AccentStyle::striped_animated(theme.gray));
             }
-            // Finished: neutral tool accent bar when expanded (no special color).
+            // Finished: white/info tool rail when expanded (not green, not magenta).
             return (ctx.mode != DisplayMode::Collapsed)
                 .then(|| AccentStyle::static_color(theme.accent_tool));
         }
@@ -1033,11 +1033,14 @@ mod tests {
     fn reauth_required_has_warning_accent() {
         let block = SessionEventBlock::new(SessionEvent::ReAuthRequired);
         let theme = Theme::current();
-        let accent = block.accent(&ctx());
+        let accent = block.accent(&ctx()).expect("re-auth rail");
         assert_eq!(
-            accent.map(|a| a.color),
-            Some(theme.warning),
+            accent.color, theme.warning,
             "re-auth prompt must stand out with a warning accent"
+        );
+        assert!(
+            accent.striped,
+            "yellow context rail must be striped, not solid"
         );
     }
 
@@ -1075,11 +1078,14 @@ mod tests {
     fn context_too_large_has_warning_accent() {
         let block = SessionEventBlock::new(SessionEvent::ContextTooLarge);
         let theme = Theme::current();
-        let accent = block.accent(&ctx());
+        let accent = block.accent(&ctx()).expect("context-too-large rail");
         assert_eq!(
-            accent.map(|a| a.color),
-            Some(theme.warning),
+            accent.color, theme.warning,
             "context-too-large prompt must stand out with a warning accent"
+        );
+        assert!(
+            accent.striped,
+            "yellow context rail must be striped, not solid"
         );
     }
 
@@ -1179,10 +1185,14 @@ mod tests {
             error: "out of credits or over your spending limit. Add credits and retry.".into(),
         });
         let theme = Theme::current();
+        let accent = block.accent(&ctx()).expect("compaction-failed rail");
         assert_eq!(
-            block.accent(&ctx()).map(|a| a.color),
-            Some(theme.warning),
+            accent.color, theme.warning,
             "an actionable compaction failure must use a warning accent, not muted"
+        );
+        assert!(
+            accent.striped,
+            "yellow context rail must be striped, not solid"
         );
     }
 
@@ -1491,6 +1501,10 @@ mod tests {
         let accent = block.accent(&rc).expect("loading recap has an accent bar");
         assert_eq!(accent.color, theme.gray);
         assert!(accent.animated, "loading sidebar animates");
+        assert!(
+            accent.striped,
+            "loading recap rail must be yellow-striped context chrome"
+        );
         assert_eq!(
             block.bullet(&rc),
             Some(accent),

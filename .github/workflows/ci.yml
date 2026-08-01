@@ -30,13 +30,40 @@ env:
 
 jobs:
   # fmt, clippy (-D warnings), full workspace tests -- not a release build.
+  # Job display name must match ruleset required check context (`just ci`).
   quality:
-    name: just test
+    name: just ci
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Free GHA images ship multi-GB toolchains we never use. Full workspace
+      # nextest + nix store + cargo target has already hit ENOSPC mid-suite
+      # (runner Worker_*.log "No space left on device") with 0 test fails —
+      # e.g. PR #18 @ d4bd92f, job 91328130084. Reclaim before nix/cargo.
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          # Best-effort: dirs missing on a future image must not fail the job.
+          for path in \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            /usr/local/.ghcup
+          do
+            if [[ -e "$path" ]]; then
+              echo "removing $path"
+              sudo rm -rf "$path" || true
+            fi
+          done
+          sudo apt-get clean || true
+          df -h /
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v16

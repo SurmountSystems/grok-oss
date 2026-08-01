@@ -222,7 +222,10 @@ pub(super) fn handle_exit_plan_mode(
     ext: xai_acp_lib::AcpArgs<acp::ExtRequest>,
     app: &mut AppView,
 ) -> bool {
-    use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
+    use crate::views::plan_approval_view::{
+        ExitPlanModeExtRequest, PLAN_PARKED_TOAST, PlanApprovalViewState,
+    };
+    use crate::views::prompt_widget::StashedPrompt;
 
     // 1. Parse typed request from raw JSON params.
     let params: ExitPlanModeExtRequest = match serde_json::from_str(ext.request.params.get()) {
@@ -252,6 +255,8 @@ pub(super) fn handle_exit_plan_mode(
         return false;
     };
     let is_active = is_matched_agent_active(app, id);
+    // Read UI config before borrowing the agent (option D force-modal).
+    let force_modal = app.current_ui.plan_approval_force_modal();
     let Some(agent) = app.agents.get_mut(&id) else {
         // `interaction_target_agent` only returns ids that exist; this arm is defensive
         tracing::warn!("exit_plan_mode: agent {id:?} not found");
@@ -333,9 +338,36 @@ pub(super) fn handle_exit_plan_mode(
     agent.casual_commenting_range = None;
     agent.casual_editing_comment_id = None;
 
-    agent.show_plan_preview_if_available();
-
-    if agent.line_viewer.is_some() {
+    // Option D: force-modal opens the line-viewer immediately (fullscreen) and
+    // stashes the live draft. Default soft park auto-opens the non-capturing
+    // side panel (same surface as /view-plan) while keeping the live draft and
+    // Prompt focus so L1 stays modal-free.
+    if force_modal {
+        agent.reopen_plan_approval();
+        // reopen opens the side panel by default; force-modal upgrades to
+        // full takeover so the historical modal setting still hard-opens.
+        if let Some(ref mut viewer) = agent.line_viewer {
+            viewer.fullscreen = true;
+            viewer.side_panel = false;
+        }
+        tracing::info!(
+            target_active = is_active,
+            "Force-modal plan approval from ext_method ([ui] plan_approval_park=modal)"
+        );
+    } else {
+        // Auto-open side panel + toast + status + transcript card.
+        // Keep the live prompt (do not stash/clear like reopen). Dismiss
+        // competing overlays so the panel is actually visible. Prompt pane +
+        // Prompt focus so typing lands immediately; printable keys stay on the
+        // composer. Panel CTAs are mouse/footer primary; empty-prompt key
+        // accelerators work when Preview is focused (L1 modal-free).
+        agent.active_modal = None;
+        agent.block_viewer = None;
+        agent.set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        }
+        agent.show_plan_preview_if_available();
         if let Some(ref mut viewer) = agent.line_viewer {
             viewer.plan_mut().feedback_active = true;
         }

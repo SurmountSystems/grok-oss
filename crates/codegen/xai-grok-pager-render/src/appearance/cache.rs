@@ -764,6 +764,7 @@ mod tests {
         assert_eq!(TIMESTAMPS_DEFAULT, ui.show_timestamps.unwrap_or(true));
         assert_eq!(TIMELINE_DEFAULT, ui.show_timeline_enabled());
         assert_eq!(PAGE_FLIP_ON_SEND_DEFAULT, ui.page_flip_on_send_enabled());
+        assert_eq!(SCRUB_ASCII_PUNCT_DEFAULT, ui.scrub_ascii_punct_enabled());
         assert_eq!(
             COMBINE_QUEUED_PROMPTS_DEFAULT,
             ui.combine_queued_prompts

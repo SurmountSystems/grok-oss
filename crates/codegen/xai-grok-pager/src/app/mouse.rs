@@ -31,6 +31,20 @@ impl AgentView {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
+                // Tasks kill / open chrome first (before Clear finished) so a
+                // mis-placed Clear hit can never steal subagent open/close.
+                if let Some(out) = self.try_tasks_chrome_click(mouse.column, mouse.row) {
+                    return out;
+                }
+                // Clear finished: hit when open todo chrome painted it
+                // (finished rows + board visible). Slash / focused X remain.
+                if self.hit_todo_clear_done.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::ClearCompletedTodos);
+                }
+                // Compact status-bar limits meter → multi-line /limits detail.
+                if self.hit_credits.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::ShowLimits);
+                }
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
                     self.todo.overlay.escape();
                     self.todo.on_state_change();
@@ -389,6 +403,14 @@ impl AgentView {
                 if self.hit_sb_copy.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::CopyBlockContent);
                 }
+                // Always-on bubble ⧉: before drag/select arm (same tier as selection ⧉).
+                if let Some(&(idx, _)) = self
+                    .bubble_copy_hits
+                    .iter()
+                    .find(|(_, r)| r.contains((mouse.column, mouse.row).into()))
+                {
+                    return InputOutcome::Action(Action::CopyEntryContent { idx });
+                }
                 if self.hit_sb_view.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::OpenBlockViewer);
                 }
@@ -579,7 +601,6 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     Some(AgentPane::Tasks) => {
-                        use crate::views::tasks_pane::TaskEntryId;
                         self.set_active_pane(AgentPane::Tasks, false);
                         for (entry_id, rect) in &self.tasks.kill_button_rects {
                             if rect.contains((mouse.column, mouse.row).into()) {
@@ -926,6 +947,10 @@ impl AgentView {
                     );
                 }
                 if self.active_pane == AgentPane::Prompt {
+                    // Top-bar ⧉ is chrome, not textarea — handle before TextArea.
+                    if self.try_copy_prompt_draft_at(mouse.column, mouse.row) {
+                        return InputOutcome::Changed;
+                    }
                     let event = self.prompt.handle_mouse(mouse);
                     if matches!(event, PromptEvent::Edited)
                         && let Some(eff) = self.notify_suggestion_text_changed()
@@ -1023,6 +1048,9 @@ impl AgentView {
                 changed |= self.hit_context.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_credits.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_todo_close.update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .hit_todo_clear_done
+                    .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_queue_close.update_hover(mouse.column, mouse.row);
                 if matches!(
                     self.pane_areas.hit_test(mouse.column, mouse.row),
@@ -1116,6 +1144,17 @@ impl AgentView {
                 }
                 changed |= self.hit_sb_copy.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_sb_view.update_hover(mouse.column, mouse.row);
+                {
+                    let new_bubble = self
+                        .bubble_copy_hits
+                        .iter()
+                        .find(|(_, r)| r.contains((mouse.column, mouse.row).into()))
+                        .map(|&(idx, _)| idx);
+                    if new_bubble != self.hovered_bubble_copy {
+                        self.hovered_bubble_copy = new_bubble;
+                        changed = true;
+                    }
+                }
                 if let Some(hd_area) = self.history_dropdown_area {
                     let hs_count = self.prompt.history_search.result_count();
                     let has_sb = hs_count > hd_area.height as usize;
@@ -1377,9 +1416,9 @@ mod tests {
         match outcome {
             InputOutcome::Action(Action::SendPromptNow { text, images, .. }) => {
                 assert_eq!(text, "local one");
-                assert_eq!(images.len(), 1, "row image must ride the send-now");
+                assert_eq!(images.len(), 1, "row image must ride the interject");
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert_eq!(agent.shared_queue.len(), 1);
@@ -1395,10 +1434,10 @@ mod tests {
         assert_eq!(ids.len(), 1);
         let outcome = click_send_now(&mut agent, *nth(&ids, 0));
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(!agent.queue.overlay.visible);
@@ -1428,10 +1467,10 @@ mod tests {
         agent.prompt.set_text("local one EDITED");
         let outcome = click_send_now(&mut agent, *nth(&ids, 0));
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));

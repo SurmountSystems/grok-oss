@@ -114,7 +114,7 @@ pub fn to_theme_kind(
 ) -> ThemeKind {
     match appearance {
         SystemAppearance::Light => light_theme.unwrap_or(ThemeKind::GrokDay),
-        SystemAppearance::Dark => dark_theme.unwrap_or(ThemeKind::GrokNight),
+        SystemAppearance::Dark => dark_theme.unwrap_or(ThemeKind::Doge),
     }
 }
 
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn to_theme_kind_dark_defaults_to_groknight() {
         let result = to_theme_kind(SystemAppearance::Dark, None, None);
-        assert_eq!(result, ThemeKind::GrokNight);
+        assert_eq!(result, ThemeKind::Doge);
     }
 
     #[test]

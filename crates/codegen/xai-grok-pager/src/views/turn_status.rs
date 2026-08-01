@@ -38,8 +38,16 @@ pub(crate) const USER_WAITING_PULSE_SPEED: f32 = 0.08;
 /// Compute the pulsing diamond color for any "waiting on you" cue.
 pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> Color {
     let brightness = crate::theme::pulse_brightness(tick, USER_WAITING_PULSE_SPEED);
-    crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
-        .unwrap_or(accent)
+    if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
+        if brightness >= 0.5 {
+            accent
+        } else {
+            theme.bg_base
+        }
+    } else {
+        crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
+            .unwrap_or(accent)
+    }
 }
 #[derive(Debug, Default)]
 pub struct TurnStatusOutput {
@@ -517,7 +525,7 @@ fn compute_activity(
             let style = if is_ask || has_desc {
                 Style::default().fg(theme.text_secondary)
             } else {
-                Style::default().fg(theme.accent_success)
+                Style::default().fg(theme.accent_running)
             };
             (style, String::new(), true)
         }
@@ -1128,7 +1136,7 @@ mod tests {
         let text = render_row_text(args, 90);
         assert!(
             text.contains("1 subagent still running")
-                && text.contains("1 queued — send now to force"),
+                && text.contains("1 queued — Interject to force"),
             "idle background hold must explain the queue + how to force, got: {text:?}"
         );
     }
@@ -1512,5 +1520,52 @@ mod tests {
     #[test]
     fn user_waiting_pulse_speed_is_stable() {
         assert_eq!(USER_WAITING_PULSE_SPEED, 0.08);
+    }
+
+    /// DOGE waiting diamond must solid-step between pure primaries — never
+    /// mid-channel gray from `blend_color` alpha fade.
+    #[test]
+    fn doge_pending_diamond_color_stays_on_pure_palette_no_gray_blend() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::doge();
+        let accent = theme.accent_user; // pure green
+        let is_pure = |c: Color| -> bool {
+            matches!(
+                c,
+                Color::Rgb(0, 0, 0)
+                    | Color::Rgb(255, 0, 0)
+                    | Color::Rgb(0, 255, 0)
+                    | Color::Rgb(255, 255, 0)
+                    | Color::Rgb(0, 0, 255)
+                    | Color::Rgb(255, 0, 255)
+                    | Color::Rgb(0, 255, 255)
+                    | Color::Rgb(255, 255, 255)
+            )
+        };
+        let mut saw_accent = false;
+        let mut saw_black = false;
+        for tick in 0..200u64 {
+            let c = pending_diamond_color(&theme, accent, tick);
+            assert!(
+                is_pure(c),
+                "tick {tick}: diamond color {c:?} must be a DOGE pure primary (no gray blend)"
+            );
+            if c == accent {
+                saw_accent = true;
+            }
+            if c == theme.bg_base {
+                saw_black = true;
+            }
+            // Reject equal-channel mid grays explicitly.
+            if let Color::Rgb(r, g, b) = c {
+                assert!(
+                    !(r == g && g == b && r > 0 && r < 255),
+                    "tick {tick}: mid-gray RGB({r},{g},{b}) forbidden under DOGE"
+                );
+            }
+        }
+        assert!(saw_accent, "cycle must hit full accent");
+        assert!(saw_black, "cycle must hit pure black trough (solid step)");
     }
 }

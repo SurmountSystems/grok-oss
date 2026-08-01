@@ -152,8 +152,8 @@ pub struct UiConfig {
     /// Soft-cap effective model context at 200K tokens so Grok 4.5 requests
     /// stay on the lower pricing tier (prices double above 200K). Catalog
     /// windows remain larger (e.g. 500K); compaction and the context bar use
-    /// the capped size when this is on. `None` = on (client default). Also
-    /// clamps auto-queued `/implement --effort N` to 1. Written by the
+    /// the capped size when this is on. `None` = on (client default). Does
+    /// not rewrite auto-queued `/implement --effort N`. Written by the
     /// pager's settings modal; overridable per conversation via
     /// `/economic-mode` when that command is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,6 +272,7 @@ impl Default for UiConfig {
             yolo: false,
             ui_theme: None,
             compact_mode: false,
+            hide_header: false,
             simple_mode: None,
             permission_mode: None,
             approval_mode: None,
@@ -372,6 +373,22 @@ impl UiConfig {
         }
         matches!(self.selection_highlight_duration_ms, Some(0))
     }
+
+    /// Default for [`Self::plan_approval_park`] when unset (soft park / option A).
+    pub const PLAN_APPROVAL_PARK_DEFAULT: &str = "soft";
+
+    /// Canonical park mode: `"soft"` or `"modal"`. Unknown values fall back to soft.
+    pub fn plan_approval_park_mode(&self) -> &'static str {
+        match self.plan_approval_park.as_deref().map(str::trim) {
+            Some("modal") => "modal",
+            Some("soft") | None | Some(_) => "soft",
+        }
+    }
+
+    /// True when `exit_plan_mode` should open the plan modal immediately.
+    pub fn plan_approval_force_modal(&self) -> bool {
+        self.plan_approval_park_mode() == "modal"
+    }
 }
 
 #[cfg(test)]
@@ -455,6 +472,64 @@ mod tests {
             ..Default::default()
         };
         assert!(!off.page_flip_on_send_enabled());
+    }
+
+    #[test]
+    fn scrub_ascii_punct_defaults_on() {
+        assert!(UiConfig::default().scrub_ascii_punct_enabled());
+        let off = UiConfig {
+            scrub_ascii_punct: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.scrub_ascii_punct_enabled());
+        let on: UiConfig = serde_json::from_value(serde_json::json!({ "scrub_ascii_punct": true }))
+            .expect("deserializes scrub_ascii_punct true");
+        assert!(on.scrub_ascii_punct_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.scrub_ascii_punct_enabled());
+    }
+
+    #[test]
+    fn plan_approval_park_defaults_soft() {
+        assert!(!UiConfig::default().plan_approval_force_modal());
+        assert_eq!(UiConfig::default().plan_approval_park_mode(), "soft");
+        let modal = UiConfig {
+            plan_approval_park: Some("modal".into()),
+            ..Default::default()
+        };
+        assert!(modal.plan_approval_force_modal());
+        assert_eq!(modal.plan_approval_park_mode(), "modal");
+        let weird = UiConfig {
+            plan_approval_park: Some("side-panel".into()),
+            ..Default::default()
+        };
+        assert!(!weird.plan_approval_force_modal());
+    }
+
+    #[test]
+    fn hide_header_defaults_false_and_parses() {
+        assert!(!UiConfig::default().hide_header);
+        let on: UiConfig = serde_json::from_value(serde_json::json!({ "hide_header": true }))
+            .expect("UiConfig deserializes hide_header true");
+        assert!(on.hide_header);
+        let off: UiConfig = serde_json::from_value(serde_json::json!({ "hide_header": false }))
+            .expect("UiConfig deserializes hide_header false");
+        assert!(!off.hide_header);
+        let missing: UiConfig = serde_json::from_value(serde_json::json!({}))
+            .expect("UiConfig defaults missing hide_header");
+        assert!(!missing.hide_header);
+    }
+
+    #[test]
+    fn stale_hide_title_bar_key_is_ignored() {
+        // Named contract: hide_title_bar was removed. Stale config keys must
+        // not fail deserialize (serde ignores unknown fields). Dynamic title
+        // opt-out is `[ui.notifications.title].enabled` only.
+        let stale: UiConfig = serde_json::from_value(serde_json::json!({ "hide_title_bar": true }))
+            .expect("stale hide_title_bar must not break UiConfig deserialize");
+        assert!(!stale.hide_header);
+        let _ = stale;
     }
 
     #[test]

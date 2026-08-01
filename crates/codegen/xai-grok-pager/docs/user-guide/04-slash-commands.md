@@ -37,8 +37,8 @@ Percent thresholds apply to the *effective* window — with **Economic mode** on
 ### `/economic-mode`
 
 Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing.
-Default **on** for new sessions (`[ui] economic_mode`). Also clamps auto-run
-`/implement --effort` above 1 down to 1.
+Default **on** for new sessions (`[ui] economic_mode`). Soft-caps context only;
+does not rewrite explicit `/implement --effort`.
 
 ```
 /economic-mode              # toggle this conversation
@@ -55,6 +55,24 @@ Grok also auto-compacts once the context window hits 85% (tune it with `[session
 
 Show the context window split into System prompt, Messages, Reasoning/overhead, and Free.
 Rows for Tool definitions, Skills, and MCP servers are already counted in those totals.
+
+### `/recap`
+
+Generate a short "where was I" summary of the session so far. Alias: `/summarize`.
+The summary is display-only (not added to the model conversation). Grok may also
+request the same kind of recap automatically when you return after being away.
+
+**Default on.** Search **Settings** (`/settings` / `/options`) for `recap` to
+toggle auto return-from-away, the debounce threshold, and the master feature
+kill. You can also set config or env:
+
+| Goal | How |
+|------|-----|
+| Turn off **all** recaps (`/recap` + auto) | Settings → **Master session recap** off; or `[features] session_recap = false` / `GROK_SESSION_RECAP=0` |
+| Turn off **auto** return-from-away only | Settings → **Auto session recap** off; or `[ui.notifications] session_recap = false` (manual `/recap` still works) |
+
+Restart the session (or start a new one) after changing the master feature flag
+so the shell re-advertises the gate. See [Configuration](05-configuration.md#session-recap).
 
 ### `/session-info`
 
@@ -82,6 +100,8 @@ Copy the most recent response's source markdown to the clipboard. Pass a number 
 ```
 
 Every copy is also written to a backup file — `~/.grok/last-copy.txt` by default, or `GROK_COPY_FILE` if set. Confirmed copies toast briefly (e.g. `Copied!`). Unverified OSC 52 deliveries and clipboard-unreachable fallbacks name the backup path so you can recover the text.
+
+One-click **`⧉`** chrome uses the same stack: always-on per-bubble copy on user and assistant messages (`bubble_copy_buttons`, default on; no select-first), selection-box copy when a block is selected (`selection_buttons`, default on; selection-box omits ⧉ when bubble chrome is on so you never see two icons), plan panel top bar (whole plan body, same as **`Y`**), and the prompt top border (full draft plain text, including multimodal chip labels). `/copy` still targets the Nth assistant message only.
 
 ### `/export`
 
@@ -198,6 +218,14 @@ Enter plan mode.
 ### `/view-plan`
 
 Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
+
+### `/clear-completed-todos`
+
+Remove **completed** and **cancelled** items from the live session todo board and archive them (toast reports how many). Pending and in-progress stay. Same as the todo pane **clear-finished icon** (`[−]` next to close when the todo board is open and finished rows exist, focused or not; quiet idle paint; does not cover tasks model/timer or subagent open chrome) and optional focused `X`. Action hints still say “Clear finished.” Not the same as pane `h` (hide done in the view only) and not an agent `merge: false` wipe.
+
+```
+/clear-completed-todos
+```
 
 ---
 
@@ -370,7 +398,15 @@ Report an issue or send feedback. Bare `/feedback` opens the feedback form in ev
 
 ### `/btw`
 
-Send an aside to the agent without interrupting the current task. In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped. The side question and its answer aren't part of the main turn.
+Send an aside to the agent without interrupting the current task. The side question and its answer aren't part of the main turn.
+
+In the full TUI, a finished answer opens a **Done** panel:
+
+- **`y`** (when the panel is focused) — copy the **full thread** to the clipboard (`/btw <question>` plus the complete rendered answer, not just what is on screen). The chrome also shows a `[y]` control.
+- **`a`** — open a follow-up composer in the **same** btw session (prior Q/A is included for the model). You can keep asking without starting a new main turn.
+- **`Esc`** — dismiss the panel.
+
+In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped.
 
 `/btw` can also appear mid-message: the whole message (minus the token) becomes the side question and nothing goes to the main turn. Only `/btw` works this way; other commands must start the message. For a multi-line side question, use `Alt+Enter` (over SSH) or `Shift+Enter`, a trailing `\`, or `/ml`. Do not rely on `Cmd+Enter`: Apple Terminal inserts a newline locally via CoreGraphics; a delivered `SUPER+Enter` (Kitty) also inserts a newline rather than sending; over SSH Cmd never arrives and the chord sends.
 
@@ -403,6 +439,10 @@ Open the MCP servers management modal.
 ### `/doctor`
 
 Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
+
+The dual-auth block also lists SuperGrok principal(s) (role + fingerprint only
+when two logins are stored) and console key fingerprints. See
+[Authentication → Two SuperGrok logins](02-authentication.md#two-supergrok-logins-personal--business).
 
 ### `/release-notes`
 
@@ -464,7 +504,8 @@ Log out and return to the login screen.
 
 ### `/usage`
 
-View credit usage or manage billing. Alias: `/cost`.
+View **session** token/cost totals, then SuperGrok billing when the consumer
+surface is visible. Alias: `/cost`.
 
 ```
 /usage
@@ -494,11 +535,29 @@ This setting doesn't touch `[features] telemetry`, `trace_upload`, or your exter
 
 ### `/settings`
 
-Open the settings modal to view and change configuration interactively. Aliases: `/config`, `/preferences`, `/prefs`.
+Open the settings modal to view and change configuration interactively. Aliases: `/config`, `/preferences`, `/prefs`, `/options`.
 
 ### `/timestamps`
 
 Toggle message timestamps on or off.
+
+### `/screenshot`
+
+Capture the **current rendered TUI frame** as a PNG (not an OS screenshot of
+other apps). Same action is bound to **F9**. Writes under
+`$GROK_HOME/screenshots/tui-*.png` (default `~/.grok/screenshots/…`) and toasts
+the path. When plan approval is open, the capture also auto-attaches into the
+plan multimodal path; you can still open the toast path and paste manually.
+
+```
+/screenshot
+```
+
+Window title vs in-app chrome: **`[ui.notifications.title] enabled`** (default
+true) controls dynamic terminal/tab **window titles**; **`[ui] hide_header`**
+hides in-app status / welcome / dashboard headers. They are separate. See
+[Theming → Hide header](06-theming.md#hide-header) and
+[Window title](06-theming.md#window-title).
 
 ---
 

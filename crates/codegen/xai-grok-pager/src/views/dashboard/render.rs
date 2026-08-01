@@ -138,7 +138,12 @@ pub(crate) fn render_dashboard(
     if state.peek.is_none() && area.height > 8 && !state.dispatch.text().is_empty() {
         let rows = dispatch_text_rows(state, layout.dispatch.width, area.height);
         if rows > 1 {
-            layout = super::layout::compute_layout_with_dispatch(area, false, rows);
+            layout = super::layout::compute_layout_with_dispatch_hide_header(
+                area,
+                false,
+                rows,
+                hide_header,
+            );
         }
     }
 

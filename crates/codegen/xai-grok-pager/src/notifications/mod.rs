@@ -19,7 +19,15 @@ pub use config::{
     NotificationCondition, NotificationConfig, NotificationEventKind, NotificationHook,
     NotificationMethod, TitleConfig, TitleItem,
 };
-pub use title::TitleState;
+pub use title::{TitleState, format_busy_agents_title_part, resolve_session_title_name};
+
+/// Pure gate: dynamic title OSC only when `[ui.notifications.title].enabled`.
+///
+/// Window titles are always product-managed on the startup/`set_terminal_title`
+/// path. This gate is the sole opt-out for TitleManager tick updates.
+pub(crate) fn title_updates_should_run(title_enabled: bool) -> bool {
+    title_enabled
+}
 
 pub struct NotificationEvent {
     pub kind: NotificationEventKind,
@@ -74,6 +82,17 @@ impl NotificationService {
         &self.config
     }
 
+    /// Live-update auto session-recap preference (Settings modal).
+    pub fn set_session_recap(&mut self, enabled: bool) {
+        self.config.session_recap = enabled;
+    }
+
+    /// Live-update auto recap debounce seconds (Settings modal).
+    pub fn set_session_recap_threshold_secs(&mut self, secs: u64) {
+        self.config.session_recap_threshold_secs = secs;
+        self.focus_tracker.set_recap_threshold_secs(secs);
+    }
+
     pub fn protocol(&self) -> protocol::NotificationProtocol {
         self.protocol
     }
@@ -121,7 +140,7 @@ impl NotificationService {
     pub fn build_idle_escapes(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         let mut buf = String::new();
 
-        if self.config.title.enabled
+        if self.title_updates_active()
             && let Some(esc) = self.title_manager.update(state)
         {
             buf.push_str(&esc);
@@ -140,9 +159,18 @@ impl NotificationService {
     pub fn on_tick(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         let mut buf = String::new();
 
-        if self.config.title.enabled
+        if self.title_updates_active()
             && let Some(title_esc) = self.title_manager.update(state)
         {
+            // Apply OSC 0 immediately on the TTY (same path as shutdown /
+            // set_terminal_title). Window titles must not depend only on
+            // draw post_flush: deferred ACP presents and idle frames can
+            // skip or delay pending_notification_escapes.
+            xai_grok_shell::util::with_locked_stderr(|stderr| {
+                use std::io::Write as _;
+                let _ = stderr.write_all(title_esc.as_bytes());
+                let _ = stderr.flush();
+            });
             buf.push_str(&title_esc);
         }
 
@@ -524,8 +552,23 @@ mod tests {
             cwd: None,
             turn_elapsed: None,
             is_busy,
+            busy_agent_count: 0,
             focused: true,
         }
+    }
+
+    #[test]
+    fn title_updates_gated_only_by_title_enabled() {
+        // Named contract: dynamic TitleManager OSC is gated solely by
+        // [ui.notifications.title].enabled. There is no hide_title_bar gate.
+        assert!(
+            title_updates_should_run(true),
+            "title.enabled true must allow dynamic title updates"
+        );
+        assert!(
+            !title_updates_should_run(false),
+            "title.enabled false is the opt-out for dynamic titles"
+        );
     }
 
     #[test]

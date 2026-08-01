@@ -92,6 +92,8 @@ pub enum ActionId {
 
     // Panes
     ToggleTodos,
+    /// Archive completed/cancelled todos off the live board (Clear finished).
+    ClearCompletedTodos,
     ToggleTasks,
     ToggleQueue,
     OpenSessions,
@@ -121,6 +123,9 @@ pub enum ActionId {
 
     // Settings
     OpenSettings,
+
+    /// Capture the current TUI frame as a PNG (`/screenshot`). Bound to F9.
+    CaptureTuiScreenshot,
 
     // Agent Dashboard
     OpenDashboard,
@@ -893,7 +898,7 @@ mod tests {
             registry.lookup(&ctrl_m, When::PromptFocused),
             Some(ActionId::ToggleMultiline)
         );
-        // Former mouse-toggle dual bindings removed from scrollback.
+        // F9 is the TUI screenshot chord (When::Always), not scrollback/agent-scoped.
         assert_eq!(registry.lookup(&f9, When::ScrollbackFocused), None);
         assert_eq!(registry.lookup(&f9, When::AgentScreen), None);
         // Ctrl+Shift+M is no longer the voice chord; it resolves to nothing

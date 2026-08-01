@@ -170,7 +170,7 @@ does not exist until a later product commit lands**. Fish may run
 that adds `scripts/` lands:
 
 ```bash
-REPO=/home/hunter/Projects/surmount/grok-build
+REPO="$(pwd)"   # path to your grok-build / grok-oss clone
 git show origin/main:scripts/put-history-on-xai.sh \
   | sed "s|ROOT=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")/..\" && pwd)\"|ROOT=\"$REPO\"|" \
   > /tmp/put-history-on-xai.sh
@@ -197,7 +197,7 @@ CONTINUE=1 SURMOUNT_REF=origin/main bash /tmp/put-history-on-xai.sh
 - **No parent-solo conflict marathons** across many UU files (shell + pager + sampler). Use **strategic subagents** (below).
 - **No wasteful swarm:** not one agent per file, not overlapping scopes, not N identical explores
 - **Spawn first** on multi-file conflict resolve and on post-pick CI red: first tool turn is a tightly scoped child — parent must not pull CI logs, open failing tests, or re-grep the hot path before spawn. Join on short on-disk notes only.
-- **Docs can lie.** Prefer code, `git show`, both conflict sides, and short child notes over assuming from FORK/AGENTS/research prose. Verify before claim. (*There are lies, damned lies, and then there is documentation.*)
+- **Docs can be wrong.** Prefer code, `git show`, both conflict sides, and short child notes over assuming from FORK/AGENTS/research prose. Verify before claim.
 
 ### Subagents for conflict resolve (strategic, not wasteful)
 
@@ -207,7 +207,7 @@ the parent. Project law: [`AGENTS.md`](../AGENTS.md).
 
 Multi-file cherry-pick resolve is exactly the work global rules say belongs in
 children: deep reads of both sides, tip vs product, surgical edits. Parent
-holds the goal, the conflict table, and join checks — not full file bodies.
+holds the goal, the conflict table, and join checks — not full file contents.
 **Hard stop:** spawn first; do not parent-marathon diagnose then spawn.
 
 **Good fan-out for #7 (example, ~2–3 agents max):**
@@ -358,14 +358,16 @@ with a clean tree.
   - [ ] `scripts/put-history-on-xai.sh` + other import/sync scripts already in `FORK_PATHS`
   - [ ] `docs/upstream-history.md` (+ import/onto logs)
   - [ ] Review `FORK_PATHS` in `scripts/import-upstream-export.sh` only if the assert failed or a new process path is needed
-- [ ] `just ci` or at least `cargo check -p xai-grok-pager-bin` + focused tests
+- [ ] **Product regression filters** (assert is path-only; seams inside `xai-grok-*` need cargo). After process-pin assert, run the core block in [`doc/dev/upstream-regression-filters.md`](../doc/dev/upstream-regression-filters.md) (or FORK § *Upstream regression filters*), **or at least `just check` / `just ci`**. Smoke: DOGE default, window titles / `title.enabled`, stuck-retry / StreamResumed, `shell_collision`, dual-auth if those areas churned.
+- [ ] **User-guide conflict resolve** — shared path `crates/codegen/xai-grok-pager/docs/user-guide/` is **not** in `FORK_PATHS`. On onto, re-check DOGE default theme, window titles / `title.enabled` vs `hide_header`, and Grok OSS / `grok-oss` branding sections against xAI base; do not drop fork copy for a clean merge alone.
+- [ ] `just ci` or at least `just check` (prefer full gate before PR); if skipping full gate, the product filter block above is the minimum besides assert
 - [ ] `docs/upstream-import-log.md` updated
 - [ ] Signed commit on Surmount (no signing bypass)
 
 ## Skills & process pins vs recon (brief)
 
 Skills are **multi-source**: product on this branch owns discovery/load order,
-project skill roots, and user-guide; operator skill bodies live under
+project skill roots, and user-guide; operator skill packs live under
 `~/.agents/skills` (host); bundled packs are a network cache under
 `~/.grok/bundled/skills`. See [`FORK.md`](../FORK.md) and
 `doc/dev/research/where-skills-come-from-2026-07-24.md`.

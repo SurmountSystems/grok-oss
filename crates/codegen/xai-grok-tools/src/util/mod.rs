@@ -1,5 +1,7 @@
+pub mod ascii_scrub;
 pub mod base64_images;
 pub mod binary;
+pub mod bulk_edit_policy;
 pub mod command_display;
 pub mod env;
 pub mod file_reader;
@@ -12,6 +14,7 @@ pub use xai_grok_image as image_validate;
 pub mod lock_path;
 pub mod mcp_truncate;
 pub mod path_suggestions;
+pub mod plan_validate;
 pub(crate) mod query_tools;
 pub mod read_policy;
 pub mod remap;
@@ -19,7 +22,10 @@ pub mod serde_base64;
 pub(crate) mod shared_http;
 pub mod shell_env_policy;
 pub mod spawn;
+pub mod toon;
+pub mod trailing_ws;
 pub mod truncate;
+pub mod ulid;
 pub mod unicode_confusables;
 #[cfg(any(bundle_rg, bundle_fd, bundle_bfs, bundle_ugrep, test))]
 pub(crate) mod vendor;

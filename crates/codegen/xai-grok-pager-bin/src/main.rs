@@ -2371,6 +2371,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 device_auth,
                 openrouter,
                 api_key,
+                list_api_keys,
                 devbox,
             } => {
                 init_tracing_simple("cli");

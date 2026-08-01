@@ -18,15 +18,15 @@ use strum::AsRefStr;
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum SkillScope {
-    /// cwd/.grok/skills (highest priority)
+    /// cwd config dirs (`.agents` then `.grok`, then vendor) — highest priority
     Local = 0,
-    /// repo_root/.grok/skills
+    /// other config dirs under the git worktree (same name order)
     Repo = 1,
-    /// ~/.grok/skills
+    /// home trees (`~/.agents` then `~/.grok`, then vendor homes)
     User = 2,
-    /// ~/.grok/server-skills (synced from the skill store)
+    /// launcher/workspace-injected server skill dirs
     Server = 3,
-    /// platform built-in skills (lowest precedence)
+    /// platform pack under `<grok_home>/bundled` (and injected bundled dirs)
     Bundled = 4,
     /// plugin-provided skills (lowest priority for bare-name resolution)
     Plugin = 5,

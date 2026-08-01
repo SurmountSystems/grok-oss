@@ -45,6 +45,7 @@ pub mod subagent_message;
 pub mod suggest;
 pub mod task;
 pub mod terminal;
+pub mod todo;
 pub mod usage;
 pub mod worktree;
 pub(crate) mod worktree_seed;

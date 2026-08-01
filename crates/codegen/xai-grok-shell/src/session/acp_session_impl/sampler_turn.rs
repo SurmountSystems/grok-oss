@@ -791,13 +791,35 @@ impl SessionActor {
             } else {
                 None
             },
+            stashed_bearer_resolver: None,
+            // Durable live re-bind for hop-to-session without prior stash
+            // (key-primary dual-auth mid-hop; next turn also re-resolves here).
+            session_bearer_resolver: self.auth_manager.as_ref().map(|am| {
+                std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
+                    as xai_grok_sampler::SharedBearerResolver
+            }),
             supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             // The sampler sends the opt-in header itself when this is set.
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+        };
+        // Dual-auth sticky: resolve always re-pins SuperGrok session as primary.
+        // When that identity is memoized credit-exhausted, prefer console key
+        // *here* so first attempt (main turn, compaction, aux clients built from
+        // this config) never hits SuperGrok extras and never shows per-turn hop
+        // Retrying chrome. Silent when already sticky.
+        if let Some(hop_reason) =
+            xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut full)
+        {
+            tracing::info!(
+                target: "xai_grok_shell::session",
+                %hop_reason,
+                "reconstruct_full_config: sticky credit preference → console primary"
+            );
         }
+        full
     }
 
     /// Install the auto-mode permission classifier with a live LLM side-query.
@@ -964,12 +986,19 @@ impl SessionActor {
             .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
-        let disable_api_key_auth = self
+        let (disable_api_key_auth, preferred_method, auto_use_included_limits) = self
             .auth_manager
             .as_ref()
-            .map(|am| am.grok_com_config().api_key_auth_disabled())
-            .unwrap_or(false);
-        crate::agent::config::resolve_aux_model_sampling_config(
+            .map(|am| {
+                let gc = am.grok_com_config();
+                (
+                    gc.api_key_auth_disabled(),
+                    gc.preferred_method,
+                    gc.auto_use_included_limits,
+                )
+            })
+            .unwrap_or((false, None, false));
+        crate::agent::config::resolve_aux_model_sampling_config_preferring(
             slug,
             &models,
             &endpoints,
@@ -977,6 +1006,8 @@ impl SessionActor {
             disable_api_key_auth,
             creds.alpha_test_key.clone(),
             creds.client_version.clone(),
+            preferred_method,
+            auto_use_included_limits,
         )
     }
 
@@ -2051,7 +2082,31 @@ impl SessionActor {
             {
                 match am.get_valid_token().await {
                     Ok(key) => {
-                        if creds.api_key.as_deref() != Some(&key) {
+                        // Dual-auth: after hop / prefer_live the live primary may
+                        // be the console API key while ACP auth method stays
+                        // session-based. session_identity_key holds the SuperGrok
+                        // JWT; when live api_key differs, do **not** clobber the
+                        // console key with a fresh session JWT (that left JWT on
+                        // api.x.ai and kept draining the wrong pool / subagents).
+                        let live_is_console_after_hop = creds
+                            .session_identity_key
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .zip(
+                                creds
+                                    .api_key
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty()),
+                            )
+                            .is_some_and(|(sess, live)| sess != live);
+                        if live_is_console_after_hop {
+                            tracing::debug!(
+                                model = %model_id,
+                                "pre-flight: keep console primary (session JWT still in memo); skip session token overwrite"
+                            );
+                        } else if creds.api_key.as_deref() != Some(&key) {
                             let mut creds = creds;
                             creds.api_key = Some(key);
                             self.chat_state_handle.update_credentials(creds);
@@ -2232,14 +2287,17 @@ impl SessionActor {
             self.chat_state_handle
                 .record_token_usage(u64::from(u.total_tokens));
             self.chat_state_handle.record_last_turn_usage(u.clone());
+            let model_id = response.assistant().and_then(|a| a.model_id.clone());
             self.chat_state_handle.record_model_call_usage(
-                response.assistant().and_then(|a| a.model_id.clone()),
+                model_id.clone(),
                 u.clone(),
                 api_duration_ms,
                 response.cost_usd_ticks,
             );
             self.signals_handle()
                 .record_token_usage(u.completion_tokens, u.reasoning_tokens);
+            // Durable per-call bill row (fail-open). Main vs subagent identity.
+            self.append_usage_jsonl(model_id, u, api_duration_ms, response.cost_usd_ticks);
         } else if self.tool_context.task_output_token_budget.is_some() {
             self.tool_context.fail_task_output_usage_closed();
             self.chat_state_handle

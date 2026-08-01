@@ -4101,6 +4101,23 @@
             .collect()
     }
 
+    /// Software composer caret at the insertion cell: solid full-block glyph
+    /// or empty half (space). Empty half is plain space — same as a blank
+    /// cell — so callers that only have the symbol treat space as caret-ok.
+    fn is_composer_box_caret(sym: &str) -> bool {
+        sym == crate::glyphs::cursor_box_filled()
+            || sym == crate::glyphs::cursor_box_hollow()
+            || sym == " "
+    }
+
+    /// True when `region` is empty/whitespace or only the software box caret.
+    /// Ghost-suppressed / empty-ghost asserts use this so the insertion-cell
+    /// caret is not mistaken for ghost content.
+    fn region_is_empty_or_box_caret(region: &str) -> bool {
+        let t = region.trim();
+        t.is_empty() || is_composer_box_caret(t)
+    }
+
     #[test]
     fn mode_flags_show_plan_and_permission_together() {
         use crate::app::actions::PermissionLabel;
@@ -4388,16 +4405,26 @@
 
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
+        // Capture theme on this thread immediately around draw so fg matches
+        // whatever ambient Theme::current() the paint path saw.
+        let theme = Theme::current();
+        let ghost_fg = theme.ghost_text_style().fg;
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        // "hello" occupies x=0..5, ghost " world" at x=5..11
-        assert_eq!(buf_text_at(&buf, 5, 11, 0), " world");
+        // "hello" at x=0..5. Insertion cell x=5 holds the software box caret
+        // (ghost's leading space is blank, so the caret owns that column).
+        // Ghost body "world" follows at x=6..11.
+        let at_cursor = buf.cell((5, 0)).unwrap().symbol();
+        assert!(
+            is_composer_box_caret(at_cursor),
+            "insertion cell must be the filled/hollow box caret, got {at_cursor:?}"
+        );
+        assert_eq!(buf_text_at(&buf, 6, 11, 0), "world");
 
-        // Verify ghost cells have the correct style (dimmed italic).
-        let theme = Theme::current();
-        let cell = buf.cell((5, 0)).unwrap();
+        // Ghost body cells stay dimmed italic (caret style is only on x=5).
+        let cell = buf.cell((6, 0)).unwrap();
         let cell_style = cell.style();
-        assert_eq!(cell_style.fg, Some(theme.gray_dim),);
+        assert_eq!(cell_style.fg, ghost_fg);
         assert!(cell_style.add_modifier.contains(Modifier::ITALIC));
     }
 
@@ -4431,7 +4458,11 @@
         let mut buf = Buffer::empty(area);
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        assert_eq!(buf_text_at(&buf, 5, 10, 0).trim(), "");
+        // No ghost body — insertion cell may still hold the software box caret.
+        assert!(
+            region_is_empty_or_box_caret(&buf_text_at(&buf, 5, 10, 0)),
+            "slash-active must suppress ghost text (caret alone ok)"
+        );
     }
 
     #[test]
@@ -4588,7 +4619,11 @@
         let mut buf = Buffer::empty(area);
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        assert_eq!(buf_text_at(&buf, 5, 10, 0).trim(), "");
+        // Empty ghost paints nothing; software box caret may occupy x=5.
+        assert!(
+            region_is_empty_or_box_caret(&buf_text_at(&buf, 5, 10, 0)),
+            "empty ghost must not paint ghost body (caret alone ok)"
+        );
     }
 
     /// Sentinel highlight color, never produced by the textarea's own render.
@@ -5069,15 +5104,6 @@
         }
     }
 
-    /// Draw a bordered prompt into a fresh `width`×4 buffer and return it.
-    fn draw_bordered(width: u16, style: &PromptStyle) -> Buffer {
-        let mut pw = PromptWidget::new();
-        let area = Rect::new(0, 0, width, 4);
-        let mut buf = Buffer::empty(area);
-        pw.draw(&mut buf, area, None, style, None, None);
-        buf
-    }
-
     #[test]
     fn title_renders_on_top_border_with_corners_intact() {
         // Pinned: the caption blend reads the ambient theme at draw time.
@@ -5111,33 +5137,191 @@
         }
     }
 
+    /// Focused info-line model label paints `theme.accent_model` (magenta on DOGE).
     #[test]
-    fn no_title_keeps_plain_top_border() {
-        let buf = draw_bordered(40, &title_test_style(None));
+    fn info_line_model_name_uses_accent_model_not_gray() {
+        use crate::views::prompt_widget::{PromptFlag, PromptInfo, PromptWidget};
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::doge();
+        let pw = PromptWidget::new();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        let info = PromptInfo {
+            model_name: "Grok 4.5 (high)",
+            flags: &[] as &[PromptFlag],
+            multiline: false,
+            usage_warning: None,
+            usage_warning_critical: false,
+        };
+        pw.render_info_line(&mut buf, area, &info, theme.bg_base, &theme, true);
+
+        // Info line is right-aligned: find the 'G' of "Grok 4.5 (high)".
+        let model_cell = (0..area.width)
+            .find_map(|x| {
+                let c = buf.cell((x, 0))?;
+                (c.symbol() == "G").then_some(c.clone())
+            })
+            .expect("model text 'G' cell");
+        assert_eq!(
+            model_cell.style().fg,
+            Some(theme.accent_model),
+            "model label must use accent_model (magenta on DOGE), got {:?}",
+            model_cell.style().fg
+        );
+        assert_ne!(
+            model_cell.style().fg,
+            Some(theme.gray),
+            "model label must not be gray secondary chrome"
+        );
+    }
+
+    /// Named contract: bordered prompt top bar paints a ⧉ hit target for
+    /// one-click draft copy (payload is composer plain text).
+    #[test]
+    fn bordered_prompt_top_bar_sets_copy_button_hit_area() {
+        let mut pw = PromptWidget::new();
+        pw.set_text("draft body with [Image #1] chip label");
+        let style = title_test_style(None);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        let copy = pw
+            .copy_button_area()
+            .expect("bordered prompt must expose ⧉ draft-copy hit target");
+        assert_eq!(copy.height, 1);
+        assert_eq!(copy.y, area.y);
+        assert!(
+            copy.x + copy.width < area.x + area.width,
+            "copy button must sit inside the top border before ╮"
+        );
+        assert_eq!(
+            pw.draft_plain_text(),
+            "draft body with [Image #1] chip label",
+            "draft plain text keeps multimodal chip labels as typed"
+        );
+        // Corners intact.
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
+        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+    }
+
+    #[test]
+    fn chromeless_prompt_skips_copy_button() {
+        let mut pw = PromptWidget::new();
+        let style = PromptStyle::overlay();
+        let area = Rect::new(0, 0, 40, 2);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        assert!(
+            pw.copy_button_area().is_none(),
+            "overlay/chromeless prompts have no top-bar copy chrome"
+        );
+    }
+
+    #[test]
+    fn no_title_keeps_corners_and_copy_chrome() {
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(None);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
 
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
-        assert_eq!(buf_text_at(&buf, 1, 39, 0), "\u{2500}".repeat(38));
+        assert!(pw.copy_button_area().is_some());
+        // Left of copy chrome is still the border rule.
+        let copy = pw.copy_button_area().unwrap();
+        assert_eq!(
+            buf.cell((1, 0)).unwrap().symbol(),
+            "\u{2500}",
+            "border dash left of chrome"
+        );
+        assert_eq!(buf.cell((copy.x, 0)).unwrap().symbol(), "[");
     }
 
     #[test]
     fn long_title_truncates_on_top_border_and_keeps_corners() {
         let long = "a".repeat(60);
-        let buf = draw_bordered(40, &title_test_style(Some(&long)));
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(Some(&long));
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
 
         // max_w = 39 - 3 = 36: label spans x 3..=38 with a trailing ellipsis.
         let row = buf_text_at(&buf, 0, 40, 0);
         assert!(row.contains('\u{2026}'), "expected ellipsis in: {row}");
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+        assert!(
+            pw.copy_button_area().is_some(),
+            "copy chrome remains with a long title"
+        );
         assert_eq!(buf_text_at(&buf, 1, 3, 0), "\u{2500}\u{2500}");
     }
 
     #[test]
     fn blank_title_or_narrow_area_skips_border_title() {
-        // Whitespace-only titles never paint on the border.
-        let buf = draw_bordered(40, &title_test_style(Some("   ")));
-        assert_eq!(buf_text_at(&buf, 1, 39, 0), "\u{2500}".repeat(38));
+        // Whitespace-only titles never paint; copy chrome still may.
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(Some("   "));
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        let row = buf_text_at(&buf, 0, 40, 0);
+        assert!(
+            !row.contains("session"),
+            "blank title must not invent text; row={row:?}"
+        );
+        assert!(pw.copy_button_area().is_some());
+
+        // Very narrow: no panic; corners stay.
+        let mut pw = PromptWidget::new();
+        let buf = {
+            let style = title_test_style(Some("my session"));
+            let area = Rect::new(0, 0, 11, 4);
+            let mut buf = Buffer::empty(area);
+            pw.draw(&mut buf, area, None, &style, None, None);
+            buf
+        };
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
+        assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "\u{256e}");
+    }
+
+    /// Focused composer paints a Human-green solid/empty block caret and hides
+    /// the terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
+    ///
+    /// Wall-clock phase may land on solid or empty:
+    /// - Solid: full-cell Human accent plate + filled glyph.
+    /// - Empty: true empty cell (space, canvas bg) - no accent plate, no hole.
+    /// Never the old hole-punch (`■` on accent plate).
+    #[test]
+    fn focused_composer_paints_human_green_box_caret_hides_terminal_cursor() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("");
+        let style = PromptStyle {
+            focused: true,
+            chrome: true,
+            show_borders: true,
+            show_prefix: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        let result = pw.draw(&mut buf, area, None, &style, None, None);
+        assert!(
+            result.cursor_pos.is_none(),
+            "software box caret hides the terminal cursor"
+        );
 
         // Too narrow for the min label width (max_w < 6): plain border, no panic.
         let buf = draw_bordered(8, &title_test_style(Some("my session")));

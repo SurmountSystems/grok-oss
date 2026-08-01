@@ -1,7 +1,7 @@
 # Tools self-improve + recon survival (workflows + skills)
 
 **Date:** 2026-07-24  
-**Workspace:** `/home/hunter/Projects/surmount/grok-build`  
+**Workspace:** `$REPO`  
 **Mode:** evidence-backed research (product code + host skills + living process docs).  
 **Related:**  
 `where-skills-come-from-2026-07-24.md`,  
@@ -15,7 +15,7 @@
 
 Grok Build has **two self-improving tool layers**:
 
-| Layer | What improves | How it improves | Where durable bodies live |
+| Layer | What improves | How it improves | Where durable content lives |
 |-------|---------------|-----------------|---------------------------|
 | **Skills** | Slash procedures (`SKILL.md`, scripts, refs) | `/create-skill`, `/skill-maintenance` quality pass, peer absorb from bundled | Host `~/.agents/skills` (operator); optional project `.agents/skills` / `.grok/skills`; platform cache `~/.grok/bundled/skills` |
 | **Workflows** | Deterministic multi-agent Rhai scripts | `/create-workflow` author → `validate_only` smoke → save → real run; iterate via editable `script_path` | Project `.grok/workflows/<name>.rhai` or user `~/.grok/workflows/<name>.rhai` |
@@ -40,13 +40,13 @@ Grok Build has **two self-improving tool layers**:
 Process law that must survive **product** upstream recon (import / put-history / join) **or** collaborators:
 
 1. **Branch** — project `AGENTS.md`, `FORK.md`, `docs/upstream-*`, and (when research must ride import) `doc/dev/**`.
-2. **Host** — `~/.agents/skills/**` (operator skill bodies) and `~/.grok/AGENTS.md` (cross-repo process).
+2. **Host** — `~/.agents/skills/**` (operator skill packs) and `~/.grok/AGENTS.md` (cross-repo process).
 
 Host skill git alone does **not** ride product history. Branch docs alone do **not** update this machine’s effective slash skills. **Edit both** when both matter (same turn).
 
 | Layer | Survives import/onto? | Role |
 |-------|----------------------|------|
-| `~/.agents/skills/**` | Yes (outside tree) | Operator skill bodies; this machine’s slash skills |
+| `~/.agents/skills/**` | Yes (outside tree) | Operator skill packs; this machine’s slash skills |
 | `~/.grok/AGENTS.md` | Yes (host) | Cross-repo process law |
 | Product `AGENTS.md` / `FORK.md` / `docs/upstream-*` | Only if on tip **and** import-protected (`FORK_PATHS`) | Collaborators + recon land path |
 | `~/.grok/bundled/skills/**` | Survives git; **not** durable for edits | Network bundle sync can overwrite |
@@ -58,7 +58,7 @@ Evidence: product `AGENTS.md` § Skills + Survive recon; `FORK.md` § Skills (mu
 
 ### What dual-pin is *not*
 
-- **Not** “copy every skill into the repo.” Most orchestrator bodies stay host.
+- **Not** “copy every skill into the repo.” Most orchestrator skill packs stay host.
 - **Not** agents↔bundled reconcile alone — that is host-only; it does **not** restore product `AGENTS.md` after import.
 - **Not** `skill-maintenance` green ⇒ recon-safe product tree. Run `./scripts/assert-process-pins.sh` separately.
 
@@ -79,7 +79,7 @@ Evidence: product `AGENTS.md` § Skills + Survive recon; `FORK.md` § Skills (mu
 
 ### Sources (product multi-source load)
 
-Product owns discovery/precedence/bundle sync (on this branch). Bodies load from:
+Product owns discovery/precedence/bundle sync (on this branch). Skill packs load from:
 
 ```text
 Local/Repo:  .agents/skills → .grok/skills  (cwd → git root)
@@ -178,7 +178,7 @@ Living residual is **not** a dump of finished work or a second chat log.
 |----------|-------|---------------|
 | **`RESIDUAL.md`** | **Open** human-intent / unfinished honesty only | Finished process (move to FORK/AGENTS); novels |
 | **`FORK.md`** | Hierarchical “what this fork is / what recon keeps” | Ephemeral research tables |
-| **`AGENTS.md`** | Standing agent process law for this repo | Full skill bodies |
+| **`AGENTS.md`** | Standing agent process law for this repo | Full skill packs |
 | **`docs/upstream-history.md`** (+ import/onto logs) | Canonical recon law, HITL runbook, checklists | Chat archaeology |
 | **`doc/dev/research/*`** | Dated evidence notes (this file’s class) | “Primary residual ranking” (that’s RESIDUAL + AGENTS) |
 | **Chat** | Short join of disk | Authority after compaction |

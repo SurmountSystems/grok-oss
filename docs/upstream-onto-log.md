@@ -14,6 +14,10 @@ ancestor and GitHub PR compare works. Full HITL runbook:
 
 There is **no** `MODE=overlay` / commit-tree mode in the current scripts.
 
+**Live stack (SHAs / mid-work):** canonical home is
+[`docs/upstream-history.md`](upstream-history.md) § *Live stack*. Project
+`AGENTS.md` only **links** there (no frozen tip table in D1 law).
+
 | Date (UTC) | xAI tip | xAI tree | Surmount tip stacked | Onto tip | Notes |
 |------------|---------|----------|----------------------|----------|-------|
 | 2026-07-18 | `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` | `b40a1962cb8061b85c2354850ab4d5707f48414b` | (older) | (local) | Historical only (pre cherry-pick script) |

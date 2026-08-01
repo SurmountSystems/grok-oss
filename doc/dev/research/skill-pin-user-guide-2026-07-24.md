@@ -9,7 +9,7 @@
 | Path | in_repo? | Change |
 |------|----------|--------|
 | `crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md` | **Y** | Added § **Token efficiency** (parent coordinator, spawn-first, join on disk, depth-1, soft quality band, parallel without waste). Extended **When to Use** with CI/regression bullet. |
-| `~/.grok/docs/user-guide/16-subagents.md` | N (install/runtime mirror) | Same body as in-repo product source. |
+| `~/.grok/docs/user-guide/16-subagents.md` | N (install/runtime mirror) | Same content as in-repo product source. |
 | `docs/upstream-history.md` | **Y** | One hard **spawn-first** anti-pattern bullet for multi-file conflict + post-pick CI; one-line hard stop under subagents section. |
 
 ## § Token efficiency — bullets shipped
@@ -35,7 +35,7 @@ Skills under `~/.agents/skills/**` (deep guide, `_SKILL_RULES`, pr-babysit, impl
 
 ## Return
 
-- Product guide (tracked): `/home/hunter/Projects/surmount/grok-build/crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md`
-- Home mirror: `/home/hunter/.grok/docs/user-guide/16-subagents.md`
-- Onto history: `/home/hunter/Projects/surmount/grok-build/docs/upstream-history.md`
-- This note: `/home/hunter/Projects/surmount/grok-build/doc/dev/research/skill-pin-user-guide-2026-07-24.md`
+- Product guide (tracked): `$REPO/crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md`
+- Home mirror: `~/.grok/docs/user-guide/16-subagents.md`
+- Onto history: `$REPO/docs/upstream-history.md`
+- This note: `$REPO/doc/dev/research/skill-pin-user-guide-2026-07-24.md`

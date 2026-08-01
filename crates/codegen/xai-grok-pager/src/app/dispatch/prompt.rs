@@ -1151,6 +1151,7 @@ pub(super) fn dispatch_send_prompt_submission(
     } else if !literal && crate::slash::commands::exit::is_exit_alias(trimmed) {
         if consume_input {
             agent.prompt.set_text("");
+            agent.clear_unsent_prompt_draft();
         }
         effects.extend(dispatch(Action::Quit, app));
         return effects;
@@ -1779,27 +1780,41 @@ pub(super) fn handle_prompt_response(
             // So treat the queue as non-empty (suppress TurnComplete and the idle escapes), mirroring the local non-empty-queue behavior
             let queue_empty =
                 agent.session.pending_prompts.is_empty() && pending_adoption.is_none();
-            let session_name = agent
-                .display_name
-                .as_deref()
-                .or(agent.generated_session_title.as_deref());
+            let session_name = crate::notifications::title::resolve_session_title_name(
+                agent.display_name.as_deref(),
+                agent.generated_session_title.as_deref(),
+            )
+            .map(str::to_owned);
 
             // Skip idle escapes when the queue is non-empty: the next turn starts immediately and would overwrite them (title flicker)
             if queue_empty {
                 let cwd_str = app.cwd.to_string_lossy();
                 let model = agent.session.models.current_model_name();
-                let idle_title = crate::notifications::TitleState {
-                    session_name,
+                // Parent turn is idle, but L2 children may still be live.
+                // Forcing a fully idle DE title here races the next tick and
+                // can flush session-only OSC on draw (pending skips recompute).
+                let has_running_subagents =
+                    crate::app::app_view::agent_has_running_title_subagents(agent);
+                let subagent_wait =
+                    has_running_subagents.then_some(crate::acp::tracker::TurnActivity::Waiting(
+                        crate::acp::tracker::WaitingReason::Subagent,
+                    ));
+                // busy_agent_count under-counts other top-level agents (we only
+                // hold this AgentView). Next update_notifications tick fills.
+                let post_turn_title = crate::notifications::TitleState {
+                    session_name: session_name.as_deref(),
                     model: model.as_deref(),
-                    activity: None,
+                    activity: subagent_wait.as_ref(),
                     has_pending_permissions: false,
                     cwd: Some(&cwd_str),
                     turn_elapsed: None,
-                    is_busy: false,
+                    is_busy: has_running_subagents,
+                    busy_agent_count: usize::from(has_running_subagents),
                     focused: true,
                 };
-                app.pending_notification_escapes =
-                    app.notification_service.build_idle_escapes(&idle_title);
+                app.pending_notification_escapes = app
+                    .notification_service
+                    .build_idle_escapes(&post_turn_title);
             }
 
             if kind != NotificationEventKind::TurnComplete || queue_empty {

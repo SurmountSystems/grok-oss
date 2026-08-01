@@ -532,4 +532,119 @@ mod tests {
         assert!(default_coding_data_retention_opt_out());
         assert!(GrokAuth::default().coding_data_retention_opt_out);
     }
+
+    // ── Multi SuperGrok principal store (personal + Business) ──────────
+
+    #[test]
+    fn upsert_personal_then_business_keeps_both_multi_slots() {
+        let base = "https://auth.x.ai::client-multi";
+        let mut map = AuthStore::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-personal".into(),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-business".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-biz".into(),
+                principal_type: Some(TEAM_PRINCIPAL_TYPE.into()),
+                principal_id: Some("team-1".into()),
+                team_id: Some("team-1".into()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(map.get(base).map(|a| a.key.as_str()), Some("tok-business"));
+        assert_eq!(
+            map.get(&format!("{base}::personal"))
+                .map(|a| a.key.as_str()),
+            Some("tok-personal")
+        );
+        assert_eq!(
+            map.get(&format!("{base}::team::team-1"))
+                .map(|a| a.key.as_str()),
+            Some("tok-business")
+        );
+
+        let listings = list_supergrok_principal_listings(&map);
+        assert_eq!(listings.len(), 2);
+        let roles: Vec<_> = listings.iter().map(|p| p.role_label).collect();
+        assert!(roles.contains(&"personal"));
+        assert!(roles.contains(&"business"));
+        for p in &listings {
+            assert!(!p.fingerprint.is_empty());
+            assert!(!p.fingerprint.contains("tok-"));
+        }
+    }
+
+    #[test]
+    fn upsert_business_then_personal_keeps_business_slot() {
+        let base = "https://auth.x.ai::client-multi-2";
+        let mut map = AuthStore::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-biz".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u".into(),
+                principal_type: Some(TEAM_PRINCIPAL_TYPE.into()),
+                team_id: Some("t-9".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-pers".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(map.get(base).map(|a| a.key.as_str()), Some("tok-pers"));
+        assert_eq!(
+            map.get(&format!("{base}::team::t-9"))
+                .map(|a| a.key.as_str()),
+            Some("tok-biz"),
+            "Business multi-slot must survive personal re-login"
+        );
+    }
+
+    #[test]
+    fn fingerprint_session_token_is_not_raw() {
+        let fp = fingerprint_session_token("super-secret-session-jwt");
+        assert!(!fp.contains("super-secret"));
+        assert!(!fp.contains("jwt"));
+        assert_eq!(fp.len(), 64);
+    }
+
+    #[test]
+    fn lookup_supergrok_adopts_multi_slot_when_base_empty() {
+        let base = "https://auth.x.ai::client-orphan";
+        let mut map = AuthStore::new();
+        map.insert(
+            format!("{base}::team::t1"),
+            GrokAuth {
+                key: "orphan-biz".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u".into(),
+                principal_type: Some(TEAM_PRINCIPAL_TYPE.into()),
+                team_id: Some("t1".into()),
+                ..Default::default()
+            },
+        );
+        let found = lookup_supergrok_session_for_base(&map, base).unwrap();
+        assert_eq!(found.key, "orphan-biz");
+    }
 }

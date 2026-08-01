@@ -327,6 +327,16 @@ where
         front_back(&self.buffers, self.current).1
     }
 
+    /// Buffer most recently flushed to the terminal (last presented frame).
+    ///
+    /// After a completed draw (`flush` then `swap_buffers`), the previous
+    /// buffer slot holds what the user currently sees. Used by TUI
+    /// self-screenshot (`/screenshot`) to capture the live frame without
+    /// re-rendering.
+    pub fn last_presented_buffer(&self) -> &Buffer {
+        &self.buffers[1 - self.current]
+    }
+
     /// Gets the backend
     pub const fn backend(&self) -> &B {
         &self.backend

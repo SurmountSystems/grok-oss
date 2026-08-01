@@ -106,8 +106,8 @@ use super::status::{
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
     dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
-    dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
-    dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
+    dispatch_copy_entry_content, dispatch_dump_input_log, dispatch_export_conversation,
+    dispatch_open_block_viewer, dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
     dispatch_open_transcript_pager,
 };
 use super::turn::{
@@ -664,6 +664,12 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             app.fps_hud.toggle();
             vec![]
         }
+        Action::CaptureTuiScreenshot => {
+            // Capture runs in the event loop after present, where the
+            // terminal buffer is available. Flag only here (sync dispatch).
+            app.pending_tui_screenshot = true;
+            vec![]
+        }
         Action::ToggleScrollLog => {
             let msg = match app.scroll_state.toggle_scroll_log() {
                 Some(path) => format!("scroll log: recording to {}", path.display()),
@@ -693,6 +699,10 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::CopyBlockContent => {
             dispatch_copy_block_content(app);
+            vec![]
+        }
+        Action::CopyEntryContent { idx } => {
+            dispatch_copy_entry_content(app, idx);
             vec![]
         }
         Action::CopyAssistantMessage { n, file_path } => {
@@ -1094,9 +1104,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ResetSessionTitleToAuto => dispatch_reset_session_title(app),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
+        Action::ShowLimits => dispatch_show_limits(app),
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
+        Action::ClearCompletedTodos => dispatch_clear_completed_todos(app),
         Action::AddSessionNote { text, tags } => dispatch_add_session_note(app, text, tags),
         Action::ShowNotes => dispatch_show_notes(app),
         Action::ShowPlan => dispatch_show_plan(app),
@@ -1159,6 +1171,13 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetAutoRunImplement(v) => set_auto_run_implement(app, v),
         Action::SetEconomicMode(v) => set_economic_mode(app, v),
         Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
+        Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
+        Action::SetCancelSubagentsOnTurnCancel(s) => set_cancel_subagents_on_turn_cancel(app, s),
+        Action::SetNotificationsSessionRecap(v) => set_notifications_session_recap(app, v),
+        Action::SetNotificationsSessionRecapThresholdSecs(v) => {
+            set_notifications_session_recap_threshold_secs(app, v)
+        }
+        Action::SetFeaturesSessionRecap(v) => set_features_session_recap(app, v),
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
         Action::SetScreenMode(s) => set_screen_mode(app, s),
@@ -1171,6 +1190,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),
+        Action::SetHideHeader(v) => set_hide_header(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
         Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),

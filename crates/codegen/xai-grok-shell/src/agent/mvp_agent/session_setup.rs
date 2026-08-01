@@ -1056,7 +1056,7 @@ impl MvpAgent {
         let crate::session::persistence::PersistedInfo {
             summary,
             chat_history,
-            plan_state: _,
+            plan_state: restored_plan_state,
             plan_mode_state: persisted_plan_mode,
             updates_file_path,
             rewind_points_file_path,
@@ -1390,6 +1390,9 @@ impl MvpAgent {
             if restored.awaiting_plan_approval {
                 let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
+            let _ = handle.cmd_tx.send(SessionCommand::RestoreTodoBoard {
+                plan_state: restored_plan_state,
+            });
         }
         if self.product_analytics_enabled() {
             log_event(xai_grok_telemetry::events::SessionLoad {

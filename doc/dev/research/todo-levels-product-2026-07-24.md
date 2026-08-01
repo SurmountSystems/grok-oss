@@ -30,7 +30,11 @@ tree UI: write `priority` + `meta` through `todo_write`, and guard
 
 **Protected id prefixes** (`PROTECTED_TODO_PREFIXES`):
 
-`plan:`, `impl:`, `pr-`, `recon:`, `residual:`
+`plan:`, `impl:`, `pr-`, `recon:`, `residual:`, `ask:`, `feat:`, `bug:`
+
+User-reported items (same-turn board + red/green TDD): `feat:<kebab-slug>` for
+features, `bug:<kebab-slug>` for bugs/regressions. Session board only — not
+durable residual unless campaign-ranked.
 
 On full replace, existing items with those prefixes that are **not** in the
 replace payload are re-attached after the new set. Unprotected unmentioned
@@ -86,6 +90,8 @@ row content is prefixed with dim `[kind] `. No tree UI.
 - OpenCode `todowrite` full-replace semantics (positional ids, no namespaces)
 - Changing default `allow_worktree` — **done** elsewhere (OSS default false;
   see `task-worktree-pins-2026-07-24.md`)
+- Cleared-item recovery UI — **archive ring shipped** (active-only pane still);
+  see `cleared-todos-archive-2026-07-25.md`
 
 ## Key paths
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-24  
 **Mode:** research inventory (historical).  
-**Workspace:** `/home/hunter/Projects/surmount/grok-build`  
+**Workspace:** `$REPO`  
 **Also scanned:** host skills `~/.agents/skills/`, global hooks `~/.git-hooks`,  
 `~/.grok` deny + PreToolUse, bundled `create-workflow` skill.
 
@@ -11,7 +11,7 @@
 script + `.grok/workflows`, dual residual FORK Process entry. This file is
 the pre-ship inventory; living SOP is the skill + recon-status join notes.
 
-> **Superseded by Slice 5 / W4.** Body sections below are a **frozen pre-ship
+> **Superseded by Slice 5 / W4.** Sections below are a **frozen pre-ship
 > snapshot** (present-tense “no X yet / not in FORK_PATHS / optional future”
 > is historical). Do **not** re-elevate those lines as open residual.
 > Living truth: FORK Process **Git recon depth**,
@@ -33,7 +33,7 @@ without violating signing or agent-commit policy.
 | **Repo scripts** | Detect, import, put-history (real cherry-pick), join (`-s ours`), assert pins, sync | Solid mechanics; stop on conflict; human must sign continues / join |
 | **Docs** | `docs/upstream-history.md` HITL runbook, onto-log, git-workflow, FORK/AGENTS | Compaction-safe if re-read; long; Live stack drifts |
 | **Host skill** | `upstream-export-import` — direction table, hard rules, spawn-first | Orchestration prose, not an executable state machine |
-| **PR skill** | `pr-babysit` — merge-not-rebase, stage + hand commit | Some older body lines still show bare `git commit` examples (policy override at top) |
+| **PR skill** | `pr-babysit` — merge-not-rebase, stage + hand commit | Some older skill-text lines still show bare `git commit` examples (policy override at top) |
 | **GPG guards** | global pre/post-commit, PreToolUse, config.toml deny | Agents cannot create/bypass unsigned tips; good |
 | **Rhai workflows** | Product supports them (`create-workflow`); **no** repo/user git-recon `.rhai` yet *(superseded — `.grok/workflows/git-recon-status.rhai` + FORK_PATHS)* | Opportunity: fan-out conflict resolve + gates; cannot own GPG |
 | **Signing** | Every new object under `commit.gpgsign=true` wants a signature | Upstream tip commits unsigned OK as parents; **our** stack commits + join need sign |
@@ -50,7 +50,7 @@ without violating signing or agent-commit policy.
 
 ## 1. Existing tooling map
 
-### 1.1 Repo scripts (`/home/hunter/Projects/surmount/grok-build/scripts/`)
+### 1.1 Repo scripts (`$REPO/scripts/`)
 
 | Script | Role | Commits? | Notes |
 |--------|------|----------|-------|
@@ -180,7 +180,7 @@ xai-org/main (unsigned orphan exports; pull-only)
 - Join does **not** backfill missing process files from main — tip tree is
   sacred (`-s ours`). Missing pins on tip stay missing until re-applied.
 - Dual-pin: host skill survives import/onto; branch docs must too (`FORK_PATHS`
-  + assert). A **new skill body** on host alone does not teach collaborators
+  + assert). A **new skill pack** on host alone does not teach collaborators
   or survive operator machine loss.
 
 ### 3.4 Skill vs automation gaps
@@ -301,7 +301,7 @@ branch docs. *(Write-time: “Today `.grok/workflows` is **not** in
 
 **Dual-pin law for any new git-recon skill:**
 
-1. Host skill body (operator).  
+1. Host skill pack (operator).  
 2. Branch pointer: short section in `docs/upstream-history.md` and/or
    `AGENTS.md` § onto + link to this research.  
 3. If shipping a Rhai workflow for the team: add path to `FORK_PATHS` +
@@ -370,14 +370,14 @@ HITL runbook, global GPG guards, upstream-export-import skill hard rules.
 
 ## 9. Sources (paths)
 
-- `/home/hunter/Projects/surmount/grok-build/scripts/{put-history-on-xai,join-main-into-onto,import-upstream-export,detect-upstream-export,sync-upstream,assert-process-pins,replay-onto-upstream}.sh`
-- `/home/hunter/Projects/surmount/grok-build/docs/{upstream-history,upstream-onto-log,git-workflow}.md`
-- `/home/hunter/Projects/surmount/grok-build/AGENTS.md`, `FORK.md`
-- `/home/hunter/.agents/skills/upstream-export-import/SKILL.md`
-- `/home/hunter/.agents/skills/pr-babysit/SKILL.md`
-- `/home/hunter/.git-hooks/{pre-commit,post-commit,README.md}`
-- `/home/hunter/.grok/{AGENTS.md,config.toml,hooks/block-unsigned-git-commit.*}`
-- `/home/hunter/.grok/bundled/skills/create-workflow/SKILL.md`
+- `$REPO/scripts/{put-history-on-xai,join-main-into-onto,import-upstream-export,detect-upstream-export,sync-upstream,assert-process-pins,replay-onto-upstream}.sh`
+- `$REPO/docs/{upstream-history,upstream-onto-log,git-workflow}.md`
+- `$REPO/AGENTS.md`, `FORK.md`
+- `~/.agents/skills/upstream-export-import/SKILL.md`
+- `~/.agents/skills/pr-babysit/SKILL.md`
+- `~/.git-hooks/{pre-commit,post-commit,README.md}`
+- `~/.grok/{AGENTS.md,config.toml,hooks/block-unsigned-git-commit.*}`
+- `~/.grok/bundled/skills/create-workflow/SKILL.md`
 - Prior research: `doc/dev/research/skills-survive-upstream-recon-2026-07-24.md`,
   `fork-paths-hardening-2026-07-24.md`
 

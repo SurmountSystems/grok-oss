@@ -4,7 +4,147 @@
     use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
 
     #[test]
-    fn exit_plan_mode_auto_opens_inline_cursor_plan_preview() {
+    fn exit_plan_mode_soft_parks_with_toast_not_modal() {
+        // Default soft park: durable approval + toast + auto-open non-capturing
+        // side panel (not fullscreen modal). Live draft kept. Option C card too.
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("still drafting");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Cursor Plan"));
+
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+
+        assert!(agent.plan_approval_view.is_some(), "approval must park durably");
+        let viewer = agent
+            .line_viewer
+            .as_ref()
+            .expect("soft park must auto-open the plan side panel");
+        assert!(
+            viewer.side_panel && !viewer.fullscreen,
+            "soft park auto-open must be side panel, not fullscreen modal"
+        );
+        assert!(
+            viewer.plan_ref().is_some_and(|p| p.feedback_active),
+            "soft park auto-open must arm approval footer CTAs (feedback_active)"
+        );
+        assert_eq!(
+            viewer.markdown_content_for_test(),
+            Some("# Cursor Plan")
+        );
+        assert_eq!(
+            agent.active_pane,
+            crate::views::agent::ActivePane::Prompt,
+            "soft park must focus Prompt so typing is not trapped"
+        );
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|p| p.focus),
+            Some(crate::views::plan_approval_view::PlanApprovalFocus::Prompt),
+            "soft park keeps Prompt focus with live draft"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some(crate::views::plan_approval_view::PLAN_PARKED_TOAST),
+            "soft park must show the review toast"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "still drafting",
+            "soft park must not clear the live prompt"
+        );
+        assert_eq!(
+            crate::views::plan_approval_view::plan_approval_status_label(true),
+            "Plan ready. Side panel open"
+        );
+        // Option C: transcript card present with plan preview + CTA legend.
+        assert!(
+            agent.scrollback.len() >= 1,
+            "soft park must commit an inline plan card"
+        );
+        assert_eq!(
+            agent.plan_card_committed_id.as_deref(),
+            Some("create-plan-call")
+        );
+        let card = match &agent.scrollback.entry(agent.scrollback.len() - 1).unwrap().block {
+            crate::scrollback::block::RenderBlock::AgentMessage(b) => b.text(),
+            other => panic!("expected plan card agent message, got {other:?}"),
+        };
+        assert!(
+            card.contains("# Cursor Plan")
+                && card.contains(crate::views::plan_approval_view::PLAN_CARD_CTAS),
+            "card must embed plan body and CTAs; got {card:?}"
+        );
+    }
+
+    #[test]
+    fn exit_plan_mode_force_modal_when_plan_approval_park_modal() {
+        // Option D: [ui] plan_approval_park = "modal" opens the line-viewer
+        // immediately as fullscreen (no soft toast-only park / no side panel).
+        let mut app = make_app_with_agent("sess-1");
+        app.current_ui.plan_approval_park = Some("modal".into());
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("draft must be stashed");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Modal Plan"));
+
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.plan_approval_view.is_some());
+        assert!(
+            agent.line_viewer.is_some(),
+            "force-modal must open the plan line-viewer"
+        );
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .and_then(|v| v.markdown_content_for_test()),
+            Some("# Modal Plan")
+        );
+        let viewer = agent.line_viewer.as_ref().unwrap();
+        assert!(
+            viewer.fullscreen && !viewer.side_panel,
+            "force-modal must open fullscreen, not side panel"
+        );
+        // Not soft-park: no PLAN_PARKED_TOAST and no transcript card commit.
+        assert_ne!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some(crate::views::plan_approval_view::PLAN_PARKED_TOAST),
+            "force-modal must not show soft-park toast"
+        );
+        assert!(
+            agent.plan_card_committed_id.is_none(),
+            "force-modal must not commit the soft-park transcript card"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "",
+            "force-modal reopen must clear live prompt"
+        );
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .map(|p| p.stashed_prompt.text.as_str()),
+            Some("draft must be stashed"),
+            "force-modal must stash the live draft"
+        );
+    }
+
+    #[test]
+    fn exit_plan_mode_soft_park_reopen_opens_side_panel() {
+        // Soft park already auto-opens the side panel. Explicit reopen (after
+        // dismiss) still docks as side panel with CTAs — not fullscreen.
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -14,16 +154,23 @@
             make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Cursor Plan"));
 
         assert!(handle_exit_plan_mode(ext, &mut app));
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-
-        assert!(agent.plan_approval_view.is_some());
-        assert_eq!(
-            agent
-                .line_viewer
-                .as_ref()
-                .and_then(|v| v.markdown_content_for_test()),
-            Some("# Cursor Plan")
-        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let viewer = agent.line_viewer.as_ref().expect("auto-open side panel");
+            assert!(viewer.side_panel, "auto-open must dock as side panel");
+            assert!(!viewer.fullscreen, "auto-open must not force fullscreen");
+            // Dismiss then reopen via /view-plan path.
+            agent.line_viewer = None;
+            agent.reopen_plan_approval();
+            let viewer = agent.line_viewer.as_ref().expect("side panel after reopen");
+            assert!(viewer.side_panel, "reopen must dock as side panel");
+            assert!(!viewer.fullscreen, "reopen must not force fullscreen");
+            assert!(
+                viewer.plan_ref().is_some_and(|p| p.feedback_active),
+                "side panel footer CTAs must be active"
+            );
+            assert_eq!(viewer.markdown_content_for_test(), Some("# Cursor Plan"));
+        }
     }
 
     #[test]
@@ -86,25 +233,31 @@
         let (ext, _rx) = make_exit_plan_ext(None);
 
         assert!(handle_exit_plan_mode(ext, &mut app));
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-
-        let pav = agent
-            .plan_approval_view
-            .as_ref()
-            .expect("plan_approval_view must be set");
-        assert!(!pav.has_plan);
-        assert_eq!(
-            pav.focus,
-            crate::views::plan_approval_view::PlanApprovalFocus::Preview,
-            "empty approval must keep Preview focus once the placeholder opens"
-        );
-        assert_eq!(
-            agent
-                .line_viewer
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let pav = agent
+                .plan_approval_view
                 .as_ref()
-                .and_then(|v| v.markdown_content_for_test()),
-            Some(crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER)
-        );
+                .expect("plan_approval_view must be set");
+            assert!(!pav.has_plan);
+            assert_eq!(
+                pav.focus,
+                crate::views::plan_approval_view::PlanApprovalFocus::Prompt,
+                "soft park focuses Prompt so L1 typing is live (modal-free)"
+            );
+            assert_eq!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .and_then(|v| v.markdown_content_for_test()),
+                Some(crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER),
+                "empty plan auto-opens placeholder panel"
+            );
+            assert_eq!(
+                agent.toast.as_ref().map(|(m, _)| m.as_str()),
+                Some(crate::views::plan_approval_view::PLAN_PARKED_TOAST)
+            );
+        }
     }
 
     #[test]
@@ -129,13 +282,18 @@
             make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Cursor Plan"));
         assert!(handle_exit_plan_mode(ext, &mut app));
 
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.active_modal.is_none(),
-            "exit_plan_mode must dismiss the open modal so the plan preview is visible"
-        );
-        assert!(agent.plan_approval_view.is_some());
-        assert!(agent.line_viewer.is_some());
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.active_modal.is_none(),
+                "auto-open panel must dismiss the open modal so the plan is visible"
+            );
+            assert!(agent.plan_approval_view.is_some());
+            assert!(
+                agent.line_viewer.as_ref().is_some_and(|v| v.side_panel),
+                "soft park must auto-open side panel"
+            );
+        }
     }
 
     #[test]
@@ -156,13 +314,18 @@
             make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Cursor Plan"));
         assert!(handle_exit_plan_mode(ext, &mut app));
 
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.block_viewer.is_none(),
-            "exit_plan_mode must dismiss open block_viewer so the plan can scroll"
-        );
-        assert!(agent.plan_approval_view.is_some());
-        assert!(agent.line_viewer.is_some());
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.block_viewer.is_none(),
+                "auto-open panel must dismiss block_viewer so the plan can scroll"
+            );
+            assert!(agent.plan_approval_view.is_some());
+            assert!(
+                agent.line_viewer.as_ref().is_some_and(|v| v.side_panel),
+                "soft park must auto-open side panel"
+            );
+        }
     }
 
     #[test]

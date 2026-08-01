@@ -729,6 +729,34 @@ pub fn report_signed_in(auth: &GrokAuth) {
         Some(ref email) => eprintln!("✓ Signed in as {email}"),
         None => eprintln!("✓ Signed in"),
     }
+    report_stored_supergrok_principals_if_multi();
+}
+
+/// After login, if auth.json holds 2+ SuperGrok principals, print labels +
+/// fingerprints (same honesty as console multi-add / doctor). No-op on one.
+fn report_stored_supergrok_principals_if_multi() {
+    let home = crate::util::grok_home::grok_home();
+    let path = home.join("auth.json");
+    let Ok(map) = super::storage::read_auth_json(&path) else {
+        return;
+    };
+    let listings = super::model::list_supergrok_principal_listings(&map);
+    if listings.len() < 2 {
+        return;
+    }
+    eprintln!(
+        "SuperGrok sessions stored ({}): labels and fingerprints only",
+        listings.len()
+    );
+    for (i, p) in listings.iter().enumerate() {
+        eprintln!(
+            "  {}. {} ({}) · fingerprint {}",
+            i + 1,
+            p.role_label,
+            p.mode_label,
+            p.fingerprint
+        );
+    }
 }
 /// CLI auth entrypoint. For GUI, use `run_auth_flow_with_stderr_bridge`.
 pub async fn ensure_authenticated(
@@ -955,6 +983,16 @@ pub fn perform_logout(
         if let Some(scope) = scope {
             auth_manager.remove_scope(scope)?;
         } else {
+            // Logout of current SuperGrok identity: drop its multi-slot too.
+            // Sibling SuperGrok principals (other multi-slots) stay so personal
+            // + Business multi-login is not wiped by logging out only one.
+            if let Some(ref a) = auth {
+                let base = auth_manager.grok_com_config().auth_scope();
+                let multi = super::model::multi_slot_scope_for_auth(&base, a);
+                if multi != base {
+                    let _ = auth_manager.remove_scope(&multi);
+                }
+            }
             auth_manager.clear()?;
         }
         clear_orphan_managed_config();

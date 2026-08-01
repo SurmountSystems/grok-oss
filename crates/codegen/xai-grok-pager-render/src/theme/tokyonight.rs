@@ -350,8 +350,8 @@ pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
 
     let t = tick as f32 * speed;
 
-    // sin²(t + phase) gives smooth 0-1 oscillation
-    let sin_val = (t + phase).sin();
+    // sin²(t - phase): traveling wave toward increasing row (down the rail).
+    let sin_val = (t - phase).sin();
     sin_val * sin_val
 }
 

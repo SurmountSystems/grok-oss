@@ -22,6 +22,7 @@ use crate::theme::ThemeKind;
 static SYNTECT_GROKNIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_TOKYONIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_GROKDAY: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_DOGE: OnceLock<Syntect> = OnceLock::new();
 
 /// Convert syntect style to ratatui foreground-only style, quantized for terminal color support (or polarity-safe under the terminal-native lock).
 pub fn syntect_to_ratatui_fg(style: syntect::highlighting::Style) -> Style {
@@ -126,11 +127,19 @@ pub fn get_syntect() -> &'static Syntect {
         | ThemeKind::Terminal
         | ThemeKind::Auto => SYNTECT_GROKNIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-night.tmTheme"))),
+        ThemeKind::Doge => {
+            SYNTECT_DOGE.get_or_init(|| Syntect::new(include_bytes!("../assets/doge.tmTheme")))
+        }
         ThemeKind::TokyoNight => SYNTECT_TOKYONIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme"))),
         ThemeKind::GrokDay => SYNTECT_GROKDAY
             .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-day.tmTheme"))),
     }
+}
+
+/// Bytes of the bundled pure-primary DOGE syntax theme (tests + diagnostics).
+pub fn doge_tmtheme_bytes() -> &'static [u8] {
+    include_bytes!("../assets/doge.tmTheme")
 }
 
 #[cfg(test)]

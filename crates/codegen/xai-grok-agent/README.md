@@ -71,11 +71,11 @@ description: What this agent does
 # ... additional config fields
 ---
 
-System prompt body goes here...
+System prompt text goes here...
 ```
 
 The **frontmatter** (between `---` delimiters) is YAML configuration.
-The **body** (after the closing `---`) is the system prompt content.
+The **markdown after** the closing `---` is the system prompt content.
 
 ### Minimal example (extends base template)
 
@@ -128,7 +128,7 @@ Date: ${{ current_date }}
 </user_info>
 ```
 
-With `promptMode: full`, the body IS the complete system prompt,
+With `promptMode: full`, the prompt text IS the complete system prompt,
 rendered through MiniJinja with custom `${{ }}`/`${% %}` delimiters
 (to avoid collisions with literal `{{ }}` in prose).
 
@@ -197,7 +197,7 @@ promptMode: extend                     promptMode: full
 1. Base template (MiniJinja)           1. Markdown body (MiniJinja, ${{ }}/${% %})
    (work policy, formatting,           2. AGENTS.md section (if agentsMd: true)
     user_info, background tasks)       3. Skills section
-2. Markdown body (appended raw)
+2. Markdown prompt (appended raw)
 3. AGENTS.md section (if agentsMd: true)
 4. Skills section
 ```

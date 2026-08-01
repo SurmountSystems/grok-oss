@@ -278,11 +278,14 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         });
         if let Some((id, expected_version)) = fire {
             if let Some(agent) = app.agents.get_mut(&aid) {
-                // Same arming contract as `dispatch_queue_interject_shared`.
-                super::super::dispatch::arm_send_now_and_paint(agent, &id, None);
+                // Soft only — mirror `dispatch_queue_interject_shared`. Never
+                // arm send-now cancel or paint a cancel-and-send user block;
+                // multi-client paint is the shell interjection broadcast.
+                agent.suppress_parked_marker_on_interject();
+                agent.show_toast("Interjection sent");
             }
             crate::unified_log::info(
-                "prompt.queue_send_now_confirmed",
+                "prompt.queue_interject_confirmed",
                 Some(&session_id),
                 Some(serde_json::json!({ "prompt_id": id, "version": expected_version })),
             );

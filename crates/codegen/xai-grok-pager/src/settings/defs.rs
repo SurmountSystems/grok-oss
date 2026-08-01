@@ -466,6 +466,46 @@ const CONTEXTUAL_HINTS_CHILDREN: &[&str] = &[
     "contextual_hints.ssh_wrap",
 ];
 
+/// Canonical string for the registry default (must match
+/// `xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`).
+pub(crate) const AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL: &str = "95";
+
+const AUTO_COMPACT_THRESHOLD_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "85",
+        display: "85%",
+        description: "Compact earlier. Frees context sooner, more frequent summaries.",
+    },
+    EnumChoice {
+        canonical: "90",
+        display: "90%",
+        description: "Compact a bit earlier than the default.",
+    },
+    EnumChoice {
+        canonical: "95",
+        display: "95%",
+        description: "Default. Compact when the context window is nearly full.",
+    },
+    EnumChoice {
+        canonical: "98",
+        display: "98%",
+        description: "Compact as late as practical. Longer threads before summarising.",
+    },
+    EnumChoice {
+        canonical: "200k",
+        display: "200k tokens",
+        description: "Grok 4.5 long-context price cliff (same cap Economic mode uses). \
+                      Stay at short-context rates (entire request doubles above 200k).",
+    },
+    EnumChoice {
+        canonical: "475k",
+        display: "475k tokens",
+        description: "95% of the Grok 4.5 500k catalog window as an absolute budget. \
+                      With Economic mode on the effective window is already 200k, so \
+                      prefer 200k tokens or a percent threshold instead.",
+    },
+];
+
 /// Build the catalog; called once at process start via `SettingsRegistry::defaults()`.
 pub fn default_settings() -> Vec<SettingMeta> {
     // The shell schema defaults are the registry's source of truth
@@ -487,6 +527,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "hide_header",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shared,
+            label: "Hide header",
+            description: "Hide chrome headers for more content space: agent status bar, \
+                          welcome location top bar, and dashboard location header. \
+                          Fullscreen UI only; ignored in minimal mode.",
+            keywords: &[
+                "header",
+                "status",
+                "bar",
+                "hide",
+                "chrome",
+                "status bar",
+                "context",
+                "welcome",
+                "dashboard",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.hide_header,
+            },
+            restart_required: false,
+            hidden_in_minimal: true,
         },
         SettingMeta {
             key: "screen_mode",
@@ -576,6 +641,33 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
+        },
+        SettingMeta {
+            key: "scrub_ascii_punct",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shared,
+            label: "ASCII-safe assistant punctuation",
+            description: "Replace em/en dashes, smart quotes, and invisible Unicode spaces in \
+                          assistant text with ASCII-safe forms (default on). Turn off to keep \
+                          curly quotes and fancy dashes. Ops kill-switch: GROK_SCRUB_ASCII_PUNCT=0. \
+                          Agent requests to disable still need your approval.",
+            keywords: &[
+                "ascii",
+                "scrub",
+                "punctuation",
+                "dash",
+                "quote",
+                "emdash",
+                "curly",
+                "unicode",
+                "zwsp",
+                "nbsp",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.scrub_ascii_punct_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
         },
         SettingMeta {
             key: "combine_queued_prompts",
@@ -1276,6 +1368,62 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        // SHARED: `[ui].plan_approval_park` — soft toast (default) vs force modal
+        // when exit_plan_mode parks (option D).
+        SettingMeta {
+            key: "plan_approval_park",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Plan approval park",
+            description: "When the agent finishes planning: soft parks with a side panel \
+                          + toast (default), or opens the fullscreen approval modal immediately.",
+            keywords: &[
+                "plan",
+                "approval",
+                "park",
+                "modal",
+                "soft",
+                "toast",
+                "exit_plan_mode",
+                "view-plan",
+            ],
+            kind: SettingKind::Enum {
+                default: UiConfig::PLAN_APPROVAL_PARK_DEFAULT,
+                choices: PLAN_APPROVAL_PARK_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHARED: `[ui].cancel_subagents_on_turn_cancel` — sticky cancel picker.
+        // Written by the cancel-turn "Always…" choices; also searchable here.
+        SettingMeta {
+            key: "cancel_subagents_on_turn_cancel",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Cancel subagents with turn",
+            description: "When you cancel a parent turn that still has running subagents: \
+                          ask each time (default), always stop them, or always leave them running.",
+            keywords: &[
+                "cancel",
+                "subagent",
+                "subagents",
+                "stop",
+                "turn",
+                "ctrl+c",
+                "always",
+                "ask",
+                "continue",
+                "leave",
+            ],
+            kind: SettingKind::Enum {
+                default: "ask",
+                choices: CANCEL_SUBAGENTS_ON_TURN_CANCEL_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned: `[ui].auto_run_implement` + process-wide cache. Default ON
         // for discoverability — auto-queues a sentence-leading `/implement`
         // follow-up from the prior user prompt after a successful turn.
@@ -1288,8 +1436,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           /implement block (from the /implement token through end of message) \
                           from a user-prompt follow-up or a trailing residual in the assistant \
                           reply. Prefer leaving “Next implement prompt” near the end of the \
-                          reply. When Economic mode is on, auto-queued blocks clamp explicit \
-                          --effort above 1 down to 1 (single reviewer).",
+                          reply. Explicit --effort N on the block is honored as written.",
             keywords: &[
                 "implement",
                 "auto",
@@ -1306,7 +1453,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "multi-line",
                 "multiline",
                 "effort",
-                "economic",
             ],
             kind: SettingKind::Bool {
                 default: ui_default.auto_run_implement.unwrap_or(true),
@@ -1316,7 +1462,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned: `[ui].economic_mode` + process-wide cache. Default ON —
         // soft-caps effective context at the Grok 4.5 long-context price cliff
-        // (200K) and clamps auto-queued /implement --effort to 1. Override per
+        // (200K). Does not rewrite auto-run /implement --effort. Override per
         // conversation with `/economic-mode`.
         SettingMeta {
             key: "economic_mode",
@@ -1326,8 +1472,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Cap effective context at 200K tokens so Grok 4.5 requests stay on the \
                           lower pricing tier (prices double above 200K for the entire request). \
                           Catalog context remains larger (e.g. 500K); compaction, the context \
-                          bar, and auto-compact % thresholds use the capped size. Also clamps \
-                          auto-run /implement --effort above 1 to 1. Default on. Override for \
+                          bar, and auto-compact % thresholds use the capped size. Does not \
+                          change explicit /implement --effort. Default on. Override for \
                           one conversation with /economic-mode. Pair with Auto-compact at → \
                           200k tokens to summarise before the cliff on uncapped sessions.",
             keywords: &[
@@ -1355,8 +1501,95 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        // SHELL-owned: auto return-from-away recap (`[ui.notifications] session_recap`).
+        // Live-applied to NotificationService; does not gate manual `/recap`.
+        SettingMeta {
+            key: "notifications.session_recap",
+            category: SettingCategory::Session,
+            owner: SettingOwner::Shell,
+            label: "Auto session recap",
+            description: "When you return to the terminal after being away, show a short \
+                          \"where was I\" recap. Manual /recap still works when this is off. \
+                          To disable all recaps (including /recap), use Master session recap \
+                          or GROK_SESSION_RECAP=0.",
+            keywords: &[
+                "recap",
+                "session",
+                "summarize",
+                "summarise",
+                "away",
+                "return",
+                "auto",
+                "notification",
+                "where",
+                "was",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.notifications.session_recap.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned: auto recap debounce (`[ui.notifications] session_recap_threshold_secs`).
+        SettingMeta {
+            key: "notifications.session_recap_threshold_secs",
+            category: SettingCategory::Session,
+            owner: SettingOwner::Shell,
+            label: "Auto recap after (seconds)",
+            description: "Minimum seconds the terminal must be unfocused before an automatic \
+                          session recap may be offered on return. Debounces quick tab switches. \
+                          The shell still enforces its own idle gates (e.g. minutes since last turn).",
+            keywords: &[
+                "recap",
+                "threshold",
+                "seconds",
+                "debounce",
+                "away",
+                "unfocused",
+                "idle",
+                "session",
+            ],
+            kind: SettingKind::Int {
+                default: ui_default
+                    .notifications
+                    .session_recap_threshold_secs
+                    .unwrap_or(30) as i64,
+                min: 5,
+                max: 3600,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned master: `[features] session_recap` (and env GROK_SESSION_RECAP).
+        // Restart-required so the shell re-advertises sessionRecap on ACP initialize.
+        SettingMeta {
+            key: "features.session_recap",
+            category: SettingCategory::Session,
+            owner: SettingOwner::Shell,
+            label: "Master session recap",
+            description: "Enable session recap at all: manual /recap and auto return-from-away. \
+                          Off kills both (same as GROK_SESSION_RECAP=0). Restart required so the \
+                          shell re-advertises the gate. Prefer Auto session recap off if you only \
+                          want to stop automatic recaps.",
+            keywords: &[
+                "recap",
+                "session",
+                "feature",
+                "master",
+                "kill",
+                "disable",
+                "enable",
+                "summarize",
+                "summarise",
+                "env",
+            ],
+            kind: SettingKind::Bool { default: true },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned dual auto-compact preference (percent or absolute tokens).
-        // Restart-required: sessions resolve the threshold once at build time.
+        // Live-applied: PersistSetting → ACP x.ai/auto_compact_threshold_changed
+        // updates open session Cells (same shape as model-switch threshold write).
         // Key kept as auto_compact_threshold_percent for config.toml continuity;
         // token choices write `[session].auto_compact_threshold_tokens` instead.
         SettingMeta {
@@ -1369,7 +1602,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           (with Economic mode on, the window is soft-capped at 200k), or a \
                           fixed token count (Grok 4.5 card: 200k = long-context price cliff \
                           where costs double for the entire request; 475k = 95% of 500k — \
-                          useful when Economic mode is off). Restart required for open sessions.",
+                          useful when Economic mode is off). Applies to open sessions live.",
             keywords: &[
                 "auto",
                 "compact",
@@ -1396,7 +1629,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 choices: AUTO_COMPACT_THRESHOLD_CHOICES,
                 supports_preview: false,
             },
-            restart_required: true,
+            restart_required: false,
             hidden_in_minimal: false,
         },
         // SHELL-owned startup-time settings (restart_required: true).
@@ -1624,9 +1857,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.send_now",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
-            label: "Send now",
+            label: "Interject tip",
             description: "After you queue a follow-up mid-turn, remind you that Enter \
-                          on an empty prompt sends the top queued item now.",
+                          on an empty prompt soft-interjects the top queued item.",
             keywords: &[
                 "send",
                 "now",

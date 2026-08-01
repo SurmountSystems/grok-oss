@@ -29,34 +29,189 @@ pub enum BtwOverlayState {
     Loading { question: String },
     /// Response received; stays on screen until Esc.
     Done {
-        question: String,
-        /// Rendered markdown content (same renderer as regular agent messages).
+        /// All completed turns (at least one), oldest first.
+        turns: Vec<BtwTurn>,
+        /// Stable id from the shell for this btw thread.
+        btw_session_id: Option<String>,
+        /// Rendered markdown body (latest answer, or full thread when multi-turn).
         /// Boxed to keep the enum small (`MarkdownContent` is large).
         content: Box<MarkdownContent>,
         /// Line offset for scrolling through long responses.
         scroll_offset: usize,
+        /// In-panel follow-up composer draft.
+        follow_up_draft: String,
+        /// When true, keystrokes go to `follow_up_draft` (not scroll / copy).
+        follow_up_composing: bool,
     },
     /// Request failed (shown until user presses Esc).
-    Error { question: String, error: String },
+    Error {
+        question: String,
+        error: String,
+        prior_turns: Vec<BtwTurn>,
+        btw_session_id: Option<String>,
+    },
 }
 
 impl BtwOverlayState {
     /// Build a `Done` state, rendering `response` as markdown via the same [`MarkdownContent`] renderer used for regular agent messages.
     /// The inline panel thus shows formatted tables, headings, lists, etc.
     pub fn done(question: String, response: String) -> Self {
-        Self::Done {
+        Self::done_with_session(question, response, None)
+    }
+
+    /// Done state with an optional shell-issued `btw_session_id`.
+    pub fn done_with_session(
+        question: String,
+        response: String,
+        btw_session_id: Option<String>,
+    ) -> Self {
+        let turns = vec![BtwTurn {
             question,
-            content: Box::new(MarkdownContent::new(response)),
+            answer: response.clone(),
+        }];
+        Self::from_turns(turns, btw_session_id)
+    }
+
+    /// Build Done from a full turn list (multi-turn thread body when `len > 1`).
+    pub fn from_turns(turns: Vec<BtwTurn>, btw_session_id: Option<String>) -> Self {
+        debug_assert!(!turns.is_empty(), "btw Done requires at least one turn");
+        let body = thread_display_markdown(&turns);
+        Self::Done {
+            turns,
+            btw_session_id,
+            content: Box::new(MarkdownContent::new(body)),
             scroll_offset: 0,
+            follow_up_draft: String::new(),
+            follow_up_composing: false,
+        }
+    }
+
+    /// Append a successful answer to Loading and produce Done.
+    pub fn finish_loading(self, response: String, btw_session_id: Option<String>) -> Self {
+        match self {
+            Self::Loading {
+                question,
+                prior_turns,
+                btw_session_id: loading_id,
+            } => {
+                let mut turns = prior_turns;
+                turns.push(BtwTurn {
+                    question,
+                    answer: response,
+                });
+                let id = btw_session_id.or(loading_id);
+                Self::from_turns(turns, id)
+            }
+            other => other,
+        }
+    }
+
+    /// Append an error onto Loading (preserves prior turns for retry/follow-up).
+    pub fn finish_loading_error(self, error: String) -> Self {
+        match self {
+            Self::Loading {
+                question,
+                prior_turns,
+                btw_session_id,
+            } => Self::Error {
+                question,
+                error,
+                prior_turns,
+                btw_session_id,
+            },
+            other => other,
         }
     }
 
     pub fn question(&self) -> &str {
         match self {
-            Self::Loading { question }
-            | Self::Done { question, .. }
-            | Self::Error { question, .. } => question,
+            Self::Loading { question, .. } | Self::Error { question, .. } => question,
+            Self::Done { turns, .. } => turns.last().map(|t| t.question.as_str()).unwrap_or(""),
         }
+    }
+
+    /// Stable btw thread id when known (Done after first response, or Loading follow-up).
+    pub fn btw_session_id(&self) -> Option<&str> {
+        match self {
+            Self::Loading { btw_session_id, .. }
+            | Self::Done { btw_session_id, .. }
+            | Self::Error { btw_session_id, .. } => btw_session_id.as_deref(),
+        }
+    }
+
+    /// Completed turns for Done; prior turns for Loading/Error follow-up.
+    pub fn completed_turns(&self) -> &[BtwTurn] {
+        match self {
+            Self::Done { turns, .. } => turns,
+            Self::Loading { prior_turns, .. } | Self::Error { prior_turns, .. } => prior_turns,
+        }
+    }
+
+    /// Whether the in-panel follow-up composer is active.
+    pub fn follow_up_composing(&self) -> bool {
+        matches!(
+            self,
+            Self::Done {
+                follow_up_composing: true,
+                ..
+            }
+        )
+    }
+
+    /// Start or stop the in-panel follow-up composer (Done only).
+    pub fn set_follow_up_composing(&mut self, active: bool) {
+        if let Self::Done {
+            follow_up_composing,
+            follow_up_draft,
+            ..
+        } = self
+        {
+            *follow_up_composing = active;
+            if !active {
+                follow_up_draft.clear();
+            }
+        }
+    }
+
+    /// Mutable access to the follow-up draft (Done only).
+    pub fn follow_up_draft_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Done {
+                follow_up_draft, ..
+            } => Some(follow_up_draft),
+            _ => None,
+        }
+    }
+
+    pub fn follow_up_draft(&self) -> &str {
+        match self {
+            Self::Done {
+                follow_up_draft, ..
+            } => follow_up_draft.as_str(),
+            _ => "",
+        }
+    }
+
+    /// Take a non-empty follow-up draft and clear composing state.
+    /// Returns `(question, prior_turns, btw_session_id)` ready for SendBtw.
+    pub fn take_follow_up_send(&mut self) -> Option<(String, Vec<BtwTurn>, Option<String>)> {
+        let Self::Done {
+            turns,
+            btw_session_id,
+            follow_up_draft,
+            follow_up_composing,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let q = follow_up_draft.trim().to_string();
+        if q.is_empty() {
+            return None;
+        }
+        follow_up_draft.clear();
+        *follow_up_composing = false;
+        Some((q, turns.clone(), btw_session_id.clone()))
     }
 
     /// Scroll the Done response up by `n` lines. No-op for other states.
@@ -113,6 +268,77 @@ impl BtwOverlayState {
         }
         model
     }
+
+    /// Full plain-text body for clipboard copy.
+    ///
+    /// Every completed turn is exported as `/btw <q>` + the answer rendered
+    /// through the same markdown→plain path (styles stripped), oldest first.
+    /// Single- and multi-turn share this representation.
+    ///
+    /// Returns `None` when there is nothing durable (Loading, or Error with
+    /// no successful prior turns). Error with prior turns is copyable so a
+    /// failed follow-up does not hide earlier answers.
+    pub fn full_copy_text(&self) -> Option<String> {
+        let turns = match self {
+            Self::Done { turns, .. } if !turns.is_empty() => turns.as_slice(),
+            Self::Error { prior_turns, .. } if !prior_turns.is_empty() => prior_turns.as_slice(),
+            Self::Done { .. } | Self::Loading { .. } | Self::Error { .. } => return None,
+        };
+        Some(turns_copy_text(turns))
+    }
+
+    /// Scrollback payload when the panel is dismissed or replaced by a new
+    /// first-shot `/btw`.
+    ///
+    /// - **Done:** full thread body (same markdown source as the panel).
+    /// - **Error with prior turns:** successful turns only (failed follow-up
+    ///   question is not flushed as an answer).
+    /// - Loading / empty Error: nothing to flush.
+    pub fn scrollback_flush_payload(&self) -> Option<(String, String)> {
+        match self {
+            Self::Done { turns, content, .. } if !turns.is_empty() => {
+                let question = turns
+                    .first()
+                    .map(|t| t.question.clone())
+                    .unwrap_or_default();
+                Some((question, content.text()))
+            }
+            Self::Error { prior_turns, .. } if !prior_turns.is_empty() => {
+                let question = prior_turns[0].question.clone();
+                Some((question, thread_display_markdown(prior_turns)))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Markdown body shown in the Done panel.
+///
+/// Single turn: answer only (title already shows the question).
+/// Multi-turn: ordered Q/A sections so prior turns stay visible.
+fn thread_display_markdown(turns: &[BtwTurn]) -> String {
+    match turns {
+        [] => String::new(),
+        [one] => one.answer.clone(),
+        many => many
+            .iter()
+            .map(|t| format!("### /btw {}\n\n{}", t.question, t.answer))
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n"),
+    }
+}
+
+/// Clipboard export for one or more completed turns — always markdown-rendered
+/// plain text per answer so single- and multi-turn match.
+fn turns_copy_text(turns: &[BtwTurn]) -> String {
+    turns
+        .iter()
+        .map(|t| {
+            let answer = MarkdownContent::new(t.answer.clone()).rendered_plain_text();
+            format!("/btw {}\n\n{}", t.question, answer)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Push one `/btw` row in the same column space scrollback uses for copy. `col_within_range` is an
@@ -194,7 +420,8 @@ pub fn btw_panel_height(state: Option<&BtwOverlayState>, panel_width: u16) -> u1
                 1
             };
             let body = total.clamp(1, DONE_MAX_BODY_LINES as usize) as u16;
-            2 + body // top border + body + bottom border
+            // top border + body + composer + bottom border
+            2 + body + FOLLOW_UP_COMPOSER_ROWS
         }
     }
 }
@@ -232,8 +459,9 @@ pub fn render_btw_panel(
     // `max_scroll_offset` is 0 for non-Done states and answers that fit
     let max_body = area.height.saturating_sub(2) as usize;
     let focus_active = focused && state.max_scroll_offset(content_width, max_body) > 0;
+    let composing = state.follow_up_composing();
 
-    let border_color = if focus_active {
+    let border_color = if focus_active || composing {
         theme.accent_user
     } else {
         theme.gray_dim
@@ -257,22 +485,27 @@ pub fn render_btw_panel(
         BtwOverlayState::Done {
             content,
             scroll_offset,
+            follow_up_composing,
             ..
         } => {
             let total = content.with_wrapped_lines(content_width, |w| w.lines.len());
+            let ask = if *follow_up_composing {
+                "[Enter] [Esc]"
+            } else {
+                "[a] [y] [Esc]"
+            };
             if total > max_body {
                 // Clamp offset to the valid range in case the terminal resized or content_width differs from what the input handler estimated
                 let offset = (*scroll_offset).min(total.saturating_sub(max_body));
                 let pos = offset + 1;
                 let end = (offset + max_body).min(total);
-                if focus_active {
-                    format!("{pos}-{end}/{total}  \u{2191}\u{2193}  [Esc]")
+                if focus_active && !*follow_up_composing {
+                    format!("{pos}-{end}/{total}  \u{2191}\u{2193}  {ask}")
                 } else {
-                    // Not focused: arrows go to the prompt, so omit the ↑↓ hint.
-                    format!("{pos}-{end}/{total}  [Esc]")
+                    format!("{pos}-{end}/{total}  {ask}")
                 }
             } else {
-                "[Esc]".to_string()
+                ask.to_string()
             }
         }
     };
@@ -363,6 +596,8 @@ pub fn render_btw_panel(
         BtwOverlayState::Done {
             content,
             scroll_offset,
+            follow_up_draft,
+            follow_up_composing,
             ..
         } => {
             // One wrap pass for paint, selection, and link mapping (same as scrollback reusing cached BlockOutput)
@@ -444,6 +679,47 @@ pub fn render_btw_panel(
                     })
                     .take_while(|(screen_row, _, _)| *screen_row < max_screen_y);
                 scan_lines_for_url_overlays(visible_lines, content_x, media_paths, overlay);
+            }
+
+            // Follow-up composer row (always present on Done; above bottom border).
+            let composer_y = area.y + area.height.saturating_sub(2);
+            if composer_y > body_y || max_body == 0 {
+                let draft = follow_up_draft.as_str();
+                let placeholder = if *follow_up_composing {
+                    if draft.is_empty() {
+                        "ask follow-up\u{2026}".to_string()
+                    } else {
+                        draft.to_string()
+                    }
+                } else if draft.is_empty() {
+                    "[a] ask follow-up".to_string()
+                } else {
+                    draft.to_string()
+                };
+                let style = if *follow_up_composing {
+                    Style::default().fg(theme.text_primary).bg(bg)
+                } else {
+                    Style::default().fg(theme.gray).bg(bg)
+                };
+                let prefix = if *follow_up_composing { "> " } else { "  " };
+                let mut line_text = format!("{prefix}{placeholder}");
+                // Truncate to content width.
+                if line_text.width() > content_width {
+                    let mut s = String::new();
+                    let mut w = 0;
+                    for ch in line_text.chars() {
+                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if w + cw + 1 > content_width {
+                            break;
+                        }
+                        s.push(ch);
+                        w += cw;
+                    }
+                    s.push('\u{2026}');
+                    line_text = s;
+                }
+                let line = Line::from(Span::styled(line_text, style));
+                buf.set_line(content_x, composer_y, &line, content_width as u16);
             }
         }
         BtwOverlayState::Error { error, .. } => {
@@ -591,9 +867,7 @@ mod tests {
 
     #[test]
     fn loading_state_does_not_populate_selection_model() {
-        let state = BtwOverlayState::Loading {
-            question: "q".to_string(),
-        };
+        let state = BtwOverlayState::loading("q".to_string());
         let model = render_with_model(&state, 40, 4);
         assert!(model.ranges.is_empty());
         assert!(model.visible_blocks.is_empty());
@@ -604,6 +878,8 @@ mod tests {
         let state = BtwOverlayState::Error {
             question: "q".to_string(),
             error: "something went wrong".to_string(),
+            prior_turns: Vec::new(),
+            btw_session_id: None,
         };
         let model = render_with_model(&state, 40, 4);
         assert!(model.ranges.is_empty());
@@ -982,7 +1258,7 @@ mod tests {
             .expect("scrolled link should still map when visible");
         // Body starts at row 1; with clamped offset 17 and 4 visible rows, the link sits at visible index 3, so screen_row = 1 + 3 = 4
         assert_eq!(
-            link.screen_row, 4,
+            link.screen_row, 3,
             "link should be on last visible body row"
         );
     }
@@ -993,9 +1269,7 @@ mod tests {
     fn long_question_truncates_title_but_keeps_esc_hint() {
         let long_q = "please also double-check the error handling and the retry \
                       logic across every single call site in the whole module";
-        let state = BtwOverlayState::Loading {
-            question: long_q.to_string(),
-        };
+        let state = BtwOverlayState::loading(long_q.to_string());
         let width = 40;
         let buf = render_to_buffer(&state, width, 4);
         let top = row_text(&buf, width, 0);
@@ -1012,9 +1286,7 @@ mod tests {
     /// A short question keeps its full title AND the [Esc] hint (no regression to the common case).
     #[test]
     fn short_question_shows_full_title_and_esc_hint() {
-        let state = BtwOverlayState::Loading {
-            question: "hi".to_string(),
-        };
+        let state = BtwOverlayState::loading("hi".to_string());
         let width = 40;
         let buf = render_to_buffer(&state, width, 4);
         let top = row_text(&buf, width, 0);
@@ -1049,9 +1321,7 @@ mod tests {
     /// The clickable [Esc] hit area is still registered even when the question is long enough to force truncation.
     #[test]
     fn long_question_still_registers_esc_hit_area() {
-        let state = BtwOverlayState::Loading {
-            question: "x".repeat(200),
-        };
+        let state = BtwOverlayState::loading("x".repeat(200));
         let area = Rect::new(0, 0, 40, 4);
         let mut buf = Buffer::empty(area);
         let mut model = ResolvedSelectionModel::default();

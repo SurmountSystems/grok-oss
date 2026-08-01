@@ -8,12 +8,12 @@
 //! This FAILS without the shell re-park: no reverse-request reaches the resumed pager, so no approval chrome appears.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use super::wait_for_welcome;
-use crate::{ContentController, PtyHarness, pager_binary};
+use crate::{ContentController, MousePoint, PtyHarness, pager_binary};
 
 const DEFAULT_ROWS: u16 = 50;
 const DEFAULT_COLS: u16 = 120;
@@ -21,6 +21,12 @@ const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
 /// Turn 1 seeds the session before quit; turn 2 is the implement turn the shell injects after the resumed approval is approved.
 const SETUP_SENTINEL: &str = "GBT3703SETUP";
 const IMPLEMENT_SENTINEL: &str = "GBT3703IMPLEMENTED";
+
+/// Side-panel footer CTA strip in key-only mode (narrow panel; CI default).
+/// Separator is `"  |  "` from `line_viewer` plan-approval paint.
+const KEY_ONLY_CTA_STRIP: &str = "a  |  A  |  ?";
+/// Labeled Approve button (compact/full label modes when the panel is wide).
+const LABELED_APPROVE_CTA: &str = "a approve";
 
 const PLAN_BODY: &str = "\
 # Plan GBT3703Repro
@@ -91,12 +97,19 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     // The shell re-parks `exit_plan_mode` on resume, so approval chrome can open immediately and cover chat history
     // Prefer the chrome markers (product signal) over SETUP_SENTINEL, which may not be visible under the plan viewer
     // Without the shell re-park this times out.
+    //
+    // Markers: card header always; CTA strip is either labeled (`a approve` /
+    // `s revise`) or key-only (`a  |  A  |  ?`) when the ~45% side panel is
+    // too narrow for compact labels (120-col CI default).
     resumed
-        .wait_for_text("request changes", WELCOME_TIMEOUT)
-        .context("restored approval 'request changes' after --continue")?;
-    resumed
-        .wait_for_text("quit plan", Duration::from_secs(5))
-        .context("restored approval 'quit plan' after resume")?;
+        .wait_for_text("Plan ready for review", WELCOME_TIMEOUT)
+        .context("restored plan-ready card after resume")?;
+    wait_for_any_text(
+        &mut resumed,
+        &[LABELED_APPROVE_CTA, "s revise", KEY_ONLY_CTA_STRIP],
+        WELCOME_TIMEOUT,
+    )
+    .context("restored approval CTA chrome after --continue")?;
     let screen = resumed.screen_contents();
     if !screen.contains("approve") {
         bail!("expected approval primary action after resume\n{screen}");
@@ -112,11 +125,13 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         bail!("pager panicked\n{screen}");
     }
 
-    // Approve: the shell leaves plan mode and injects the implement turn.
-    resumed.inject_keys(b"a").context("press 'a' to approve")?;
+    // Soft-park without panel is non-capturing for bare `a`. Default park
+    // auto-opens the side panel; click its Approve CTA (not card prose /
+    // "Enter:approve" shortcut text).
+    click_plan_approve_cta(&mut resumed).context("click side-panel Approve CTA")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))
-        .context("approve must leave plan mode and start the implement turn")?;
+        .context("panel Approve must leave plan mode and start the implement turn")?;
     tokio::time::timeout(Duration::from_secs(10), implement_turn.wait_satisfied())
         .await
         .context("implement turn expectation timeout")?;

@@ -222,8 +222,9 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
+        let status_bar_height = if hide_header { 0 } else { 1 };
         let mut constraints = vec![
-            Constraint::Length(1), // StatusBar
+            Constraint::Length(status_bar_height), // StatusBar (0 when hide_header)
         ];
         let pane_gap = if top_vpad == 0 { 0u16 } else { 1 };
         if tasks_height > 0 {
@@ -231,7 +232,12 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(tasks_height));
         }
         if todo_height > 0 {
-            constraints.push(Constraint::Length(pane_gap));
+            // Always reserve one row above the todo body for Clear finished /
+            // focus top chrome (SelectionBox paints at body.y - 1). Compact and
+            // zero outer_vpad collapse `pane_gap` to 0, which previously let
+            // Clear paint into the tasks model/timer/[↗]/[x] row or status chips.
+            let todo_chrome_gap = pane_gap.max(1);
+            constraints.push(Constraint::Length(todo_chrome_gap));
             constraints.push(Constraint::Length(todo_height));
         }
         let status_gap = if top_vpad == 0 { 0u16 } else { 1 };
@@ -574,6 +580,7 @@ pub fn render_todo_chrome(
     hovered: bool,
     close_hovered: bool,
     theme: &Theme,
+    focus_border: ratatui::style::Color,
 ) -> Option<SelectionBox> {
     render_todo_chrome_with_close_label(
         buf,
@@ -584,9 +591,23 @@ pub fn render_todo_chrome(
         close_hovered,
         theme,
         None,
+        None,
+        false,
+        true,
+        focus_border,
     )
 }
 /// Like [`render_todo_chrome`], with optional close label (queue uses `[close]`).
+///
+/// `action_label` is an optional chrome control left of close (todo clear-finished
+/// icon, e.g. `[−]`). Callers decide when to pass a label: product clear-finished
+/// passes it when the todo board is **open** and finished rows exist (focused or
+/// not). No paint when the board is hidden or there is nothing to clear.
+/// `action_enabled` controls live hit vs dim paint when a label is supplied.
+/// Close and role-coloured rails stay focus/hover gated; action can paint
+/// without rails via the unfocused action-only path.
+/// `focus_border` paints the side rails when focused; hover-only uses
+/// `theme.hover_border` (see [`render_todo_chrome`]).
 #[allow(clippy::too_many_arguments)]
 pub fn render_todo_chrome_with_close_label(
     buf: &mut Buffer,
@@ -597,25 +618,50 @@ pub fn render_todo_chrome_with_close_label(
     close_hovered: bool,
     theme: &Theme,
     close_label: Option<&'static str>,
+    action_label: Option<&'static str>,
+    action_hovered: bool,
+    action_enabled: bool,
+    focus_border: ratatui::style::Color,
 ) -> Option<SelectionBox> {
     if todo_area.area() == 0 {
         return None;
     }
-    let color = if focused {
-        theme.selection_border
-    } else if hovered {
-        theme.hover_border
-    } else {
-        return None;
-    };
     let layout = HorizontalLayout::new(todo_area, layout_cfg);
-    let mut sel = SelectionBox::new(layout.selection_area(), Style::default().fg(color))
-        .with_closable(focused, close_hovered);
-    if focused && let Some(label) = close_label {
-        sel = sel.with_close_label(Some(label));
+    // Focus gets the role colour (magenta agent / green queue). Hover-only
+    // keeps the softer theme.hover_border so the two cues stay distinct on
+    // GrokNight and DOGE alike. Action (when provided) paints next to close
+    // with focus chrome; unfocused open boards still paint action-only.
+    if focused || hovered {
+        let color = if focused {
+            focus_border
+        } else {
+            theme.hover_border
+        };
+        let mut sel = SelectionBox::new(layout.selection_area(), Style::default().fg(color))
+            .with_closable(focused, close_hovered);
+        if focused && let Some(label) = close_label {
+            sel = sel.with_close_label(Some(label));
+        }
+        sel = sel
+            .with_action_label(action_label, action_hovered)
+            .with_action_enabled(action_enabled);
+        sel.render(buf);
+        return Some(sel);
     }
-    sel.render(buf);
-    Some(sel)
+    // Unfocused + no hover: product clear-finished still passes a label when
+    // the board is open with finished rows. Action-only path paints the
+    // control without focus rails (no always-on smash into status chrome).
+    if action_label.is_some() {
+        let sel = SelectionBox::new(
+            layout.selection_area(),
+            Style::default().fg(theme.text_secondary),
+        )
+        .with_action_label(action_label, action_hovered)
+        .with_action_enabled(action_enabled);
+        sel.render_action_only(buf);
+        return Some(sel);
+    }
+    None
 }
 /// Render the scrollbar track and thumb. When `is_following` is true, the scrollbar thumb is dimmed
 /// to show the viewport is locked to the bottom. That makes follow mode (G) visible in the
@@ -717,6 +763,11 @@ pub(crate) fn build_hints(
                 crate::key!('h'),
                 if show_done { "hide done" } else { "show done" },
             ));
+            if let Some(def) = registry.find(ActionId::ClearCompletedTodos) {
+                hints.push(def.hint());
+            } else {
+                hints.push(HintItem::new(crate::key!('X'), "clear finished"));
+            }
             hints
         }
         ActivePane::Dock => {
@@ -795,7 +846,8 @@ pub(crate) fn build_hints(
                 } else if prompt.can_send() {
                     hints.push(HintItem::new(key, submit_label));
                 } else if is_turn_running && has_queued_follow_up {
-                    hints.push(HintItem::new(key, "send now"));
+                    // Empty Enter mid-turn soft-interjects the top queued row.
+                    hints.push(HintItem::new(key, "interject"));
                 }
             }
             if !multiline_mode && prompt.can_send() {
@@ -825,6 +877,14 @@ pub(crate) fn build_hints(
                     continue;
                 }
                 if def.id == ActionId::EnableVoiceMode || def.id == ActionId::VoiceToggle {
+                    continue;
+                }
+                // Live expand vs collapse verb from scrollback state — not the
+                // static ActionDef "expand/collapse thinking" label.
+                if def.id == ActionId::ExpandAllThinking {
+                    let mut item = def.hint();
+                    item.label = std::borrow::Cow::Borrowed(thinking_label);
+                    hints.push(item);
                     continue;
                 }
                 hints.push(def.hint());
@@ -1558,6 +1618,97 @@ mod tests {
             "ExitSession (home) must not appear in prompt-focused bar"
         );
     }
+
+    /// Contract: footer Ctrl+E verb follows live fold state — "expand thinking"
+    /// when collapsed / not fully open, "collapse thinking" when expanded.
+    /// Never the static ActionDef "expand/collapse thinking" (dogfood: prompt
+    /// focus was still using the registry label).
+    #[test]
+    fn prompt_ctrl_e_thinking_hint_reflects_expand_or_collapse_state() {
+        let registry = ActionRegistry::defaults();
+        for thinking_label in ["expand thinking", "collapse thinking"] {
+            let hints = build_hints(
+                ActivePane::Prompt,
+                &PromptWidget::default(),
+                &registry,
+                false,
+                None,
+                None,
+                thinking_label,
+                false,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            let thinking = hints
+                .iter()
+                .find(|h| h.label.as_ref().contains("thinking"))
+                .unwrap_or_else(|| panic!("expected Ctrl+E thinking hint; got {hints:?}"));
+            assert_eq!(
+                thinking.label.as_ref(),
+                thinking_label,
+                "prompt footer must use live thinking_label, not ActionDef static"
+            );
+            assert_ne!(
+                thinking.label.as_ref(),
+                "expand/collapse thinking",
+                "must not show both expand and collapse at once"
+            );
+        }
+    }
+
+    /// Same contract on scrollback-focused footer (already wired; guard regression).
+    #[test]
+    fn scrollback_ctrl_e_thinking_hint_reflects_expand_or_collapse_state() {
+        let registry = ActionRegistry::defaults();
+        for thinking_label in ["expand thinking", "collapse thinking"] {
+            let hints = build_hints(
+                ActivePane::Scrollback,
+                &PromptWidget::default(),
+                &registry,
+                false,
+                None,
+                None,
+                thinking_label,
+                false,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            let thinking = hints
+                .iter()
+                .find(|h| h.label.as_ref().contains("thinking"))
+                .unwrap_or_else(|| panic!("expected Ctrl+E thinking hint; got {hints:?}"));
+            assert_eq!(thinking.label.as_ref(), thinking_label);
+            assert_ne!(thinking.label.as_ref(), "expand/collapse thinking");
+        }
+    }
     fn prompt_hints_with_text(
         multiline_mode: bool,
         prefer_alt_enter_newline: bool,
@@ -1623,14 +1774,14 @@ mod tests {
             "mid-turn must not mislabel Enter as send; got {labels:?}"
         );
         assert!(
-            labels.contains(&"send now"),
-            "mid-turn with composer text must advertise the send-now (interject) chord; got {labels:?}"
+            labels.contains(&"interject"),
+            "mid-turn with composer text must advertise the soft-interject chord; got {labels:?}"
         );
     }
     /// Empty composer with a mid-turn queue: bare Enter is send-now in both normal and multiline modes.
     /// Multiline only inserts a newline when there is text.
     #[test]
-    fn prompt_empty_mid_turn_queue_advertises_send_now_including_multiline() {
+    fn prompt_empty_mid_turn_queue_advertises_interject_including_multiline() {
         for multiline in [false, true] {
             let prompt = PromptWidget::default();
             let registry = ActionRegistry::defaults();
@@ -1664,8 +1815,8 @@ mod tests {
             );
             let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
             assert!(
-                labels.contains(&"send now"),
-                "empty composer mid-turn with queue must advertise Enter:send now \
+                labels.contains(&"interject"),
+                "empty composer mid-turn with queue must advertise Enter:interject \
                  (multiline={multiline}); got {labels:?}"
             );
         }
@@ -2181,6 +2332,65 @@ mod tests {
             scrollbar_cfg: *scrollbar_cfg,
             ..base_params(area)
         })
+    }
+
+    #[test]
+    fn hide_header_zeroes_status_bar_height() {
+        let area = Rect::new(0, 0, 80, 40);
+        let layout_cfg = LayoutConfig::default();
+        let scrollbar_cfg = ScrollbarConfig::default();
+        let shown = AgentViewLayout::compute(
+            area,
+            &layout_cfg,
+            &scrollbar_cfg,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            false,
+            false,
+        );
+        let hidden = AgentViewLayout::compute(
+            area,
+            &layout_cfg,
+            &scrollbar_cfg,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            false,
+            true,
+        );
+        assert_eq!(shown.status_bar.height, 1);
+        assert_eq!(hidden.status_bar.height, 0);
+        assert!(
+            hidden.scrollback.height >= shown.scrollback.height,
+            "hiding header should free space for scrollback (shown={}, hidden={})",
+            shown.scrollback.height,
+            hidden.scrollback.height
+        );
     }
     #[test]
     fn timeline_rail_replaces_the_scrollbar_column() {

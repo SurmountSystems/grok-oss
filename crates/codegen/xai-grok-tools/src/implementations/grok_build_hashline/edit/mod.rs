@@ -383,8 +383,12 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                                 ),
                             });
                         }
-                        let abs = crate::util::fs::canonicalize_with_timeout(joined_path).await;
-                        let r = apply::apply_edits(content, &input.edits, &abs, &*scheme);
+                        // Only canonicalize after a successful write (file exists).
+                        let abs = if r.new_content.is_some() {
+                            crate::util::fs::canonicalize_with_timeout(joined_path).await
+                        } else {
+                            joined_path
+                        };
                         let edit_details = r.edit_details;
                         return Ok(to_search_replace(
                             r.output,
@@ -432,7 +436,13 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
         };
         let old_content = String::from_utf8_lossy(&file_bytes).into_owned();
 
-        let apply_result = apply::apply_edits(&old_content, &input.edits, &path, &*scheme);
+        let mut apply_result = apply::apply_edits(&old_content, &input.edits, &path, &*scheme);
+
+        // Post-edit trailing-ws strip (default ON; env override). FileWritten
+        // and return content must match bytes on disk.
+        if let Some(nc) = apply_result.new_content.as_mut() {
+            *nc = crate::util::trailing_ws::prepare_for_write(std::mem::take(nc));
+        }
 
         let is_memory_write = match apply_result.new_content {
             Some(ref new_content) => {

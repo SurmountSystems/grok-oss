@@ -877,14 +877,14 @@ impl SessionActor {
             mutated = true;
             tracing::info!(
                 queued_id = %id,
-                "send-now no-opped; saved the edit to the queued row"
+                "soft interject no-op; saved the edit to the queued row"
             );
         } else {
             tracing::debug!(
                 queued_id = %id,
                 expected_version,
                 turn_running,
-                "queue send-now no-op (running id / stale / drained / not owner); rebroadcasting"
+                "queue soft-interject no-op (running id / stale / drained / not owner); rebroadcasting"
             );
         }
         if !Self::has_protected_row(&state, id) {

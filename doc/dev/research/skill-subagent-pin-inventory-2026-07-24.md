@@ -39,7 +39,7 @@ subagent *features*.
 | `subagent-token-strategy.md` | Yes (full) | **No** — no “first tool turn” / CI-log ban bullet |
 | `_SKILL_RULES-read-first-pls.md` | Yes | **No** Hard stop wording |
 | Orchestrator skills (implement, plan, check-work, review) | Partial bullets | **No** explicit Hard stop |
-| `pr-babysit` | Fixes in worktree children (practice) | **No** Hard stop pin; body still narrates parent-adjacent CI fix commits historically |
+| `pr-babysit` | Fixes in worktree children (practice) | **No** Hard stop pin; skill text still narrates parent-adjacent CI fix commits historically |
 | `execute-plan`, `design` | Sub-agents tables only | **No** regression/Hard stop |
 | User-guide `16-subagents.md` (home + in-repo) | Product “when to use” only | **Missing** § *Token efficiency* that AGENTS/help still link to |
 | `~/.grok/skills/*` mirrors | Stale / thin | **No** |
@@ -51,44 +51,44 @@ subagent *features*.
 
 | path | in_repo? | relevance (1 line) | edit needed? (Y/N + why) |
 |------|----------|--------------------|--------------------------|
-| `/home/hunter/.grok/AGENTS.md` | N | Canonical parent pins: regressions, **Hard stop**, token economics, strategic parallel max | **N** for content (already has Hard stop); keep as source of truth |
-| `/home/hunter/Projects/surmount/grok-build/AGENTS.md` | **Y** | Project hard “parent is coordinator only”; onto multi-file conflict subagent table | **N** unless adding one-line pointer to skill deep guide for non-onto CI |
-| `/home/hunter/.agents/skills/shared/references/subagent-token-strategy.md` | N | Deep “when to spawn”, regressions, anti-patterns, micro-flow, skill-author requirements | **Y** — add Hard stop: first tool = spawn; ban parent `gh run`/CI logs/nextest; link AGENTS § Hard stop |
-| `/home/hunter/.agents/skills/_SKILL_RULES-read-first-pls.md` | N | Author checklist: token efficiency + sub-agent strategy + regressions item 8/12 | **Y** — pin Hard stop in § Sub-agent strategy + Recent reconciliations (2026-07-24) |
-| `/home/hunter/.agents/skills/implement/SKILL.md` | N | Primary implement→review orchestrator; strong regressions + token bullets | **Y** — one Hard stop bullet (CI fail / multi-file → spawn first; parent no `gh`/greps); fix dead link to user-guide § Token efficiency if section still missing |
-| `/home/hunter/.agents/skills/pr-babysit/SKILL.md` | N | CI fail / review / conflict babysit; all fixes in worktree subagents | **Y** — Sub-agents: parent never pulls CI logs or diagnoses in parent; spawn first on red CI; join on disk/JSON only; reinforce no parent marathon before Step 4 |
-| `/home/hunter/.agents/skills/check-work/SKILL.md` | N | Verifier subagent; regression verification stays in child | **Y** — light: forbid parent re-running builds/tests after FAIL summary before re-spawn; point Hard stop |
-| `/home/hunter/.agents/skills/plan/SKILL.md` | N | Explore fan-out; multi-file root-cause plans not in parent | **N** for Hard stop (already solid); optional link to Hard stop for CI-plan cases |
-| `/home/hunter/.agents/skills/review/SKILL.md` | N | One reviewer child; no parent re-author findings | **N**/light — optional Hard stop cross-link |
-| `/home/hunter/.agents/skills/execute-plan/SKILL.md` | N | Mega PR-DAG orchestrator; heavy subagent protocol | **Y** — add Sub-agents regression/Hard stop ownership (CI red mid-stack → child, not parent log dump) |
-| `/home/hunter/.agents/skills/design/SKILL.md` | N | Writer/reviewer loop; spawn protocol | **N**/low — optional “no parent diagnosis marathons” if design starts from a bug report |
-| `/home/hunter/.agents/skills/skill-maintenance/SKILL.md` | N | Quality pass enforces regression ownership in orchestrators | **Y** — Required pins table: add Hard stop row; assert workers check first-tool-turn language |
-| `/home/hunter/.agents/skills/help/SKILL.md` | N | Points users at 16-subagents § Token efficiency + deep guide | **Y** — § Token efficiency **missing** in guide; point at AGENTS Hard stop + deep guide until product section exists |
-| `/home/hunter/.agents/skills/create-skill/SKILL.md` | N | Mandates Sub-agents section + token bar for new skills | **N**/low — optional “if skill can face CI/regression, require Hard stop sentence” |
-| `/home/hunter/.agents/skills/upstream-export-import/SKILL.md` | N | Onto/import scripts; **no** Sub-agents section | **Y** — multi-file conflict/CI after onto: spawn first; defer to project AGENTS onto table + Hard stop (skill is high-risk parent-marathon magnet) |
-| `/home/hunter/.agents/skills/resume-claude/SKILL.md` | N | Explicitly **do not** spawn | **N** |
-| `/home/hunter/.grok/bundled/skills/resume-codex/SKILL.md` | N | Resume other hosts; no spawn policy | **N** |
-| `/home/hunter/.grok/bundled/skills/resume-cursor/SKILL.md` | N | Same | **N** |
-| `/home/hunter/.agents/skills/pptx/SKILL.md` + `editing.md` | N | Parallel slide QA subagents | **N** (unrelated to CI Hard stop) |
-| `/home/hunter/.agents/skills/imagine/SKILL.md` | N | Prefer parallel tools not subagents | **N** |
-| `/home/hunter/.agents/skills/xlsx/SKILL.md` | N | Spawn alias only | **N** |
-| `/home/hunter/.agents/skills/grok-tool-policy/SKILL.md` | N | Do not spawn for policy edits | **N** |
-| `/home/hunter/.agents/skills/check-work/references/verifier-prompt.md` | N | Verifier severity includes regression | **N** |
-| `/home/hunter/.agents/skills/TASKS.md` | N | P1 token-efficiency mega-orchestrator backlog | **N**/note only — track Hard stop as maintenance task if desired |
-| `/home/hunter/.agents/skills/shared/personas/*` | N | No spawn/parent policy text | **N** |
-| `/home/hunter/.grok/docs/user-guide/16-subagents.md` | N | Product “when to use”; **no** Token efficiency section | **Y** — add § Token efficiency (or stop linking it); optionally note agent Hard stop is in AGENTS not product guide |
-| `/home/hunter/Projects/surmount/grok-build/crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md` | **Y** | Same product guide source (ends at “When to Use”; no token/Hard stop) | **Y** — if shipping token guidance to users, add short §; Hard stop is operator/agent policy (AGENTS) more than end-user guide |
-| `/home/hunter/Projects/surmount/grok-build/docs/upstream-history.md` | **Y** | Onto conflict subagent fan-out + anti parent-solo marathons | **N**/light — already aligned; optional Hard stop cross-link for post-pick CI |
-| `/home/hunter/Projects/surmount/grok-build/crates/codegen/xai-grok-agent/templates/subagent_prompt.md` | **Y** | Child session system prompt template | **N** (product, not orchestrator policy) |
-| `/home/hunter/Projects/surmount/grok-build/crates/codegen/xai-grok-shell/README.md` | **Y** | Feature docs for subagents/tools | **N** for Hard stop |
-| `/home/hunter/.grok/skills/check-work/SKILL.md` | N | **Stale** vs agents (long inline verifier; weaker orchestration pins) | **Y** if dual-maintained — prefer agents home; rsync/reconcile on skill-maintenance |
-| `/home/hunter/.grok/skills/help/SKILL.md` | N | Thin doc map; no Hard stop | **Y** only if kept in sync with agents help |
-| `/home/hunter/.grok/skills/upstream-export-import/SKILL.md` | N | Mirror; check vs agents | reconcile via skill-maintenance |
-| `/home/hunter/.grok/bundled/skills/implement/SKILL.md` | N | Bundled peer of agents implement | **Y** after agents edit (skill-maintenance copy) |
-| `/home/hunter/.grok/bundled/skills/pr-babysit/SKILL.md` | N | Bundled peer | **Y** after agents edit |
-| `/home/hunter/.grok/bundled/skills/execute-plan/SKILL.md` | N | Bundled peer | **Y** after agents edit |
-| `/home/hunter/.grok/bundled/skills/review/SKILL.md` | N | Bundled peer | light after agents |
-| `/home/hunter/.grok/bundled/skills/create-workflow/SKILL.md` | N | Rhai workflow agent() orchestration (product skill) | **N** for Hard stop |
+| `~/.grok/AGENTS.md` | N | Canonical parent pins: regressions, **Hard stop**, token economics, strategic parallel max | **N** for content (already has Hard stop); keep as source of truth |
+| `$REPO/AGENTS.md` | **Y** | Project hard “parent is coordinator only”; onto multi-file conflict subagent table | **N** unless adding one-line pointer to skill deep guide for non-onto CI |
+| `~/.agents/skills/shared/references/subagent-token-strategy.md` | N | Deep “when to spawn”, regressions, anti-patterns, micro-flow, skill-author requirements | **Y** — add Hard stop: first tool = spawn; ban parent `gh run`/CI logs/nextest; link AGENTS § Hard stop |
+| `~/.agents/skills/_SKILL_RULES-read-first-pls.md` | N | Author checklist: token efficiency + sub-agent strategy + regressions item 8/12 | **Y** — pin Hard stop in § Sub-agent strategy + Recent reconciliations (2026-07-24) |
+| `~/.agents/skills/implement/SKILL.md` | N | Primary implement→review orchestrator; strong regressions + token bullets | **Y** — one Hard stop bullet (CI fail / multi-file → spawn first; parent no `gh`/greps); fix dead link to user-guide § Token efficiency if section still missing |
+| `~/.agents/skills/pr-babysit/SKILL.md` | N | CI fail / review / conflict babysit; all fixes in worktree subagents | **Y** — Sub-agents: parent never pulls CI logs or diagnoses in parent; spawn first on red CI; join on disk/JSON only; reinforce no parent marathon before Step 4 |
+| `~/.agents/skills/check-work/SKILL.md` | N | Verifier subagent; regression verification stays in child | **Y** — light: forbid parent re-running builds/tests after FAIL summary before re-spawn; point Hard stop |
+| `~/.agents/skills/plan/SKILL.md` | N | Explore fan-out; multi-file root-cause plans not in parent | **N** for Hard stop (already solid); optional link to Hard stop for CI-plan cases |
+| `~/.agents/skills/review/SKILL.md` | N | One reviewer child; no parent re-author findings | **N**/light — optional Hard stop cross-link |
+| `~/.agents/skills/execute-plan/SKILL.md` | N | Mega PR-DAG orchestrator; heavy subagent protocol | **Y** — add Sub-agents regression/Hard stop ownership (CI red mid-stack → child, not parent log dump) |
+| `~/.agents/skills/design/SKILL.md` | N | Writer/reviewer loop; spawn protocol | **N**/low — optional “no parent diagnosis marathons” if design starts from a bug report |
+| `~/.agents/skills/skill-maintenance/SKILL.md` | N | Quality pass enforces regression ownership in orchestrators | **Y** — Required pins table: add Hard stop row; assert workers check first-tool-turn language |
+| `~/.agents/skills/help/SKILL.md` | N | Points users at 16-subagents § Token efficiency + deep guide | **Y** — § Token efficiency **missing** in guide; point at AGENTS Hard stop + deep guide until product section exists |
+| `~/.agents/skills/create-skill/SKILL.md` | N | Mandates Sub-agents section + token bar for new skills | **N**/low — optional “if skill can face CI/regression, require Hard stop sentence” |
+| `~/.agents/skills/upstream-export-import/SKILL.md` | N | Onto/import scripts; **no** Sub-agents section | **Y** — multi-file conflict/CI after onto: spawn first; defer to project AGENTS onto table + Hard stop (skill is high-risk parent-marathon magnet) |
+| `~/.agents/skills/resume-claude/SKILL.md` | N | Explicitly **do not** spawn | **N** |
+| `~/.grok/bundled/skills/resume-codex/SKILL.md` | N | Resume other hosts; no spawn policy | **N** |
+| `~/.grok/bundled/skills/resume-cursor/SKILL.md` | N | Same | **N** |
+| `~/.agents/skills/pptx/SKILL.md` + `editing.md` | N | Parallel slide QA subagents | **N** (unrelated to CI Hard stop) |
+| `~/.agents/skills/imagine/SKILL.md` | N | Prefer parallel tools not subagents | **N** |
+| `~/.agents/skills/xlsx/SKILL.md` | N | Spawn alias only | **N** |
+| `~/.agents/skills/grok-tool-policy/SKILL.md` | N | Do not spawn for policy edits | **N** |
+| `~/.agents/skills/check-work/references/verifier-prompt.md` | N | Verifier severity includes regression | **N** |
+| `~/.agents/skills/TASKS.md` | N | P1 token-efficiency mega-orchestrator backlog | **N**/note only — track Hard stop as maintenance task if desired |
+| `~/.agents/skills/shared/personas/*` | N | No spawn/parent policy text | **N** |
+| `~/.grok/docs/user-guide/16-subagents.md` | N | Product “when to use”; **no** Token efficiency section | **Y** — add § Token efficiency (or stop linking it); optionally note agent Hard stop is in AGENTS not product guide |
+| `$REPO/crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md` | **Y** | Same product guide source (ends at “When to Use”; no token/Hard stop) | **Y** — if shipping token guidance to users, add short §; Hard stop is operator/agent policy (AGENTS) more than end-user guide |
+| `$REPO/docs/upstream-history.md` | **Y** | Onto conflict subagent fan-out + anti parent-solo marathons | **N**/light — already aligned; optional Hard stop cross-link for post-pick CI |
+| `$REPO/crates/codegen/xai-grok-agent/templates/subagent_prompt.md` | **Y** | Child session system prompt template | **N** (product, not orchestrator policy) |
+| `$REPO/crates/codegen/xai-grok-shell/README.md` | **Y** | Feature docs for subagents/tools | **N** for Hard stop |
+| `~/.grok/skills/check-work/SKILL.md` | N | **Stale** vs agents (long inline verifier; weaker orchestration pins) | **Y** if dual-maintained — prefer agents home; rsync/reconcile on skill-maintenance |
+| `~/.grok/skills/help/SKILL.md` | N | Thin doc map; no Hard stop | **Y** only if kept in sync with agents help |
+| `~/.grok/skills/upstream-export-import/SKILL.md` | N | Mirror; check vs agents | reconcile via skill-maintenance |
+| `~/.grok/bundled/skills/implement/SKILL.md` | N | Bundled peer of agents implement | **Y** after agents edit (skill-maintenance copy) |
+| `~/.grok/bundled/skills/pr-babysit/SKILL.md` | N | Bundled peer | **Y** after agents edit |
+| `~/.grok/bundled/skills/execute-plan/SKILL.md` | N | Bundled peer | **Y** after agents edit |
+| `~/.grok/bundled/skills/review/SKILL.md` | N | Bundled peer | light after agents |
+| `~/.grok/bundled/skills/create-workflow/SKILL.md` | N | Rhai workflow agent() orchestration (product skill) | **N** for Hard stop |
 | Session/debug under `~/.grok/sessions/**`, `debug/**` | N | Noise / runtime | **Ignore** |
 
 ---
@@ -153,5 +153,5 @@ Ranked for closing the gap to **Hard stop / spawn-first on CI+regression+multi-f
 
 ## Return
 
-- **This note:** `/home/hunter/Projects/surmount/grok-build/doc/dev/research/skill-subagent-pin-inventory-2026-07-24.md`
+- **This note:** `$REPO/doc/dev/research/skill-subagent-pin-inventory-2026-07-24.md`
 - **Top 8:** strategy deep guide → skill rules → pr-babysit → implement → upstream-export-import → execute-plan → user-guide 16-subagents (dead Token efficiency §) → skill-maintenance/help/check-work glue

@@ -716,6 +716,13 @@ pub(super) async fn run_session(
                         SessionCommand::TitleRenamed { manual } => {
                             session.on_title_renamed(manual);
                         }
+                        SessionCommand::RestoreTodoBoard { plan_state } => {
+                            session.restore_todo_board(plan_state).await;
+                        }
+                        SessionCommand::ClearCompletedTodos { respond_to } => {
+                            let n = session.clear_completed_todos().await;
+                            let _ = respond_to.send(n);
+                        }
                         SessionCommand::GetToolOverrides { respond_to } => {
                             let _ = respond_to.send(session.effective_tool_overrides());
                         }
@@ -840,6 +847,15 @@ pub(super) async fn run_session(
                             let updated_model_id = session.handle_set_session_model(switch).await;
                             let _ = responds_to.send(updated_model_id);
                         }
+                        SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent,
+                            auto_compact_threshold_tokens,
+                        } => {
+                            session.apply_auto_compact_threshold(
+                                auto_compact_threshold_percent,
+                                auto_compact_threshold_tokens,
+                            );
+                        }
                         SessionCommand::SetReasoningEffort { effort, responds_to } => {
                             let updated_model_id = session.handle_set_reasoning_effort(effort).await;
                             let _ = responds_to.send(updated_model_id);
@@ -880,6 +896,9 @@ pub(super) async fn run_session(
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
+                                        failover_base_url: r.failover_base_url,
+                                        session_base_url: r.session_base_url,
+                                        session_identity_key: r.session_identity_key,
                                     });
                                 }
                                 // Credentials changed under a possibly-unchanged model id.

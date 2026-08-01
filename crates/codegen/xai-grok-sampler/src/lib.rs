@@ -19,6 +19,8 @@ pub mod config;
 pub mod doom_loop;
 mod doom_loop_recovery;
 pub mod events;
+/// Process-local credit/allowance-exhausted credential fingerprints (dual-auth).
+pub mod exhausted_identity;
 pub mod handle;
 pub mod metrics;
 mod prewarm;

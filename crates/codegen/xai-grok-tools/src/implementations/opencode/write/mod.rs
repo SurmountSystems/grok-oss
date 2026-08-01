@@ -170,13 +170,13 @@ impl xai_tool_runtime::Tool for WriteTool {
         notification_handle.send_file_written(FileWritten {
             tool_call_id,
             absolute_path: path.clone(),
-            content: input.content.clone(),
+            content: content.clone(),
             previous_content: old_content.clone(),
             is_new_file: !existed,
         });
 
         let old_string = old_content.unwrap_or_default();
-        let new_string = input.content;
+        let new_string = content;
 
         let edits = vec![SearchReplaceEditDetail {
             old_string: old_string.clone(),
@@ -488,5 +488,55 @@ mod tests {
     fn notification_fields() {
         // Notification verification requires capturing handle.
         // Covered at integration layer.
+    }
+
+    // ── Trailing-whitespace strip ─────────────────────────────
+
+    #[tokio::test]
+    async fn write_strips_trailing_whitespace_by_default() {
+        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
+        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("1"))]);
+
+        let tmp = TempDir::new().unwrap();
+        let tool = WriteTool;
+        let resources = test_resources(tmp.path());
+        let file_path = tmp.path().join("ws.txt");
+        let input = WriteInput {
+            file_path: file_path.to_string_lossy().into_owned(),
+            content: "a  \nb\t\n".to_string(),
+        };
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "a\nb\n");
+    }
+
+    #[tokio::test]
+    async fn write_preserves_trailing_whitespace_when_env_off() {
+        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
+        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("0"))]);
+
+        let tmp = TempDir::new().unwrap();
+        let tool = WriteTool;
+        let resources = test_resources(tmp.path());
+        let file_path = tmp.path().join("ws.txt");
+        let input = WriteInput {
+            file_path: file_path.to_string_lossy().into_owned(),
+            content: "a  \nb\t\n".to_string(),
+        };
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "a  \nb\t\n");
     }
 }

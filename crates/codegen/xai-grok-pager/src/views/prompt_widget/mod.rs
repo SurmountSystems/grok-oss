@@ -629,6 +629,10 @@ pub struct PromptWidget {
     textarea_state: TextAreaState,
     /// Cached textarea render area from last draw (for mouse coordinate mapping).
     textarea_area: Rect,
+    /// Cached top-bar ⧉ copy button rect from last draw (None when chrome off).
+    copy_button_area: Option<Rect>,
+    /// Whether the draft-copy button is hovered.
+    copy_hovered: bool,
     /// @-completion file search state.
     pub file_search: FileSearchState,
     /// Whether typing `@` may activate file-reference completion on this surface.
@@ -718,6 +722,8 @@ impl PromptWidget {
             textarea,
             textarea_state: TextAreaState::default(),
             textarea_area: Rect::default(),
+            copy_button_area: None,
+            copy_hovered: false,
             file_search: FileSearchState::new(cwd),
             file_search_enabled: true,
             pending_viewer_request: None,
@@ -2986,6 +2992,8 @@ impl PromptWidget {
         voice: Option<VoicePromptOverlay>,
     ) -> PromptRenderResult {
         if area.height == 0 || area.width < 4 {
+            // Drop stale hit targets from a wider prior frame.
+            self.copy_button_area = None;
             return PromptRenderResult {
                 cursor_pos: None,
                 post_flush_escapes: None,
@@ -3045,7 +3053,8 @@ impl PromptWidget {
             };
         };
 
-        // Top divider: ╭──────────╮
+        // Top divider: ╭──────────╮  (optional session title + ⧉ draft copy)
+        self.copy_button_area = None;
         if vpad_top > 0 && style.chrome && style.show_borders {
             let div_style = Style::default().fg(border_color).bg(bg);
             let div_y = chunks.first().map(|c| c.y).unwrap_or(area.y);
@@ -3119,6 +3128,23 @@ impl PromptWidget {
             height: text_area_rect.height,
         };
         self.textarea_area = ta_area;
+
+        // Full-line dirty wipe before textarea paint. The software box caret
+        // restyles the insertion cell (and on blank cells may replace the
+        // symbol with solid `█`). TextArea only writes cells that still have
+        // draft text, so blanks beyond the draft would keep a previous
+        // frame's caret glyph / Human-green plate if we only set_style.
+        // Wipe every cell in the textarea rect so a moved caret never leaves
+        // residual green or a solid block on letters/spaces it has left.
+        let text_cell_style = Style::default().fg(theme.text_primary).bg(bg);
+        for y in ta_area.y..ta_area.y.saturating_add(ta_area.height) {
+            for x in ta_area.x..ta_area.x.saturating_add(ta_area.width) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.reset();
+                    cell.set_style(text_cell_style);
+                }
+            }
+        }
 
         (&self.textarea).render_ref(ta_area, buf, &mut self.textarea_state);
 
@@ -3434,7 +3460,7 @@ impl PromptWidget {
                 && self.textarea.cursor() == self.textarea.text().len()
                 && !slash_active
                 && !slash_has_inline_ghost
-                && let Some((cx, cy)) = cursor_pos
+                && let Some((cx, cy)) = layout_cursor_pos
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3444,7 +3470,7 @@ impl PromptWidget {
             }
 
             if let Some(ghost) = self.prompt_suggestion_ghost()
-                && let Some((cx, cy)) = cursor_pos
+                && let Some((cx, cy)) = layout_cursor_pos
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3453,6 +3479,18 @@ impl PromptWidget {
                 }
             }
         }
+
+        // Software Human-green caret: slow solid↔empty block blink
+        // (`accent_user`, not agent `accent_running` magenta). Terminal hardware
+        // cursor stays hidden so we do not stack two carets; phase is wall-clock
+        // so Slow redraw ticks are enough.
+        let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {
+            paint_composer_box_cursor(buf, cx, cy, &theme, bg);
+            // Hide the terminal caret — the painted box *is* the cursor.
+            None
+        } else {
+            None
+        };
 
         // Paste preview overlay: show when cursor is on or right after a paste element
         if style.focused
@@ -3536,7 +3574,13 @@ impl PromptWidget {
         let sep_opacity = if focused { 1.0 } else { 0.6 };
         let flag_opacity = if focused { 0.75 } else { 0.5 };
 
-        let model_style = Self::chrome_caption_style(bg, theme, focused);
+        let model_fg = if focused {
+            theme.accent_model
+        } else {
+            crate::render::color::blend_color(bg, theme.accent_model, 0.75)
+                .unwrap_or(theme.accent_model)
+        };
+        let model_style = Style::default().fg(model_fg).bg(bg);
         let sep_fg = if focused {
             theme.gray_dim
         } else {

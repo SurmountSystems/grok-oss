@@ -401,6 +401,19 @@ pub enum SessionCommand {
     /// The client then re-shows its approval UI over a real live waiter.
     /// Fire-and-forget; the actor spawns the round-trip and the decision.
     RestorePlanApproval,
+    /// Resume hook: rehydrate the todo board from Resources
+    /// (`resources_state.json`) and fall back to `plan.json` when tool state
+    /// is empty. Emits an ACP `Plan` update so the UI board matches durable
+    /// state after load.
+    RestoreTodoBoard {
+        plan_state: Option<crate::tools::todo::TodoState>,
+    },
+    /// Operator Clear finished: archive completed/cancelled active todos,
+    /// persist Resources + plan.json, re-emit ACP `Plan`. Responds with the
+    /// number of items cleared (0 = no-op).
+    ClearCompletedTodos {
+        respond_to: oneshot::Sender<usize>,
+    },
     /// A `/rename` landed for this resident session.
     /// `manual: true` (a user title) freezes the auto title refresh and aborts any in-flight one.
     /// `manual: false` (`/rename --auto`) reopens it so the whole-conversation refresh can re-title.
@@ -493,6 +506,20 @@ pub enum SessionCommand {
         /// `None` keeps percent mode.
         auto_compact_threshold_tokens: Option<u64>,
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
+    },
+    /// Live-apply auto-compact threshold without a model switch.
+    ///
+    /// Fired when Settings commits `auto_compact_threshold_percent` /
+    /// tokens (ACP `x.ai/auto_compact_threshold_changed`). Updates the
+    /// session's `compaction.threshold_percent` / `threshold_tokens` Cells
+    /// so the next gate check uses the new boundary without restart.
+    ///
+    /// When `auto_compact_threshold_tokens` is `Some`, absolute-token mode
+    /// wins and `auto_compact_threshold_percent` is treated as a display
+    /// hint (the handler may recompute display percent from the session window).
+    SetAutoCompactThreshold {
+        auto_compact_threshold_percent: u8,
+        auto_compact_threshold_tokens: Option<u64>,
     },
     /// Set only the reasoning effort on the session's live model. Carrying no
     /// model keeps a concurrent `SetSessionModel` from being reverted.

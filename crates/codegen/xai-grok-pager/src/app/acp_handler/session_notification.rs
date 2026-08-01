@@ -1882,6 +1882,11 @@ pub(super) fn apply_retry_state(
                 error_type: error_type.clone(),
             }));
         }
+        // Live stream after a retry: drop sticky Retrying chrome immediately.
+        // Without this, attempt N freezes for the whole next TTFB/stream window.
+        RetryState::StreamResumed => {
+            session.set_retry_activity(None);
+        }
         RetryState::Exhausted {
             attempts,
             reason,

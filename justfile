@@ -16,13 +16,12 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 set default-list
 
 # Host system for flake check attributes (e.g. x86_64-linux).
-# Prefer CI_SYSTEM on GHA so a transient `nix eval` at just parse time cannot
-# kill attribute expansion for mem-guard checks. Local default: impure eval.
-# GHA must set CI_SYSTEM (ci.yml does). Attribute sinks use `{{ system }}` only
-# after `require_system` (dependency) has allowlisted the value -- the guard
-# body reads CI_SYSTEM / nix eval from the environment and never interpolates
-# `{{ system }}` into quotes (avoids single-quote breakout).
-system := env_var_or_default("CI_SYSTEM", `nix eval --impure --raw --expr 'builtins.currentSystem'`)
+# Prefer CI_SYSTEM (GHA sets it). Local default: uname map — do not call `nix`
+# at just parse time (a broken host nix would fail every recipe). Recipe-time
+# helper: scripts/nix-current-system.sh. Top-level backticks cannot expand
+# {{ justfile_directory() }}, so keep uname inline here. Attribute sinks use
+# {{ system }} only after require_system.
+system := env_var_or_default("CI_SYSTEM", `case "$(uname -s)-$(uname -m)" in Linux-x86_64) echo x86_64-linux;; Linux-aarch64|Linux-arm64) echo aarch64-linux;; Darwin-x86_64) echo x86_64-darwin;; Darwin-arm64) echo aarch64-darwin;; *) echo "unsupported $(uname -s)-$(uname -m); set CI_SYSTEM=..." >&2; exit 1;; esac`)
 
 # Nix flags when CI_LOW_MEM=1: cap cores/jobs for pure nix steps.
 nix_low_mem_opts := if env_var_or_default("CI_LOW_MEM", "") == "1" { "--option cores 2 --option max-jobs 1" } else { "" }
@@ -59,18 +58,16 @@ http-connections = 4
 '''
 
 # Fail fast if the host system string is not safe for shell/attr interpolation.
-# Reads CI_SYSTEM or impure nix eval inside bash only -- never `{{ system }}`
-# into this recipe (single-quote in CI_SYSTEM must not break assignment).
+# Same source as `system` (CI_SYSTEM or scripts/nix-current-system.sh) — no
+# host `nix` call here. Never interpolate `{{ system }}` into this recipe
+# (single-quote in CI_SYSTEM must not break assignment).
 # Recipes that expand `{{ system }}` into nix attr paths depend on this first.
 [private]
 require_system:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "${CI_SYSTEM:-}" ]]; then
-      sys="${CI_SYSTEM}"
-    else
-      sys="$(nix eval --impure --raw --expr 'builtins.currentSystem')"
-    fi
+    root="{{ justfile_directory() }}"
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
     case "${sys}" in
       x86_64-linux|aarch64-linux|x86_64-darwin|aarch64-darwin) exit 0 ;;
     esac
@@ -85,10 +82,15 @@ require_system:
 # Prints a clear banner per attempt. Permanent failures fail after all attempts.
 # Retries every non-zero exit (not network-classified); use only around store
 # realization / flake eval, never around host cargo compile payloads.
+#
+# Before the first attempt: ensure a working `nix` is first on PATH so a
+# broken host binary does not burn the full retry budget. Override: NIX_BIN.
 [private]
 nix_retry +cmd:
     #!/usr/bin/env bash
     set -euo pipefail
+    # shellcheck source=scripts/ensure-working-nix-path.sh
+    source "{{ justfile_directory() }}/scripts/ensure-working-nix-path.sh"
     raw_attempts="${NIX_RETRY_ATTEMPTS:-4}"
     if [[ ! "${raw_attempts}" =~ ^[1-9][0-9]*$ ]]; then
       echo "==> nix_retry: NIX_RETRY_ATTEMPTS must be a positive integer, got: ${raw_attempts}" >&2
@@ -217,6 +219,8 @@ mem-guard: require_system
 cargo-ci +cmd:
     #!/usr/bin/env bash
     set -euo pipefail
+    # shellcheck source=scripts/ensure-working-nix-path.sh
+    source "{{ justfile_directory() }}/scripts/ensure-working-nix-path.sh"
     export RULES_RUST_RUNFILES_WORKSPACE_NAME="${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"
     # Theme/color unit tests need distinct SGR slots. Host shells (and the
     # agent runtime) often export NO_COLOR=1, which quantizes every theme
@@ -233,6 +237,10 @@ cargo-ci +cmd:
     # and that default catalog entries lack live credentials. Match CI.
     unset OPENROUTER_API_KEY
     export GROK_DISABLE_SHARED_HARNESS_SECRETS="${GROK_DISABLE_SHARED_HARNESS_SECRETS:-1}"
+    # Skip OS Secret Service / keyring in tests (D-Bus can hang forever on
+    # desktop sessions). File-backend only — same as headless CI intent for
+    # GROK_CREDENTIALS_FORCE_FILE in credentials_store.
+    export GROK_CREDENTIALS_FORCE_FILE="${GROK_CREDENTIALS_FORCE_FILE:-1}"
     # Idle-resume e2e tests bind a loopback axum mock as cli-chat-proxy.
     export GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY="${GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY:-1}"
     if [[ "${CI_LOW_MEM:-}" == "1" ]]; then
@@ -245,11 +253,19 @@ cargo-ci +cmd:
 
 # Enter the fenix/crane-aligned dev shell (interactive: no retry wrapper).
 dev:
-    nix develop
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # shellcheck source=scripts/ensure-working-nix-path.sh
+    source "{{ justfile_directory() }}/scripts/ensure-working-nix-path.sh"
+    exec nix develop
 
 # Enter the free-GHA / low-mem host shell (interactive: no retry wrapper).
 dev-ci:
-    nix develop .#ci
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # shellcheck source=scripts/ensure-working-nix-path.sh
+    source "{{ justfile_directory() }}/scripts/ensure-working-nix-path.sh"
+    exec nix develop .#ci
 
 # Quality gate (GHA `quality` job + local pre-push). No release build.
 #
@@ -352,6 +368,8 @@ test-nix-retry-smoke:
 
 # Install grok-oss -> ~/.cargo/bin (Cargo.toml [[bin]] name = "grok-oss").
 # Overrides host -fuse-ld=wild (breaks this link). See comments in recipe body.
+# Strips the installed artifact only: [profile.release] stays unstripped for
+# local debugging; release-dist keeps strip=false for sidecar extract.
 install:
     # Host ~/.cargo/config often sets -fuse-ld=wild; wild fails this workspace
     # (undefined drop_in_place<serde_json::Value>). CLI --config rustflags wins.
@@ -360,15 +378,47 @@ install:
     cargo build --release -p xai-grok-pager-bin --locked \
       --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C","force-unwind-tables=yes"]' \
       --config 'target.aarch64-unknown-linux-gnu.rustflags=["-C","force-unwind-tables=yes"]'
+    @echo "==> strip unneeded symbols (install artifact only)"
+    strip --strip-unneeded target/release/grok-oss
     @echo "==> install -> ${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     install -Dm755 target/release/grok-oss "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     @echo "==> verify"
     "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" --version
+    @file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" | grep -q 'stripped' \
+      || (echo "install: expected stripped binary" >&2; file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" >&2; exit 1)
+
+# Build release-dist binary, extract .debug sidecar, strip (not CI quality gate).
+build-dist:
+    # Host ~/.cargo/config often sets -fuse-ld=wild; wild fails this workspace.
+    @echo "==> cargo build --profile release-dist -p xai-grok-pager-bin (no wild linker)"
+    cargo build --profile release-dist -p xai-grok-pager-bin --locked \
+      --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C","force-unwind-tables=yes"]' \
+      --config 'target.aarch64-unknown-linux-gnu.rustflags=["-C","force-unwind-tables=yes"]'
+    @echo "==> extract debug sidecar + strip binary"
+    ./scripts/extract-debug-sidecar.sh target/release-dist/grok-oss
+    @echo "==> artifacts"
+    ls -lh target/release-dist/grok-oss target/release-dist/grok-oss.debug
+    file target/release-dist/grok-oss target/release-dist/grok-oss.debug
+
+# Install release-dist binary + grok-oss.debug sidecar to cargo bin (not CI).
+install-dist: build-dist
+    mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
+    @echo "==> install stripped binary + sidecar -> ${CARGO_HOME:-$HOME/.cargo}/bin/"
+    install -Dm755 target/release-dist/grok-oss "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
+    install -Dm644 target/release-dist/grok-oss.debug "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.debug"
+    @echo "==> verify"
+    "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" --version
+    @file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" | grep -q 'stripped' \
+      || (echo "install-dist: expected stripped binary" >&2; file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" >&2; exit 1)
+    @test -f "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.debug" \
+      || (echo "install-dist: missing sidecar grok-oss.debug" >&2; exit 1)
 
 # Install from Nix result (matches just build / CI; no host cargo linker).
+# Strip after copy: nix fixup may already strip; --strip-unneeded is safe/idempotent.
 install-nix: build
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
     install -Dm755 ./result/bin/grok-oss "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
+    strip --strip-unneeded "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" --version
 
 # Upstream monorepo export helpers (see docs/upstream-history.md).

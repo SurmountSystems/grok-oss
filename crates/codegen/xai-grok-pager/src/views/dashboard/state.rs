@@ -4177,6 +4177,7 @@ fn dashboard_action_for_id(
         | ActionId::OpenNextLink
         | ActionId::OpenPrevLink
         | ActionId::ToggleTodos
+        | ActionId::ClearCompletedTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal
         | ActionId::ToggleQueue
@@ -4196,6 +4197,7 @@ fn dashboard_action_for_id(
         | ActionId::ModelPicker
         | ActionId::ShortcutsHelp
         | ActionId::OpenSettings
+        | ActionId::CaptureTuiScreenshot
         | ActionId::OpenDashboard
         | ActionId::EnableVoiceMode
         | ActionId::VoiceToggle

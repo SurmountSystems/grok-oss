@@ -200,6 +200,27 @@ pub(crate) async fn run_search_replace(
             "Old string and new string are the same".to_owned(),
         ));
     }
+    // In-process bulk-edit policy (host C3 port). Deny reckless replace_all
+    // when GROK_DENY_REPLACE_ALL=1 and multi-file same-hunk storms. Fail-open.
+    // Missing OwnerSessionId → storm skipped (no shared "unknown" bucket).
+    {
+        let session_id = {
+            let res = resources.lock().await;
+            res.get::<crate::types::resources::OwnerSessionId>()
+                .map(|s| s.0.clone())
+        };
+        if let Some(deny) = crate::util::bulk_edit_policy::evaluate(
+            &crate::util::bulk_edit_policy::BulkEditRequest {
+                session_id: session_id.as_deref(),
+                file_path: &input.file_path,
+                old_string: &input.old_string,
+                new_string: &input.new_string,
+                replace_all: input.replace_all,
+            },
+        ) {
+            return Ok(SearchReplaceOutput::InvalidInput(deny.reason));
+        }
+    }
     let (empty_old_string_does_not_override, include_user_edit_hint);
     {
         let res = resources.lock().await;
@@ -366,7 +387,7 @@ async fn handle_new_file_creation(
         notification_handle.send_file_written(FileWritten {
             tool_call_id: tool_call_id.to_string(),
             absolute_path: path.to_path_buf(),
-            content: input.new_string.clone(),
+            content: write_content.clone(),
             previous_content: Some(old_text.clone()),
             is_new_file: false,
         });
@@ -374,7 +395,7 @@ async fn handle_new_file_creation(
         notification_handle.send_file_written(FileWritten {
             tool_call_id: tool_call_id.to_string(),
             absolute_path: path.to_path_buf(),
-            content: input.new_string.clone(),
+            content: write_content.clone(),
             previous_content: None,
             is_new_file: true,
         });
@@ -387,7 +408,7 @@ async fn handle_new_file_creation(
     let edits = vec![SearchReplaceEditDetail {
         old_string: input.old_string.clone(),
         old_line: 1,
-        new_string: input.new_string.clone(),
+        new_string: write_content.clone(),
         new_line: 1,
         context_before: String::new(),
         context_after: String::new(),
@@ -396,7 +417,7 @@ async fn handle_new_file_creation(
     Ok(SearchReplaceOutput::EditsApplied(
         SearchReplaceEditsApplied {
             old_string: input.old_string.clone(),
-            new_string: input.new_string.clone(),
+            new_string: write_content,
             tool_output_for_prompt,
             tool_output_for_prompt_concise: Some(tool_output_for_prompt_concise),
             absolute_path: path.to_path_buf(),
@@ -435,10 +456,8 @@ fn build_nearest_match_hint(file: &str, old_string: &str) -> String {
 fn build_confusable_hint(
     file: &str,
     old_string: &str,
-    tools: crate::util::query_tools::QueryTools,
     read_tool_name: &str,
     old_string_param: &str,
-    execute_tool_name: &str,
 ) -> Option<String> {
     use crate::util::unicode_confusables::{
         build_offset_map, detect_confusables, normalize_confusables,
@@ -493,22 +512,14 @@ fn build_confusable_hint(
     } else {
         old_string_param
     };
-    let edit_tools = tools.edit_tools();
-    let terminal_fallback = if edit_tools.is_empty() || execute_tool_name.is_empty() {
-        String::new()
-    } else {
-        format!(
-            ", or use {} with a short script{} to edit the file directly",
-            execute_tool_name,
-            crate::util::query_tools::examples_clause(&edit_tools)
-        )
-    };
+    // Prefer native edit path only: re-read + shorter old_string. Do not
+    // steer to shell scripts (python3/sed) for file edits.
     Some(format!(
         "\n\nThe nearest matching region contains Unicode typography characters \
          (smart quotes, em-dashes, etc.) on lines {} that look identical to \
          ASCII{} but differ at the byte level. Re-read the file and \
-         use a shorter {} anchored on nearby ASCII-only context{}.",
-        line_summary, read_qualifier, old_string_param, terminal_fallback
+         use a shorter {} anchored on nearby ASCII-only context.",
+        line_summary, read_qualifier, old_string_param
     ))
 }
 /// Handle replacement in existing file.
@@ -619,7 +630,7 @@ async fn handle_replacement(
         }
     }
     if positions.is_empty() {
-        let (read_name, old_string_param, execute_name) = {
+        let (read_name, old_string_param) = {
             let res = resources.lock().await;
             let renderer = res.require::<TemplateRenderer>()?;
             let read_name = renderer
@@ -628,10 +639,7 @@ async fn handle_replacement(
             let old_string_param = renderer
                 .render("${{ params.edit.old_string }}")
                 .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
-            let execute_name = renderer
-                .render("${{ tools.by_kind.execute }}")
-                .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
-            (read_name, old_string_param, execute_name)
+            (read_name, old_string_param)
         };
         let hint = if is_legacy {
             String::new()
@@ -644,10 +652,8 @@ async fn handle_replacement(
             build_confusable_hint(
                 &match_text,
                 &input.old_string,
-                crate::util::query_tools::QueryTools::detect(),
                 &read_name,
                 &old_string_param,
-                &execute_name,
             )
             .unwrap_or_default()
         };
@@ -740,6 +746,7 @@ async fn handle_replacement(
         previous_content: Some(old_text.clone()),
         is_new_file: false,
     });
+    // Edit details use pre-CRLF/pre-strip `new_text` so byte positions remain valid.
     let edits = build_edit_details(
         &new_text,
         &input.old_string,
@@ -1026,6 +1033,94 @@ mod tests {
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
     }
+
+    /// A3 gate: `GROK_DENY_REPLACE_ALL=1` → InvalidInput, file unchanged.
+    #[tokio::test]
+    async fn bulk_policy_denies_replace_all_when_env_set() {
+        use crate::types::resources::OwnerSessionId;
+        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
+        use crate::util::bulk_edit_policy::{ENV_BULK_EDIT_DIR, ENV_DENY_REPLACE_ALL};
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let state = TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            (ENV_BULK_EDIT_DIR, Some(state.path().to_str().unwrap())),
+            (ENV_DENY_REPLACE_ALL, Some("1")),
+        ]);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ra.txt");
+        std::fs::write(&path, "foo foo\n").unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(OwnerSessionId("sr-deny-ra".into()));
+        let mut input = make_input("ra.txt", "foo", "bar");
+        input.replace_all = true;
+        let result = xai_tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(resources.into_shared()),
+            input,
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("replace_all"), "msg={msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "foo foo\n");
+    }
+
+    /// A3 gate: same old→new storm across N files → InvalidInput on Nth; last file unchanged.
+    #[tokio::test]
+    async fn bulk_policy_storm_denies_and_leaves_file_unchanged() {
+        use crate::types::resources::OwnerSessionId;
+        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
+        use crate::util::bulk_edit_policy::{
+            ENV_BULK_EDIT_DIR, ENV_BULK_EDIT_N, ENV_DENY_REPLACE_ALL,
+        };
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let state = TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            (ENV_BULK_EDIT_DIR, Some(state.path().to_str().unwrap())),
+            (ENV_BULK_EDIT_N, Some("3")),
+            (ENV_DENY_REPLACE_ALL, None),
+        ]);
+        let tmp = TempDir::new().unwrap();
+        for i in 0..3 {
+            let name = format!("s{i}.txt");
+            let p = tmp.path().join(&name);
+            std::fs::write(&p, "FOO_RENAME here\n").unwrap();
+            let mut resources = test_resources(tmp.path());
+            resources.insert(OwnerSessionId("sr-storm".into()));
+            let input = make_input(&name, "FOO_RENAME", "BAR_RENAME");
+            let result = xai_tool_runtime::Tool::run(
+                &SearchReplaceTool,
+                test_ctx(resources.into_shared()),
+                input,
+            )
+            .await
+            .unwrap();
+            if i < 2 {
+                assert!(
+                    matches!(result, SearchReplaceOutput::EditsApplied(_)),
+                    "path {i} should apply: {result:?}"
+                );
+            } else {
+                match result {
+                    SearchReplaceOutput::InvalidInput(msg) => {
+                        assert!(msg.contains("storm"), "msg={msg}");
+                    }
+                    other => panic!("expected storm InvalidInput, got {other:?}"),
+                }
+                assert_eq!(
+                    std::fs::read_to_string(&p).unwrap(),
+                    "FOO_RENAME here\n",
+                    "denied path must not be modified"
+                );
+            }
+        }
+    }
     #[tokio::test]
     async fn new_file_creation() {
         let tmp = TempDir::new().unwrap();
@@ -1237,6 +1332,12 @@ mod tests {
     }
     #[tokio::test]
     async fn replace_all_mode() {
+        // Serialize with bulk-policy env tests; ensure DENY is not set.
+        use crate::util::bulk_edit_policy::ENV_DENY_REPLACE_ALL;
+        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[(ENV_DENY_REPLACE_ALL, None)]);
+
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), "aaa bbb aaa bbb aaa\n").unwrap();
         let tool = SearchReplaceTool;
@@ -1966,49 +2067,36 @@ neutTest_set);
             other => panic!("Expected NoMatchesFound, got {:?}", other),
         }
     }
-    /// Every script tool present — for tests that only care about the
-    /// diagnostic logic, not which tools the host happens to have.
-    fn test_tools() -> crate::util::query_tools::QueryTools {
-        crate::util::query_tools::QueryTools {
-            jq: Some("jq"),
-            python: Some("python3"),
-            sed: Some("sed"),
-            cut: Some("cut"),
-        }
-    }
-    /// The terminal fallback names only installed script tools (mirrors the
-    /// `use_tool` MCP-dump steer; never suggest a tool that isn't there).
+    /// Confusable recovery steers to re-read + shorter old_string only —
+    /// never shell python/sed for file edits (A1 native-tools preference).
     #[test]
-    fn confusable_hint_names_only_installed_script_tools() {
+    fn confusable_hint_prefers_native_edit_path() {
         let file = "She said \u{201C}hello\u{201D}\n";
-        let tools = crate::util::query_tools::QueryTools {
-            jq: None,
-            python: None,
-            sed: Some("sed"),
-            cut: None,
-        };
-        let hint = build_confusable_hint(
-            file,
-            "\"hello\"",
-            tools,
-            "read_file",
-            "old_string",
-            "run_terminal_cmd",
-        )
-        .expect("should produce a confusable hint");
-        assert!(hint.contains("`sed`"), "names the present sed: {hint}");
+        let hint = build_confusable_hint(file, "\"hello\"", "read_file", "old_string")
+            .expect("should produce a confusable hint");
         assert!(
-            !hint.contains("python"),
-            "must not name absent python: {hint}"
+            hint.contains("ASCII-only context"),
+            "keeps the tool-free recovery advice: {hint}"
+        );
+        assert!(
+            hint.contains("Re-read the file"),
+            "steers to re-read + shorter old_string: {hint}"
+        );
+        assert!(
+            !hint.contains("python")
+                && !hint.contains("sed")
+                && !hint.contains("script")
+                && !hint.contains("run_terminal"),
+            "must not recommend shell edit scripts: {hint}"
         );
     }
-    /// Template-derived names can render blank (no Execute tool, read guard
-    /// disabled, missing param mapping); the hint must never emit a dangling
-    /// reference to a blank name.
+    /// Template-derived names can render blank (read guard disabled, missing
+    /// param mapping); the hint must never emit a dangling reference to a
+    /// blank name.
     #[test]
     fn confusable_hint_guards_blank_template_names() {
         let file = "She said \u{201C}hello\u{201D}\n";
-        let hint = build_confusable_hint(file, "\"hello\"", test_tools(), "", "", "")
+        let hint = build_confusable_hint(file, "\"hello\"", "", "")
             .expect("should produce a confusable hint");
         assert!(
             !hint.contains(" in  output"),
@@ -2019,54 +2107,15 @@ neutTest_set);
             "falls back to the canonical param name: {hint}"
         );
         assert!(
-            !hint.contains(", or use "),
-            "no terminal fallback without an Execute tool: {hint}"
-        );
-        assert!(
             !hint.contains("  "),
             "no double spaces from blank substitutions: {hint}"
-        );
-    }
-    /// With no script tools installed, the terminal fallback is omitted
-    /// entirely — the ASCII-anchor advice needs no external tool.
-    #[test]
-    fn confusable_hint_omits_terminal_fallback_when_no_script_tools() {
-        let file = "She said \u{201C}hello\u{201D}\n";
-        let hint = build_confusable_hint(
-            file,
-            "\"hello\"",
-            crate::util::query_tools::QueryTools::default(),
-            "read_file",
-            "old_string",
-            "run_terminal_cmd",
-        )
-        .expect("should produce a confusable hint");
-        assert!(
-            hint.contains("ASCII-only context"),
-            "keeps the tool-free recovery advice: {hint}"
-        );
-        assert!(
-            !hint.contains("python") && !hint.contains("sed") && !hint.contains("script"),
-            "no terminal fallback when no script tools exist: {hint}"
-        );
-        assert!(
-            !hint.contains("run_terminal_cmd"),
-            "must not steer to the shell tool with nothing to run: {hint}"
         );
     }
     #[test]
     fn confusable_hint_none_for_pure_ascii_file() {
         let file = "hello world\nfoo bar\n";
         assert!(
-            build_confusable_hint(
-                file,
-                "xyz",
-                test_tools(),
-                "read_file",
-                "old_string",
-                "run_terminal_cmd"
-            )
-            .is_none(),
+            build_confusable_hint(file, "xyz", "read_file", "old_string").is_none(),
             "no hint when file has no confusables"
         );
     }
@@ -2074,29 +2123,15 @@ neutTest_set);
     fn confusable_hint_none_when_normalized_miss_also_fails() {
         let file = "She said \u{201C}hello\u{201D}\n";
         assert!(
-            build_confusable_hint(
-                file,
-                "totally_different_string",
-                test_tools(),
-                "read_file",
-                "old_string",
-                "run_terminal_cmd"
-            )
-            .is_none(),
+            build_confusable_hint(file, "totally_different_string", "read_file", "old_string")
+                .is_none(),
             "no false guidance when confusables are unrelated to the miss"
         );
     }
     #[test]
     fn confusable_hint_present_when_normalized_match_would_succeed() {
         let file = "the fix should be \u{201C}stream through\u{201D}\n";
-        let hint = build_confusable_hint(
-            file,
-            "\"stream through\"",
-            test_tools(),
-            "read_file",
-            "old_string",
-            "run_terminal_cmd",
-        );
+        let hint = build_confusable_hint(file, "\"stream through\"", "read_file", "old_string");
         let hint = hint.expect("should produce a confusable hint");
         assert!(
             hint.contains("Unicode typography characters"),
@@ -2112,14 +2147,7 @@ neutTest_set);
     #[test]
     fn confusable_hint_reports_only_matched_region_lines() {
         let file = "line one\n\u{201C}line two\u{201D}\nline three\n\u{2014}line four\n";
-        let hint = build_confusable_hint(
-            file,
-            "\"line two\"",
-            test_tools(),
-            "read_file",
-            "old_string",
-            "run_terminal_cmd",
-        );
+        let hint = build_confusable_hint(file, "\"line two\"", "read_file", "old_string");
         let hint = hint.expect("should produce a confusable hint");
         assert!(hint.contains('2'), "should mention line 2: {}", hint);
         assert!(
@@ -2131,14 +2159,7 @@ neutTest_set);
     #[test]
     fn confusable_hint_multi_line_match_region() {
         let file = "header\n\u{201C}start\nend\u{201D}\nfooter\n";
-        let hint = build_confusable_hint(
-            file,
-            "\"start\nend\"",
-            test_tools(),
-            "read_file",
-            "old_string",
-            "run_terminal_cmd",
-        );
+        let hint = build_confusable_hint(file, "\"start\nend\"", "read_file", "old_string");
         let hint = hint.expect("should produce a confusable hint");
         assert!(hint.contains('2'), "should mention line 2: {}", hint);
         assert!(hint.contains('3'), "should mention line 3: {}", hint);
@@ -2153,14 +2174,7 @@ neutTest_set);
         for i in 1..=12 {
             old_string.push_str(&format!("line {} content\n", i));
         }
-        let hint = build_confusable_hint(
-            &file,
-            &old_string,
-            test_tools(),
-            "read_file",
-            "old_string",
-            "run_terminal_cmd",
-        );
+        let hint = build_confusable_hint(&file, &old_string, "read_file", "old_string");
         let hint = hint.expect("should produce a confusable hint");
         assert!(
             hint.contains("and 4 more"),
@@ -2407,6 +2421,11 @@ neutTest_set);
     /// Multi-match + replace_all=true replaces all occurrences.
     #[tokio::test]
     async fn fallback_multi_match_with_replace_all() {
+        use crate::util::bulk_edit_policy::ENV_DENY_REPLACE_ALL;
+        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[(ENV_DENY_REPLACE_ALL, None)]);
+
         let tmp = TempDir::new().unwrap();
         std::fs::write(
             tmp.path().join("f.txt"),
@@ -2592,6 +2611,11 @@ neutTest_set);
     /// Replace-all mode works correctly with CRLF files.
     #[tokio::test]
     async fn crlf_replace_all() {
+        use crate::util::bulk_edit_policy::ENV_DENY_REPLACE_ALL;
+        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[(ENV_DENY_REPLACE_ALL, None)]);
+
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), b"foo\r\nbar\r\nfoo\r\nbaz\r\n").unwrap();
         let tool = SearchReplaceTool;
@@ -2643,6 +2667,87 @@ neutTest_set);
                 assert_eq!(written, b"line1\r\nREPLACED\r\nline4\r\n");
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
+        }
+    }
+
+    /// Default ON: trailing spaces/tabs on lines are stripped before disk write.
+    #[tokio::test]
+    async fn strips_trailing_whitespace_by_default() {
+        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
+        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        // Explicit on (and clear any prior off) for isolation.
+        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("1"))]);
+
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("ws.txt"), "keep me\n").unwrap();
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        // new_string has trailing spaces and a tab-terminated line.
+        let input = make_input("ws.txt", "keep me\n", "line one  \nline two\t\n");
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::EditsApplied(_) => {
+                let content = std::fs::read_to_string(tmp.path().join("ws.txt")).unwrap();
+                assert_eq!(content, "line one\nline two\n");
+            }
+            other => panic!("Expected EditsApplied, got {other:?}"),
+        }
+    }
+
+    /// Env off: trailing whitespace preserved on disk.
+    #[tokio::test]
+    async fn preserves_trailing_whitespace_when_env_off() {
+        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
+        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("0"))]);
+
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("ws.txt"), "keep me\n").unwrap();
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        let input = make_input("ws.txt", "keep me\n", "line one  \nline two\t\n");
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::EditsApplied(_) => {
+                let content = std::fs::read_to_string(tmp.path().join("ws.txt")).unwrap();
+                assert_eq!(content, "line one  \nline two\t\n");
+            }
+            other => panic!("Expected EditsApplied, got {other:?}"),
+        }
+    }
+
+    /// CRLF file: strip EOL spaces/tabs but keep `\r\n`.
+    /// Match/replace use LF (read_file strips `\r`); write re-encodes CRLF.
+    #[tokio::test]
+    async fn strips_trailing_ws_preserves_crlf() {
+        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
+        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("1"))]);
+
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("crlf.txt"), b"old\r\n").unwrap();
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        let input = make_input("crlf.txt", "old\n", "a  \nb\t\n");
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::EditsApplied(_) => {
+                let content = std::fs::read(tmp.path().join("crlf.txt")).unwrap();
+                assert_eq!(content, b"a\r\nb\r\n");
+            }
+            other => panic!("Expected EditsApplied, got {other:?}"),
         }
     }
 }

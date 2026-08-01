@@ -848,7 +848,8 @@ pub struct CopySessionResult {
     /// Whether `plan_mode.json` (plan mode lifecycle state) was copied.
     pub plan_mode_state_copied: bool,
     pub signals_copied: bool,
-    /// Whether `tool_state.json` (persisted tool state, e.g. TodoState) was copied.
+    /// Whether live tool Resources state was copied (`tool_state.json` and/or
+    /// `resources_state.json` — the latter is the actual Resources SoT on disk).
     pub tool_state_copied: bool,
     /// Whether `announcement_state.json` was copied.
     pub announcement_state_copied: bool,

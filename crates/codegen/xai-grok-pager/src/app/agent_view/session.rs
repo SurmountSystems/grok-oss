@@ -75,6 +75,67 @@ impl AgentView {
             self.last_seen_event_seq = new_seq.or(cur_seq);
         }
     }
+
+    /// Persist the live composer text as a session-scoped unsent draft.
+    ///
+    /// Fail-open: disk errors are logged and ignored. Empty text clears the file.
+    pub(crate) fn persist_unsent_prompt_draft(&self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let text = self.prompt.text();
+        if let Err(e) = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+            text,
+        ) {
+            tracing::warn!(?e, "failed to persist unsent prompt draft");
+        }
+    }
+
+    /// Clear durable unsent draft after a successful submit (or explicit discard).
+    pub(crate) fn clear_unsent_prompt_draft(&self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        if let Err(e) = xai_grok_shell::session::unsent_prompt_draft::clear_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+        ) {
+            tracing::warn!(?e, "failed to clear unsent prompt draft");
+        }
+    }
+
+    /// Load durable draft into an empty composer for the bound session.
+    pub(crate) fn maybe_restore_unsent_prompt_draft(&mut self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let draft = match xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(?e, "failed to load unsent prompt draft");
+                return;
+            }
+        };
+        let Some(text) = draft else {
+            return;
+        };
+        if xai_grok_shell::session::unsent_prompt_draft::should_restore_draft_into_composer(
+            self.prompt.text(),
+            &text,
+        ) {
+            self.prompt.set_text(&text);
+            self.prompt.set_cursor(text.len());
+        }
+    }
+
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
         if self.session.session_id.take().is_some() {
@@ -206,6 +267,8 @@ impl AgentView {
             credit_balance: None,
             auto_topup: None,
             openrouter_credit_balance: None,
+            console_team_prepaid_cents: None,
+            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
             goal_state: None,
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
@@ -255,7 +318,7 @@ impl AgentView {
             scrollback_visible_link_count: 0,
             highlighted_link_idx: None,
             hovered_link_idx: None,
-            last_pointer_on_link: false,
+            last_pointer_cursor: false,
             last_btw_selection_model: ResolvedSelectionModel::default(),
             last_btw_area: Rect::default(),
             pending_scrollback_click: None,
@@ -272,6 +335,7 @@ impl AgentView {
             hit_context: Default::default(),
             hit_credits: Default::default(),
             hit_todo_close: Default::default(),
+            hit_todo_clear_done: Default::default(),
             hit_bg_close: Default::default(),
             hit_subagent_close: Default::default(),
             hit_bg_status: Default::default(),
@@ -282,6 +346,7 @@ impl AgentView {
             hit_queue_close: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
+            hit_soft_park_ctas: Default::default(),
             hit_follow_indicator: Default::default(),
             hit_response_top_indicator: Default::default(),
             hit_cwd: Default::default(),
@@ -348,6 +413,8 @@ impl AgentView {
             scrollback_search: None,
             hit_sb_copy: Default::default(),
             hit_sb_view: Default::default(),
+            bubble_copy_hits: Vec::new(),
+            hovered_bubble_copy: None,
             question_view: None,
             elicitation_view: None,
             pending_elicitation: None,
@@ -1278,6 +1345,7 @@ impl AgentView {
             self.credit_balance = None;
             self.auto_topup = None;
             self.openrouter_credit_balance = None;
+            self.console_team_prepaid_cents = None;
             return;
         }
         self.credit_balance = balance;
@@ -2177,7 +2245,8 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             old_request,
-            Ok("old answer".into())
+            Ok("old answer".into()),
+            None,
         ));
         assert!(agent.btw_state.is_none());
         let replay_request =
@@ -2188,7 +2257,8 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             replay_request,
-            Ok("pre-replay answer".into())
+            Ok("pre-replay answer".into()),
+            None,
         ));
         assert!(agent.btw_state.is_none());
     }

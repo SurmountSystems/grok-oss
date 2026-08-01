@@ -41,18 +41,47 @@ fn default_team_oauth2_scopes() -> Vec<String> {
 }
 /// Pin automatic auth to one method (`[auth] preferred_method` in config.toml).
 ///
-/// When set, only that method is used for automatic selection; if it is
-/// unavailable, auth fails (no silent fallthrough to the other method).
-/// Unset keeps today's multi-method fallthrough (session preferred when both
-/// exist). Config-toml only — not remote settings, settings UI, or env.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// - [`Self::ApiKey`]: console / Business API key first (fail-closed if missing).
+/// - [`Self::Oidc`]: SuperGrok login session path (fail-closed if missing).
+///
+/// SuperGrok multi-identity ranking (prefer included limits before $ extras)
+/// is **not** a method value — use `[auth] auto_use_included_limits = true`
+/// (see [`super::supergrok_identity_rank`]). Roles personal|business are also
+/// not method values. Unset keeps multi-method fallthrough.
+/// Config-toml only — not remote settings, settings UI, or env.
+///
+/// Wire values match ordinary grok: `api_key` / `oauth` (and aliases). `auto`
+/// is **not** accepted here so shared configs stay compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferredAuthMethod {
     /// `XAI_API_KEY` / auth.json `xai::api_key` / per-model BYOK (`xai.api_key`).
     ApiKey,
-    /// OIDC / OAuth2 session (`cached_token`, interactive `grok.com` / `oidc`,
-    /// including devbox-minted OIDC).
+    /// SuperGrok OIDC / OAuth2 session (`cached_token`, interactive login).
+    /// Canonical serde name is `oauth`; `oidc` still deserializes.
     Oidc,
+}
+
+impl Serialize for PreferredAuthMethod {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::ApiKey => "api_key",
+            Self::Oidc => "oauth",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for PreferredAuthMethod {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "api_key" | "console_api_key" | "api" | "key" => Ok(Self::ApiKey),
+            "oauth" | "oidc" | "oauth_token" => Ok(Self::Oidc),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["api_key", "oauth", "oidc"],
+            )),
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -87,11 +116,27 @@ pub struct GrokComConfig {
     /// equal this. Put in `requirements.toml` to enforce as non-overridable policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_login_team_uuid: Option<ForceLoginTeam>,
-    /// Pin automatic auth to `api_key` or `oidc`. When set and the chosen
+    /// Pin automatic auth to `api_key` or `oauth`/`oidc`. When set and that
     /// method is unavailable, auth fails (no fallthrough). Unset keeps
     /// multi-method fallthrough. Config.toml only (`[auth] preferred_method`).
+    /// Not for SuperGrok multi-identity ranking — use [`Self::auto_use_included_limits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_method: Option<PreferredAuthMethod>,
+    /// Prefer **included** SuperGrok limits (personal and/or Business) before
+    /// SuperGrok dollar extras / console API $. When multi-identity exists,
+    /// see both pools' headroom and rank among included pools (sooner reset
+    /// is a ranking heuristic, not the feature name). Exhausted included
+    /// pool fails over to another with included headroom, then console.
+    /// Independent of [`Self::preferred_method`] so ordinary `oauth` /
+    /// `api_key` pins stay compatible with stock grok. Config.toml only
+    /// (`[auth] auto_use_included_limits`). Default false.
+    /// Serde alias `prefer_sooner_reset` accepted for one-release dogfood.
+    #[serde(
+        default,
+        alias = "prefer_sooner_reset",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub auto_use_included_limits: bool,
 }
 /// Team login restriction. TOML string or array; an empty array fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +347,7 @@ impl Default for GrokComConfig {
                 .map(|v| env_flag_enabled(&v)),
             force_login_team_uuid: None,
             preferred_method: None,
+            auto_use_included_limits: false,
         }
     }
 }
@@ -426,5 +472,99 @@ mod tests {
         assert_eq!(cfg.preferred_method, Some(PreferredAuthMethod::Oidc));
         let cfg: GrokComConfig = toml::from_str("").expect("parse empty");
         assert_eq!(cfg.preferred_method, None);
+    }
+
+    #[test]
+    fn preferred_method_accepts_aliases_not_auto() {
+        let cases: &[(&str, PreferredAuthMethod)] = &[
+            ("api_key", PreferredAuthMethod::ApiKey),
+            ("console_api_key", PreferredAuthMethod::ApiKey),
+            ("api", PreferredAuthMethod::ApiKey),
+            ("key", PreferredAuthMethod::ApiKey),
+            ("oidc", PreferredAuthMethod::Oidc),
+            ("oauth", PreferredAuthMethod::Oidc),
+            ("oauth_token", PreferredAuthMethod::Oidc),
+        ];
+        for (raw, expect) in cases {
+            let toml = format!("preferred_method = \"{raw}\"");
+            let cfg: GrokComConfig =
+                toml::from_str(&toml).unwrap_or_else(|e| panic!("parse {raw:?}: {e}"));
+            assert_eq!(cfg.preferred_method, Some(*expect), "raw={raw}");
+        }
+        // `auto` is not a preferred_method value (use auto_use_included_limits).
+        let err = toml::from_str::<GrokComConfig>("preferred_method = \"auto\"").unwrap_err();
+        assert!(
+            err.to_string().contains("auto") || err.to_string().contains("unknown"),
+            "expected reject auto: {err}"
+        );
+    }
+
+    #[test]
+    fn preferred_method_oauth_round_trips_as_oauth() {
+        let oauth: PreferredAuthMethod = serde_json::from_str("\"oauth\"").expect("oauth");
+        assert_eq!(oauth, PreferredAuthMethod::Oidc);
+        let ser = serde_json::to_string(&oauth).expect("ser oauth");
+        assert_eq!(ser, "\"oauth\"", "canonical serialize is oauth not oidc");
+        let oidc: PreferredAuthMethod = serde_json::from_str("\"oidc\"").expect("oidc");
+        assert_eq!(oidc, PreferredAuthMethod::Oidc);
+        assert_eq!(
+            serde_json::to_string(&oidc).expect("ser"),
+            "\"oauth\"",
+            "oidc deserializes but serializes as oauth"
+        );
+    }
+
+    #[test]
+    fn auto_use_included_limits_deserializes_independently() {
+        let cfg: GrokComConfig = toml::from_str(
+            r#"
+            preferred_method = "oidc"
+            auto_use_included_limits = true
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.preferred_method, Some(PreferredAuthMethod::Oidc));
+        assert!(cfg.auto_use_included_limits);
+        let cfg: GrokComConfig = toml::from_str("").expect("empty");
+        assert!(!cfg.auto_use_included_limits);
+        let cfg: GrokComConfig =
+            toml::from_str("auto_use_included_limits = true").expect("flag only");
+        assert!(cfg.auto_use_included_limits);
+        assert_eq!(cfg.preferred_method, None);
+    }
+
+    #[test]
+    fn prefer_sooner_reset_alias_still_deserializes() {
+        let cfg: GrokComConfig =
+            toml::from_str("prefer_sooner_reset = true").expect("legacy alias");
+        assert!(
+            cfg.auto_use_included_limits,
+            "serde alias prefer_sooner_reset → auto_use_included_limits"
+        );
+        assert_eq!(cfg.preferred_method, None);
+    }
+
+    #[test]
+    fn preferred_method_rejects_personal_business_as_method() {
+        for bad in ["personal", "business", "auto"] {
+            let toml = format!("preferred_method = \"{bad}\"");
+            let err = toml::from_str::<GrokComConfig>(&toml).unwrap_err();
+            assert!(
+                err.to_string().contains(bad) || err.to_string().contains("unknown"),
+                "expected reject for {bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_use_included_limits_does_not_block_automatic_oidc() {
+        let mut cfg = GrokComConfig::default();
+        cfg.auto_use_included_limits = true;
+        assert!(!cfg.blocks_automatic_oidc());
+        cfg.preferred_method = Some(PreferredAuthMethod::ApiKey);
+        assert!(cfg.blocks_automatic_oidc());
+        cfg.preferred_method = Some(PreferredAuthMethod::Oidc);
+        cfg.auto_use_included_limits = true;
+        assert!(!cfg.blocks_automatic_oidc());
     }
 }

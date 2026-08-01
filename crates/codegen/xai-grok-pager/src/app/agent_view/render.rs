@@ -136,10 +136,39 @@ impl AgentView {
                 ]
             }
             PlanApprovalFocus::Prompt => {
+                // Soft-park (no panel): free typing, no empty-Enter approve
+                // hint. Mouse footer CTAs + `/view-plan` for decisions.
+                if self.line_viewer.is_none() {
+                    let has_content =
+                        !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
+                    if has_content {
+                        use crate::views::plan_approval_view::PlanPromptIntent;
+                        let enter_label = match pav.prompt_intent {
+                            PlanPromptIntent::ApproveNotes => "approve w/ comment",
+                            PlanPromptIntent::Questions => "clarify",
+                            PlanPromptIntent::Revise => "revise",
+                        };
+                        return vec![
+                            HintItem::new(key!(Enter), enter_label),
+                            HintItem::new(key!(Tab), "plan"),
+                            HintItem::new(key!(Esc), "back"),
+                        ];
+                    }
+                    return vec![
+                        HintItem::new(key!(Tab), "plan"),
+                        HintItem::new(key!(Esc), "back"),
+                    ];
+                }
                 let has_content = !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
                 if has_content {
+                    use crate::views::plan_approval_view::PlanPromptIntent;
+                    let enter_label = match pav.prompt_intent {
+                        PlanPromptIntent::ApproveNotes => "approve w/ comment",
+                        PlanPromptIntent::Questions => "clarify",
+                        PlanPromptIntent::Revise => "revise",
+                    };
                     vec![
-                        HintItem::new(key!(Enter), "request changes"),
+                        HintItem::new(key!(Enter), enter_label),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]
@@ -695,9 +724,14 @@ impl AgentView {
             None
         };
         let prompt_focused = if self.plan_approval_view.is_some() {
-            self.plan_approval_view
+            let plan_prompt = self
+                .plan_approval_view
                 .as_ref()
-                .is_some_and(|pav| pav.focus != PlanApprovalFocus::Preview)
+                .is_some_and(|pav| pav.focus != PlanApprovalFocus::Preview);
+            let soft_park_prompt_pane = self.line_viewer.is_none()
+                && self.active_pane == AgentPane::Prompt
+                && !overlay_focused;
+            plan_prompt || soft_park_prompt_pane
         } else if casual_commenting {
             true
         } else {
@@ -1035,6 +1069,11 @@ impl AgentView {
             drain_blocked
         };
         let watchers = self.watchers();
+        // While parked, refresh the single "Worked for" row's elapsed so the
+        // duration ticks live without stacking a new transcript line per second.
+        if self.renders_parked() {
+            self.maybe_push_parked_marker();
+        }
         let parked = self.renders_parked();
         let turn_status_watchers = if dock_covers_cues {
             crate::views::turn_status::Watchers::default()
@@ -1656,20 +1695,26 @@ impl AgentView {
             }
             let any_drag_active =
                 self.drag_selection.is_some() || self.block_drag_selection.is_some();
-            if !any_drag_active
-                && !overlay_focused
-                && let Some(ref selection_box) = sb_output.selection_box
-            {
-                selection_box.render(buf);
-                self.render_selection_buttons(
-                    buf,
-                    selection_box,
-                    sb_output.selected_entry_area,
-                    &theme,
-                );
+            if !any_drag_active && !overlay_focused {
+                if let Some(ref selection_box) = sb_output.selection_box {
+                    selection_box.render(buf);
+                    self.render_selection_buttons(
+                        buf,
+                        selection_box,
+                        sb_output.selected_entry_area,
+                        &theme,
+                    );
+                } else {
+                    self.hit_sb_copy.clear();
+                    self.hit_sb_view.clear();
+                }
+                // Always-on bubble ⧉ after selection chrome (sibling pass).
+                self.render_bubble_copy_buttons(buf, &theme);
             } else {
                 self.hit_sb_copy.clear();
                 self.hit_sb_view.clear();
+                self.bubble_copy_hits.clear();
+                self.hovered_bubble_copy = None;
             }
             let rail_shown = self.timeline_rail.is_some();
             if !rail_shown {
@@ -1808,6 +1853,9 @@ impl AgentView {
                 &self.subagent_sessions,
                 &self.session.scheduled_tasks,
             );
+            // Always-on magenta agent rail (like Human green gutter).
+            agent::paint_side_pane_agent_rail(buf, layout.tasks, theme.accent_running);
+            // Agent / subagent list: magenta focus rails (`accent_running`).
             let close_rect = agent::render_todo_chrome(
                 buf,
                 layout.tasks,
@@ -1816,6 +1864,7 @@ impl AgentView {
                 false,
                 self.hit_bg_close.hovered,
                 &theme,
+                theme.accent_running,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_bg_close.set(close_rect);
@@ -1823,7 +1872,23 @@ impl AgentView {
         if todo_height > 0 {
             let todo_focused = self.active_pane == ActivePane::Todo && !overlay_focused;
             self.todo.render(layout.todo, buf, todo_focused, layout_cfg);
-            let close_rect = agent::render_todo_chrome(
+            // Always-on magenta agent rail on the status board.
+            agent::paint_side_pane_agent_rail(buf, layout.todo, theme.accent_running);
+            // Clear finished: compact [−] icon when the todo board is **open**
+            // and finished rows exist. Not focus-only (operators looking at
+            // the board while on scrollback/tasks never found it) and not
+            // always-on top-right next to pts/context. Collocates with close
+            // in the todo header gap. Quiet idle (hover stronger); never neon
+            // green or agent magenta. Slash + focused X still work.
+            // Action registry / hints still say "Clear finished".
+            let clear_enabled = self.todo.counts().completed + self.todo.counts().cancelled > 0;
+            let clear_label = if clear_enabled {
+                Some(crate::glyphs::clear_finished_button())
+            } else {
+                None
+            };
+            // Status board tracks agent work → magenta agent rails.
+            let sel = agent::render_todo_chrome_with_close_label(
                 buf,
                 layout.todo,
                 layout_cfg,
@@ -1831,11 +1896,22 @@ impl AgentView {
                 false,
                 self.hit_todo_close.hovered,
                 &theme,
-            )
-            .and_then(|sel| sel.close_button_rect());
-            self.hit_todo_close.set(close_rect);
+                None,
+                clear_label,
+                self.hit_todo_clear_done.hovered,
+                true, // label only passed when live; no dim reserved slot
+                theme.accent_running,
+            );
+            self.hit_todo_close
+                .set(sel.as_ref().and_then(|s| s.close_button_rect()));
+            self.hit_todo_clear_done.set(if clear_enabled {
+                sel.as_ref().and_then(|s| s.action_button_rect())
+            } else {
+                None
+            });
         } else {
             self.hit_todo_close.clear();
+            self.hit_todo_clear_done.clear();
         }
         if queue_height > 0 {
             let queue_focused = self.active_pane == ActivePane::Queue && !overlay_focused;
@@ -1847,6 +1923,7 @@ impl AgentView {
                 Some(layout.scrollback),
                 self.can_send_now(),
             );
+            // Queued human prompts → Human green rail (not agent magenta).
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,
                 layout.queue,
@@ -1856,6 +1933,10 @@ impl AgentView {
                 self.hit_queue_close.hovered,
                 &theme,
                 Some(crate::glyphs::ballot_x_button()),
+                None,
+                false,
+                true,
+                theme.accent_user,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_queue_close.set(close_rect);
@@ -2308,14 +2389,56 @@ impl AgentView {
             .models
             .current_model_id_str()
             .is_some_and(xai_grok_shell::auth::is_openrouter_catalog_id);
-        let warning = crate::views::credit_bar::usage_warning_for_session_with_openrouter(
-            self.credit_balance.as_ref(),
-            self.auto_topup.as_ref(),
-            self.openrouter_credit_balance.as_ref(),
-            self.billing_surface_visible,
-            self.chat_kind,
-            openrouter_model,
-        );
+        // Meter = live spend pool. Silent sticky console (SuperGrok still
+        // memoized out of allowance) must not keep SuperGrok extras as the
+        // footer when tracked identity is still the default SuperGrokSession.
+        // Probe only while tracked is SuperGrok; on hit, pin ConsoleKey so
+        // later frames skip dual-auth/disk work.
+        if !self.sampling_identity.is_console() {
+            let grok_home = xai_grok_shell::util::grok_home::grok_home();
+            if xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(&grok_home) {
+                self.sampling_identity = crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
+            }
+        }
+        // When dual SuperGrok principals exist, name which role's included pool
+        // the footer is talking about (active base identity).
+        let live_principal_role = if self.sampling_identity.is_console() {
+            None
+        } else {
+            let grok_home = xai_grok_shell::util::grok_home::grok_home();
+            xai_grok_shell::auth::active_supergrok_identity_id(&grok_home).and_then(|aid| {
+                let map =
+                    xai_grok_shell::auth::read_auth_json(&grok_home.join("auth.json")).ok()?;
+                let listings = xai_grok_shell::auth::list_supergrok_principal_listings(&map);
+                if listings.len() < 2 {
+                    return None;
+                }
+                listings
+                    .into_iter()
+                    .find(|p| p.identity_id == aid)
+                    .map(|p| p.role_label.to_string())
+            })
+        };
+        // Console team prepaid: agent field, else process cache when team_id set.
+        let console_prepaid = self
+            .console_team_prepaid_cents
+            .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+        // Honest gap when cents unknown (not soft "no $ meter yet").
+        let console_prepaid_gap =
+            crate::views::credit_bar::resolve_console_team_prepaid_gap_default();
+        let warning =
+            crate::views::credit_bar::usage_warning_for_session_with_identity_principal_and_gap(
+                self.credit_balance.as_ref(),
+                self.auto_topup.as_ref(),
+                self.openrouter_credit_balance.as_ref(),
+                self.billing_surface_visible,
+                self.chat_kind,
+                openrouter_model,
+                self.sampling_identity,
+                live_principal_role.as_deref(),
+                console_prepaid,
+                console_prepaid_gap,
+            );
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
         let usage_warning_critical = warning.is_some_and(|(_, critical)| critical);
@@ -3300,6 +3423,17 @@ impl AgentView {
                 }
             }
             let in_plan_approval = self.plan_approval_view.is_some();
+            // Panel early-return (too small) leaves no footer CTAs while
+            // `line_viewer` is still Some — soft-park strip was cleared above.
+            // Detect painted approval hits so we can fall back to strip CTAs.
+            let panel_has_approval_cta = in_plan_approval
+                && viewer.plan_ref().is_some_and(|p| {
+                    p.approve_button_area.is_some()
+                        || p.abandon_button_area.is_some()
+                        || p.approve_notes_button_area.is_some()
+                        || p.questions_button_area.is_some()
+                        || p.send_button_area.is_some()
+                });
             let on_comment = in_plan_approval
                 && viewer
                     .list_state
@@ -3343,6 +3477,8 @@ impl AgentView {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
                 h.push(HintItem::new(key!('v'), "select"));
+                h.push(HintItem::new(key!('y'), "copy"));
+                h.push(HintItem::new(key!('Y'), "copy plan"));
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
             } else if is_plan_viewer {
@@ -3373,6 +3509,8 @@ impl AgentView {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
                 h.push(HintItem::new(key!('v'), "select"));
+                h.push(HintItem::new(key!('y'), "copy"));
+                h.push(HintItem::new(key!('Y'), "copy plan"));
                 h.push(HintItem::new(key!('f', CONTROL), "fullscreen"));
                 h.push(HintItem::new(key!('/'), "search"));
                 h.push(HintItem::new(key!(Esc), "close"));
@@ -3397,6 +3535,24 @@ impl AgentView {
             if !(plan_prompt_focused || casual_commenting || viewer.fullscreen && input_bar_active)
             {
                 ShortcutsBar::new(&viewer_hints).render(layout.shortcuts, buf);
+            }
+            // Soft-park chrome fallback: line_viewer is open but panel did not
+            // paint approval footer CTAs (size early-return). Earlier branch
+            // cleared `hit_soft_park_ctas` because line_viewer.is_some().
+            // Re-paint strip CTAs so approval is never silent zero chrome.
+            if in_plan_approval && !panel_has_approval_cta {
+                use crate::views::plan_approval_view::{
+                    SoftParkCtaHovers, paint_soft_park_cta_buttons,
+                };
+                let hovers = SoftParkCtaHovers {
+                    approve: self.hit_soft_park_ctas.approve.hovered,
+                    notes: self.hit_soft_park_ctas.notes.hovered,
+                    clarify: self.hit_soft_park_ctas.clarify.hovered,
+                    revise: self.hit_soft_park_ctas.revise.hovered,
+                    quit: self.hit_soft_park_ctas.quit.hovered,
+                };
+                let areas = paint_soft_park_cta_buttons(buf, layout.shortcuts, &theme, hovers);
+                self.hit_soft_park_ctas.apply_areas(areas);
             }
             self.pane_areas = layout.pane_areas();
             let viewer_cursor = if plan_prompt_focused || self.is_casual_commenting() {
@@ -4312,12 +4468,12 @@ impl AgentView {
                 );
             }
         }
-        let on_link = self.hovered_link_idx.is_some();
-        if supports_osc22() && on_link != self.last_pointer_on_link {
-            self.last_pointer_on_link = on_link;
+        let want_pointer = self.mouse_wants_pointer_cursor();
+        if supports_osc22() && want_pointer != self.last_pointer_cursor {
+            self.last_pointer_cursor = want_pointer;
             use crossterm::Command;
             let mut seq = String::new();
-            if on_link {
+            if want_pointer {
                 let _ = crate::terminal::SetPointerCursor.write_ansi(&mut seq);
             } else {
                 let _ = crate::terminal::SetDefaultCursor.write_ansi(&mut seq);

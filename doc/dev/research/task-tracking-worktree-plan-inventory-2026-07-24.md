@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-24  
 **Mode:** research inventory (no product code change).  
-**Workspace:** `/home/hunter/Projects/surmount/grok-build`  
+**Workspace:** `$REPO`  
 **Honesty note:** This file was **synthesized from a parent handoff summary** when
 the explore agent did not write an inventory. Product code (todo tool, plan
 mode, worktree isolation, pending prompts) should be **re-verified** against

@@ -683,6 +683,7 @@ pub fn current_value_for(
     match key {
         // SHARED: UiConfig is the source of truth, the pager keeps a cache
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
+        "hide_header" => Some(SettingValue::Bool(ui.hide_header)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
         "dashboard_preview" => Some(SettingValue::Bool(ui.dashboard_preview_enabled())),
@@ -706,6 +707,7 @@ pub fn current_value_for(
         "contextual_hints.plan_mode" => Some(SettingValue::Bool(
             ui.contextual_hints.plan_mode.unwrap_or(true),
         )),
+        "plan_approval_park" => Some(SettingValue::Enum(ui.plan_approval_park_mode())),
         "contextual_hints.image_input" => Some(SettingValue::Bool(
             ui.contextual_hints.image_input.unwrap_or(true),
         )),
@@ -803,14 +805,14 @@ pub fn current_value_for(
             ui.theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
-                .unwrap_or("groknight"),
+                .unwrap_or("doge"),
         )),
         "auto_dark_theme" => Some(SettingValue::Enum(
             ui.auto_dark_theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
                 .filter(|s| *s != "auto")
-                .unwrap_or("groknight"),
+                .unwrap_or("doge"),
         )),
         "auto_light_theme" => Some(SettingValue::Enum(
             ui.auto_light_theme
@@ -907,6 +909,27 @@ pub fn current_value_for(
                     .unwrap_or_else(|| ui.fork_secondary_model.clone())
             }
         })),
+        // Auto away-recap: live notification service / snapshot wins; disk
+        // `ui.notifications.session_recap` is the seed when the modal opens.
+        "notifications.session_recap" => {
+            Some(SettingValue::Bool(pager.notifications_session_recap))
+        }
+        "notifications.session_recap_threshold_secs" => Some(SettingValue::Int(
+            pager.notifications_session_recap_threshold_secs as i64,
+        )),
+        // Master recap feature flag (restart-required). Snapshot mirrors
+        // user config; default true.
+        "features.session_recap" => Some(SettingValue::Bool(pager.features_session_recap)),
+        // Sticky cancel-subagents preference.
+        "cancel_subagents_on_turn_cancel" => Some(SettingValue::Enum(
+            match ui.cancel_subagents_on_turn_cancel.as_deref() {
+                Some("always_stop") => "always_stop",
+                Some("always_continue") => "always_continue",
+                _ => "ask",
+            },
+        )),
+        // Always-on bubble copy chrome (pager.toml).
+        "bubble_copy_buttons" => Some(SettingValue::Bool(pager.bubble_copy_buttons)),
 
         _ => None,
     }
@@ -1075,7 +1098,7 @@ mod tests {
                         .theme
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
-                        .unwrap_or("groknight");
+                        .unwrap_or("doge");
                     assert_eq!(
                         *default, expected,
                         "theme default drifts from UiConfig::default()",
@@ -1091,7 +1114,7 @@ mod tests {
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
                         .filter(|s| *s != "auto")
-                        .unwrap_or("groknight");
+                        .unwrap_or("doge");
                     assert_eq!(
                         *default, expected,
                         "auto_dark_theme default drifts from UiConfig::default()",
@@ -1124,6 +1147,18 @@ mod tests {
                         *default, expected,
                         "permission_mode default drifts from UiConfig::default()'s \
                          None → 'ask' fallback (load_permission_mode contract)",
+                    );
+                }
+                ("plan_approval_park", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        UiConfig::PLAN_APPROVAL_PARK_DEFAULT,
+                        "plan_approval_park default drifts from UiConfig::PLAN_APPROVAL_PARK_DEFAULT"
+                    );
+                    assert_eq!(
+                        *default,
+                        ui.plan_approval_park_mode(),
+                        "plan_approval_park default drifts from UiConfig::default()"
                     );
                 }
                 // default_model: no UiConfig mirror, resolved dynamically.
@@ -1429,6 +1464,34 @@ mod tests {
                          models::default_model() — drift here breaks the empty-fold contract",
                     );
                 }
+                ("notifications.session_recap", SettingKind::Bool { default }) => {
+                    assert!(
+                        *default,
+                        "notifications.session_recap must default ON (auto away-recap)"
+                    );
+                    assert_eq!(
+                        ui.notifications.session_recap.unwrap_or(true),
+                        *default,
+                        "notifications.session_recap default drifts from UiConfig"
+                    );
+                }
+                (
+                    "notifications.session_recap_threshold_secs",
+                    SettingKind::Int { default, .. },
+                ) => {
+                    assert_eq!(*default, 30);
+                    assert_eq!(
+                        ui.notifications.session_recap_threshold_secs.unwrap_or(30) as i64,
+                        *default,
+                    );
+                }
+                ("features.session_recap", SettingKind::Bool { default }) => {
+                    assert!(*default, "features.session_recap master must default ON");
+                }
+                ("cancel_subagents_on_turn_cancel", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(*default, "ask");
+                    assert_eq!(ui.cancel_subagents_on_turn_cancel, None);
+                }
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
@@ -1467,6 +1530,18 @@ mod tests {
                         "respect_manual_folds default drifts from ScrollConfig::default() — \
                          the appearance config is the source of truth"
                     );
+                }
+                ("bubble_copy_buttons", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, pager.bubble_copy_buttons,
+                        "bubble_copy_buttons default drifts from PagerLocalSnapshot::default()"
+                    );
+                    assert_eq!(
+                        *default,
+                        crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
+                        "bubble_copy_buttons default drifts from ScrollbackDisplayConfig"
+                    );
+                    assert!(*default, "bubble_copy_buttons must default ON");
                 }
                 // plan_mode: per-session, not persisted.
                 ("plan_mode", SettingKind::Enum { default, .. }) => {
@@ -1749,7 +1824,7 @@ mod tests {
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
         assert_eq!(
             value,
-            SettingValue::Enum("groknight"),
+            SettingValue::Enum("doge"),
             "corrupted `auto_dark_theme = \"auto\"` must fall back to canonical default",
         );
     }
@@ -1778,7 +1853,7 @@ mod tests {
         };
         let pager = PagerLocalSnapshot::default();
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
-        assert_eq!(value, SettingValue::Enum("groknight"));
+        assert_eq!(value, SettingValue::Enum("doge"));
     }
 
     /// The persisted `fork_secondary_model` slug resolves to the catalog display name.
@@ -1944,6 +2019,25 @@ mod tests {
     }
 
     /// Search is a literal substring multi-word AND match.
+    #[test]
+    fn search_recap_finds_session_recap_rows() {
+        let reg = SettingsRegistry::defaults();
+        let hits = reg.search("recap");
+        let keys: std::collections::HashSet<&str> = hits.iter().map(|m| m.key).collect();
+        assert!(
+            keys.contains("notifications.session_recap"),
+            "search(recap) missing auto recap: {keys:?}"
+        );
+        assert!(
+            keys.contains("features.session_recap"),
+            "search(recap) missing master: {keys:?}"
+        );
+        assert!(
+            keys.contains("notifications.session_recap_threshold_secs"),
+            "search(recap) missing threshold: {keys:?}"
+        );
+    }
+
     #[test]
     fn search_multi_word_and() {
         let reg = SettingsRegistry::defaults();

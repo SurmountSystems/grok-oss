@@ -860,9 +860,11 @@ pub(super) fn dispatch_send_btw(
         // Composer clearing belongs to the submit funnel: `dispatch_send_prompt_inner` clears it when `consume_input` is set
         // Draft-preserving callers (the palette, an edited queue row) keep theirs
         let minimal_request_id = if minimal {
-            Some(crate::minimal_api::start_minimal_btw(
+            Some(crate::minimal_api::start_minimal_btw_with_context(
                 agent,
                 question.clone(),
+                prior_btw,
+                btw_session_id.clone(),
             ))
         } else {
             agent.clear_btw_owned_selection();
@@ -1156,6 +1158,7 @@ pub(super) fn handle_btw_response(
     app: &mut AppView,
     agent_id: AgentId,
     result: Result<String, String>,
+    btw_session_id: Option<String>,
     minimal_request_id: Option<uuid::Uuid>,
     image_notice: Option<String>,
     skipped_image_numbers: &[usize],
@@ -1185,9 +1188,54 @@ pub(super) fn handle_btw_response(
                 agent.btw_state = Some(BtwOverlayState::done(question, response));
                 agent.btw_focused = true;
             }
-            Err(error) => {
+            (Some(state @ BtwOverlayState::Loading { .. }), Err(error)) => {
                 // Error stays until Esc; nothing to scroll, keep prompt focus.
-                agent.btw_state = Some(BtwOverlayState::Error { question, error });
+                agent.btw_state = Some(state.finish_loading_error(error));
+                agent.btw_focused = false;
+            }
+            (prior, Ok(response)) => {
+                // Late response after dismiss / unexpected state: still show
+                // a single-turn Done so the answer is not lost (legacy path).
+                let question = prior
+                    .as_ref()
+                    .map(|s| s.question().to_string())
+                    .unwrap_or_default();
+                agent.btw_state = Some(BtwOverlayState::done_with_session(
+                    question,
+                    response,
+                    btw_session_id,
+                ));
+                agent.btw_focused = true;
+            }
+            (prior, Err(error)) => {
+                let question = prior
+                    .as_ref()
+                    .map(|s| s.question().to_string())
+                    .unwrap_or_default();
+                let (prior_turns, sid) = match prior {
+                    Some(BtwOverlayState::Loading {
+                        prior_turns,
+                        btw_session_id: sid,
+                        ..
+                    })
+                    | Some(BtwOverlayState::Error {
+                        prior_turns,
+                        btw_session_id: sid,
+                        ..
+                    }) => (prior_turns, sid.or(btw_session_id)),
+                    Some(BtwOverlayState::Done {
+                        turns,
+                        btw_session_id: sid,
+                        ..
+                    }) => (turns, sid.or(btw_session_id)),
+                    None => (Vec::new(), btw_session_id),
+                };
+                agent.btw_state = Some(BtwOverlayState::Error {
+                    question,
+                    error,
+                    prior_turns,
+                    btw_session_id: sid,
+                });
                 agent.btw_focused = false;
             }
         }
