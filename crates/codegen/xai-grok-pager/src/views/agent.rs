@@ -1096,6 +1096,14 @@ pub fn build_hints(
                 if def.id == ActionId::EnableVoiceMode || def.id == ActionId::VoiceToggle {
                     continue;
                 }
+                // Live expand vs collapse verb from scrollback state — not the
+                // static ActionDef "expand/collapse thinking" label.
+                if def.id == ActionId::ExpandAllThinking {
+                    let mut item = def.hint();
+                    item.label = std::borrow::Cow::Borrowed(thinking_label);
+                    hints.push(item);
+                    continue;
+                }
                 hints.push(def.hint());
             }
             hints
@@ -1686,6 +1694,97 @@ mod tests {
             !hints.iter().any(|h| h.label == "home"),
             "ExitSession (home) must not appear in prompt-focused bar"
         );
+    }
+
+    /// Contract: footer Ctrl+E verb follows live fold state — "expand thinking"
+    /// when collapsed / not fully open, "collapse thinking" when expanded.
+    /// Never the static ActionDef "expand/collapse thinking" (dogfood: prompt
+    /// focus was still using the registry label).
+    #[test]
+    fn prompt_ctrl_e_thinking_hint_reflects_expand_or_collapse_state() {
+        let registry = ActionRegistry::defaults();
+        for thinking_label in ["expand thinking", "collapse thinking"] {
+            let hints = build_hints(
+                ActivePane::Prompt,
+                &PromptWidget::default(),
+                &registry,
+                false,
+                None,
+                None,
+                thinking_label,
+                false,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            let thinking = hints
+                .iter()
+                .find(|h| h.label.as_ref().contains("thinking"))
+                .unwrap_or_else(|| panic!("expected Ctrl+E thinking hint; got {hints:?}"));
+            assert_eq!(
+                thinking.label.as_ref(),
+                thinking_label,
+                "prompt footer must use live thinking_label, not ActionDef static"
+            );
+            assert_ne!(
+                thinking.label.as_ref(),
+                "expand/collapse thinking",
+                "must not show both expand and collapse at once"
+            );
+        }
+    }
+
+    /// Same contract on scrollback-focused footer (already wired; guard regression).
+    #[test]
+    fn scrollback_ctrl_e_thinking_hint_reflects_expand_or_collapse_state() {
+        let registry = ActionRegistry::defaults();
+        for thinking_label in ["expand thinking", "collapse thinking"] {
+            let hints = build_hints(
+                ActivePane::Scrollback,
+                &PromptWidget::default(),
+                &registry,
+                false,
+                None,
+                None,
+                thinking_label,
+                false,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            let thinking = hints
+                .iter()
+                .find(|h| h.label.as_ref().contains("thinking"))
+                .unwrap_or_else(|| panic!("expected Ctrl+E thinking hint; got {hints:?}"));
+            assert_eq!(thinking.label.as_ref(), thinking_label);
+            assert_ne!(thinking.label.as_ref(), "expand/collapse thinking");
+        }
     }
     fn prompt_hints_with_text(
         multiline_mode: bool,

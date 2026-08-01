@@ -341,7 +341,11 @@ pub fn striped_accent_bar() -> &'static str {
 /// Frame from the DOGE striped-down marquee for an animated striped rail.
 ///
 /// `tick` advances the marquee; `row` offsets so a multi-row rail reads as
-/// stripes falling downward. Always 1 column.
+/// stripes falling **downward**. Always 1 column.
+///
+/// Phase uses `phase - row` (not `phase + row`): with increasing tick, the
+/// glyph that was on row `r` appears on row `r + 1` next frame — pattern
+/// shifts down the rail. `phase + row` made stripes crawl **up**.
 pub fn striped_accent_bar_frame(tick: u64, row: u16) -> &'static str {
     let frames = if is_legacy_windows_console() {
         doge_striped_down_frames_ascii()
@@ -351,11 +355,29 @@ pub fn striped_accent_bar_frame(tick: u64, row: u16) -> &'static str {
     // Slow the cycle: advance one frame every 4 ticks so the marquee is
     // readable (~7.5 fps at the default 30fps animation clock).
     let n = frames.len() as u64;
-    let idx = ((tick / 4) + u64::from(row)) % n;
+    let phase = tick / 4;
+    let row_off = u64::from(row) % n;
+    // (phase - row) mod n — downward marquee on a top-to-bottom row axis.
+    let idx = (phase + n - row_off) % n;
     frames[idx as usize]
 }
 
-/// Composer caret: filled box half of the slow green blink.
+/// Composer caret: **solid** half of the classic full-cell block blink.
+///
+/// Paired with [`cursor_box_hollow`] as one **box/block caret family**: solid
+/// filled cell ↔ true empty cell of the **same terminal-cell silhouette**
+/// (Alacritty-style block on/off). Outer height is the cell itself via the
+/// background plate on the solid half — not outline glyph metrics.
+///
+/// Glyph (paint pairs with `fg = bg = accent` solid plate):
+/// - `█` U+2588 FULL BLOCK (classic solid block ink on the plate).
+/// - Legacy ConHost: `#`.
+///
+/// Rejected mates for the *empty* half: canvas hole-punch on an accent plate
+/// (`■` with `fg=canvas bg=accent` — reads as a green tile with a void),
+/// dimming the solid `█`, skinny `▯`, medium `◼`/`◻`, tiny mid-cell `□`,
+/// and short outline quads (`⎕` / `□`) whose ink is only a fraction of the
+/// cell in common monospace (e.g. Noto Sans Mono).
 pub fn cursor_box_filled() -> &'static str {
     if is_legacy_windows_console() {
         "#"
@@ -364,25 +386,35 @@ pub fn cursor_box_filled() -> &'static str {
     }
 }
 
-/// Composer caret: hollow box half of the slow green blink.
+/// Composer caret: **empty** half of the classic full-cell block blink.
+///
+/// Mate of [`cursor_box_filled`]: **true empty cell** — a single space with
+/// **no** accent plate (paint: `fg = bg = canvas`). Blink is solid plate
+/// on/off of the same cell rectangle, not a green frame with a dark hole
+/// and not a dimmed solid.
+///
+/// Glyph:
+/// - ` ` U+0020 SPACE (empty cell; silhouette is the terminal cell itself).
+/// - Legacy ConHost: same space (no ASCII stand-in hole).
+///
+/// Rejected empty shapes: `■` hole-punch on accent plate, dim `█`, skinny
+/// `▯`, medium `◻`/`◼`, tiny `□`, short APL quad `⎕`.
 pub fn cursor_box_hollow() -> &'static str {
-    if is_legacy_windows_console() {
-        "o"
-    } else {
-        "\u{25a1}" // □ WHITE SQUARE
-    }
+    // Classic block empty half: plain space. Paint path must not put an
+    // accent background plate behind this glyph.
+    " "
 }
 
-/// Half-period for the composer filled↔hollow box blink (milliseconds).
+/// Half-period for the composer filled↔empty block blink (milliseconds).
 /// ~600ms keeps the blink slow and readable (not seizure-fast).
 pub const CURSOR_BOX_BLINK_HALF_MS: u64 = 600;
 
-/// Whether the filled box phase is showing at `now_ms` (monotonic millis).
+/// Whether the filled (solid plate) phase is showing at `now_ms` (monotonic millis).
 pub fn cursor_box_filled_phase(now_ms: u64) -> bool {
     (now_ms / CURSOR_BOX_BLINK_HALF_MS).is_multiple_of(2)
 }
 
-/// Glyph for the composer caret at `now_ms`: filled box or hollow box.
+/// Glyph for the composer caret at `now_ms` (filled `█` or empty space).
 pub fn cursor_box_glyph(now_ms: u64) -> &'static str {
     if cursor_box_filled_phase(now_ms) {
         cursor_box_filled()
@@ -805,10 +837,11 @@ mod tests {
         assert_eq!(striped_accent_bar().width(), 1);
         assert_eq!(cursor_box_filled().width(), 1);
         assert_eq!(cursor_box_hollow().width(), 1);
+        // Solid block vs empty space are distinct glyphs, both 1 col.
         assert_ne!(
             cursor_box_filled(),
             cursor_box_hollow(),
-            "filled and hollow composer boxes must differ"
+            "solid filled and empty space must be different glyphs"
         );
         for t in 0..32u64 {
             assert_eq!(striped_accent_bar_frame(t, 0).width(), 1);
@@ -816,7 +849,71 @@ mod tests {
         }
     }
 
-    /// Composer caret phase slowly alternates filled ↔ hollow (~600ms half).
+    /// Classic block pair: solid = full-cell `█` plate mate; empty = space
+    /// (true empty cell, no accent plate). Same cell silhouette via on/off
+    /// fill — not hole-punch `■` on green plate, not dim `█`, not short
+    /// outline quads. Outer height is the terminal cell, not glyph metrics.
+    #[test]
+    fn cursor_box_pair_is_matching_box_rectangles() {
+        // Empty half is always a plain space (classic block off).
+        assert_eq!(cursor_box_hollow(), " ");
+        if is_legacy_windows_console() {
+            assert_eq!(cursor_box_filled(), "#");
+            assert_ne!(cursor_box_filled(), cursor_box_hollow());
+            return;
+        }
+        // Solid: █ FULL BLOCK. Empty: space (no hole-punch square).
+        assert_eq!(cursor_box_filled(), "\u{2588}");
+        assert_ne!(
+            cursor_box_filled(),
+            cursor_box_hollow(),
+            "empty half must be space, not the solid full block"
+        );
+        // Reject empty shapes operator already turned down / hole-punch / short.
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{2588}",
+            "empty must not be FULL BLOCK (dim-of-solid / style-on-█ path)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25a0}",
+            "empty must not be BLACK SQUARE hole-punch (green plate + void)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25af}",
+            "must not be WHITE VERTICAL RECTANGLE (skinny ▯)"
+        );
+        assert_ne!(
+            cursor_box_filled(),
+            "\u{25fc}",
+            "must not be BLACK MEDIUM SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25fb}",
+            "must not be WHITE MEDIUM SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25a1}",
+            "must not be tiny WHITE SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{2395}",
+            "must not be short APL QUAD outline (mid-cell in common mono)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "O",
+            "empty must not be legacy ASCII hole stand-in"
+        );
+    }
+
+    /// Composer caret slowly alternates solid ↔ empty (~600ms half).
+    /// Glyph and phase both change: solid `█` vs empty space.
     #[test]
     fn cursor_box_blink_alternates_filled_and_hollow() {
         let half = CURSOR_BOX_BLINK_HALF_MS;
@@ -828,8 +925,62 @@ mod tests {
         assert_eq!(cursor_box_glyph(0), cursor_box_filled());
         assert!(!cursor_box_filled_phase(half));
         assert_eq!(cursor_box_glyph(half), cursor_box_hollow());
+        // Solid vs empty: glyphs differ across the half-period.
+        assert_ne!(
+            cursor_box_glyph(0),
+            cursor_box_glyph(half),
+            "filled and empty phases must use different glyphs"
+        );
+        assert_ne!(
+            cursor_box_filled_phase(0),
+            cursor_box_filled_phase(half),
+            "filled↔empty phase must toggle with time"
+        );
         assert!(cursor_box_filled_phase(half * 2));
         assert_eq!(cursor_box_glyph(half * 2), cursor_box_filled());
+    }
+
+    /// Multi-row striped rail: as tick advances one frame, each glyph moves
+    /// to the row **below** (down the screen), not above.
+    ///
+    /// Contract: glyph at (phase, row) == glyph at (phase + 1, row + 1).
+    /// That is the definition of a downward-scrolling marquee when row 0 is
+    /// the top of the rail. The old `phase + row` index made stripes crawl up.
+    #[test]
+    fn striped_accent_bar_marquee_moves_down_not_up() {
+        assert!(!is_legacy_windows_console());
+        let n = doge_striped_down_frames().len() as u64;
+        assert!(n >= 2, "need at least two frames to observe motion");
+        for phase in 0..n {
+            let tick0 = phase * 4;
+            let tick1 = (phase + 1) * 4;
+            for row in 0..16u16 {
+                let g0 = striped_accent_bar_frame(tick0, row);
+                let g_down = striped_accent_bar_frame(tick1, row + 1);
+                assert_eq!(
+                    g0,
+                    g_down,
+                    "downward marquee: glyph at row {row} phase {phase} must \
+                     appear at row {} next phase (got {g0:?} vs {g_down:?})",
+                    row + 1
+                );
+                // Explicit anti-contract: must NOT match the row above.
+                if row > 0 {
+                    let g_up = striped_accent_bar_frame(tick1, row - 1);
+                    assert_ne!(
+                        g0,
+                        g_up,
+                        "must not crawl upward: glyph at row {row} phase {phase} \
+                         must not equal row {} next phase",
+                        row - 1
+                    );
+                }
+            }
+        }
+        // Single-cell path (row 0) still advances through the frame set.
+        let f0 = striped_accent_bar_frame(0, 0);
+        let f1 = striped_accent_bar_frame(4, 0);
+        assert_ne!(f0, f1, "row-0 spinner must still advance frames over time");
     }
 
     /// Under DOGE, the *left* activity spinner (braille API) uses the striped

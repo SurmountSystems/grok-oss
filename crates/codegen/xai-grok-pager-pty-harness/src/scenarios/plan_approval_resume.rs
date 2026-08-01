@@ -12,17 +12,24 @@
 //!
 //! ## Named contract (soft-park approve path)
 //!
-//! Soft-park is **non-capturing** for keyboard CTAs (L1 modal-free, 2026-07-29):
-//! empty-prompt `a` / `A` / `?` / `s` / `q` / Enter type into the composer or
-//! no-op; they do **not** exclusive-approve. Product approve paths after resume:
+//! Soft-park is **non-capturing** for keyboard CTAs when the side panel is
+//! closed (L1 modal-free, 2026-07-29): empty-prompt `a` / `A` / `?` / `s` / `q`
+//! / Enter type into the composer or no-op. Default soft-park **auto-opens**
+//! the plan side panel; soft-park footer CTAs are only painted when the panel
+//! is closed. With the panel open, product approve paths are:
 //!
-//! 1. **Mouse** footer soft-park CTAs (primary) — works with draft text too
-//! 2. **`/view-plan`** (or status chip) side panel, then empty-prompt `a`
+//! 1. **Mouse** side-panel footer CTAs (primary) — full/compact labels when
+//!    width allows, else key-only `a | A | ? | s | q`
+//! 2. Empty-prompt panel accelerators (`a` / Enter on Prompt) while the panel
+//!    owns input
 //!
-//! This scenario uses path (1): click the painted footer **approve** label.
+//! This scenario uses path (1): click the painted panel Approve CTA (label or
+//! key-only). Do **not** match bare `"approve"` — the transcript card prose
+//! (`PLAN_CARD_CTAS`) and shortcut hint `Enter:approve` both contain that
+//! substring and are not hit targets.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -37,6 +44,12 @@ const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
 const SETUP_SENTINEL: &str = "GBT3703SETUP";
 const IMPLEMENT_SENTINEL: &str = "GBT3703IMPLEMENTED";
 
+/// Side-panel footer CTA strip in key-only mode (narrow panel; CI default).
+/// Separator is `"  |  "` from `line_viewer` plan-approval paint.
+const KEY_ONLY_CTA_STRIP: &str = "a  |  A  |  ?";
+/// Labeled Approve button (compact/full label modes when the panel is wide).
+const LABELED_APPROVE_CTA: &str = "a approve";
+
 const PLAN_BODY: &str = "\
 # Plan GBT3703Repro
 
@@ -47,7 +60,7 @@ const PLAN_BODY: &str = "\
 ";
 
 /// Regression: the shell re-parks `exit_plan_mode` on resume; approving via the
-/// soft-park footer mouse CTA leaves plan mode and starts the implement turn.
+/// side-panel footer mouse CTA leaves plan mode and starts the implement turn.
 pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     let content = ContentController::start()
         .await
@@ -105,24 +118,24 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     )
     .context("spawn resumed pager")?;
 
-    // The shell re-parks `exit_plan_mode` on resume, so soft-park approval chrome
-    // can open immediately and cover chat history. Prefer the chrome markers
-    // (product signal) over SETUP_SENTINEL, which may not be visible under the
-    // plan viewer. Without the shell re-park this times out.
+    // The shell re-parks `exit_plan_mode` on resume, so soft-park approval
+    // chrome can open immediately (default: auto-open side panel). Prefer
+    // chrome markers over SETUP_SENTINEL, which may sit under the panel.
+    // Without the shell re-park this times out.
     //
-    // Markers match soft-park CTA legend / footer (`PLAN_CARD_CTAS` + Preview
-    // hints): "s revise" (not the old "request changes" label) and the card
-    // header. Full-screen viewer uses "quit plan"; soft-park uses "q quit".
+    // Markers: card header always; CTA strip is either labeled (`a approve` /
+    // `s revise`) or key-only (`a  |  A  |  ?`) when the ~45% side panel is
+    // too narrow for compact labels (120-col CI default).
     resumed
-        .wait_for_text("s revise", WELCOME_TIMEOUT)
-        .context("restored approval 's revise' after --continue")?;
-    resumed
-        .wait_for_text("Plan ready for review", Duration::from_secs(5))
+        .wait_for_text("Plan ready for review", WELCOME_TIMEOUT)
         .context("restored plan-ready card after resume")?;
+    wait_for_any_text(
+        &mut resumed,
+        &[LABELED_APPROVE_CTA, "s revise", KEY_ONLY_CTA_STRIP],
+        WELCOME_TIMEOUT,
+    )
+    .context("restored approval CTA chrome after --continue")?;
     let screen = resumed.screen_contents();
-    if !screen.contains("approve") {
-        bail!("expected approval primary action after resume\n{screen}");
-    }
     // History was seeded before quit; plan body from disk is a stronger signal
     // that the session was restored when chrome already covers the transcript.
     if !screen.contains("GBT3703Repro")
@@ -135,14 +148,13 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         bail!("pager panicked\n{screen}");
     }
 
-    // Soft-park is non-capturing: bare `a` types into the composer (see screen
-    // dump with `❯ a` under the prompt). Approve via the painted footer CTA —
-    // mouse primary product path. First "approve" is the primary button; the
-    // second is "approve w/ comment".
-    click_screen_text(&mut resumed, "approve", 0).context("click soft-park footer Approve CTA")?;
+    // Soft-park without panel is non-capturing for bare `a`. Default park
+    // auto-opens the side panel; click its Approve CTA (not card prose /
+    // "Enter:approve" shortcut text).
+    click_plan_approve_cta(&mut resumed).context("click side-panel Approve CTA")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))
-        .context("footer Approve must leave plan mode and start the implement turn")?;
+        .context("panel Approve must leave plan mode and start the implement turn")?;
     tokio::time::timeout(Duration::from_secs(10), implement_turn.wait_satisfied())
         .await
         .context("implement turn expectation timeout")?;
@@ -151,15 +163,69 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     Ok(())
 }
 
+/// Click the painted plan-approval Approve control.
+///
+/// Prefer labeled `a approve` (unique; card prose is "to approve," without the
+/// leading key). Fall back to key-only strip click at the `a` glyph (hit rect
+/// is one cell — no +1 label inset). Last resort: empty Enter when the
+/// shortcut bar advertises `Enter:approve` (panel Prompt focus).
+fn click_plan_approve_cta(harness: &mut PtyHarness) -> Result<()> {
+    let screen = harness.screen_contents();
+    if screen.contains(LABELED_APPROVE_CTA) {
+        // Inset one cell into the label so the hit lands in the button rect.
+        return click_screen_text(harness, LABELED_APPROVE_CTA, 0, 1)
+            .context("click labeled 'a approve' CTA");
+    }
+    if screen.contains(KEY_ONLY_CTA_STRIP) {
+        // Key-only approve is a single-cell hit on `a` — click the glyph.
+        return click_screen_text(harness, KEY_ONLY_CTA_STRIP, 0, 0)
+            .context("click key-only panel Approve (`a`)");
+    }
+    if screen.contains("Enter:approve") {
+        harness
+            .inject_keys(b"\r")
+            .context("empty Enter approve (panel Prompt)")?;
+        harness.update(Duration::from_millis(150));
+        return Ok(());
+    }
+    bail!(
+        "no plan Approve control found (expected '{LABELED_APPROVE_CTA}', \
+         '{KEY_ONLY_CTA_STRIP}', or Enter:approve)\n{screen}"
+    )
+}
+
+/// Poll until any of `needles` appears on the screen (or timeout).
+fn wait_for_any_text(harness: &mut PtyHarness, needles: &[&str], timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        harness.update(Duration::from_millis(50));
+        let screen = harness.screen_contents();
+        if needles.iter().any(|n| screen.contains(n)) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {:?} waiting for any of {needles:?}\n{screen}",
+                timeout
+            );
+        }
+    }
+}
+
 /// Click the `occurrence`-th on-screen match of `text` (0-indexed), SGR mouse.
 ///
 /// Coordinates match scripted runner convention: 0-indexed row/col from the
 /// visible screen text snapshot, converted to 1-indexed SGR in the wire bytes.
-fn click_screen_text(harness: &mut PtyHarness, text: &str, occurrence: usize) -> Result<()> {
+/// `col_offset` shifts right from the match start (1 = into a labeled button;
+/// 0 = key-only single-cell hit).
+fn click_screen_text(
+    harness: &mut PtyHarness,
+    text: &str,
+    occurrence: usize,
+    col_offset: u16,
+) -> Result<()> {
     let point = locate_screen_text(harness, text, occurrence)?;
-    // Click slightly into the label (not the leading key glyph) so the hit
-    // lands inside the soft-park button rect painted around "approve".
-    let col = point.col.saturating_add(1);
+    let col = point.col.saturating_add(col_offset);
     let click = format!(
         "{}{}",
         sgr_mouse(0, point.row, col, 'M'),

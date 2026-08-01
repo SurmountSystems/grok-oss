@@ -2846,15 +2846,31 @@ impl PromptWidget {
     }
 }
 
-/// Paint the Human green composer caret as a slow filled↔hollow box blink.
+/// Paint the agent-magenta composer caret as a slow solid↔empty block blink.
 ///
 /// Uses wall-clock millis so any redraw cadence (including Slow ticks) advances
-/// the phase. Colour is `theme.accent_user` (green under DOGE).
+/// the phase. Colour is `theme.accent_running` (magenta under DOGE: same agent
+/// chrome family as rails / activity / model accents, not Human `accent_user`
+/// green).
 ///
-/// On an empty / space insertion cell the caret is the filled or hollow box
-/// glyph. On a cell that already has a visible grapheme (typed text, ghost
-/// body, slash inline suffix) the grapheme is kept and only restyled so the
-/// block caret never eats characters under the cursor.
+/// Blank insertion cell blinks **classic terminal block on/off** of the **same
+/// full-cell rectangle** (the terminal cell itself — not a dimmed solid `█`,
+/// not a short mid-cell outline, not an accent plate with a dark hole):
+///
+/// - **Silhouette** for both phases is the terminal cell. Solid half fills it
+///   with an accent **background plate** (cell bg always paints full height).
+///   Empty half is a true empty cell (canvas bg, no accent plate).
+/// - **Solid (full):** [`cursor_box_filled`] (`█`) with `fg=accent`,
+///   `bg=accent` — solid magenta block filling the cell (DOGE).
+/// - **Empty (off):** [`cursor_box_hollow`] (space) with `fg=canvas`,
+///   `bg=canvas` — pure empty cell, **no** accent plate. **No**
+///   [`Modifier::DIM`]. Rejected: `■`/`fg=canvas bg=accent` hole-punch
+///   (reads as a mini-badge with a void).
+///
+/// On a cell that already has a visible grapheme (typed text, ghost body, slash
+/// inline suffix) the grapheme is kept and only restyled so the block caret
+/// never eats characters under the cursor: solid = reverse plate; empty =
+/// accent ink on canvas (still no dim-as-blink).
 fn paint_composer_box_cursor(
     buf: &mut Buffer,
     cx: u16,
@@ -2867,8 +2883,20 @@ fn paint_composer_box_cursor(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let filled_phase = crate::glyphs::cursor_box_filled_phase(now_ms);
-    let accent = match theme.accent_user {
-        // Reset→Cyan so NO_COLOR still shows a visible caret (mirrors Human rail).
+    paint_composer_box_cursor_phase(buf, cx, cy, theme, bg, filled_phase);
+}
+
+/// Phase-injected paint path (wall-clock wrapper + unit tests).
+fn paint_composer_box_cursor_phase(
+    buf: &mut Buffer,
+    cx: u16,
+    cy: u16,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+    filled_phase: bool,
+) {
+    let accent = match theme.accent_running {
+        // Reset→Cyan so NO_COLOR still shows a visible caret.
         ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
         c => c,
     };
@@ -2876,25 +2904,28 @@ fn paint_composer_box_cursor(
     let Some(cell) = buf.cell_mut((cx, cy)) else {
         return;
     };
-    // Treat blank / empty cells as the insertion-point affordance (box glyph).
+    // Treat blank / empty cells as the insertion-point affordance (block on/off).
     // Any other grapheme stays readable under the block caret.
     let blank = {
         let sym = cell.symbol();
         sym.is_empty() || sym == " " || sym == "\u{00a0}"
     };
     if blank {
-        let glyph = if filled_phase {
-            crate::glyphs::cursor_box_filled()
+        if filled_phase {
+            // Solid filled rectangle: full-cell agent accent plate (+ block ink).
+            cell.set_symbol(crate::glyphs::cursor_box_filled());
+            cell.set_style(Style::default().fg(accent).bg(accent));
         } else {
-            crate::glyphs::cursor_box_hollow()
-        };
-        cell.set_symbol(glyph);
-        cell.set_style(Style::default().fg(accent).bg(bg));
+            // Classic block off: true empty cell (space on canvas). No accent
+            // plate, no hole-punch square — silhouette is the cell itself.
+            cell.set_symbol(crate::glyphs::cursor_box_hollow());
+            cell.set_style(Style::default().fg(bg).bg(bg));
+        }
     } else if filled_phase {
-        // Classic block: invert — green plate, canvas-coloured ink.
+        // Classic block: invert — agent accent plate, canvas-coloured ink.
         cell.set_style(Style::default().fg(bg).bg(accent));
     } else {
-        // Hollow half: keep canvas bg, green ink on the same grapheme.
+        // Empty half on a grapheme: keep canvas bg, agent accent ink (no DIM).
         cell.set_style(Style::default().fg(accent).bg(bg));
     }
 }
@@ -3363,9 +3394,10 @@ impl PromptWidget {
             }
         }
 
-        // Software green caret: slow filled-box ↔ hollow-box blink (Human
-        // accent). Terminal hardware cursor stays hidden so we do not stack
-        // two carets; phase is wall-clock so Slow redraw ticks are enough.
+        // Software magenta caret: slow solid↔empty block blink (agent chrome
+        // `accent_running`, not Human `accent_user` green). Terminal hardware
+        // cursor stays hidden so we do not stack two carets; phase is wall-clock
+        // so Slow redraw ticks are enough.
         let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {
             paint_composer_box_cursor(buf, cx, cy, &theme, bg);
             // Hide the terminal caret — the painted box *is* the cursor.

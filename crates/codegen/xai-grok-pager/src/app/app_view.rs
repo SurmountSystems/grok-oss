@@ -264,7 +264,7 @@ pub enum TickDemand {
 /// latency of the macOS Cmd link-hover underline.
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
 
-/// Whether the agent composer would paint the software green box caret.
+/// Whether the agent composer would paint the software magenta box caret.
 ///
 /// Used by [`AppView::tick_demand`] so idle sessions with a focused prompt
 /// keep Slow redraws for the filled↔hollow blink without a Fast 30fps loop.
@@ -5261,6 +5261,12 @@ impl AppView {
                     needs_redraw = true;
                 }
             }
+            // Software magenta box caret samples wall-clock phase on every paint.
+            // Slow ticks keep the clock armed (`tick_demand`); this forces the
+            // present so filled↔hollow actually advances while idle/focused.
+            if agent_wants_composer_cursor_blink(agent) {
+                needs_redraw = true;
+            }
         }
         if let Some(commands) = bootstrap_commands_update {
             self.welcome_prompt
@@ -5549,7 +5555,7 @@ impl AppView {
                 {
                     return TickDemand::Slow;
                 }
-                // Composer green box caret blinks filled↔hollow on a slow
+                // Composer magenta box caret blinks filled↔hollow on a slow
                 // wall-clock phase; Slow ticks keep it alive without a 30fps spin
                 // while the agent is idle and the prompt is focused.
                 if agent_wants_composer_cursor_blink(agent) {
@@ -6456,7 +6462,7 @@ pub(crate) mod tests {
         assert_eq!(
             app.tick_demand(),
             TickDemand::Slow,
-            "focused prompt must Slow-tick for green box caret blink"
+            "focused prompt must Slow-tick for magenta box caret blink"
         );
         assert!(app.needs_animation());
         // Modal steals focus → park again (no software caret).
@@ -6470,6 +6476,57 @@ pub(crate) mod tests {
             app.tick_demand(),
             TickDemand::None,
             "modal open suppresses composer caret ticks"
+        );
+    }
+
+    /// Idle focused composer must *redraw* on each animation tick so the
+    /// filled↔hollow box caret advances. `tick_demand` only schedules the
+    /// clock; `tick()` returning true is what arms `presenter.request`.
+    #[test]
+    fn tick_redraws_while_composer_caret_blinks() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+
+        // Settle one-shot tick side effects (title OSC queue, command sync).
+        // Title escapes force redraw until drawn; clear them so this test
+        // measures caret-blink redraw alone.
+        let _ = app.tick();
+        app.pending_notification_escapes = None;
+        let _ = app.tick();
+        app.pending_notification_escapes = None;
+
+        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert!(
+            !app.tick() && app.pending_notification_escapes.is_none(),
+            "scrollback-focused settled idle must not force redraw"
+        );
+
+        app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+        assert_eq!(app.tick_demand(), TickDemand::Slow);
+        app.pending_notification_escapes = None;
+        assert!(
+            app.tick(),
+            "focused composer caret blink must request a redraw each Slow tick"
+        );
+        app.pending_notification_escapes = None;
+        assert!(
+            app.tick(),
+            "caret blink redraw must hold across ticks, not a one-shot"
+        );
+
+        // Modal steals the caret → no blink redraw.
+        app.agents.get_mut(&id).unwrap().active_modal =
+            Some(crate::views::modal::ActiveModal::CommandPalette {
+                entries: Vec::new(),
+                state: crate::views::picker::PickerState::default(),
+                window: crate::views::modal_window::ModalWindowState::new(),
+            });
+        let _ = app.tick();
+        app.pending_notification_escapes = None;
+        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert!(
+            !app.tick() && app.pending_notification_escapes.is_none(),
+            "modal open must not keep caret redraws"
         );
     }
 

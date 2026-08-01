@@ -154,11 +154,12 @@ if disjoint). Host: § *Hard stop* default loop.
 - Parent must **not**: pull CI logs, open failing tests, re-run nextest, edit
   product code, re-do the subagent’s greps “to be sure,” or research/implement
   in the main thread.
-- **Additive asks / “also”:** phrases like **also**, **this too**, **and also**,
-  **this work too** mean a second slice, not a pivot. Board-upsert; **spawn**
-  another subagent (or queue if same-file race); **never kill**, cancel, or
-  re-prompt healthy in-flight subagents on the prior goal unless the operator
-  explicitly stops/supersedes. Full pin: `~/.grok/AGENTS.md` § *Additive asks*.
+- **Additive asks / “also” / “btw”:** phrases like **also**, **btw**, **by the
+  way**, **this too**, **and also**, **this work too** mean a second slice, not
+  a pivot. Board-upsert; **spawn** another subagent (or queue if same-file race);
+  **never kill**, cancel, or re-prompt healthy in-flight subagents on the prior
+  goal unless the operator explicitly stops/supersedes. Full pin:
+  `~/.grok/AGENTS.md` § *Additive asks*.
 
 ## Never assume without checking
 

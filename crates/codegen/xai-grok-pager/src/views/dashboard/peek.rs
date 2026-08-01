@@ -1633,16 +1633,29 @@ mod tests {
         assert!(!content.contains("reply\u{2026}"), "got: {content:?}");
         // Software box caret owns the insertion cell; hardware cursor stays
         // hidden (`PromptRenderResult::cursor_pos` is None → peek caret None).
+        // Solid half paints full-block glyph; empty half is plain space (not
+        // scannable as a unique glyph — wall-clock phase may land either way).
         assert!(
             res.caret.is_none(),
             "focused reply paints the software box caret; hardware caret unreported"
         );
         let filled = crate::glyphs::cursor_box_filled();
-        let hollow = crate::glyphs::cursor_box_hollow();
-        assert!(
-            content.contains(filled) || content.contains(hollow),
-            "focused reply must paint filled or hollow box caret, got: {content:?}"
-        );
+        let mut solid_plate = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == filled {
+                    solid_plate = true;
+                }
+                // Never reintroduce hole-punch mini-badge.
+                assert_ne!(
+                    cell.symbol(),
+                    "\u{25a0}",
+                    "reply must not paint black-square hole-punch caret"
+                );
+            }
+        }
+        let _ = solid_plate; // empty phase is valid; solid is optional by clock
         assert!(res.reply_rect.is_some(), "reply rect must be reported");
     }
 
@@ -2008,16 +2021,21 @@ mod tests {
         // The `❯ reply` row is hidden while answering.
         assert!(!content.contains("reply"), "got: {content:?}");
         // Software box caret on the feedback field; hardware caret unreported.
+        // Empty half is space (not unique in content scan); solid is optional
+        // by wall-clock phase. Hole-punch square must never appear.
         assert!(
             res.caret.is_none(),
             "focused feedback paints the software box caret; hardware caret unreported"
         );
-        let filled = crate::glyphs::cursor_box_filled();
-        let hollow = crate::glyphs::cursor_box_hollow();
-        assert!(
-            content.contains(filled) || content.contains(hollow),
-            "focused feedback must paint filled or hollow box caret, got: {content:?}"
-        );
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                assert_ne!(
+                    buf[(x, y)].symbol(),
+                    "\u{25a0}",
+                    "feedback must not paint black-square hole-punch caret"
+                );
+            }
+        }
         assert!(
             res.reply_rect.is_some(),
             "feedback slot rect must be reported for mouse routing"
