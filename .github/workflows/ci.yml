@@ -30,8 +30,9 @@ env:
 
 jobs:
   # fmt, clippy (-D warnings), full workspace tests -- not a release build.
+  # Job display name must match ruleset required check context (`just ci`).
   quality:
-    name: just test
+    name: just ci
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:

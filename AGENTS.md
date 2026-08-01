@@ -104,6 +104,19 @@ less than product code and tests. Do not invent long essays or git nags.
     uncommitted trees in ordinary status. Engage git only for **complex**
     recon/upstream/onto/put-history when asked. Still never `git commit`.
     Host: § *Git silence*.
+11a. **PR titles and descriptions (help only; human sets them)** (pinned
+    2026-08-01). When the operator asks for PR title/body help:
+    - **Do not** apply `gh pr edit` / set the title or body unless they
+      **explicitly** ask to publish that text.
+    - **Titles:** one clear product outcome (or two tightly joined). Prefer a
+      short sentence or conventional `area: outcome`. Avoid theme shopping
+      lists, deck prefixes (`Operator UX:`), and **internal** words on a
+      public PR (`dogfood`, board ids, join paths, residual codes).
+    - **Bodies:** complete sentences, plain American English, what changed for
+      operators first. Theme sections are fine in the body; not as the title.
+    - Match the professionalism bar in product prompts (good grammar, only
+      relevant detail). Do not overstate operator reaction (“hate,” “furious”)
+      when they only said something was bad or weak.
 12. **Autonomy default** (pinned 2026-07-26). Prefer always-approve autonomy;
     keep Zed-style deny/ask filters and explicit approval via existing
     `permission_mode` + `[permission]` rules / hooks — do not invent a second
