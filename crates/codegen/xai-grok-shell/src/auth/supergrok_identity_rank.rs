@@ -49,6 +49,10 @@ pub struct IncludedBillingFields {
     pub usage_pct: Option<f64>,
     /// When this principal's included pool resets (UTC). `None` = unknown.
     pub reset_at: Option<DateTime<Utc>>,
+    /// Billing period type proto name when known (e.g. `USAGE_PERIOD_TYPE_WEEKLY`).
+    /// Used by `/limits` sibling rows so copy can say "weekly" / "monthly"
+    /// instead of a bare "Included allowance". Ranking ignores this field.
+    pub period_type: Option<String>,
 }
 
 /// Map included usage % to ranking headroom units.
@@ -910,6 +914,7 @@ mod tests {
             IncludedBillingFields {
                 usage_pct: Some(40.0),
                 reset_at: Some(ts(5_000)),
+                period_type: None,
             },
         );
         fields.insert(
@@ -917,6 +922,7 @@ mod tests {
             IncludedBillingFields {
                 usage_pct: Some(10.0),
                 reset_at: Some(ts(1_000)),
+                period_type: None,
             },
         );
         enrich_candidates_with_included_billing(&mut candidates, &fields, |_| false);
@@ -951,6 +957,7 @@ mod tests {
             IncludedBillingFields {
                 usage_pct: Some(100.0),
                 reset_at: Some(ts(9_999)),
+                period_type: None,
             },
         );
         enrich_candidates_with_included_billing(&mut candidates, &fields, |_| false);
@@ -965,6 +972,7 @@ mod tests {
             IncludedBillingFields {
                 usage_pct: Some(10.0),
                 reset_at: None,
+                period_type: None,
             },
         );
         candidates[0].headroom.included_remaining = 1;

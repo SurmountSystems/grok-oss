@@ -4745,15 +4745,15 @@
         assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "\u{256e}");
     }
 
-    /// Focused composer paints a magenta solid/empty block caret and hides the
-    /// terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
+    /// Focused composer paints a Human-green solid/empty block caret and hides
+    /// the terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
     ///
     /// Wall-clock phase may land on solid or empty:
-    /// - Solid: full-cell agent accent plate + filled glyph.
-    /// - Empty: true empty cell (space, canvas bg) — no accent plate, no hole.
+    /// - Solid: full-cell Human accent plate + filled glyph.
+    /// - Empty: true empty cell (space, canvas bg) - no accent plate, no hole.
     /// Never the old hole-punch (`■` on accent plate).
     #[test]
-    fn focused_composer_paints_magenta_box_caret_hides_terminal_cursor() {
+    fn focused_composer_paints_human_green_box_caret_hides_terminal_cursor() {
         use crate::theme::cache;
         use ratatui::style::Color;
 
@@ -4780,7 +4780,7 @@
 
         let filled = crate::glyphs::cursor_box_filled();
         let theme = crate::theme::Theme::current();
-        // Agent chrome family (rails / running), not Human green.
+        // Human chrome family (pointer / rail / OSC 12), not agent magenta.
         assert_eq!(theme.accent_running, Color::Rgb(255, 0, 255));
         assert_eq!(theme.accent_user, Color::Rgb(0, 255, 0));
         let mut found_solid_plate = false;
@@ -4791,38 +4791,39 @@
                     // Reject hole-punch design if it ever reappears.
                     assert_ne!(
                         (sym, cell.bg, cell.fg),
-                        ("\u{25a0}", theme.accent_running, theme.bg_base),
+                        ("\u{25a0}", theme.accent_user, theme.bg_base),
                         "must not paint black-square hole on accent plate"
                     );
                     if sym == filled {
                         assert_eq!(
-                            cell.bg, theme.accent_running,
-                            "solid blank caret is full-cell agent magenta plate"
+                            cell.bg, theme.accent_user,
+                            "solid blank caret is full-cell Human green plate"
                         );
                         assert_eq!(
-                            cell.fg, theme.accent_running,
-                            "solid blank caret uses agent magenta ink on the plate"
+                            cell.fg, theme.accent_user,
+                            "solid blank caret uses Human green ink on the plate"
                         );
                         assert_ne!(
-                            cell.bg, theme.accent_user,
-                            "caret must not use Human green accent_user"
+                            cell.bg, theme.accent_running,
+                            "caret must not use agent magenta accent_running"
                         );
                         found_solid_plate = true;
                     }
                 }
             }
         }
-        // Empty half is plain space on canvas — not scannable as a unique
+        // Empty half is plain space on canvas - not scannable as a unique
         // glyph. When wall-clock lands on solid, the accent plate must be
         // present; phase-injected unit tests cover both halves always.
         let _ = found_solid_plate;
         // Hardware cursor stays hidden whenever the software caret paints.
     }
 
-    /// Composer box caret colour is agent chrome magenta (`accent_running`),
-    /// not Human green (`accent_user`). DOGE: rails / running / model family.
+    /// Composer box caret colour is Human green (`accent_user`), not agent
+    /// magenta (`accent_running`). DOGE: human input surface / rails / OSC 12.
+    /// Pin: do not flip caret back to magenta "because agent chrome".
     #[test]
-    fn paint_composer_box_cursor_uses_agent_magenta_not_human_green() {
+    fn paint_composer_box_cursor_uses_human_green_not_agent_magenta() {
         use crate::theme::cache;
         use ratatui::style::Color;
 
@@ -4840,10 +4841,10 @@
         let mut solid_buf = Buffer::empty(area);
         super::paint_composer_box_cursor_phase(&mut solid_buf, 1, 0, &theme, canvas, true);
         let solid = solid_buf.cell((1, 0)).expect("solid cell");
-        assert_eq!(solid.bg, agent, "solid plate is agent magenta");
-        assert_eq!(solid.fg, agent, "solid ink is agent magenta");
-        assert_ne!(solid.bg, human, "solid plate must not be Human green");
-        assert_ne!(solid.fg, human, "solid ink must not be Human green");
+        assert_eq!(solid.bg, human, "solid plate is Human green");
+        assert_eq!(solid.fg, human, "solid ink is Human green");
+        assert_ne!(solid.bg, agent, "solid plate must not be agent magenta");
+        assert_ne!(solid.fg, agent, "solid ink must not be agent magenta");
 
         let mut grapheme_buf = Buffer::empty(area);
         grapheme_buf
@@ -4852,15 +4853,15 @@
             .set_symbol("x");
         super::paint_composer_box_cursor_phase(&mut grapheme_buf, 1, 0, &theme, canvas, true);
         let rev = grapheme_buf.cell((1, 0)).expect("reverse");
-        assert_eq!(rev.bg, agent, "grapheme reverse plate is agent magenta");
-        assert_ne!(rev.bg, human, "grapheme reverse must not be Human green");
+        assert_eq!(rev.bg, human, "grapheme reverse plate is Human green");
+        assert_ne!(rev.bg, agent, "grapheme reverse must not be agent magenta");
 
         let mut empty_g = Buffer::empty(area);
         empty_g.cell_mut((1, 0)).expect("cell").set_symbol("x");
         super::paint_composer_box_cursor_phase(&mut empty_g, 1, 0, &theme, canvas, false);
         let empty = empty_g.cell((1, 0)).expect("empty grapheme");
-        assert_eq!(empty.fg, agent, "empty grapheme ink is agent magenta");
-        assert_ne!(empty.fg, human, "empty grapheme ink must not be Human green");
+        assert_eq!(empty.fg, human, "empty grapheme ink is Human green");
+        assert_ne!(empty.fg, agent, "empty grapheme ink must not be agent magenta");
     }
 
     /// Blank-cell solid vs empty: classic full-cell block on/off.
@@ -4868,7 +4869,7 @@
     /// Named contract (operator dogfood: hole-punch `■` on accent plate looked
     /// like a mini badge with a void, not a terminal block caret):
     /// - Silhouette for **both** phases is the terminal **cell** itself.
-    /// - Solid (full): agent accent plate + ink (`█`), full cell height, no DIM.
+    /// - Solid (full): Human accent plate + ink (`█`), full cell height, no DIM.
     /// - Empty (off): plain space, **canvas** bg (true empty cell), **no**
     ///   accent plate, no DIM. Not an accent frame with a dark center.
     /// - Symbols and styles differ so the blink is visible.
@@ -4880,9 +4881,9 @@
         let _pin = cache::pin_theme();
         cache::set(crate::theme::ThemeKind::Doge);
         let theme = crate::theme::Theme::current();
-        let accent = theme.accent_running;
+        let accent = theme.accent_user;
         let canvas = theme.bg_base;
-        assert_eq!(accent, Color::Rgb(255, 0, 255));
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
 
         let area = Rect::new(0, 0, 4, 2);
         let filled_glyph = crate::glyphs::cursor_box_filled();
@@ -4897,10 +4898,10 @@
         super::paint_composer_box_cursor_phase(&mut solid_buf, 1, 0, &theme, canvas, true);
         let solid = solid_buf.cell((1, 0)).expect("solid cell");
         assert_eq!(solid.symbol(), filled_glyph, "solid uses full-block glyph");
-        assert_eq!(solid.fg, accent, "solid plate uses agent magenta ink");
+        assert_eq!(solid.fg, accent, "solid plate uses Human green ink");
         assert_eq!(
             solid.bg, accent,
-            "solid outer box is full-cell agent magenta plate (not glyph metrics)"
+            "solid outer box is full-cell Human green plate (not glyph metrics)"
         );
         assert!(
             !solid.modifier.contains(Modifier::DIM),
@@ -4928,7 +4929,7 @@
         // True empty: canvas plate, no accent outer frame.
         assert_eq!(
             empty.bg, canvas,
-            "empty half has canvas bg (no accent plate / no magenta frame)"
+            "empty half has canvas bg (no accent plate / no green frame)"
         );
         assert_eq!(
             empty.fg, canvas,
@@ -4975,9 +4976,9 @@
         let _pin = cache::pin_theme();
         cache::set(crate::theme::ThemeKind::Doge);
         let theme = crate::theme::Theme::current();
-        let accent = theme.accent_running;
+        let accent = theme.accent_user;
         let canvas = theme.bg_base;
-        assert_eq!(accent, Color::Rgb(255, 0, 255));
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
 
         let area = Rect::new(0, 0, 4, 2);
         let mut solid_buf = Buffer::empty(area);
@@ -4993,7 +4994,7 @@
         let solid = solid_buf.cell((1, 0)).expect("solid");
         assert_eq!(solid.symbol(), "x", "solid keeps grapheme under caret");
         assert_eq!(solid.fg, canvas, "solid reverse plate: canvas ink");
-        assert_eq!(solid.bg, accent, "solid reverse plate: agent magenta bg");
+        assert_eq!(solid.bg, accent, "solid reverse plate: Human green bg");
         assert!(!solid.modifier.contains(Modifier::DIM));
 
         let mut empty_buf = Buffer::empty(area);
@@ -5008,7 +5009,7 @@
         super::paint_composer_box_cursor_phase(&mut empty_buf, 1, 0, &theme, canvas, false);
         let empty = empty_buf.cell((1, 0)).expect("empty");
         assert_eq!(empty.symbol(), "x", "empty keeps grapheme under caret");
-        assert_eq!(empty.fg, accent, "empty half: agent magenta ink on grapheme");
+        assert_eq!(empty.fg, accent, "empty half: Human green ink on grapheme");
         assert_eq!(empty.bg, canvas, "empty half: canvas bg (no plate steal)");
         assert!(!empty.modifier.contains(Modifier::DIM));
     }

@@ -82,7 +82,7 @@ list when you ship fork work.
 - [x] **Keyring login time-box + fail-loud + secure fallback + TTY progress** — OS keyring get/set/delete wall-clock budget (`KEYRING_OP_TIMEOUT`); interactive `grok login --api-key` / OpenRouter login require a **secure** backend (primary platform store, then on Linux automatic **keyutils** fallback when Secret Service times out/errors). TTY stderr progress counts seconds up to **2× timeout (~6s)** during store RMW+write (suppressed non-TTY / env short-circuit). Only if **all** secure backends fail → clear error, **no** silent `provider_credentials.json` secret dump. File mirror only after successful secure write. `GROK_CREDENTIALS_FORCE_FILE` = tests/CI only (not user recovery).
 - [x] **Economic mode** — soft-cap effective context at the Grok 4.5 long-context price cliff (~200k); `/economic-mode`; settings default on
 - [x] **Auto-compact default 95% + live-apply** — stock Grok 4.5 catalog omits a per-model undercut (was 80); remote `models_cache` undercuts on stock models are dropped so the product default applies; user session/env still win; banner shows usage **and** configured threshold. Settings commit live-applies to open sessions (`restart_required: false`): disk persist → ACP `x.ai/auto_compact_threshold_changed` → `SessionCommand::SetAutoCompactThreshold` → CompactionConfig Cells (same write path as model switch). Live-apply pushes the **committed Settings value** (race-safe vs disk); env `GROK_AUTO_COMPACT_THRESHOLD_*` wins again on the next full resolve (spawn / model switch). Detail: `docs/dev/research/rca-auto-compact-early-fire.md`
-- [x] **Auto-run `/implement`** — after a successful turn, queue a follow-up implement block when present; **appends** after any already-queued prompts (does not drop them); economic mode can clamp implement `--effort`
+- [x] **Auto-run `/implement`** — after a successful turn, queue a follow-up implement block when present; **appends** after any already-queued prompts (does not drop them); explicit `--effort N` is honored (economic mode does not rewrite it)
 - [x] **Shared rate limits** — crate `grok-rate-limit` (Surmount name, not `xai-`); cooldowns under `~/.grok/rate_limits/`; optional `GROK_DISABLE_SHARED_RATE_LIMIT=1`
 - [x] **Updates** — no xAI auto-update channel by default (wrong product). `grok-oss update --check` compares to Surmount `main`. Escape hatch: `GROK_OSS_ENABLE_XAI_UPDATER=1`
 - [x] **Soft interject only** — mid-turn interject (Ctrl+Enter / terminal alts, queue `[Interject]`) injects into the **current** turn and **never cancels**. Cancel is Esc/stop only. Shell contracts: `interject_contract_*` tests. Do **not** re-unify user mid-turn steer on `SendPromptNow` (cancel-and-send). Idle + live background subagents holding the queue: status `… Interject to force`, queue row `[Interject]` force-drains (same as chord). User copy: tip/status say **Enter to interject** (not “send now”). Esc on cancel-turn panel dismisses only. **Parked sendable-wait exception (intentional):** while the agent is **blocked waiting** (task/subagent) **and the queue is empty**, plain Enter with text may still cancel-and-send to unblock immediately — not soft Interject; documented in user-guide `03-keyboard-shortcuts`. Detail: user-guide `03-keyboard-shortcuts` § during an active turn.
@@ -211,10 +211,15 @@ list when you ship fork work.
   Cancel-aware shared cooldown wait; short transport footer labels
   (`connection interrupted`, headers-timeout wording; not opaque
   `Transport error: error`).
-- [x] **Clear done todos** — pane chrome + focused `X` + `/clear-completed-todos`
-  archives completed/cancelled (`ClearedReason::UserClearCompleted`); not `h`
-  hide-done and not `merge: false` wipe. Slash reserved in pager
-  `SHELL_RESERVED` (`shell_collision` contract).
+- [x] **Clear done todos** — pane chrome **Clear done** (open pane, focused or
+  not; human green, not agent magenta) + optional focused `X` +
+  `/clear-completed-todos` archives completed/cancelled
+  (`ClearedReason::UserClearCompleted`); not `h` hide-done and not
+  `merge: false` wipe. Slash reserved in pager `SHELL_RESERVED`
+  (`shell_collision` contract).
+- [x] **Status-bar limits meter** — compact SuperGrok `Credits used: N%` or
+  console prepaid/gap always on when billing surface is visible; click opens
+  `/limits` (same data path as slash; not a second billing system).
 - [x] **Always-on bubble copy + one-click copy** — selection-box / plan top-bar /
   prompt draft / per-bubble `⧉` (`bubble_copy_buttons` default on) reuse the
   clipboard stack; Policy A keeps selection ⧉ off bubble-owned blocks only.

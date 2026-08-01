@@ -102,6 +102,12 @@ pub struct LimitsSnapshot {
     pub extra_principals: Vec<PrincipalLimitsSlot>,
     /// Console path status (always present so copy can say live / not live).
     pub console: ConsoleMeter,
+    /// Dual SuperGrok OIDC logins share one consumer SuperGrok included pool
+    /// (billing `is_unified_billing_user`, and/or both rows show the same
+    /// included % + reset). Not a client "mirror paint" of one slot onto the
+    /// other — credentials are polled per slot; the credits API returns one
+    /// pool. Also not console.x.ai Grok Business license seat/message usage.
+    pub shared_unified_supergrok_pool: bool,
 }
 
 /// One SuperGrok principal input for multi-principal `/limits` build.
@@ -160,6 +166,8 @@ impl LimitsSnapshot {
                 balance_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
             },
+            // Single SuperGrok section: no dual-login shared-pool note.
+            shared_unified_supergrok_pool: false,
         }
     }
 
@@ -230,6 +238,8 @@ impl LimitsSnapshot {
                 .map(str::to_owned)
                 .or_else(|| principals.first().and_then(|p| p.role_label.clone()))
         };
+        let shared_unified_supergrok_pool =
+            principals.len() >= 2 && dual_principals_share_unified_supergrok_pool(principals);
         Self {
             live_identity,
             live_principal_label,
@@ -240,6 +250,7 @@ impl LimitsSnapshot {
                 balance_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
             },
+            shared_unified_supergrok_pool,
         }
     }
 
@@ -301,12 +312,53 @@ fn fmt_dollars(cents: i64) -> String {
     }
 }
 
+/// True when dual SuperGrok principal rows should explain a shared consumer pool.
+///
+/// - Any principal with `is_unified_billing_user == Some(true)`, or
+/// - Two+ known included readings with the same floored % and same reset display.
+///
+/// Distinct included % / reset stay independent (no shared-pool note).
+fn dual_principals_share_unified_supergrok_pool(principals: &[PrincipalLimitsInput]) -> bool {
+    if principals.len() < 2 {
+        return false;
+    }
+    if principals
+        .iter()
+        .any(|p| p.balance.as_ref().and_then(|b| b.is_unified_billing_user) == Some(true))
+    {
+        return true;
+    }
+    let known: Vec<&CreditBalance> = principals
+        .iter()
+        .filter_map(|p| p.balance.as_ref())
+        .collect();
+    if known.len() < 2 {
+        return false;
+    }
+    let first = known[0];
+    known.iter().all(|b| {
+        b.usage_pct.floor() as i64 == first.usage_pct.floor() as i64
+            && b.period_end_display == first.period_end_display
+    })
+}
+
 /// Multi-line `/limits` body. Pure; hermetic fixtures only.
 pub fn format_limits_detail(snap: &LimitsSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     lines.push("Limits".to_string());
     lines.push(snap.live_sampling_line());
+    if snap.shared_unified_supergrok_pool {
+        // Dogfood: dual rows both at e.g. 62% looked like a client mirror bug.
+        // Live GetGrokCreditsConfig returns one unified SuperGrok pool for both
+        // OIDC principals; console.x.ai Grok Business license usage is elsewhere.
+        lines.push(
+            "Note: SuperGrok included weekly is one shared consumer pool for this account \
+(personal and business SuperGrok logins share it under unified billing). \
+It is not console.x.ai Grok Business license seat/message usage."
+                .to_string(),
+        );
+    }
     lines.push(String::new());
 
     format_principal(&mut lines, &snap.primary);
@@ -328,12 +380,17 @@ fn format_principal(lines: &mut Vec<String>, p: &PrincipalLimitsSlot) {
         Some(inc) => {
             let used = inc.used_pct_floored();
             let rem = inc.remaining_pct_floored();
-            lines.push(format!(
-                "  Included {} allowance: {}% used · {}% remaining",
-                inc.period_label.to_lowercase(),
-                used,
-                rem
-            ));
+            // period_label "Included" means unknown cycle — do not emit
+            // "Included included allowance". Prefer "Included weekly/monthly
+            // allowance" when the billing period type is known.
+            let allowance_line = match inc.period_label {
+                "Included" => format!("  Included allowance: {used}% used · {rem}% remaining"),
+                other => format!(
+                    "  Included {} allowance: {used}% used · {rem}% remaining",
+                    other.to_lowercase()
+                ),
+            };
+            lines.push(allowance_line);
             match &inc.next_reset_display {
                 Some(reset) => lines.push(format!("  Next reset: {reset}")),
                 None => lines.push("  Next reset: not known yet".to_string()),
@@ -811,13 +868,13 @@ mod tests {
             autotopup: None,
             included_billing_only: false,
         };
-        // Process cache remembered included % only (no prepaid fields).
+        // Process cache remembered included % + weekly period (no prepaid).
         let sibling = PrincipalLimitsInput {
             label: "SuperGrok (business)".into(),
             role_label: Some("business".into()),
             balance: Some(CreditBalance {
-                period_type: None,
-                period_end_display: Some("Jul 28, 00:00".into()),
+                period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+                period_end_display: Some("July 28, 00:00".into()),
                 prepaid_balance_cents: None,
                 ..bal(40.0)
             }),
@@ -831,10 +888,12 @@ mod tests {
         );
         let out = format_limits_detail(&snap);
         assert!(
-            out.contains("Included included allowance: 40% used · 60% remaining")
-                || out.contains("Included allowance: 40% used · 60% remaining")
-                || out.contains("40% used · 60% remaining"),
-            "sibling included from process cache: {out}"
+            !out.contains("Included included allowance"),
+            "must never double the word included: {out}"
+        );
+        assert!(
+            out.contains("Included weekly allowance: 40% used · 60% remaining"),
+            "sibling included from process cache uses weekly when period known: {out}"
         );
         // Active still shows real extras.
         assert!(
@@ -850,6 +909,223 @@ mod tests {
         assert!(
             !business_section.contains("none on file"),
             "must not claim unobserved extras empty: {out}"
+        );
+    }
+
+    /// Named contract: unknown period type → plain "Included allowance", never
+    /// "Included included allowance" (the double-word dogfood bug).
+    #[test]
+    fn format_unknown_period_does_not_double_included_word() {
+        let slot = PrincipalLimitsSlot {
+            label: "SuperGrok (personal)".into(),
+            included: Some(IncludedAllowanceMeter {
+                period_label: "Included",
+                used_pct: 62.0,
+                next_reset_display: Some("Aug 3, 19:25".into()),
+            }),
+            dollar_extras: None,
+            dollar_extras_observed: false,
+        };
+        let snap = LimitsSnapshot {
+            live_identity: SamplingIdentityKind::SuperGrokSession,
+            live_principal_label: Some("business".into()),
+            primary: PrincipalLimitsSlot {
+                label: "SuperGrok (business)".into(),
+                included: Some(IncludedAllowanceMeter {
+                    period_label: "Weekly",
+                    used_pct: 62.0,
+                    next_reset_display: Some("August 3, 19:25".into()),
+                }),
+                dollar_extras: Some(DollarExtrasMeter {
+                    balance_cents: 10029,
+                    auto_topup: Some(AutoTopupLine::Disabled),
+                }),
+                dollar_extras_observed: true,
+            },
+            extra_principals: vec![slot],
+            console: ConsoleMeter {
+                is_live: false,
+                balance_cents: None,
+                prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
+            },
+            // This fixture exercises double-"included" copy only; shared-pool
+            // note is covered by dedicated dual-unified tests.
+            shared_unified_supergrok_pool: false,
+        };
+        let out = format_limits_detail(&snap);
+        assert!(
+            !out.contains("Included included allowance"),
+            "copy bug: double 'included' is forbidden: {out}"
+        );
+        assert!(
+            out.contains("Included weekly allowance: 62% used · 38% remaining"),
+            "business weekly line: {out}"
+        );
+        assert!(
+            out.contains("Included allowance: 62% used · 38% remaining"),
+            "personal unknown-period still honest, not doubled: {out}"
+        );
+        let personal = out.split("SuperGrok (personal):").nth(1).unwrap_or("");
+        assert!(
+            personal.contains("SuperGrok dollar extras: no data yet"),
+            "sibling extras honest absence: {out}"
+        );
+    }
+
+    /// Named contract: dual SuperGrok rows keep **per-slot** included % — never
+    /// mirror the active principal's meter onto the sibling row.
+    #[test]
+    fn format_dual_principals_keep_distinct_included_pct() {
+        let business = PrincipalLimitsInput {
+            label: "SuperGrok (business)".into(),
+            role_label: Some("business".into()),
+            balance: Some(weekly(62.0, "August 3, 19:25", Some(10029))),
+            autotopup: Some(AutoTopupInfo {
+                enabled: false,
+                topup_amount_cents: None,
+                max_amount_cents: None,
+            }),
+            included_billing_only: false,
+        };
+        let personal = PrincipalLimitsInput {
+            label: "SuperGrok (personal)".into(),
+            role_label: Some("personal".into()),
+            // Distinct sibling pool: 15% used, different reset.
+            balance: Some(weekly(15.0, "August 3, 19:25", None)),
+            autotopup: None,
+            included_billing_only: true,
+        };
+        let snap = LimitsSnapshot::from_principals(
+            &[business, personal],
+            SamplingIdentityKind::SuperGrokSession,
+            Some("business"),
+        );
+        assert!(
+            !snap.shared_unified_supergrok_pool,
+            "distinct included % must not claim a shared unified pool"
+        );
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("Included weekly allowance: 62% used · 38% remaining"),
+            "business slot own %: {out}"
+        );
+        assert!(
+            out.contains("Included weekly allowance: 15% used · 85% remaining"),
+            "personal slot own % (must not reuse business 62%): {out}"
+        );
+        // Count exact 62% lines — only business should carry it.
+        let sixty_two = out.matches("62% used").count();
+        assert_eq!(
+            sixty_two, 1,
+            "62% must appear once (business only), not mirrored: {out}"
+        );
+        let business_sec = out.split("SuperGrok (business):").nth(1).unwrap_or("");
+        let personal_sec = out.split("SuperGrok (personal):").nth(1).unwrap_or("");
+        // Truncate each section to its body (before next blank+header is fine).
+        assert!(
+            business_sec.contains("SuperGrok dollar extras: $100.29"),
+            "business extras: {out}"
+        );
+        assert!(
+            personal_sec.contains("SuperGrok dollar extras: no data yet"),
+            "personal included-only: no invented dollars: {out}"
+        );
+        assert!(!out.contains("Included included allowance"), "{out}");
+        assert!(
+            !out.contains("shared consumer pool"),
+            "distinct pools: no unified-share note: {out}"
+        );
+    }
+
+    /// Named contract (dogfood 62%/62%): when both SuperGrok OIDC slots report
+    /// the same included % + reset under unified billing, /limits must say they
+    /// share one SuperGrok consumer pool — not look like a silent client mirror —
+    /// and must name that this is not console Grok Business license usage.
+    #[test]
+    fn format_dual_unified_same_included_explains_shared_pool_not_console_business() {
+        let mut business_bal = weekly(62.0, "August 3, 19:25", Some(10029));
+        business_bal.is_unified_billing_user = Some(true);
+        let business = PrincipalLimitsInput {
+            label: "SuperGrok (business)".into(),
+            role_label: Some("business".into()),
+            balance: Some(business_bal),
+            autotopup: Some(AutoTopupInfo {
+                enabled: false,
+                topup_amount_cents: None,
+                max_amount_cents: None,
+            }),
+            included_billing_only: false,
+        };
+        // Sibling poll: same included % + reset the credits API returns for the
+        // personal OIDC token under unified billing (distinct token, same pool).
+        let personal = PrincipalLimitsInput {
+            label: "SuperGrok (personal)".into(),
+            role_label: Some("personal".into()),
+            balance: Some(weekly(62.0, "August 3, 19:25", None)),
+            autotopup: None,
+            included_billing_only: true,
+        };
+        let snap = LimitsSnapshot::from_principals(
+            &[business, personal],
+            SamplingIdentityKind::SuperGrokSession,
+            Some("business"),
+        );
+        assert!(
+            snap.shared_unified_supergrok_pool,
+            "unified flag must mark shared SuperGrok pool"
+        );
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("shared consumer pool"),
+            "must explain shared SuperGrok pool: {out}"
+        );
+        assert!(
+            out.contains("unified billing"),
+            "must name unified billing: {out}"
+        );
+        assert!(
+            out.contains("not console.x.ai Grok Business license"),
+            "must distinguish SuperGrok included from console Business usage: {out}"
+        );
+        // Both rows still show their (same) per-slot readings — not collapsed.
+        assert_eq!(
+            out.matches("62% used").count(),
+            2,
+            "both slots keep their own 62% reading from each poll: {out}"
+        );
+        assert!(out.contains("SuperGrok (business):"), "{out}");
+        assert!(out.contains("SuperGrok (personal):"), "{out}");
+    }
+
+    /// Same 62%/62% without the unified flag still gets the shared-pool note
+    /// (identical included % + reset is the dogfood signal).
+    #[test]
+    fn format_dual_identical_included_without_flag_still_explains_shared_pool() {
+        let business = PrincipalLimitsInput {
+            label: "SuperGrok (business)".into(),
+            role_label: Some("business".into()),
+            balance: Some(weekly(62.0, "August 3, 19:25", Some(10029))),
+            autotopup: None,
+            included_billing_only: false,
+        };
+        let personal = PrincipalLimitsInput {
+            label: "SuperGrok (personal)".into(),
+            role_label: Some("personal".into()),
+            balance: Some(weekly(62.0, "August 3, 19:25", None)),
+            autotopup: None,
+            included_billing_only: true,
+        };
+        let snap = LimitsSnapshot::from_principals(
+            &[business, personal],
+            SamplingIdentityKind::SuperGrokSession,
+            Some("business"),
+        );
+        assert!(snap.shared_unified_supergrok_pool);
+        let out = format_limits_detail(&snap);
+        assert!(out.contains("shared consumer pool"), "{out}");
+        assert!(
+            out.contains("not console.x.ai Grok Business license"),
+            "{out}"
         );
     }
 

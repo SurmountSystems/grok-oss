@@ -32,10 +32,13 @@ static INCLUDED_BILLING_BY_IDENTITY: Mutex<BTreeMap<String, IncludedBillingField
 ///
 /// Pure-ish side effect on process cache only. `period_end_rfc3339` is parsed
 /// when present; unparseable / empty → leave prior `reset_at` or `None`.
+/// `period_type` is the billing proto name (`USAGE_PERIOD_TYPE_WEEKLY`, …)
+/// when known; empty/None leaves any prior value.
 pub fn remember_supergrok_included_billing(
     identity_id: &str,
     usage_pct: f64,
     period_end_rfc3339: Option<&str>,
+    period_type: Option<&str>,
 ) {
     let id = identity_id.trim();
     if id.is_empty() {
@@ -48,10 +51,14 @@ pub fn remember_supergrok_included_billing(
     let entry = map.entry(id.to_owned()).or_insert(IncludedBillingFields {
         usage_pct: None,
         reset_at: None,
+        period_type: None,
     });
     entry.usage_pct = Some(usage_pct);
     if let Some(r) = reset_at {
         entry.reset_at = Some(r);
+    }
+    if let Some(pt) = period_type.map(str::trim).filter(|s| !s.is_empty()) {
+        entry.period_type = Some(pt.to_owned());
     }
 }
 
@@ -64,11 +71,12 @@ pub fn remember_active_supergrok_included_billing(
     grok_home: &Path,
     usage_pct: f64,
     period_end_rfc3339: Option<&str>,
+    period_type: Option<&str>,
 ) {
     let Some(identity_id) = active_supergrok_identity_id(grok_home) else {
         return;
     };
-    remember_supergrok_included_billing(&identity_id, usage_pct, period_end_rfc3339);
+    remember_supergrok_included_billing(&identity_id, usage_pct, period_end_rfc3339, period_type);
 }
 
 /// Identity id of the first SuperGrok session in `auth.json` (active/base first).
@@ -392,7 +400,8 @@ pub fn apply_billing_usage_to_session_exhaust_with_period(
     period_end_rfc3339: Option<&str>,
 ) -> xai_grok_sampler::AllowanceExhaustAction {
     // Feed ranking even when dual-auth is not ready (multi SuperGrok alone).
-    remember_active_supergrok_included_billing(grok_home, usage_pct, period_end_rfc3339);
+    // Period type unknown on this path (usage-only callers); leave prior or None.
+    remember_active_supergrok_included_billing(grok_home, usage_pct, period_end_rfc3339, None);
 
     let status = collect_dual_auth_status(grok_home);
     if !status.dual_auth_ready() {
@@ -812,8 +821,18 @@ mod tests {
         write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
 
         // identity_id for personal = user-p; business = team-biz
-        remember_supergrok_included_billing("user-p", 40.0, Some("2026-08-01T00:00:00Z"));
-        remember_supergrok_included_billing("team-biz", 80.0, Some("2026-07-30T00:00:00Z"));
+        remember_supergrok_included_billing(
+            "user-p",
+            40.0,
+            Some("2026-08-01T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_included_billing(
+            "team-biz",
+            80.0,
+            Some("2026-07-30T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
 
         let candidates = load_supergrok_session_candidates(dir.path());
         assert_eq!(candidates.len(), 2);
@@ -985,6 +1004,27 @@ mod tests {
             non_active[0].access_token == "tok-personal-sibling"
                 || non_active[0].access_token == "tok-business-sibling"
         );
+        // Named contract: dual SuperGrok poll targets must not share one JWT.
+        // Same token for both slots would paint one principal's credits on both
+        // /limits rows (the 62%/62% "mirror" failure mode when wiring is wrong).
+        let tokens: Vec<&str> = all.iter().map(|t| t.access_token.as_str()).collect();
+        assert_eq!(tokens.len(), 2);
+        assert_ne!(
+            tokens[0], tokens[1],
+            "personal and business must poll with distinct access tokens; got {tokens:?}"
+        );
+        let personal = all
+            .iter()
+            .find(|t| t.access_token == "tok-personal-sibling")
+            .expect("personal target");
+        let business = all
+            .iter()
+            .find(|t| t.access_token == "tok-business-sibling")
+            .expect("business target");
+        assert_ne!(
+            personal.identity_id, business.identity_id,
+            "identity_ids must differ so process cache keys stay per-slot"
+        );
     }
 
     /// Hermetic: remember included billing for both principals → load enriches both.
@@ -1022,8 +1062,18 @@ mod tests {
         write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
 
         // Simulate active poll + non-active sibling poll both remembering.
-        remember_supergrok_included_billing("user-p-rem", 25.0, Some("2026-08-10T00:00:00Z"));
-        remember_supergrok_included_billing("team-rem", 70.0, Some("2026-08-01T00:00:00Z"));
+        remember_supergrok_included_billing(
+            "user-p-rem",
+            25.0,
+            Some("2026-08-10T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_included_billing(
+            "team-rem",
+            70.0,
+            Some("2026-08-01T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
 
         let snap = included_billing_fields_snapshot();
         assert!(
@@ -1166,7 +1216,12 @@ mod tests {
         );
 
         // Simulate active poll remembering business, then load both.
-        remember_supergrok_included_billing("team-poll", 90.0, Some("2026-08-15T00:00:00Z"));
+        remember_supergrok_included_billing(
+            "team-poll",
+            90.0,
+            Some("2026-08-15T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
         let candidates = load_supergrok_session_candidates(dir.path());
         assert_eq!(candidates.len(), 2);
         let by_id: BTreeMap<_, _> = candidates
@@ -1185,6 +1240,151 @@ mod tests {
         assert!(
             *by_id.get("team-poll").unwrap_or(&0) > 0,
             "business enriched from active remember"
+        );
+        // Sibling poll must retain period_type so /limits can say "weekly".
+        assert_eq!(
+            snap["user-p-poll"].period_type.as_deref(),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+            "sibling remember keeps period type for limits copy"
+        );
+
+        clear_included_billing_cache();
+        server.abort();
+    }
+
+    /// Named contract: mock returns **different** included % per Bearer token.
+    /// Active (business) + sibling (personal) remember only their own reading —
+    /// never paint personal's % onto the business identity (or vice versa).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dual_poll_remembers_distinct_pct_per_token_never_cross_paints() {
+        use crate::auth::model::upsert_supergrok_session;
+        use axum::Router;
+        use axum::routing::get;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        clear_included_billing_cache();
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_h = hits.clone();
+        let app = Router::new().route(
+            "/billing",
+            get(move |req: axum::http::Request<axum::body::Body>| {
+                let hits = hits_h.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let auth = req
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    // Distinct mock results: personal 62%, business 5%.
+                    let (pct, end) = if auth.contains("tok-personal-distinct") {
+                        (62.0, "2026-08-03T19:25:00Z")
+                    } else if auth.contains("tok-business-distinct") {
+                        (5.0, "2026-08-10T00:00:00Z")
+                    } else {
+                        (99.0, "2026-09-01T00:00:00Z")
+                    };
+                    axum::Json(serde_json::json!({
+                        "config": {
+                            "creditUsagePercent": pct,
+                            "isUnifiedBillingUser": false,
+                            "currentPeriod": {
+                                "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                                "end": end
+                            }
+                        }
+                    }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let dir = TempDir::new().unwrap();
+        let base_scope = "https://auth.x.ai::distinct-pct";
+        let mut map = AuthStore::default();
+        upsert_supergrok_session(
+            &mut map,
+            base_scope,
+            GrokAuth {
+                key: "tok-personal-distinct".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p-distinct".into(),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base_scope,
+            GrokAuth {
+                key: "tok-business-distinct".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b-distinct".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-distinct".into()),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let proxy = format!("http://{addr}");
+        // Sibling (personal) path — uses personal JWT only.
+        crate::extensions::billing::poll_and_remember_non_active_supergrok_included_billing(
+            dir.path(),
+            &proxy,
+        )
+        .await;
+        // Active (business) path: poll with business JWT, remember under active
+        // identity_id from auth.json (team-distinct), matching production wire.
+        let biz_resp = crate::extensions::billing::fetch_credits_config_with_session(
+            &proxy,
+            "tok-business-distinct",
+            "user-b-distinct",
+        )
+        .await
+        .expect("business credits fetch");
+        let biz_cfg = biz_resp.config.as_ref().expect("config");
+        let (biz_pct, biz_end) = crate::extensions::billing::included_usage_and_period_end(biz_cfg);
+        let biz_pct = biz_pct.expect("business usage %");
+        let biz_period = biz_cfg
+            .current_period
+            .as_ref()
+            .and_then(|p| p.period_type.as_deref());
+        remember_active_supergrok_included_billing(
+            dir.path(),
+            biz_pct,
+            biz_end.as_deref(),
+            biz_period,
+        );
+
+        assert!(
+            hits.load(Ordering::SeqCst) >= 2,
+            "must hit credits for sibling and active"
+        );
+        assert_eq!(biz_pct, 5.0, "business token → 5%");
+
+        let snap = included_billing_fields_snapshot();
+        assert_eq!(
+            snap.get("user-p-distinct").and_then(|f| f.usage_pct),
+            Some(62.0),
+            "personal identity keeps 62% from personal token; snap={snap:?}"
+        );
+        assert_eq!(
+            snap.get("team-distinct").and_then(|f| f.usage_pct),
+            Some(5.0),
+            "business identity keeps 5% from business token; snap={snap:?}"
+        );
+        // Cross-paint guard: personal must not hold business %, and vice versa.
+        assert_ne!(
+            snap["user-p-distinct"].usage_pct,
+            snap["team-distinct"].usage_pct
         );
 
         clear_included_billing_cache();

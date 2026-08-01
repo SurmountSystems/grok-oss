@@ -270,10 +270,15 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
                     );
                     continue;
                 };
+                let period_type = config
+                    .current_period
+                    .as_ref()
+                    .and_then(|p| p.period_type.as_deref());
                 crate::auth::remember_supergrok_included_billing(
                     &target.identity_id,
                     pct,
                     period_end.as_deref(),
+                    period_type,
                 );
                 tracing::debug!(
                     identity_id = %target.identity_id,
@@ -371,10 +376,15 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
     if let Some(ref config) = billing.config {
         let (usage_pct, period_end) = included_usage_and_period_end(config);
         if let Some(pct) = usage_pct {
+            let period_type = config
+                .current_period
+                .as_ref()
+                .and_then(|p| p.period_type.as_deref());
             crate::auth::remember_active_supergrok_included_billing(
                 &grok_home,
                 pct,
                 period_end.as_deref(),
+                period_type,
             );
         }
     }

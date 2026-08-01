@@ -370,6 +370,9 @@ fn build_limits_snapshot(
             let (bal, topup, included_billing_only) = if is_active {
                 (balance.cloned(), autotopup.cloned(), false)
             } else if let Some(fields) = billing_by_id.get(&p.identity_id) {
+                // Per-slot process cache only — never reuse active CreditBalance.
+                // Date format matches credit_balance_from_config (`%B`, full month)
+                // so dual rows do not look like two different clocks (Aug vs August).
                 (
                     fields
                         .usage_pct
@@ -378,14 +381,16 @@ fn build_limits_snapshot(
                             effective_usage_pct: pct,
                             period_end_display: fields.reset_at.map(|dt| {
                                 dt.with_timezone(&chrono::Local)
-                                    .format("%b %-d, %H:%M")
+                                    .format("%B %-d, %H:%M")
                                     .to_string()
                             }),
                             pay_as_you_go: false,
                             on_demand_cap_cents: None,
                             on_demand_used_cents: None,
                             prepaid_balance_cents: None,
-                            period_type: None,
+                            // Plumb period_type so copy says "weekly"/"monthly"
+                            // instead of bare "Included allowance".
+                            period_type: fields.period_type.clone(),
                             is_unified_billing_user: None,
                         }),
                     None,

@@ -235,6 +235,44 @@ impl SelectionBox {
         })
     }
 
+    /// Style for the optional action label (todo **Clear done**).
+    ///
+    /// Operator chrome uses human green (`accent_user`), never the agent-role
+    /// border colour — DOGE: human green / agent magenta.
+    fn action_paint_style(&self) -> Style {
+        let theme = Theme::current();
+        if self.action_hovered {
+            Style::default().fg(theme.text_primary)
+        } else {
+            Style::default().fg(theme.accent_user)
+        }
+    }
+
+    /// Paint only the optional action label (no rails, corners, or close).
+    ///
+    /// Used when the todo pane is open but unfocused: Clear done stays
+    /// clickable without painting focus chrome.
+    pub fn render_action_only(&self, buf: &mut Buffer) {
+        self.paint_action_label(buf);
+    }
+
+    fn paint_action_label(&self, buf: &mut Buffer) {
+        if self.top_clipped || self.inner_area.y == 0 {
+            return;
+        }
+        if let Some(action_rect) = self.action_button_rect()
+            && let Some(label) = self.action_label
+        {
+            use crate::render::SafeBuf;
+            buf.set_string_safe(
+                action_rect.x,
+                action_rect.y,
+                label,
+                self.action_paint_style(),
+            );
+        }
+    }
+
     /// Render the selection box to the buffer.
     ///
     /// Draws:
@@ -298,17 +336,7 @@ impl SelectionBox {
                 cell.set_char(border_chars::TOP_RIGHT).set_style(self.style);
             }
             // Optional action left of close (todo "Clear done").
-            if let Some(action_rect) = self.action_button_rect()
-                && let Some(label) = self.action_label
-            {
-                use crate::render::SafeBuf;
-                let style = if self.action_hovered {
-                    Style::default().fg(Theme::current().text_primary)
-                } else {
-                    self.style
-                };
-                buf.set_string_safe(action_rect.x, action_rect.y, label, style);
-            }
+            self.paint_action_label(buf);
         }
 
         // Draw bottom corners (if not clipped)
@@ -507,5 +535,51 @@ mod tests {
         assert_eq!(action.width, "Clear done".chars().count() as u16);
         // Gap of one cell between action right edge and close left.
         assert_eq!(action.x + action.width + 1, close.x);
+    }
+
+    /// Named contract: Clear done without a close control still gets a hit rect
+    /// (unfocused open pane paints action only, closable=false).
+    #[test]
+    fn action_button_without_close_right_aligns() {
+        let sel = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default())
+            .with_action_label(Some("Clear done"), false);
+        assert!(sel.close_button_rect().is_none());
+        let action = sel.action_button_rect().expect("action without close");
+        assert_eq!(action.width, "Clear done".chars().count() as u16);
+        assert_eq!(action.y, 1);
+        // Right edge of label aligns with right edge of inner area.
+        assert_eq!(action.x + action.width - 1, 0 + 40 - 1);
+    }
+
+    /// DOGE: Clear done is operator chrome → human green, not agent magenta.
+    #[test]
+    fn clear_done_action_paints_human_green_not_agent_magenta() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let magenta = theme.accent_running;
+        let human = theme.accent_user;
+        assert_ne!(magenta, human, "DOGE setup: magenta != human green");
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+        let sel = SelectionBox::new(
+            Rect::new(0, 2, 40, 4),
+            // Border style deliberately agent magenta — action must not inherit it.
+            Style::default().fg(magenta),
+        )
+        .with_action_label(Some("Clear done"), false);
+        sel.render_action_only(&mut buf);
+
+        let action = sel.action_button_rect().expect("action");
+        let cell = buf.cell((action.x, action.y)).expect("label cell");
+        assert_eq!(
+            cell.fg, human,
+            "Clear done must paint accent_user (human green), got {:?}",
+            cell.fg
+        );
+        assert_ne!(
+            cell.fg, magenta,
+            "Clear done must not inherit agent magenta"
+        );
     }
 }

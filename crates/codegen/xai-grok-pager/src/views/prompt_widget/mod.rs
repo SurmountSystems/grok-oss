@@ -2846,12 +2846,13 @@ impl PromptWidget {
     }
 }
 
-/// Paint the agent-magenta composer caret as a slow solid↔empty block blink.
+/// Paint the Human-green composer caret as a slow solid↔empty block blink.
 ///
 /// Uses wall-clock millis so any redraw cadence (including Slow ticks) advances
-/// the phase. Colour is `theme.accent_running` (magenta under DOGE: same agent
-/// chrome family as rails / activity / model accents, not Human `accent_user`
-/// green).
+/// the phase. Colour is `theme.accent_user` (green under DOGE: Human chrome —
+/// same family as user rails / pointer / OSC 12). **Not** agent
+/// `accent_running` magenta. Prior mistake: caret was painted magenta because
+/// "agent chrome"; the composer is the human input surface → green.
 ///
 /// Blank insertion cell blinks **classic terminal block on/off** of the **same
 /// full-cell rectangle** (the terminal cell itself — not a dimmed solid `█`,
@@ -2861,7 +2862,7 @@ impl PromptWidget {
 ///   with an accent **background plate** (cell bg always paints full height).
 ///   Empty half is a true empty cell (canvas bg, no accent plate).
 /// - **Solid (full):** [`cursor_box_filled`] (`█`) with `fg=accent`,
-///   `bg=accent` — solid magenta block filling the cell (DOGE).
+///   `bg=accent` — solid Human green block filling the cell (DOGE).
 /// - **Empty (off):** [`cursor_box_hollow`] (space) with `fg=canvas`,
 ///   `bg=canvas` — pure empty cell, **no** accent plate. **No**
 ///   [`Modifier::DIM`]. Rejected: `■`/`fg=canvas bg=accent` hole-punch
@@ -2895,7 +2896,9 @@ fn paint_composer_box_cursor_phase(
     bg: ratatui::style::Color,
     filled_phase: bool,
 ) {
-    let accent = match theme.accent_running {
+    // Human input surface → `accent_user` (green under DOGE). Never agent
+    // `accent_running` magenta.
+    let accent = match theme.accent_user {
         // Reset→Cyan so NO_COLOR still shows a visible caret.
         ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
         c => c,
@@ -2912,7 +2915,7 @@ fn paint_composer_box_cursor_phase(
     };
     if blank {
         if filled_phase {
-            // Solid filled rectangle: full-cell agent accent plate (+ block ink).
+            // Solid filled rectangle: full-cell Human accent plate (+ block ink).
             cell.set_symbol(crate::glyphs::cursor_box_filled());
             cell.set_style(Style::default().fg(accent).bg(accent));
         } else {
@@ -2922,10 +2925,10 @@ fn paint_composer_box_cursor_phase(
             cell.set_style(Style::default().fg(bg).bg(bg));
         }
     } else if filled_phase {
-        // Classic block: invert — agent accent plate, canvas-coloured ink.
+        // Classic block: invert — Human accent plate, canvas-coloured ink.
         cell.set_style(Style::default().fg(bg).bg(accent));
     } else {
-        // Empty half on a grapheme: keep canvas bg, agent accent ink (no DIM).
+        // Empty half on a grapheme: keep canvas bg, Human accent ink (no DIM).
         cell.set_style(Style::default().fg(accent).bg(bg));
     }
 }
@@ -3394,8 +3397,8 @@ impl PromptWidget {
             }
         }
 
-        // Software magenta caret: slow solid↔empty block blink (agent chrome
-        // `accent_running`, not Human `accent_user` green). Terminal hardware
+        // Software Human-green caret: slow solid↔empty block blink
+        // (`accent_user`, not agent `accent_running` magenta). Terminal hardware
         // cursor stays hidden so we do not stack two carets; phase is wall-clock
         // so Slow redraw ticks are enough.
         let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {

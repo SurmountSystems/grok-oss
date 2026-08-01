@@ -1422,8 +1422,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           /implement block (from the /implement token through end of message) \
                           from a user-prompt follow-up or a trailing residual in the assistant \
                           reply. Prefer leaving “Next implement prompt” near the end of the \
-                          reply. When Economic mode is on, auto-queued blocks clamp explicit \
-                          --effort above 1 down to 1 (single reviewer).",
+                          reply. Explicit --effort N on the block is honored as written.",
             keywords: &[
                 "implement",
                 "auto",
@@ -1440,7 +1439,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "multi-line",
                 "multiline",
                 "effort",
-                "economic",
             ],
             kind: SettingKind::Bool {
                 default: ui_default.auto_run_implement.unwrap_or(true),
@@ -1450,7 +1448,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned: `[ui].economic_mode` + process-wide cache. Default ON —
         // soft-caps effective context at the Grok 4.5 long-context price cliff
-        // (200K) and clamps auto-queued /implement --effort to 1. Override per
+        // (200K). Does not rewrite auto-run /implement --effort. Override per
         // conversation with `/economic-mode`.
         SettingMeta {
             key: "economic_mode",
@@ -1460,8 +1458,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Cap effective context at 200K tokens so Grok 4.5 requests stay on the \
                           lower pricing tier (prices double above 200K for the entire request). \
                           Catalog context remains larger (e.g. 500K); compaction, the context \
-                          bar, and auto-compact % thresholds use the capped size. Also clamps \
-                          auto-run /implement --effort above 1 to 1. Default on. Override for \
+                          bar, and auto-compact % thresholds use the capped size. Does not \
+                          change explicit /implement --effort. Default on. Override for \
                           one conversation with /economic-mode. Pair with Auto-compact at → \
                           200k tokens to summarise before the cliff on uncapped sessions.",
             keywords: &[

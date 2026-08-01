@@ -730,6 +730,9 @@ pub fn render_todo_chrome(
 /// Like [`render_todo_chrome`], with optional close label (queue uses `[close]`).
 ///
 /// `action_label` is an optional chrome control left of close (todo **Clear done**).
+/// The action paints and hit-tests whenever a label is provided — **not** only
+/// when the pane is focused — so the operator can click Clear done on an open
+/// unfocused pane. Close and role-coloured rails stay focus/hover gated.
 /// `focus_border` paints the side rails when focused; hover-only uses
 /// `theme.hover_border` (see [`render_todo_chrome`]).
 #[allow(clippy::too_many_arguments)]
@@ -749,27 +752,39 @@ pub fn render_todo_chrome_with_close_label(
     if todo_area.area() == 0 {
         return None;
     }
+    let layout = HorizontalLayout::new(todo_area, layout_cfg);
     // Focus gets the role colour (magenta agent / green queue). Hover-only
     // keeps the softer theme.hover_border so the two cues stay distinct on
-    // GrokNight and DOGE alike.
-    let color = if focused {
-        focus_border
-    } else if hovered {
-        theme.hover_border
-    } else {
-        return None;
-    };
-    let layout = HorizontalLayout::new(todo_area, layout_cfg);
-    let mut sel = SelectionBox::new(layout.selection_area(), Style::default().fg(color))
-        .with_closable(focused, close_hovered);
-    if focused && let Some(label) = close_label {
-        sel = sel.with_close_label(Some(label));
-    }
-    if focused {
+    // GrokNight and DOGE alike. Unfocused + action-only skips rails/close and
+    // paints just the operator action (Clear done) so finished work stays
+    // one click away without stealing focus chrome.
+    if focused || hovered {
+        let color = if focused {
+            focus_border
+        } else {
+            theme.hover_border
+        };
+        let mut sel = SelectionBox::new(layout.selection_area(), Style::default().fg(color))
+            .with_closable(focused, close_hovered);
+        if focused && let Some(label) = close_label {
+            sel = sel.with_close_label(Some(label));
+        }
+        // Action is never focus-gated: open pane + finished rows → clickable.
         sel = sel.with_action_label(action_label, action_hovered);
+        sel.render(buf);
+        return Some(sel);
     }
-    sel.render(buf);
-    Some(sel)
+    if action_label.is_some() {
+        let sel = SelectionBox::new(
+            layout.selection_area(),
+            Style::default().fg(theme.text_secondary),
+        )
+        .with_action_label(action_label, action_hovered);
+        // Operator control only — no role rails, no ✗ (those stay focus-gated).
+        sel.render_action_only(buf);
+        return Some(sel);
+    }
+    None
 }
 /// Render the scrollbar track and thumb.
 ///
@@ -2635,5 +2650,71 @@ mod tests {
             left.fg, magenta,
             "hover-only must not paint focus_border (accent_running)"
         );
+    }
+
+    /// Named contract: Clear done paints + hit-tests when the pane is open
+    /// but **not** focused (and not hovered). Focus must not gate the control.
+    #[test]
+    fn clear_done_chrome_available_when_todo_pane_open_unfocused() {
+        let _pin = crate::theme::cache::pin_theme();
+        let theme = Theme::current();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        let area = Rect::new(2, 2, 40, 6);
+        let layout_cfg = LayoutConfig::default();
+        let sel = render_todo_chrome_with_close_label(
+            &mut buf,
+            area,
+            &layout_cfg,
+            false, // not focused
+            false, // not hovered
+            false,
+            &theme,
+            None,
+            Some("Clear done"),
+            false,
+            theme.accent_running,
+        )
+        .expect("unfocused open pane with Clear done must still yield chrome geometry");
+        let action = sel
+            .action_button_rect()
+            .expect("Clear done hit rect must exist without Todo focus");
+        assert_eq!(action.width, "Clear done".chars().count() as u16);
+        // Label cells painted (not empty).
+        let cell = buf.cell((action.x, action.y)).expect("action cell");
+        assert_eq!(
+            cell.symbol().chars().next(),
+            Some('C'),
+            "unfocused Clear done must paint label text, got {:?}",
+            cell.symbol()
+        );
+        // No focus rails: left border of selection area should not be role rails.
+        let layout = HorizontalLayout::new(area, &layout_cfg);
+        let sa = layout.selection_area();
+        let left = buf.cell((sa.x, sa.y)).expect("left cell");
+        // render_action_only skips vertical rails — cell stays default/space.
+        assert_ne!(
+            left.symbol(),
+            "│",
+            "unfocused Clear done must not paint focus rails"
+        );
+    }
+
+    /// Unfocused + no action label → no chrome (unchanged for other panes).
+    #[test]
+    fn unfocused_unhovered_without_action_yields_no_chrome() {
+        let theme = Theme::current();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
+        let area = Rect::new(2, 2, 30, 6);
+        let out = render_todo_chrome(
+            &mut buf,
+            area,
+            &LayoutConfig::default(),
+            false,
+            false,
+            false,
+            &theme,
+            theme.accent_running,
+        );
+        assert!(out.is_none(), "no chrome without focus/hover/action");
     }
 }

@@ -4285,6 +4285,11 @@ pub(crate) fn execute(
                             .and_then(|p| p.end.clone())
                             .or_else(|| c.billing_period_end.clone())
                     });
+                    let period_type = billing.config.as_ref().and_then(|c| {
+                        c.current_period
+                            .as_ref()
+                            .and_then(|p| p.period_type.clone())
+                    });
                     let balance = billing.config.map(credit_balance_from_config);
                     // Feed live usage + reset into SuperGrok ranking cache.
                     if let Some(ref bal) = balance {
@@ -4293,6 +4298,7 @@ pub(crate) fn execute(
                             &grok_home,
                             bal.usage_pct,
                             period_end_rfc3339.as_deref(),
+                            period_type.as_deref(),
                         );
                     }
                     let autotopup = if has_prepaid_credits(balance.as_ref()) {
@@ -4379,6 +4385,11 @@ pub(crate) fn execute(
                                                 .and_then(|p| p.end.clone())
                                                 .or_else(|| c.billing_period_end.clone())
                                         });
+                                    let period_type = billing.config.as_ref().and_then(|c| {
+                                        c.current_period
+                                            .as_ref()
+                                            .and_then(|p| p.period_type.clone())
+                                    });
                                     // App-level poll historically hid period_end_display
                                     // on the status bar; keep that, but still feed ranking.
                                     let balance = billing.config.map(|c| {
@@ -4394,6 +4405,7 @@ pub(crate) fn execute(
                                             &grok_home,
                                             bal.usage_pct,
                                             period_end_rfc3339.as_deref(),
+                                            period_type.as_deref(),
                                         );
                                     }
                                     let autotopup = if has_prepaid_credits(balance.as_ref()) {

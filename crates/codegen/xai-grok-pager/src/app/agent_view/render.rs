@@ -1431,6 +1431,65 @@ impl AgentView {
             ) {
                 status.push("badge", Line::from(badge_spans));
             }
+            // Compact SuperGrok / console meter in the always-visible status
+            // bar (click → /limits). Reuses existing credit_bar formatters;
+            // not a second billing system. Hidden for gateway/chat sessions
+            // and when the billing surface is off.
+            if self.billing_surface_visible && !self.chat_kind {
+                use crate::views::credit_bar;
+                let meter_line = if self.sampling_identity.is_console() {
+                    let console_prepaid = self
+                        .console_team_prepaid_cents
+                        .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+                    let gap = credit_bar::resolve_console_team_prepaid_gap_default();
+                    let (text, color) = match console_prepaid {
+                        Some(cents) => {
+                            let dollars = cents.abs() as f64 / 100.0;
+                            let t = if dollars.fract() == 0.0 {
+                                format!("console · ${dollars:.0}")
+                            } else {
+                                format!("console · ${dollars:.2}")
+                            };
+                            let c = if cents.abs() <= 1000 {
+                                theme.warning
+                            } else {
+                                theme.accent_success
+                            };
+                            (t, c)
+                        }
+                        None => (
+                            format!("console · {}", gap.as_display_str()),
+                            theme.gray_dim,
+                        ),
+                    };
+                    let mut style = Style::default().fg(color).bg(theme.bg_base);
+                    if self.hit_credits.hovered {
+                        style = style.add_modifier(ratatui::style::Modifier::BOLD);
+                    }
+                    Some(Line::from(Span::styled(text, style)))
+                } else if let Some(ref bal) = self.credit_balance {
+                    credit_bar::credit_bar_line_for_session(
+                        bal,
+                        self.hit_credits.hovered,
+                        &theme,
+                        false,
+                    )
+                    .map(|mut line| {
+                        if self.hit_credits.hovered {
+                            for span in &mut line.spans {
+                                span.style =
+                                    span.style.add_modifier(ratatui::style::Modifier::BOLD);
+                            }
+                        }
+                        line
+                    })
+                } else {
+                    None
+                };
+                if let Some(line) = meter_line {
+                    status.push("credits", line);
+                }
+            }
             let areas = status.render(buf, layout.status_bar);
             self.hit_bg_status.rect = areas.get("bg_tasks").copied();
             self.hit_goal_status.rect = areas.get("goal").copied();
@@ -1925,10 +1984,10 @@ impl AgentView {
             self.todo.render(layout.todo, buf, todo_focused, layout_cfg);
             // Always-on magenta agent rail on the status board.
             agent::paint_side_pane_agent_rail(buf, layout.todo, theme.accent_running);
-            // Show Clear done when focused and the board has finished rows.
-            let clear_label = if todo_focused
-                && self.todo.counts().completed + self.todo.counts().cancelled > 0
-            {
+            // Clear done whenever the pane is open and the board has finished
+            // rows — not only when focused. Auto-open leaves the pane unfocused;
+            // requiring focus made the control effectively invisible.
+            let clear_label = if self.todo.counts().completed + self.todo.counts().cancelled > 0 {
                 Some("Clear done")
             } else {
                 None
@@ -4526,6 +4585,109 @@ mod toast_fit_tests {
         assert_eq!(fit_toast_text("Copied!", 0), None);
     }
 }
+#[cfg(test)]
+mod clear_done_and_limits_chrome_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::AgentView;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::credit_bar::CreditBalance;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+
+    fn draw_hits(agent: &mut AgentView) -> Buffer {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    /// Named contract: open todo pane with finished rows registers Clear done
+    /// hit rect even when ActivePane is not Todo (auto-open leaves unfocused).
+    #[test]
+    fn unfocused_open_todo_pane_registers_clear_done_hit() {
+        let mut agent = make_agent();
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = false;
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        let _buf = draw_hits(&mut agent);
+        assert!(
+            agent.hit_todo_clear_done.rect.is_some(),
+            "open unfocused todo pane with finished rows must register Clear done hit"
+        );
+        // Painted label should appear in the buffer.
+        let rect = agent.hit_todo_clear_done.rect.unwrap();
+        let mut label = String::new();
+        for x in rect.x..rect.x + rect.width {
+            if let Some(cell) = _buf.cell((x, rect.y)) {
+                label.push_str(cell.symbol());
+            }
+        }
+        assert!(
+            label.contains("Clear"),
+            "buffer should paint Clear done at hit rect, got {label:?}"
+        );
+    }
+
+    /// Named contract: SuperGrok balance with billing surface on paints status
+    /// credits meter and registers hit_credits for /limits click.
+    #[test]
+    fn status_bar_credits_meter_registers_hit_when_balance_known() {
+        let mut agent = make_agent();
+        agent.billing_surface_visible = true;
+        agent.chat_kind = false;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 42.0,
+            effective_usage_pct: 42.0,
+            period_end_display: None,
+            pay_as_you_go: false,
+            on_demand_cap_cents: None,
+            on_demand_used_cents: None,
+            prepaid_balance_cents: None,
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            is_unified_billing_user: None,
+        });
+        let buf = draw_hits(&mut agent);
+        assert!(
+            agent.hit_credits.rect.is_some(),
+            "status bar must register credits hit when balance is known"
+        );
+        let rect = agent.hit_credits.rect.unwrap();
+        let mut text = String::new();
+        for x in rect.x..rect.x + rect.width {
+            if let Some(cell) = buf.cell((x, rect.y)) {
+                text.push_str(cell.symbol());
+            }
+        }
+        assert!(
+            text.contains("Credits") || text.contains("42"),
+            "status meter should show credits used %, got {text:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod selection_state_tests {
     use super::super::test_fixtures::make_agent;

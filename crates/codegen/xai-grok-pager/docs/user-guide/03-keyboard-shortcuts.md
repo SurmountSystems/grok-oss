@@ -135,7 +135,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+B` | Agent screen | Send the running foreground command to the background |
 | `Ctrl+T` | Agent screen | Toggle the todos pane |
 | `h` | Todo pane focused | Hide or show completed/cancelled rows in the pane only (view filter; does not change the board or badge) |
-| `X` | Todo pane focused | **Clear done** — remove completed and cancelled items from the live session board and archive them (badge and pane update). Same as the pane chrome control and `/clear-completed-todos` |
+| `X` | Todo pane focused | Optional **Clear done** accelerator — remove completed and cancelled items and archive them. Prefer the pane **Clear done** click target (works when the pane is open even if unfocused) or `/clear-completed-todos` |
 | `Ctrl+G` | Agent screen (full TUI) | Toggle the tasks pane |
 | `Ctrl+G` | Ordinary composer (minimal mode) | Edit the current draft in an external editor without sending it. If the terminal reserves this chord, choose **Edit Prompt in External Editor** from the command palette. |
 | `Ctrl+L` | Agent screen | Open the extensions modal (**non–VS Code family only**; on VS Code / Cursor / Windsurf / Zed, `Ctrl+L` is mid-turn **interject** and extensions open via `/plugins` / `/hooks`) |

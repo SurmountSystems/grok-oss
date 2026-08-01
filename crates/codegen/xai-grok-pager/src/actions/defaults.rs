@@ -566,7 +566,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("X"),
             requires_confirmation: false,
             long_help: Some(
-                "Removes completed and cancelled items from the live session board and archives them.\nDoes not hide-only (that is h on the todo pane). Pending and in-progress stay.\nSame action as the pane Clear done control and /clear-completed-todos. Key X works only with the todo pane focused.",
+                "Removes completed and cancelled items from the live session board and archives them.\nDoes not hide-only (that is h on the todo pane). Pending and in-progress stay.\nSame action as the pane Clear done control (visible on an open todo pane even when unfocused) and /clear-completed-todos. Key X is optional and only works with the todo pane focused.",
             ),
         },
         ActionDef {

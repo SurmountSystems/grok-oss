@@ -28,9 +28,10 @@ or code — not only here. Closed campaign history:
    counts); reject size on parents with children; tool result includes
    `progress` + optional `merge:false` archive warning; status-bar badge
    shows `N/M pts` in points mode; `prompt.md` Planning + tool description
-   teach merge-only + fib leaves. **Clear done** (pane / focused `X` /
-   `/clear-completed-todos` + `SHELL_RESERVED`) → lasting truth in
-   [`FORK.md`](FORK.md); not open residual.
+   teach merge-only + fib leaves. **Clear done** (open-pane chrome even
+   unfocused / optional focused `X` / `/clear-completed-todos` +
+   `SHELL_RESERVED`) and **status-bar limits meter** (click → `/limits`) →
+   lasting truth in [`FORK.md`](FORK.md); not open residual.
    **Still soft:** no hard ban on inventing bare ids; phase vs work tree is
    agent structure (not enforced hierarchy product); no archive browser UI.
    Plan:
@@ -441,8 +442,9 @@ login; live ranking headroom + dual SuperGrok `/limits`; non-active SuperGrok
 billing poll; `/limits` panel; TUI `/screenshot` + F9 + plan auto-attach;
 **window titles on by default** (`title.enabled` default true; session +
 `agents` items; no `hide_title_bar`; distinct from `hide_header`); **DOGE
-default theme**; always-on bubble `⧉`; **Clear done** todos (focused `X` /
-chrome / slash); edgeless = host docs only.
+default theme**; always-on bubble `⧉`; **Clear done** todos (open-pane chrome
+even unfocused / optional focused `X` / slash); status-bar limits meter
+(click → `/limits`); edgeless = host docs only.
 
 **Limits residual = two halves (both intended; pin 2026-07-30):**
 **Half A shipped** (SuperGrok session meters: dual principals, sibling poll,

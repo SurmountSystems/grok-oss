@@ -578,7 +578,8 @@ pub(crate) fn wants_pointer_cursor(
 }
 
 impl AgentView {
-    /// Live hover state → OSC 22 pointer request (links + one-click copy chrome).
+    /// Live hover state → OSC 22 pointer request (links + one-click copy chrome
+    /// + status/todo CTAs: Clear done, limits meter).
     pub(crate) fn mouse_wants_pointer_cursor(&self) -> bool {
         wants_pointer_cursor(
             self.hovered_link_idx.is_some(),
@@ -586,7 +587,8 @@ impl AgentView {
             self.hovered_bubble_copy.is_some(),
             self.prompt.copy_hovered(),
             self.line_viewer.as_ref().is_some_and(|v| v.copy_hovered),
-        )
+        ) || self.hit_todo_clear_done.hovered
+            || self.hit_credits.hovered
     }
 }
 
@@ -675,6 +677,19 @@ mod pointer_cursor_tests {
         );
         assert!(agent.prompt.update_copy_hover(0, 0));
         assert!(!agent.mouse_wants_pointer_cursor());
+
+        // Clear done + limits meter CTAs also request pointer.
+        agent.hit_todo_clear_done.hovered = true;
+        assert!(
+            agent.mouse_wants_pointer_cursor(),
+            "Clear done hover must request pointer"
+        );
+        agent.hit_todo_clear_done.hovered = false;
+        agent.hit_credits.hovered = true;
+        assert!(
+            agent.mouse_wants_pointer_cursor(),
+            "limits meter hover must request pointer"
+        );
     }
 }
 

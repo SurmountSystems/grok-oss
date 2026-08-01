@@ -37,8 +37,8 @@ Percent thresholds apply to the *effective* window — with **Economic mode** on
 ### `/economic-mode`
 
 Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing.
-Default **on** for new sessions (`[ui] economic_mode`). Also clamps auto-run
-`/implement --effort` above 1 down to 1.
+Default **on** for new sessions (`[ui] economic_mode`). Soft-caps context only;
+does not rewrite explicit `/implement --effort`.
 
 ```
 /economic-mode              # toggle this conversation
@@ -179,7 +179,7 @@ Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
 
 ### `/clear-completed-todos`
 
-Remove **completed** and **cancelled** items from the live session todo board and archive them (toast reports how many). Pending and in-progress stay. Same as the todo pane **Clear done** chrome control and focused `X`. Not the same as pane `h` (hide done in the view only) and not an agent `merge: false` wipe.
+Remove **completed** and **cancelled** items from the live session todo board and archive them (toast reports how many). Pending and in-progress stay. Same as the todo pane **Clear done** chrome control (visible on an open pane even when unfocused) and optional focused `X`. Not the same as pane `h` (hide done in the view only) and not an agent `merge: false` wipe.
 
 ```
 /clear-completed-todos
@@ -475,10 +475,13 @@ console key) is active when known. The non-active sibling may show **no data
 yet** until its billing pool has been polled. Personal included, Business
 included, SuperGrok dollar extras, and console team prepaid stay separate lines.
 
-The prompt footer stays a one-line summary (console live shows
-`Console key · team prepaid: $N` when known, else the honest gap strings above);
-`/limits` is the multi-line panel. Billing refresh (session start, turn end,
-`/usage`) fills SuperGrok cache and, when configured, Management team prepaid.
+The **status bar** shows a compact always-on meter when billing data is known
+(`Credits used: N%` on SuperGrok, or `console · $N` / honest gap on a console
+key). Click that meter to open this same `/limits` detail. The prompt footer
+stays a one-line warning summary when usage is high (console live shows
+`Console key · team prepaid: $N` when known, else the honest gap strings above).
+Billing refresh (session start, turn end, `/usage`) fills SuperGrok cache and,
+when configured, Management team prepaid.
 
 ```
 /limits

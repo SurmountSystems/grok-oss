@@ -613,9 +613,9 @@ pub(super) fn set_economic_mode_inner(app: &mut AppView, new: bool) {
 /// Set economic mode (soft-cap context at 200K for Grok 4.5 pricing).
 ///
 /// SHELL-OWNED: cache mirror + `[ui].economic_mode` via
-/// `Effect::PersistSetting`. Seeds new sessions' effective context window and
-/// auto-run `/implement` effort clamp (max 1). Use `/economic-mode` for the
-/// current conversation. Default ON.
+/// `Effect::PersistSetting`. Seeds new sessions' effective context window.
+/// Does not rewrite auto-run `/implement --effort`. Use `/economic-mode` for
+/// the current conversation. Default ON.
 pub(in crate::app::dispatch) fn set_economic_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
     let prev = crate::appearance::cache::load_economic_mode();
     if prev == new {

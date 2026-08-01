@@ -858,6 +858,62 @@ mod clear_completed_todos_key_tests {
             "Todo pane focused must map X to ClearCompletedTodos, got {todo_out:?}"
         );
     }
+
+    /// Named contract: mouse click on Clear done works without ActivePane::Todo
+    /// (hit rect from open unfocused pane chrome). Focus must not gate dispatch.
+    #[test]
+    fn clear_done_click_works_without_todo_pane_focus() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Scrollback, false);
+        assert_ne!(
+            agent.active_pane,
+            AgentPane::Todo,
+            "setup: scrollback/prompt focus, not Todo"
+        );
+        // Simulate last-frame paint of unfocused Clear done chrome.
+        agent.hit_todo_clear_done.set(Some(Rect::new(10, 3, 10, 1)));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(mouse),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Clear done click without Todo focus must dispatch, got {out:?}"
+        );
+    }
+
+    /// Named contract: status-bar credits meter click opens /limits detail.
+    #[test]
+    fn credits_status_click_dispatches_show_limits() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        agent.hit_credits.set(Some(Rect::new(40, 0, 16, 1)));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 45,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(mouse),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Action(Action::ShowLimits)),
+            "credits meter click must open limits, got {out:?}"
+        );
+    }
 }
 
 #[cfg(test)]

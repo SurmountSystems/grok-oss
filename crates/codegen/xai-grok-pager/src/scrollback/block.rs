@@ -985,12 +985,17 @@ impl RenderBlock {
             RenderBlock::AgentMessage(_) => None,
             RenderBlock::Workflow(_) => None,
             RenderBlock::ToolCall(block) => {
-                // Execute: Green for success, red for failure
+                // Execute: user `!` bash keeps success green; agent Run uses
+                // neutral tool chrome when finished (not Human green rail).
                 // Read/Edit/ListDir/Search: No accent
                 match block {
                     ToolCallBlock::Execute(b) => {
                         if b.is_success() {
-                            Some(theme.accent_success)
+                            if b.bash_mode {
+                                Some(theme.accent_success)
+                            } else {
+                                Some(theme.accent_tool)
+                            }
                         } else {
                             Some(theme.accent_error)
                         }

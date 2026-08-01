@@ -67,8 +67,8 @@ auto_run_implement = true              # after a successful turn, auto-queue a f
                                        # /implement block (token through EOF) from a follow-up or
                                        # trailing residual (default: true)
 economic_mode = true                   # soft-cap effective context at 200k (Grok 4.5 price cliff)
-                                       # for compaction / context bar; also clamps auto-run
-                                       # /implement --effort above 1 to 1 (default: true).
+                                       # for compaction / context bar (default: true). Does not
+                                       # rewrite explicit /implement --effort.
                                        # Override one conversation with /economic-mode
 hide_header = false                    # hide in-app status / welcome / dashboard headers only
                                        # (default: false). Not the desktop/terminal window title.

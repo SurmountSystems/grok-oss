@@ -264,7 +264,7 @@ pub enum TickDemand {
 /// latency of the macOS Cmd link-hover underline.
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
 
-/// Whether the agent composer would paint the software magenta box caret.
+/// Whether the agent composer would paint the software Human-green box caret.
 ///
 /// Used by [`AppView::tick_demand`] so idle sessions with a focused prompt
 /// keep Slow redraws for the filled↔hollow blink without a Fast 30fps loop.
@@ -291,6 +291,16 @@ fn agent_wants_composer_cursor_blink(agent: &crate::app::agent_view::AgentView) 
     }
     agent.active_pane == ActivePane::Prompt
 }
+
+/// Live non-workflow L2 subagents that should keep window-title busy state
+/// and Agent-view ticks (mirrors dashboard tick demand for subagent_sessions).
+fn agent_has_running_title_subagents(agent: &crate::app::agent_view::AgentView) -> bool {
+    agent
+        .subagent_sessions
+        .values()
+        .any(|info| info.is_running() && info.workflow_run_id.is_none())
+}
+
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
 const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(4);
@@ -5261,7 +5271,7 @@ impl AppView {
                     needs_redraw = true;
                 }
             }
-            // Software magenta box caret samples wall-clock phase on every paint.
+            // Software Human-green box caret samples wall-clock phase on every paint.
             // Slow ticks keep the clock armed (`tick_demand`); this forces the
             // present so filled↔hollow actually advances while idle/focused.
             if agent_wants_composer_cursor_blink(agent) {
@@ -5482,6 +5492,9 @@ impl AppView {
                     || agent.acp_synced_generation != agent.session.available_commands_generation
                     || !agent.session.state.is_idle()
                     || agent.session.loading_replay
+                    // Live L2 subagents must keep ticks even when the parent is
+                    // Idle so window title / progress can refresh on finish.
+                    || agent_has_running_title_subagents(agent)
                     || agent
                         .mcp_init_progress
                         .as_ref()
@@ -5555,7 +5568,7 @@ impl AppView {
                 {
                     return TickDemand::Slow;
                 }
-                // Composer magenta box caret blinks filled↔hollow on a slow
+                // Composer Human-green box caret blinks filled↔hollow on a slow
                 // wall-clock phase; Slow ticks keep it alive without a 30fps spin
                 // while the agent is idle and the prompt is focused.
                 if agent_wants_composer_cursor_blink(agent) {
@@ -5596,10 +5609,16 @@ impl AppView {
     /// Also clears the permission notification flag when no permissions
     /// remain queued, so the next batch fires a fresh bell/popup.
     pub fn update_notifications(&mut self) {
+        // Top-level busy (unparked) agents, plus any agent that still has live
+        // L2 subagents — parked TaskOutput chrome must not hide multi-agent
+        // discoverability while children run.
         let busy_agent_count = self
             .agents
             .values()
-            .filter(|a| a.session.state.is_busy() && !a.renders_parked())
+            .filter(|a| {
+                (a.session.state.is_busy() && !a.renders_parked())
+                    || agent_has_running_title_subagents(a)
+            })
             .count();
         let any_agent_has_perms = self.agents.values().any(|a| !a.permission_queue.is_empty());
         if !any_agent_has_perms {
@@ -5619,14 +5638,26 @@ impl AppView {
                         .map(str::to_owned);
                         let model = agent.session.models.current_model_name();
                         let parked = agent.renders_parked();
-                        let activity = if parked {
+                        let has_running_subagents = agent_has_running_title_subagents(agent);
+                        // Parked chrome blanks activity for pure bg-command
+                        // waits (progress bar off). Keep activity when L2
+                        // subagents are still running so the DE title does
+                        // not look idle during long waits.
+                        let activity = if parked && !has_running_subagents {
                             None
                         } else {
                             agent.resolve_turn_activity()
                         };
                         let has_perms = !agent.permission_queue.is_empty();
-                        let elapsed = if parked { None } else { agent.turn_elapsed() };
-                        let is_busy = agent.session.state.is_busy() && !parked;
+                        let elapsed = if parked && !has_running_subagents {
+                            None
+                        } else {
+                            agent.turn_elapsed()
+                        };
+                        // Progress + title spinner: unparked parent busy, or
+                        // any live subagent (idle parent / parked wait).
+                        let is_busy =
+                            (agent.session.state.is_busy() && !parked) || has_running_subagents;
                         (name, model, activity, has_perms, elapsed, is_busy)
                     } else {
                         (None, None, None, false, None, false)
@@ -6462,7 +6493,7 @@ pub(crate) mod tests {
         assert_eq!(
             app.tick_demand(),
             TickDemand::Slow,
-            "focused prompt must Slow-tick for magenta box caret blink"
+            "focused prompt must Slow-tick for Human-green box caret blink"
         );
         assert!(app.needs_animation());
         // Modal steals focus → park again (no software caret).
@@ -9990,6 +10021,127 @@ pub(crate) mod tests {
         assert!(
             esc.contains("dash session"),
             "agent title OSC must include session, got {esc:?}"
+        );
+    }
+
+    #[test]
+    fn window_title_shows_activity_when_parked_with_running_subagents() {
+        // Named contract: parked TaskOutput chrome must not hide DE window
+        // title activity while L2 subagents are still running. Dogfood failure
+        // mode: parent parks on get_command_or_subagent_output → title goes
+        // idle even though subagents are live.
+        use crate::app::actions::Action;
+        use crate::app::agent_view::test_fixtures::{
+            running_subagent_info, simulate_task_output_wait,
+        };
+
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("proj-alpha".into());
+        let _ =
+            crate::app::dispatch::dispatch(Action::SendPrompt("spawn workers".into()), &mut app);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent
+                .subagent_sessions
+                .insert("child-a".into(), running_subagent_info("child-a"));
+            agent
+                .subagent_sessions
+                .insert("child-b".into(), running_subagent_info("child-b"));
+            simulate_task_output_wait(agent, "child-a");
+            agent.maybe_push_parked_marker();
+            assert!(
+                agent.renders_parked(),
+                "fixture must park on TaskOutput wait"
+            );
+            assert!(
+                agent.session.state.is_busy(),
+                "parent turn remains running while parked"
+            );
+        }
+
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        let esc = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("TitleManager must emit OSC while subagents run");
+        assert!(
+            esc.contains("proj-alpha"),
+            "session name must remain in window title, got {esc:?}"
+        );
+        // Must not collapse to idle "proj-alpha - grok-oss" only.
+        let activity_signal = esc.contains("Waiting") || title_spinner_chars_present(esc);
+        assert!(
+            activity_signal,
+            "window title must signal running subagent wait (activity/spinner), got {esc:?}"
+        );
+    }
+
+    /// Any braille spinner codepoint from TitleManager's spinner set.
+    fn title_spinner_chars_present(esc: &str) -> bool {
+        const SPINNER: &[char] = &[
+            '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
+            '\u{2827}',
+        ];
+        esc.chars().any(|c| SPINNER.contains(&c))
+    }
+
+    #[test]
+    fn tick_demand_fast_when_idle_parent_has_running_subagent() {
+        // Named contract: Agent-view ticks must keep running while L2
+        // subagents are live even if the parent AgentState is Idle, so the
+        // window title (and progress) can refresh on spawn/finish.
+        use crate::app::agent_view::test_fixtures::running_subagent_info;
+
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "idle agent with no subagents must not force fast ticks"
+        );
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .subagent_sessions
+            .insert("bg-child".into(), running_subagent_info("bg-child"));
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Fast,
+            "running subagent must keep Agent-view ticks alive for title refresh"
+        );
+    }
+
+    #[test]
+    fn window_title_is_busy_signal_when_idle_parent_has_running_subagent() {
+        // Named contract: background L2 subagents with an idle parent still
+        // mark the DE title as busy (spinner / Waiting), not a fully idle
+        // session-only string.
+        use crate::app::agent_view::test_fixtures::running_subagent_info;
+
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("bg-sub-session".into());
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .subagent_sessions
+            .insert("bg-child".into(), running_subagent_info("bg-child"));
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        let esc = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("title OSC while bg subagent runs");
+        assert!(
+            esc.contains("bg-sub-session"),
+            "session must stay in title, got {esc:?}"
+        );
+        let busy_signal = esc.contains("Waiting") || title_spinner_chars_present(esc);
+        assert!(
+            busy_signal,
+            "idle parent + running subagent must still busy the window title, got {esc:?}"
         );
     }
 

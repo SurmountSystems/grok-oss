@@ -26,8 +26,14 @@ impl AgentView {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
+                // Clear done: hit rect is set whenever the open todo pane has
+                // finished rows (focused or not). Does not require ActivePane::Todo.
                 if self.hit_todo_clear_done.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::ClearCompletedTodos);
+                }
+                // Compact status-bar limits meter → multi-line /limits detail.
+                if self.hit_credits.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::ShowLimits);
                 }
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
                     self.todo.overlay.escape();
