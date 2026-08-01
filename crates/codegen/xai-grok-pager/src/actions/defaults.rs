@@ -553,8 +553,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::ClearCompletedTodos,
-            label: "clear done",
-            description: "Clear completed todos from the board",
+            label: "clear finished",
+            description: "Clear finished todos from the board",
             // No AgentScreen default key: bare X is handled only when the todo
             // pane is focused (panes.rs). AgentScreen binding would fire after
             // Tasks/Catalog/Queue fallthrough. Chrome button + slash remain.
@@ -566,7 +566,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("X"),
             requires_confirmation: false,
             long_help: Some(
-                "Removes completed and cancelled items from the live session board and archives them.\nDoes not hide-only (that is h on the todo pane). Pending and in-progress stay.\nSame action as the pane Clear done control (visible on an open todo pane even when unfocused) and /clear-completed-todos. Key X is optional and only works with the todo pane focused.",
+                "Removes completed and cancelled items from the live session board and archives them.\nDoes not hide-only (that is h on the todo pane). Pending and in-progress stay.\nSame action as the pane clear-finished icon ([−], when the todo board is open and finished rows exist) and /clear-completed-todos. Key X is optional and only works with the todo pane focused.",
             ),
         },
         ActionDef {

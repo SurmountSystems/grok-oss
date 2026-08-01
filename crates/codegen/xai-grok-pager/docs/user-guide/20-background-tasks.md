@@ -198,6 +198,12 @@ Whenever background work is still running while the agent looks idle — between
 
 It counts running background commands, monitors, scheduled `/loop` tasks, and background subagents, and updates live as each finishes. Any of them can wake the agent for a new turn (commands and subagents on completion, monitors on events, loops on their timer), so the cue stays up until nothing is left. The running counts live only on this status line: completions land in the transcript as a single "Task completed" chip, and "Worked for" markers stay plain — the transcript never repeats or restates the running counts.
 
+When a turn parks on a wait, the transcript shows **one** `"Worked for …"`
+line for that prompt turn. As time passes, that **same** line updates its
+elapsed duration in place. The product does **not** append a new "Worked for
+16m39s / 16m40s / …" row on every tick (that was a scrollback flood). Ongoing
+watcher counts stay on this still-running status line, not stacked markers.
+
 ---
 
 ## Use Cases and Patterns

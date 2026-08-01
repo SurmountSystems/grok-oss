@@ -78,7 +78,7 @@ list when you ship fork work.
 - [x] **OpenRouter** — separate model option (`openrouter-grok-4.5`); login/logout; secret store; optional Zed credential probe (read-only)
 - [x] **Multi-key OpenRouter** — comma lists / failover keys for credit + rate-limit rotation
 - [x] **SuperGrok OAuth ↔ console API key dual-auth** — first-party resolve merge (session primary + console failover by default; `preferred_method=api_key` reverses); identity switch on **credit / SuperGrok Heavy usage-limit** and **plain 429** (session→key clears bearer; key→session via JWT in failover list); also switches API host (SuperGrok proxy ↔ `api.x.ai`); credit/allowance exhausted-fingerprint memo (process cache + durable `$GROK_HOME/exhausted_credits/`, 1h TTL; **console-key success clears**, **session success does not** — extras-paid SuperGrok 200s must not put SuperGrok back) + status/toast (“out of allowance” vs “rate limited”; labels only); when billing included `usage_pct ≥ 100%` + dual-auth, mark SuperGrok used up and prefer console key before the next request (no 402; clear on period reset); rate-limit switch uses temporary shared `grok-rate-limit` cooldown (not credit memo); kill-switch clears key failover + host metadata; console keys in keyring/`provider_credentials.json` + env/auth.json; **live re-bind without prior stash** (`session_bearer_resolver`); **multi-add** `grok login --api-key` + `--list-api-keys` (fingerprints only). **Also:** `[auth] auto_use_included_limits` rank+hop (prefer included before SuperGrok $ extras; sooner `reset_at` + headroom; ExhaustedAll→console; oauth/api_key pins fail-closed); sticky-console meter honesty (no SuperGrok $ extras sell while console is the live principal). **Multi SuperGrok OAuth:** two principals; second login does not wipe the first; doctor / list show both (role labels + fingerprints only); dual `/limits` rows; sibling billing poll for the non-active SuperGrok on the same included-safe path. **SuperGrok Heavy multi-slot load:** when base JWT is live/fresher and multi-slot is stale/exhausted, ranking + doctor prefer the **live base** (not blind multi-slot); enrichment upsert keeps multi-slot in lockstep with base. Plans: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md), [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md), [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md).
-- [x] **Billing meters (two halves; core shipped)** — meters stay distinct: personal SuperGrok **included weekly** ≠ SuperGrok **dollar extras** ≠ **console team prepaid** (Business Usage class) ≠ second SuperGrok OAuth principal. **Half A shipped:** dual SuperGrok `/limits`, sibling poll, footer honesty for included weekly + SuperGrok $ extras. **Half B core prepaid shipped:** management key (keyring URL `https://management-api.x.ai`) + `[endpoints] management_team_id` + hermetic `GET …/billing/teams/{team_id}/prepaid/balance`; footer `Console key · team prepaid: $N` when console live; `/limits` balance line; honest **distinct** gaps (`no management key` | `no management team id` | `loading team prepaid...` | `team prepaid unavailable` — not a forever mushy “no $ meter”). `/usage` when console-live names console team prepaid, not SuperGrok session spend. **Still open (not shipped):** token/spend **series charts** UI; live dogfood with real management key + team id. See `RESIDUAL.md` §4.
+- [x] **Billing meters (two halves; core shipped)** — meters stay distinct: personal SuperGrok **included weekly** ≠ SuperGrok **dollar extras** ≠ **console team prepaid** (Business Usage class) ≠ second SuperGrok OAuth principal. **Honesty:** multi-pool / “paying double” is xAI product billing structure (docs + surfaces), **not** a missing code merge of pools on this branch. **Half A shipped:** dual SuperGrok `/limits`, sibling poll, footer honesty for included weekly + SuperGrok $ extras. **Half B core prepaid shipped:** management key (keyring URL `https://management-api.x.ai`) + `[endpoints] management_team_id` + hermetic `GET …/billing/teams/{team_id}/prepaid/balance`; footer `Console key · team prepaid: $N` when console live; `/limits` balance line; honest **distinct** gaps (`no management key` | `no management team id` | `loading team prepaid...` | `team prepaid unavailable` — not a forever mushy “no $ meter”). `/usage` when console-live names console team prepaid, not SuperGrok session spend. **Still open (not shipped):** token/spend **series charts** UI; live dogfood with real management key + team id. See `RESIDUAL.md` §4. Operator how-tos: user-guide `02-authentication` (two SuperGrok logins + honesty), `04-slash-commands` `/limits` (status-bar meter click); joins `/tmp/grok-join-limits-dogfood-howto.md`, `/tmp/grok-join-second-supergrok-oidc-howto.md`.
 - [x] **Keyring login time-box + fail-loud + secure fallback + TTY progress** — OS keyring get/set/delete wall-clock budget (`KEYRING_OP_TIMEOUT`); interactive `grok login --api-key` / OpenRouter login require a **secure** backend (primary platform store, then on Linux automatic **keyutils** fallback when Secret Service times out/errors). TTY stderr progress counts seconds up to **2× timeout (~6s)** during store RMW+write (suppressed non-TTY / env short-circuit). Only if **all** secure backends fail → clear error, **no** silent `provider_credentials.json` secret dump. File mirror only after successful secure write. `GROK_CREDENTIALS_FORCE_FILE` = tests/CI only (not user recovery).
 - [x] **Economic mode** — soft-cap effective context at the Grok 4.5 long-context price cliff (~200k); `/economic-mode`; settings default on
 - [x] **Auto-compact default 95% + live-apply** — stock Grok 4.5 catalog omits a per-model undercut (was 80); remote `models_cache` undercuts on stock models are dropped so the product default applies; user session/env still win; banner shows usage **and** configured threshold. Settings commit live-applies to open sessions (`restart_required: false`): disk persist → ACP `x.ai/auto_compact_threshold_changed` → `SessionCommand::SetAutoCompactThreshold` → CompactionConfig Cells (same write path as model switch). Live-apply pushes the **committed Settings value** (race-safe vs disk); env `GROK_AUTO_COMPACT_THRESHOLD_*` wins again on the next full resolve (spawn / model switch). Detail: `docs/dev/research/rca-auto-compact-early-fire.md`
@@ -194,7 +194,8 @@ list when you ship fork work.
   scrollback has no coloured rail. Yellow context/time rails use **striped**
   dashed glyphs (not solid pink/green). Composer caret: slow green filled-box
   ↔ hollow-box blink (paint keeps graphemes; hardware cursor hidden while
-  box caret paints). Left activity throbber under DOGE is a **dashed marquee**;
+  box caret paints; **Human green only**, never agent magenta). Left activity
+  throbber under DOGE is a **dashed marquee** / agent-magenta activity cue;
   right-side status sparkle stays classic density frames (must not share the
   left marquee). Gray/alpha scrub: DOGE `blend_color` solid-steps (no mid-channel
   RGB invent); finished labels keep pure role primaries. Role map: Green=Human,
@@ -204,6 +205,8 @@ list when you ship fork work.
   User-guide `06-theming`; annex
   [`doc/dev/specs/doge-pure-8-colour-2026-07-26.md`](doc/dev/specs/doge-pure-8-colour-2026-07-26.md).
   Soft open: optional rename of token ids still named `gray*` (values already pure).
+  **Do not invent** unnamed glyph colours from screenshots (e.g. “little guy”);
+  caret residue ≠ lower-left throbber ≠ Clear finished.
 - [x] **Stuck Retrying cleared on stream resume** — sticky yellow Retrying chrome
   clears when the next stream starts (`RetryState::StreamResumed`). Stream
   response-headers / first-byte timeout default **120s**
@@ -211,12 +214,28 @@ list when you ship fork work.
   Cancel-aware shared cooldown wait; short transport footer labels
   (`connection interrupted`, headers-timeout wording; not opaque
   `Transport error: error`).
-- [x] **Clear done todos** — pane chrome **Clear done** (open pane, focused or
-  not; human green, not agent magenta) + optional focused `X` +
-  `/clear-completed-todos` archives completed/cancelled
+- [x] **Clear finished todos** — pane chrome compact **`[−]`** icon (U+2212;
+  not empty-set, not a long "Clear finished" string). Paints in the todo
+  header next to close when the todo board is **open** and finished rows
+  exist (focused **or** unfocused — findable while looking at scrollback/
+  tasks). No paint when the board is hidden or nothing is finished. Quiet
+  idle / stronger hover; never neon green or agent magenta.
+  + `/clear-completed-todos` archives completed/cancelled
   (`ClearedReason::UserClearCompleted`); not `h` hide-done and not
-  `merge: false` wipe. Slash reserved in pager `SHELL_RESERVED`
-  (`shell_collision` contract).
+  `merge: false` wipe. Hints/slash still say Clear finished. Optional
+  focused `X`. Layout still reserves a chrome gap above the todo body so
+  clear **must not** paint into tasks model/timer / `[↗]` / `[x]` (compact
+  smash case). Slash reserved in pager `SHELL_RESERVED` (`shell_collision`
+  contract). User-guide `03` / `04` / `17`.
+- [x] **Click tasks top-right chrome → open subagent** — single click on tasks
+  pane **model + elapsed + `[↗]`** open chrome calls the same
+  `open_subagent_fullscreen` path as Enter / Ctrl-F / double-click. Kill `[x]`
+  stays separate. Tasks open/kill hits win z-order over Clear finished.
+  User-guide `16-subagents`.
+- [x] **“Worked for …” one live line** — parked turn marker is **one row per
+  prompt turn**; mid-park epoch ticks and re-parks **refresh elapsed in place**
+  (no append-per-tick scrollback flood). Still-running counts stay on the
+  status cue, not stacked “Worked for” rows. User-guide `20-background-tasks`.
 - [x] **Status-bar limits meter** — compact SuperGrok `Credits used: N%` or
   console prepaid/gap always on when billing surface is visible; click opens
   `/limits` (same data path as slash; not a second billing system).
@@ -224,18 +243,38 @@ list when you ship fork work.
   prompt draft / per-bubble `⧉` (`bubble_copy_buttons` default on) reuse the
   clipboard stack; Policy A keeps selection ⧉ off bubble-owned blocks only.
   Hover on copy chrome requests OSC 22 **pointer** cursor (same path as links;
-  hosts without OSC 22 keep the default arrow).
+  hosts without OSC 22 keep the default arrow). Settings **Bubble copy buttons**
+  (Appearance) toggles `[scrollback.display] bubble_copy_buttons` in pager.toml.
+- [x] **Session recap in Settings** — search `recap` for **Auto session recap**
+  (`[ui.notifications] session_recap`), **Auto recap after (seconds)**, and
+  **Master session recap** (`[features] session_recap`, restart-required). Also
+  **Cancel subagents with turn** sticky enum under Agent.
 - [x] **btw Done-panel keys in user-guide** — focused `y` copy full thread, `a`
   follow-up same session, Esc dismiss (`04-slash-commands`).
 - [x] **Plan approval soft park → auto-open side panel** — `exit_plan_mode`
   soft path parks durable approval, keeps the live draft, and **auto-opens**
-  the non-capturing plan **side panel** (same surface as `/view-plan`). Toast /
-  status say side panel is open (not a “run `/view-plan`” nudge). Footer mouse
-  CTAs stay hit-tested; L1 typing stays free (printable chars → composer).
-  `/view-plan`, status click, `ShowPlan` still reopen if the panel was
-  dismissed. Force fullscreen: `[ui] plan_approval_park = "modal"`. Product
-  CTAs only; no freeform chat approve. Design note (historical option A):
+  the non-capturing plan **side panel** (same surface as `/view-plan`) with
+  full borders + approval footer CTAs. **Three surfaces:** (1) side panel
+  (borders + Approve / Notes / Clarify / Revise / Quit), (2) soft-park strip
+  CTAs when the panel is dismissed or too small to paint, (3) transcript plan
+  card (preview pointer only, not a fake button menu). Never silent empty
+  chrome. Toast / status say side panel is open (not a “run `/view-plan`”
+  nudge). L1 typing stays free (printable chars → composer). `/view-plan`,
+  status click, `ShowPlan` still reopen if the panel was dismissed. Force
+  fullscreen: `[ui] plan_approval_park = "modal"`. Product CTAs only; no
+  freeform chat approve. Design note (historical option A):
   [`doc/dev/research/plan-modal-softer-park-2026-07-26.md`](doc/dev/research/plan-modal-softer-park-2026-07-26.md)
+  User-guide `19-plan-mode`.
+- [x] **Composer caret Human green + no residue** — software box caret uses
+  `accent_user` (Human green under DOGE), never agent magenta. After arrow /
+  home / end move, previous cells repaint as normal text (no leftover green
+  plate, reverse ink, or solid `█`). OSC 12 session cursor stays `accent_user`.
+  User-guide `06-theming`.
+- [x] **Lower-left activity throbber agent magenta** — tool-running braille
+  spinner and idle “subagents still running” concentric icon use
+  `accent_running` (magenta under DOGE), not success green and not system cyan.
+  Distinct from composer caret (Human green) and Clear finished (quiet
+  secondary). User-guide `06-theming`.
 - [x] **Plan approval panel SoT = live `plan.md`** — FileBacked preview re-reads
   session `plan.md` on open / body resolve (frozen reverse-request snapshot is
   fallback only). Product CTAs only; no freeform chat approve. User-guide
@@ -313,11 +352,13 @@ Upstream crate paths stay **`xai-grok-*`** for mergeability.
 
 **Product seams** (DOGE default + rails, titles-on / no `hide_title_bar`,
 stuck-retry clear, dual-auth + multi SuperGrok + Heavy fresher-slot load,
-console team prepaid gaps, plan soft-park side panel, OpenRouter, clear-done,
-bubble copy + pointer cursor, …) live inside those crates. They survive onto
-only through **cherry-picks / conflict resolve** and stay honest through
-**cargo tests**. After recon, run the assert **and** the product filter block
-(or at least `just check`).
+console team prepaid gaps, plan soft-park side panel + three surfaces,
+OpenRouter, Clear finished non-overlap / quiet paint, click tasks chrome open
+subagent, Worked-for in-place, composer caret green + no residue, lower-left
+throbber magenta, bubble copy + pointer cursor, …) live inside those crates.
+They survive onto only through **cherry-picks / conflict resolve** and stay
+honest through **cargo tests**. After recon, run the assert **and** the
+product filter block (or at least `just check`).
 
 Full filter catalog (why each exists + every residual Validate honesty block):
 [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md).
@@ -336,6 +377,10 @@ cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_
 cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_prefix_matches recap_accent
 cargo test -p xai-grok-pager --lib -- hide_header window_title titles_on_session default_title_items shell_collision retry_chrome_clears
 cargo test -p xai-grok-pager --test settings_e2e -- hide_header
+# Plan soft-park three surfaces + Clear / click-open / Worked-for / caret / throbber
+cargo test -p xai-grok-pager --lib -- exit_plan_mode_soft soft_park_draw clear_finished click_tasks_model_timer \
+  parked_marker_not_stacked paint_composer_box_cursor_uses_human caret_move_clears \
+  doge_idle_subagent_still_running doge_tool_running_spinner
 cargo test -p xai-grok-shell --lib -- stream_started_emits_retry_state_stream_resumed
 cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason stream_headers_timeout_defaults
 cargo test -p xai-grok-sampler --test stream_headers_timeout

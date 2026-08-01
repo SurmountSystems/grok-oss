@@ -555,6 +555,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "multiline",
             "new",
             "onboarding",
+            "options",
             "personas",
             "plan",
             "plan-view",

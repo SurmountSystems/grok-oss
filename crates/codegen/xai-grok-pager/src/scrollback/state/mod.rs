@@ -903,6 +903,60 @@ impl ScrollbackState {
         true
     }
 
+    /// Update elapsed on the most recent parked "Worked for X" marker for
+    /// `prompt_id` in place. Used so mid-park duration ticks refresh one
+    /// transcript row instead of stacking a new one each second.
+    ///
+    /// Returns `false` when no matching uncommitted parked marker exists
+    /// (caller may push a first marker). Committed rows (minimal print-once)
+    /// stay frozen — mutating them would never reach the terminal.
+    pub fn refresh_parked_marker_elapsed(
+        &mut self,
+        prompt_id: &str,
+        elapsed: std::time::Duration,
+    ) -> bool {
+        use super::blocks::SessionEvent;
+        let id = (0..self.len()).rev().find_map(|i| {
+            let entry = self.get(i)?;
+            match &entry.block {
+                RenderBlock::SessionEvent(b)
+                    if b.parked && b.prompt_id.as_deref() == Some(prompt_id) =>
+                {
+                    Some(entry.id)
+                }
+                _ => None,
+            }
+        });
+        let Some(id) = id else {
+            return false;
+        };
+        if self.is_committed(id) {
+            return false;
+        }
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return false;
+        };
+        let RenderBlock::SessionEvent(ref mut b) = entry.block else {
+            return false;
+        };
+        let already = matches!(
+            &b.event,
+            SessionEvent::TurnCompleted {
+                elapsed: Some(e)
+            } if *e == elapsed
+        );
+        if already {
+            return true;
+        }
+        b.event = SessionEvent::TurnCompleted {
+            elapsed: Some(elapsed),
+        };
+        entry.invalidate_cache();
+        self.mark_structurally_dirty(id);
+        self.bump_content_generation();
+        true
+    }
+
     /// Push a text chunk to an agent message entry.
     ///
     /// This is the preferred way to append streaming content because it:

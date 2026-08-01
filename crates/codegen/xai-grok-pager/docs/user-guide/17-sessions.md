@@ -53,7 +53,7 @@ Do not treat `plan.json` alone as the full story: if files disagree, prefer non-
 
 - Agent `merge: false` full replace of unprotected unmentioned ids
 - Ask-cap prune of oldest `ask:*` rows
-- **You** clearing finished work: todo pane **Clear done** (clickable on an open pane even when unfocused), optional focused `X`, or `/clear-completed-todos` (archives completed and cancelled only; pending and in-progress stay)
+- **You** clearing finished work: todo pane **clear-finished icon** (`[−]`, when the todo board is open and finished rows exist; quiet idle paint; does not block tasks subagent chrome), optional focused `X`, or `/clear-completed-todos` (archives completed and cancelled only; pending and in-progress stay)
 
 That operator clear is durable (board + badge update). Pane `h` only hides done rows in the view; it does not archive or change the badge. There is no archive browser UI yet.
 

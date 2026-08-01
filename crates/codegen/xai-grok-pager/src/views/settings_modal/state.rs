@@ -883,6 +883,9 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
         "economic_mode" => Some(Action::SetEconomicMode(new)),
+        "notifications.session_recap" => Some(Action::SetNotificationsSessionRecap(new)),
+        "features.session_recap" => Some(Action::SetFeaturesSessionRecap(new)),
+        "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
         _ => None,
     }
 }
@@ -964,6 +967,12 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
         }
+        "cancel_subagents_on_turn_cancel" => match choice {
+            "ask" | "always_stop" | "always_continue" => {
+                Some(Action::SetCancelSubagentsOnTurnCancel(choice.to_string()))
+            }
+            _ => None,
+        },
         "auto_compact_threshold_percent" => {
             crate::settings::parse_auto_compact_threshold_canonical(choice)
                 .map(Action::SetAutoCompactThreshold)
@@ -1014,6 +1023,9 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "max_thoughts_width" => Some(Action::SetMaxThoughtsWidth(value)),
         "scroll_speed" => Some(Action::SetScrollSpeed(value)),
         "scroll_lines" => Some(Action::SetScrollLines(value)),
+        "notifications.session_recap_threshold_secs" => {
+            Some(Action::SetNotificationsSessionRecapThresholdSecs(value))
+        }
         _ => None,
     }
 }

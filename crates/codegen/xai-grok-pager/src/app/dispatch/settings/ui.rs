@@ -4,12 +4,14 @@ use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner,
     set_auto_compact_threshold_percent_inner, set_auto_compact_threshold_tokens_inner,
     set_auto_dark_theme_inner, set_auto_light_theme_inner, set_auto_run_implement_inner,
-    set_auto_update_inner, set_collapsed_edit_blocks_inner, set_combine_queued_prompts_inner,
-    set_compact_mode, set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
-    set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
-    set_economic_mode_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
+    set_auto_update_inner, set_bubble_copy_buttons_inner, set_collapsed_edit_blocks_inner,
+    set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
+    set_contextual_hint_inner, set_default_model_inner, set_default_selected_permission_inner,
+    set_display_refresh_auto_cadence_inner, set_economic_mode_inner,
+    set_features_session_recap_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
     set_hide_header_inner, set_hunk_tracker_mode_inner, set_invert_scroll_inner,
     set_keep_text_selection_inner, set_max_thoughts_width_inner, set_multiline_mode,
+    set_notifications_session_recap_inner, set_notifications_session_recap_threshold_secs_inner,
     set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
     set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
     set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
@@ -58,6 +60,13 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
+    let notifications_session_recap_from_app = app.notification_service.config().session_recap;
+    let notifications_session_recap_threshold_from_app = app
+        .notification_service
+        .config()
+        .session_recap_threshold_secs;
+    let features_session_recap_from_app = app.features_session_recap;
+    let bubble_copy_buttons_from_app = app.appearance.scrollback.display.bubble_copy_buttons;
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -97,6 +106,11 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
+                notifications_session_recap: notifications_session_recap_from_app,
+                notifications_session_recap_threshold_secs:
+                    notifications_session_recap_threshold_from_app,
+                features_session_recap: features_session_recap_from_app,
+                bubble_copy_buttons: bubble_copy_buttons_from_app,
             };
         }
     }
@@ -197,6 +211,13 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
+    let notifications_session_recap_from_app = app.notification_service.config().session_recap;
+    let notifications_session_recap_threshold_from_app = app
+        .notification_service
+        .config()
+        .session_recap_threshold_secs;
+    let features_session_recap_from_app = app.features_session_recap;
+    let bubble_copy_buttons_from_app = app.appearance.scrollback.display.bubble_copy_buttons;
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -245,6 +266,10 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
+        notifications_session_recap: notifications_session_recap_from_app,
+        notifications_session_recap_threshold_secs: notifications_session_recap_threshold_from_app,
+        features_session_recap: features_session_recap_from_app,
+        bubble_copy_buttons: bubble_copy_buttons_from_app,
     };
     let mut state = Box::new(SettingsModalState::new(
         registry,
@@ -724,6 +749,13 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
+        notifications_session_recap: app.notification_service.config().session_recap,
+        notifications_session_recap_threshold_secs: app
+            .notification_service
+            .config()
+            .session_recap_threshold_secs,
+        features_session_recap: app.features_session_recap,
+        bubble_copy_buttons: app.appearance.scrollback.display.bubble_copy_buttons,
     }
 }
 
@@ -798,6 +830,19 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("auto_run_implement", SettingValue::Bool(b)) => Some(Action::SetAutoRunImplement(*b)),
         ("economic_mode", SettingValue::Bool(b)) => Some(Action::SetEconomicMode(*b)),
         ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
+        ("bubble_copy_buttons", SettingValue::Bool(b)) => Some(Action::SetBubbleCopyButtons(*b)),
+        ("cancel_subagents_on_turn_cancel", SettingValue::Enum(s)) => {
+            Some(Action::SetCancelSubagentsOnTurnCancel((*s).to_owned()))
+        }
+        ("notifications.session_recap", SettingValue::Bool(b)) => {
+            Some(Action::SetNotificationsSessionRecap(*b))
+        }
+        ("notifications.session_recap_threshold_secs", SettingValue::Int(i)) => {
+            Some(Action::SetNotificationsSessionRecapThresholdSecs(*i))
+        }
+        ("features.session_recap", SettingValue::Bool(b)) => {
+            Some(Action::SetFeaturesSessionRecap(*b))
+        }
         ("default_selected_permission", SettingValue::Enum(s)) => {
             Some(Action::SetDefaultSelectedPermission((*s).to_owned()))
         }
@@ -979,6 +1024,16 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             set_contextual_hint_inner(app, |h, v| h.ssh_wrap = v, *b)
         }
         ("respect_manual_folds", SettingValue::Bool(b)) => set_respect_manual_folds_inner(app, *b),
+        ("bubble_copy_buttons", SettingValue::Bool(b)) => set_bubble_copy_buttons_inner(app, *b),
+        ("notifications.session_recap", SettingValue::Bool(b)) => {
+            set_notifications_session_recap_inner(app, *b)
+        }
+        ("notifications.session_recap_threshold_secs", SettingValue::Int(i)) => {
+            set_notifications_session_recap_threshold_secs_inner(app, (*i).clamp(5, 3600) as u64)
+        }
+        ("features.session_recap", SettingValue::Bool(b)) => {
+            set_features_session_recap_inner(app, *b)
+        }
         ("theme", SettingValue::Enum(s)) => set_theme_inner(app, s),
         ("default_selected_permission", SettingValue::Enum(s)) => {
             set_default_selected_permission_inner(

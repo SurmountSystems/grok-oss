@@ -322,7 +322,9 @@ pub fn render_turn_status(
     {
         // Pulsing concentric circle (○ ◎ ◉ ◎) on a calm ambient cadence:
         // the agent is idle, so this breath runs slower than the active
-        // turn spinner (see MONITOR_PULSE_DIVISOR).
+        // turn spinner (see MONITOR_PULSE_DIVISOR). Icon uses accent_running
+        // (agent activity / subagent throbber; magenta under DOGE), not
+        // accent_system cyan (limits / path / system tags).
         let frames = crate::glyphs::monitor_icon_frames();
         let frame_idx = (tick / MONITOR_PULSE_DIVISOR) as usize % frames.len();
         let icon = format!("{} ", frames[frame_idx]);
@@ -343,7 +345,7 @@ pub fn render_turn_status(
         let full_label = format!("{cue}{queue_suffix}");
         let cue_width = (icon.width() + full_label.width()).min(area.width as usize) as u16;
         let mut spans = vec![
-            Span::styled(icon, Style::default().fg(theme.accent_system)),
+            Span::styled(icon, Style::default().fg(theme.accent_running)),
             Span::styled(cue, Style::default().fg(label_fg)),
         ];
         if !queue_suffix.is_empty() {
@@ -1536,6 +1538,46 @@ mod tests {
         assert!(
             text.contains("2 subagents still running"),
             "idle with subagents must render the still-running cue, got: {text:?}"
+        );
+    }
+
+    /// Lower-left still-running throbber (○ ◎ ◉ beside "N subagents still
+    /// running") is agent activity chrome: `accent_running` (magenta under
+    /// DOGE), not `accent_system` cyan used for limits / path / system tags.
+    #[test]
+    fn doge_idle_subagent_still_running_throbber_uses_accent_running_not_system_cyan() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let doge = Theme::doge();
+        let magenta = Color::Rgb(255, 0, 255);
+        let cyan = Color::Rgb(0, 255, 255);
+        assert_eq!(
+            doge.accent_running, magenta,
+            "DOGE accent_running is pure magenta"
+        );
+        assert_eq!(doge.accent_system, cyan, "DOGE accent_system is pure cyan");
+        assert_ne!(doge.accent_running, doge.accent_system);
+
+        let watchers = Watchers {
+            subagents: 2,
+            ..Watchers::default()
+        };
+        let (_, buf) = render_row(idle_args(watchers), 60);
+        let icon_fg = buf.cell((0, 0)).map(|c| c.fg);
+        assert_eq!(
+            icon_fg,
+            Some(doge.accent_running),
+            "still-running throbber must paint accent_running (magenta under DOGE), got {icon_fg:?}"
+        );
+        assert_ne!(
+            icon_fg,
+            Some(doge.accent_system),
+            "still-running throbber must not use accent_system cyan"
+        );
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("2 subagents still running"),
+            "sanity: cue text present, got: {text:?}"
         );
     }
 

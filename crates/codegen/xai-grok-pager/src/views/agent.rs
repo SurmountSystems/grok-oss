@@ -219,7 +219,12 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(catalog_height));
         }
         if todo_height > 0 {
-            constraints.push(Constraint::Length(pane_gap));
+            // Always reserve one row above the todo body for Clear finished /
+            // focus top chrome (SelectionBox paints at body.y - 1). Compact and
+            // zero outer_vpad collapse `pane_gap` to 0, which previously let
+            // Clear paint into the tasks model/timer/[↗]/[x] row or status chips.
+            let todo_chrome_gap = pane_gap.max(1);
+            constraints.push(Constraint::Length(todo_chrome_gap));
             constraints.push(Constraint::Length(todo_height));
         }
         let status_gap = if top_vpad == 0 { 0u16 } else { 1 };
@@ -724,15 +729,19 @@ pub fn render_todo_chrome(
         None,
         None,
         false,
+        true,
         focus_border,
     )
 }
 /// Like [`render_todo_chrome`], with optional close label (queue uses `[close]`).
 ///
-/// `action_label` is an optional chrome control left of close (todo **Clear done**).
-/// The action paints and hit-tests whenever a label is provided — **not** only
-/// when the pane is focused — so the operator can click Clear done on an open
-/// unfocused pane. Close and role-coloured rails stay focus/hover gated.
+/// `action_label` is an optional chrome control left of close (todo clear-finished
+/// icon, e.g. `[−]`). Callers decide when to pass a label: product clear-finished
+/// passes it when the todo board is **open** and finished rows exist (focused or
+/// not). No paint when the board is hidden or there is nothing to clear.
+/// `action_enabled` controls live hit vs dim paint when a label is supplied.
+/// Close and role-coloured rails stay focus/hover gated; action can paint
+/// without rails via the unfocused action-only path.
 /// `focus_border` paints the side rails when focused; hover-only uses
 /// `theme.hover_border` (see [`render_todo_chrome`]).
 #[allow(clippy::too_many_arguments)]
@@ -747,6 +756,7 @@ pub fn render_todo_chrome_with_close_label(
     close_label: Option<&'static str>,
     action_label: Option<&'static str>,
     action_hovered: bool,
+    action_enabled: bool,
     focus_border: ratatui::style::Color,
 ) -> Option<SelectionBox> {
     if todo_area.area() == 0 {
@@ -755,9 +765,8 @@ pub fn render_todo_chrome_with_close_label(
     let layout = HorizontalLayout::new(todo_area, layout_cfg);
     // Focus gets the role colour (magenta agent / green queue). Hover-only
     // keeps the softer theme.hover_border so the two cues stay distinct on
-    // GrokNight and DOGE alike. Unfocused + action-only skips rails/close and
-    // paints just the operator action (Clear done) so finished work stays
-    // one click away without stealing focus chrome.
+    // GrokNight and DOGE alike. Action (when provided) paints next to close
+    // with focus chrome; unfocused open boards still paint action-only.
     if focused || hovered {
         let color = if focused {
             focus_border
@@ -769,18 +778,22 @@ pub fn render_todo_chrome_with_close_label(
         if focused && let Some(label) = close_label {
             sel = sel.with_close_label(Some(label));
         }
-        // Action is never focus-gated: open pane + finished rows → clickable.
-        sel = sel.with_action_label(action_label, action_hovered);
+        sel = sel
+            .with_action_label(action_label, action_hovered)
+            .with_action_enabled(action_enabled);
         sel.render(buf);
         return Some(sel);
     }
+    // Unfocused + no hover: product clear-finished still passes a label when
+    // the board is open with finished rows. Action-only path paints the
+    // control without focus rails (no always-on smash into status chrome).
     if action_label.is_some() {
         let sel = SelectionBox::new(
             layout.selection_area(),
             Style::default().fg(theme.text_secondary),
         )
-        .with_action_label(action_label, action_hovered);
-        // Operator control only — no role rails, no ✗ (those stay focus-gated).
+        .with_action_label(action_label, action_hovered)
+        .with_action_enabled(action_enabled);
         sel.render_action_only(buf);
         return Some(sel);
     }
@@ -1026,7 +1039,7 @@ pub fn build_hints(
             if let Some(def) = registry.find(ActionId::ClearCompletedTodos) {
                 hints.push(def.hint());
             } else {
-                hints.push(HintItem::new(crate::key!('X'), "clear done"));
+                hints.push(HintItem::new(crate::key!('X'), "clear finished"));
             }
             hints
         }
@@ -2652,51 +2665,155 @@ mod tests {
         );
     }
 
-    /// Named contract: Clear done paints + hit-tests when the pane is open
-    /// but **not** focused (and not hovered). Focus must not gate the control.
+    /// Named contract: clear-finished label paints when supplied — focused
+    /// (next to close) **and** unfocused action-only (open board path). No
+    /// label → no chrome. Compact `[−]`, never empty-set / long label.
     #[test]
-    fn clear_done_chrome_available_when_todo_pane_open_unfocused() {
+    fn clear_finished_chrome_paints_when_label_supplied() {
         let _pin = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
         let area = Rect::new(2, 2, 40, 6);
         let layout_cfg = LayoutConfig::default();
-        let sel = render_todo_chrome_with_close_label(
+        let chrome = crate::glyphs::clear_finished_button();
+
+        // Unfocused, no label: no chrome (hidden board / nothing finished).
+        let unfocused_none = render_todo_chrome_with_close_label(
             &mut buf,
             area,
             &layout_cfg,
-            false, // not focused
-            false, // not hovered
+            false,
+            false,
             false,
             &theme,
             None,
-            Some("Clear done"),
+            None,
             false,
+            true,
+            theme.accent_running,
+        );
+        assert!(
+            unfocused_none.is_none(),
+            "unfocused without clear label must not paint chrome"
+        );
+
+        // Unfocused + clear label: action-only paints `[−]` (open board path).
+        let mut buf_unf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        let unfocused = render_todo_chrome_with_close_label(
+            &mut buf_unf,
+            area,
+            &layout_cfg,
+            false,
+            false,
+            false,
+            &theme,
+            None,
+            Some(chrome),
+            false,
+            true,
             theme.accent_running,
         )
-        .expect("unfocused open pane with Clear done must still yield chrome geometry");
-        let action = sel
+        .expect("unfocused + clear label must yield action-only chrome");
+        let action_unf = unfocused
             .action_button_rect()
-            .expect("Clear done hit rect must exist without Todo focus");
-        assert_eq!(action.width, "Clear done".chars().count() as u16);
-        // Label cells painted (not empty).
-        let cell = buf.cell((action.x, action.y)).expect("action cell");
+            .expect("clear-finished geometry when unfocused with label");
+        assert_eq!(action_unf.width, 3, "icon chrome is compact [−]");
+        let mut painted_unf = String::new();
+        for x in action_unf.x..action_unf.x + action_unf.width {
+            if let Some(cell) = buf_unf.cell((x, action_unf.y)) {
+                painted_unf.push_str(cell.symbol());
+            }
+        }
         assert_eq!(
-            cell.symbol().chars().next(),
-            Some('C'),
-            "unfocused Clear done must paint label text, got {:?}",
-            cell.symbol()
+            painted_unf, chrome,
+            "unfocused must paint [−], got {painted_unf:?}"
         );
-        // No focus rails: left border of selection area should not be role rails.
-        let layout = HorizontalLayout::new(area, &layout_cfg);
-        let sa = layout.selection_area();
-        let left = buf.cell((sa.x, sa.y)).expect("left cell");
-        // render_action_only skips vertical rails — cell stays default/space.
-        assert_ne!(
-            left.symbol(),
-            "│",
-            "unfocused Clear done must not paint focus rails"
+        assert!(!painted_unf.contains('\u{2205}'));
+
+        // Focused + clear label: paints icon left of close.
+        let mut buf2 = Buffer::empty(Rect::new(0, 0, 50, 12));
+        let focused = render_todo_chrome_with_close_label(
+            &mut buf2,
+            area,
+            &layout_cfg,
+            true,
+            false,
+            false,
+            &theme,
+            None,
+            Some(chrome),
+            false,
+            true,
+            theme.accent_running,
+        )
+        .expect("focused + clear label must yield chrome");
+        let action = focused
+            .action_button_rect()
+            .expect("clear-finished next to close when focused");
+        let close = focused.close_button_rect().expect("close when focused");
+        assert_eq!(action.width, 3, "icon chrome is compact [−]");
+        assert_eq!(action.x + action.width + 1, close.x);
+        let mut painted = String::new();
+        for x in action.x..action.x + action.width {
+            if let Some(cell) = buf2.cell((x, action.y)) {
+                painted.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(painted, chrome, "must paint [−], got {painted:?}");
+        assert!(!painted.contains('\u{2205}'), "empty-set dogfood-rejected");
+        assert!(!painted.contains("Clear finished"));
+    }
+
+    /// Named contract: when a clear label is supplied, action x is stable with
+    /// or without close reserved (focus paints close; geometry must not jump).
+    #[test]
+    fn clear_finished_action_x_stable_with_close_reserved() {
+        let theme = Theme::current();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        let area = Rect::new(2, 2, 40, 6);
+        let layout_cfg = LayoutConfig::default();
+        let label = Some(crate::glyphs::clear_finished_button());
+
+        let focused = render_todo_chrome_with_close_label(
+            &mut buf,
+            area,
+            &layout_cfg,
+            true,
+            false,
+            false,
+            &theme,
+            None,
+            label,
+            false,
+            true,
+            theme.accent_running,
+        )
+        .expect("focused");
+        // Generic path: label without focus still reserves close slot.
+        let action_only = render_todo_chrome_with_close_label(
+            &mut buf,
+            area,
+            &layout_cfg,
+            false,
+            false,
+            false,
+            &theme,
+            None,
+            label,
+            false,
+            true,
+            theme.accent_running,
+        )
+        .expect("action-only path");
+
+        let a = focused.action_button_rect().expect("focused action");
+        let b = action_only.action_button_rect().expect("action-only");
+        assert_eq!(
+            a.x, b.x,
+            "action x must reserve close slot so focus does not jump control"
         );
+        assert_eq!(a.width, b.width);
+        assert_eq!(a.width, 3);
     }
 
     /// Unfocused + no action label → no chrome (unchanged for other panes).

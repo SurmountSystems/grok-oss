@@ -644,6 +644,10 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // PAGER-owned respect_manual_folds (Appearance,
             // persisted to pager.toml).
             "respect_manual_folds",
+            // PAGER-owned bubble_copy_buttons (Appearance; always-on ⧉
+            // on user/assistant bubbles; default ON; pager.toml
+            // `[scrollback.display].bubble_copy_buttons`).
+            "bubble_copy_buttons",
             // SHELL-owned group_tool_verbs (Appearance; live cache).
             "group_tool_verbs",
             // SHELL-owned collapsed_edit_blocks (Appearance; live cache,
@@ -685,6 +689,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // SHARED plan_approval_park (Agent; after plan_mode — soft toast
             // vs force modal on exit_plan_mode park).
             "plan_approval_park",
+            // SHARED cancel_subagents_on_turn_cancel (Agent; sticky cancel
+            // picker: ask / always_stop / always_continue).
+            "cancel_subagents_on_turn_cancel",
             // SHELL-owned auto_run_implement (Agent category; after plan_mode).
             "auto_run_implement",
             // SHELL-owned economic_mode (Agent; after auto_run_implement).
@@ -697,7 +704,13 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
-            // Session category.
+            // Session category — recap knobs before auto-compact.
+            // SHELL notifications.session_recap (auto return-from-away).
+            "notifications.session_recap",
+            // SHELL notifications.session_recap_threshold_secs (debounce).
+            "notifications.session_recap_threshold_secs",
+            // SHELL features.session_recap (master gate; restart-required).
+            "features.session_recap",
             "auto_compact_threshold_percent",
             // Advanced category.
             "show_tips",

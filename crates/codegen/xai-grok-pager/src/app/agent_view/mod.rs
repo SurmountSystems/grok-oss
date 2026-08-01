@@ -579,7 +579,7 @@ pub(crate) fn wants_pointer_cursor(
 
 impl AgentView {
     /// Live hover state → OSC 22 pointer request (links + one-click copy chrome
-    /// + status/todo CTAs: Clear done, limits meter).
+    /// + status/todo CTAs: Clear finished, limits meter).
     pub(crate) fn mouse_wants_pointer_cursor(&self) -> bool {
         wants_pointer_cursor(
             self.hovered_link_idx.is_some(),
@@ -678,11 +678,11 @@ mod pointer_cursor_tests {
         assert!(agent.prompt.update_copy_hover(0, 0));
         assert!(!agent.mouse_wants_pointer_cursor());
 
-        // Clear done + limits meter CTAs also request pointer.
+        // Clear finished + limits meter CTAs also request pointer.
         agent.hit_todo_clear_done.hovered = true;
         assert!(
             agent.mouse_wants_pointer_cursor(),
-            "Clear done hover must request pointer"
+            "Clear finished hover must request pointer"
         );
         agent.hit_todo_clear_done.hovered = false;
         agent.hit_credits.hovered = true;
@@ -918,19 +918,19 @@ pub(crate) enum AgentDeferredSend {
     Interject,
 }
 /// How the parked-marker slot was consumed. Both variants carry the turn's
-/// prompt id and both keep the parked (idle) chrome. `Rendered` markers are
-/// one-per-park-episode — a re-park after new parent output (epoch bump)
-/// pushes a fresh one (see `maybe_push_parked_marker`); `Forgone` (an
-/// interjection continued the parked turn) is final — a later "Worked for"
-/// line would land below the interjected message, flipping the transcript.
+/// prompt id and both keep the parked (idle) chrome. `Rendered` is **one
+/// parked "Worked for" row per prompt turn** — mid-park epoch noise and
+/// re-parks refresh elapsed in place rather than stacking rows (see
+/// `maybe_push_parked_marker`). `Forgone` (an interjection continued the
+/// parked turn) is final — a later "Worked for" line would land below the
+/// interjected message, flipping the transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ParkedMarkerSlot {
-    /// A "Worked for X" marker block was pushed.
+    /// A "Worked for X" marker block was pushed (at most one per prompt turn).
     Rendered {
         prompt_id: String,
-        /// The parent-output boundary at push time: chips/completions landing
-        /// under the marker don't bump it, so a matching epoch means "same
-        /// park episode — don't re-push".
+        /// Tracker epoch at last push/refresh (bookkeeping only; re-push is
+        /// never driven by epoch mismatch while this slot is live).
         agent_output_epoch: u64,
     },
     /// The marker was forgone: an interjection continued the parked turn.
@@ -1281,7 +1281,7 @@ pub struct AgentView {
     pub hit_context: HitArea,
     pub hit_credits: HitArea,
     pub hit_todo_close: HitArea,
-    /// Todo pane chrome **Clear done** (archives completed/cancelled).
+    /// Todo pane chrome **Clear finished** (archives completed/cancelled).
     pub hit_todo_clear_done: HitArea,
     pub hit_bg_close: HitArea,
     pub hit_subagent_close: HitArea,

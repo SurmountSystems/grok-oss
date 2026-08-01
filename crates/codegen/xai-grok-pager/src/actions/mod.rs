@@ -90,7 +90,7 @@ pub enum ActionId {
 
     // Panes
     ToggleTodos,
-    /// Archive completed/cancelled todos off the live board (Clear done).
+    /// Archive completed/cancelled todos off the live board (Clear finished).
     ClearCompletedTodos,
     ToggleTasks,
     ToggleQueue,

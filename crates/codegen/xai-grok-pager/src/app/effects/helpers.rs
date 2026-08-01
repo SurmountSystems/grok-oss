@@ -1025,6 +1025,43 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "notifications.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("notifications.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "notifications.session_recap_threshold_secs",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap_threshold_secs(i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "features.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("features.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_features_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "bubble_copy_buttons" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("bubble_copy_buttons", "Bool", &value));
+            };
+            tokio::task::spawn_blocking(move || crate::appearance::persist_bubble_copy_buttons(b))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
         "vim_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("vim_mode", "Bool", &value));

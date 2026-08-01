@@ -5013,3 +5013,205 @@
         assert_eq!(empty.bg, canvas, "empty half: canvas bg (no plate steal)");
         assert!(!empty.modifier.contains(Modifier::DIM));
     }
+
+    /// True when a cell still carries Human-green caret plate / reverse /
+    /// empty-phase ink (or the solid block glyph left after the caret moved).
+    fn cell_has_composer_caret_residue(
+        cell: &ratatui::buffer::Cell,
+        accent: ratatui::style::Color,
+    ) -> bool {
+        let filled = crate::glyphs::cursor_box_filled();
+        if cell.symbol() == filled {
+            return true;
+        }
+        cell.bg == accent || cell.fg == accent
+    }
+
+    /// Contract: after the software caret moves (arrows / home / end), cells it
+    /// previously occupied must repaint as normal text — no leftover green
+    /// plate, reverse accent, empty-phase green ink, or solid block glyph.
+    ///
+    /// Operator dogfood: typed `BLA`, final `A` stuck Human-green while the
+    /// real caret was elsewhere. Human caret stays green on the *current*
+    /// cell only.
+    #[test]
+    fn caret_move_clears_previous_cell_caret_styling() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let style = ghost_test_style(); // chromeless: text at area origin
+        let area = Rect::new(0, 0, 40, 1);
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("BLA");
+        pw.set_cursor(pw.text().len());
+        // End of text: insertion cell is blank after 'A' (x=3).
+        assert_eq!(pw.cursor(), 3);
+
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        // Move onto 'A' (index 2) — caret paints that grapheme green.
+        pw.set_cursor(2);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        let on_a = buf.cell((2, 0)).expect("A cell while caret on A");
+        assert_eq!(on_a.symbol(), "A");
+        assert!(
+            cell_has_composer_caret_residue(on_a, accent),
+            "caret on A must style A with Human green (precondition)"
+        );
+
+        // Move onto 'L' (index 1). 'A' must lose all caret styling / glyph.
+        pw.set_cursor(1);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        let a_after = buf.cell((2, 0)).expect("A after caret left");
+        assert_eq!(a_after.symbol(), "A", "letter must remain after caret leaves");
+        assert!(
+            !cell_has_composer_caret_residue(a_after, accent),
+            "A must not keep caret green plate/ink or solid block after caret moved; \
+             got fg={:?} bg={:?} sym={:?}",
+            a_after.fg,
+            a_after.bg,
+            a_after.symbol()
+        );
+
+        // Blank insertion cell after the word must not keep a solid █ from when
+        // the caret lived at end-of-text.
+        let after_word = buf.cell((3, 0)).expect("cell after A");
+        assert_ne!(
+            after_word.symbol(),
+            crate::glyphs::cursor_box_filled(),
+            "end-of-text blank must not keep solid box caret glyph after move"
+        );
+        assert!(
+            !cell_has_composer_caret_residue(after_word, accent),
+            "end-of-text blank must not keep Human green after caret moved; \
+             got fg={:?} bg={:?} sym={:?}",
+            after_word.fg,
+            after_word.bg,
+            after_word.symbol()
+        );
+
+        // Current caret cell ('L') is still allowed green styling.
+        let on_l = buf.cell((1, 0)).expect("L under caret");
+        assert_eq!(on_l.symbol(), "L");
+        assert!(
+            cell_has_composer_caret_residue(on_l, accent),
+            "current caret cell must still use Human green"
+        );
+    }
+
+    /// Solid blank caret replaces the insertion cell with `█`. A full prompt
+    /// redraw after the caret moves must not leave that block glyph (or its
+    /// green plate) on the old cell — even when the textarea never re-paints
+    /// blanks beyond the text.
+    #[test]
+    fn caret_move_clears_forced_solid_blank_caret_glyph() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        let canvas = theme.bg_base;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let style = ghost_test_style();
+        let area = Rect::new(0, 0, 40, 1);
+        let filled = crate::glyphs::cursor_box_filled();
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("BLA");
+        pw.set_cursor(3); // blank insertion after 'A'
+
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        // Force solid phase regardless of wall-clock blink half.
+        super::paint_composer_box_cursor_phase(&mut buf, 3, 0, &theme, canvas, true);
+        let solid = buf.cell((3, 0)).expect("solid blank caret");
+        assert_eq!(solid.symbol(), filled);
+        assert_eq!(solid.bg, accent);
+
+        // Move caret onto 'L' and full-draw again (same buffer = ratatui reuse).
+        pw.set_cursor(1);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        let after = buf.cell((3, 0)).expect("old blank caret cell");
+        assert_ne!(
+            after.symbol(),
+            filled,
+            "solid blank caret glyph must not remain after caret moved; got {:?}",
+            after.symbol()
+        );
+        assert!(
+            !cell_has_composer_caret_residue(after, accent),
+            "old blank caret cell must not keep Human green; fg={:?} bg={:?} sym={:?}",
+            after.fg,
+            after.bg,
+            after.symbol()
+        );
+
+        // 'A' must stay normal text (no green) when caret is on 'L'.
+        let a = buf.cell((2, 0)).expect("A");
+        assert_eq!(a.symbol(), "A");
+        assert!(
+            !cell_has_composer_caret_residue(a, accent),
+            "A must not keep caret styling; fg={:?} bg={:?}",
+            a.fg,
+            a.bg
+        );
+    }
+
+    /// Lower-level paint contract: painting the caret at j must not leave
+    /// caret styling on a previously painted caret cell at i when the caller
+    /// re-paints normal text first (full-line dirty) then the new caret only.
+    /// Pins the "only current caret cell uses caret styling" rule for
+    /// grapheme reverse / empty-phase ink.
+    #[test]
+    fn paint_composer_box_cursor_phase_only_styles_current_cell_after_text_repaint() {
+        use crate::theme::cache;
+        use ratatui::style::{Color, Style};
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        let canvas = theme.bg_base;
+        let text_fg = theme.text_primary;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let area = Rect::new(0, 0, 8, 1);
+        let mut buf = Buffer::empty(area);
+        // Simulate frame 1: text + caret solid reverse on 'A' at x=2.
+        buf.set_string(0, 0, "BLA", Style::default().fg(text_fg).bg(canvas));
+        super::paint_composer_box_cursor_phase(&mut buf, 2, 0, &theme, canvas, true);
+        assert_eq!(buf.cell((2, 0)).unwrap().bg, accent);
+
+        // Frame 2: full-line text repaint (normal ink) + caret on 'L' at x=1.
+        buf.set_string(0, 0, "BLA", Style::default().fg(text_fg).bg(canvas));
+        // set_string with explicit fg/bg must clear prior reverse plate on A.
+        let a_mid = buf.cell((2, 0)).unwrap();
+        assert_eq!(a_mid.symbol(), "A");
+        assert_eq!(a_mid.fg, text_fg, "text repaint must restore A fg");
+        assert_eq!(a_mid.bg, canvas, "text repaint must restore A bg");
+        super::paint_composer_box_cursor_phase(&mut buf, 1, 0, &theme, canvas, true);
+
+        let a_after = buf.cell((2, 0)).unwrap();
+        assert_eq!(a_after.symbol(), "A");
+        assert_ne!(a_after.bg, accent, "A must not keep reverse green plate");
+        assert_ne!(a_after.fg, accent, "A must not keep green ink");
+        assert_eq!(a_after.fg, text_fg);
+        assert_eq!(a_after.bg, canvas);
+
+        let l = buf.cell((1, 0)).unwrap();
+        assert_eq!(l.symbol(), "L");
+        assert_eq!(l.bg, accent, "current caret keeps reverse plate");
+    }

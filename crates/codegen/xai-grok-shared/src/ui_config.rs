@@ -206,6 +206,36 @@ pub struct UiConfig {
     ///   the live draft.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_approval_park: Option<String>,
+    /// Settings-written subset of `[ui.notifications]` (auto session recap).
+    /// Full notification config is still loaded by the pager from raw TOML;
+    /// this nest lets Settings merge only the recap knobs without splatting
+    /// method/condition/hooks. Absent until a Settings toggle writes a value.
+    #[serde(default, skip_serializing_if = "NotificationsUiSettings::is_default")]
+    pub notifications: NotificationsUiSettings,
+}
+
+/// Settings-owned slice of `[ui.notifications]` (session recap prefs).
+///
+/// Other notification keys (`method`, `condition`, hooks, title, …) stay
+/// unmodeled here so `merge_section` deep-merge preserves them. The pager
+/// still loads the full `NotificationConfig` from raw TOML at startup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationsUiSettings {
+    /// Auto "where was I" recap when returning from away. `None` = inherit
+    /// client default (`true`). Does not gate manual `/recap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_recap: Option<bool>,
+    /// Min unfocused seconds before auto recap may fire. `None` = inherit
+    /// client default (`30`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_recap_threshold_secs: Option<u64>,
+}
+
+impl NotificationsUiSettings {
+    /// True when no recap field has a user-explicit value.
+    pub fn is_default(&self) -> bool {
+        self.session_recap.is_none() && self.session_recap_threshold_secs.is_none()
+    }
 }
 
 /// User-config opt-outs for the per-tip contextual hints, serialized as
@@ -323,6 +353,7 @@ impl Default for UiConfig {
             combine_queued_prompts: None,
             display_refresh: DisplayRefreshSettings::default(),
             plan_approval_park: None,
+            notifications: NotificationsUiSettings::default(),
         }
     }
 }

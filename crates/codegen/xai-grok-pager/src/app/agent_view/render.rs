@@ -1144,6 +1144,11 @@ impl AgentView {
         let queue_height = self.queue.desired_height();
         let drain_blocked = self.drain_blocked();
         let watchers = self.watchers();
+        // While parked, refresh the single "Worked for" row's elapsed so the
+        // duration ticks live without stacking a new transcript line per second.
+        if self.renders_parked() {
+            self.maybe_push_parked_marker();
+        }
         let parked = self.renders_parked();
         let turn_status_height = if turn_status::should_show(
             &self.session.state,
@@ -1984,11 +1989,16 @@ impl AgentView {
             self.todo.render(layout.todo, buf, todo_focused, layout_cfg);
             // Always-on magenta agent rail on the status board.
             agent::paint_side_pane_agent_rail(buf, layout.todo, theme.accent_running);
-            // Clear done whenever the pane is open and the board has finished
-            // rows — not only when focused. Auto-open leaves the pane unfocused;
-            // requiring focus made the control effectively invisible.
-            let clear_label = if self.todo.counts().completed + self.todo.counts().cancelled > 0 {
-                Some("Clear done")
+            // Clear finished: compact [−] icon when the todo board is **open**
+            // and finished rows exist. Not focus-only (operators looking at
+            // the board while on scrollback/tasks never found it) and not
+            // always-on top-right next to pts/context. Collocates with close
+            // in the todo header gap. Quiet idle (hover stronger); never neon
+            // green or agent magenta. Slash + focused X still work.
+            // Action registry / hints still say "Clear finished".
+            let clear_enabled = self.todo.counts().completed + self.todo.counts().cancelled > 0;
+            let clear_label = if clear_enabled {
+                Some(crate::glyphs::clear_finished_button())
             } else {
                 None
             };
@@ -2004,12 +2014,16 @@ impl AgentView {
                 None,
                 clear_label,
                 self.hit_todo_clear_done.hovered,
+                true, // label only passed when live; no dim reserved slot
                 theme.accent_running,
             );
             self.hit_todo_close
                 .set(sel.as_ref().and_then(|s| s.close_button_rect()));
-            self.hit_todo_clear_done
-                .set(sel.as_ref().and_then(|s| s.action_button_rect()));
+            self.hit_todo_clear_done.set(if clear_enabled {
+                sel.as_ref().and_then(|s| s.action_button_rect())
+            } else {
+                None
+            });
         } else {
             self.hit_todo_close.clear();
             self.hit_todo_clear_done.clear();
@@ -2037,6 +2051,7 @@ impl AgentView {
                 Some(crate::glyphs::ballot_x_button()),
                 None,
                 false,
+                true,
                 theme.accent_user,
             )
             .and_then(|sel| sel.close_button_rect());
@@ -3529,6 +3544,9 @@ impl AgentView {
         let is_plan_viewer = self.is_plan_viewer();
         let has_plan_comments = !self.plan_comments.is_empty();
         let casual_commenting = self.is_casual_commenting();
+        // Approval path must win over stale casual flags every frame so
+        // soft-park never paints `c comment` while exit_plan_mode is parked.
+        self.sync_plan_viewer_approval_chrome();
         if let Some(ref mut viewer) = self.line_viewer {
             use crate::views::file_search::line_viewer::render_line_viewer;
             use crate::views::shortcuts_bar::HintItem;
@@ -3573,6 +3591,17 @@ impl AgentView {
                 effective_comment_count,
             );
             let in_plan_approval = self.plan_approval_view.is_some();
+            // Panel early-return (too small) leaves no footer CTAs while
+            // `line_viewer` is still Some — soft-park strip was cleared above.
+            // Detect painted approval hits so we can fall back to strip CTAs.
+            let panel_has_approval_cta = in_plan_approval
+                && viewer.plan_ref().is_some_and(|p| {
+                    p.approve_button_area.is_some()
+                        || p.abandon_button_area.is_some()
+                        || p.approve_notes_button_area.is_some()
+                        || p.questions_button_area.is_some()
+                        || p.send_button_area.is_some()
+                });
             let on_comment = in_plan_approval
                 && viewer
                     .list_state
@@ -3667,6 +3696,24 @@ impl AgentView {
             if !(plan_prompt_focused || casual_commenting || viewer.fullscreen && input_bar_active)
             {
                 ShortcutsBar::new(&viewer_hints).render(layout.shortcuts, buf);
+            }
+            // Soft-park chrome fallback: line_viewer is open but panel did not
+            // paint approval footer CTAs (size early-return). Earlier branch
+            // cleared `hit_soft_park_ctas` because line_viewer.is_some().
+            // Re-paint strip CTAs so approval is never silent zero chrome.
+            if in_plan_approval && !panel_has_approval_cta {
+                use crate::views::plan_approval_view::{
+                    SoftParkCtaHovers, paint_soft_park_cta_buttons,
+                };
+                let hovers = SoftParkCtaHovers {
+                    approve: self.hit_soft_park_ctas.approve.hovered,
+                    notes: self.hit_soft_park_ctas.notes.hovered,
+                    clarify: self.hit_soft_park_ctas.clarify.hovered,
+                    revise: self.hit_soft_park_ctas.revise.hovered,
+                    quit: self.hit_soft_park_ctas.quit.hovered,
+                };
+                let areas = paint_soft_park_cta_buttons(buf, layout.shortcuts, &theme, hovers);
+                self.hit_soft_park_ctas.apply_areas(areas);
             }
             self.pane_areas = layout.pane_areas();
             let viewer_cursor = if plan_prompt_focused || self.is_casual_commenting() {
@@ -4617,11 +4664,14 @@ mod clear_done_and_limits_chrome_tests {
         buf
     }
 
-    /// Named contract: open todo pane with finished rows registers Clear done
-    /// hit rect even when ActivePane is not Todo (auto-open leaves unfocused).
+    /// Named contract: open todo board with finished rows paints compact `[−]`
+    /// and registers hit **even when unfocused** (operators looking at the
+    /// board while on scrollback/tasks must still find clear). Not always-on
+    /// top-right empty-set; only when open + finished > 0.
     #[test]
-    fn unfocused_open_todo_pane_registers_clear_done_hit() {
+    fn open_todo_with_finished_paints_clear_even_when_unfocused() {
         let mut agent = make_agent();
+        let chrome = crate::glyphs::clear_finished_button();
         agent.todo.update_todos(vec![TodoItem {
             content: "shipped".into(),
             priority: TodoPriority::Medium,
@@ -4632,22 +4682,328 @@ mod clear_done_and_limits_chrome_tests {
         agent.todo.overlay.visible = true;
         agent.todo.overlay.focused = false;
         agent.set_active_pane(super::super::AgentPane::Scrollback, false);
-        let _buf = draw_hits(&mut agent);
-        assert!(
-            agent.hit_todo_clear_done.rect.is_some(),
-            "open unfocused todo pane with finished rows must register Clear done hit"
-        );
-        // Painted label should appear in the buffer.
-        let rect = agent.hit_todo_clear_done.rect.unwrap();
+        let buf = draw_hits(&mut agent);
+        let hit = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("open + finished must register clear-finished hit when unfocused");
+        assert_eq!(hit.width, 3);
         let mut label = String::new();
-        for x in rect.x..rect.x + rect.width {
-            if let Some(cell) = _buf.cell((x, rect.y)) {
+        for x in hit.x..hit.x + hit.width {
+            if let Some(cell) = buf.cell((x, hit.y)) {
                 label.push_str(cell.symbol());
             }
         }
+        assert_eq!(label, chrome, "must paint [−] unfocused, got {label:?}");
+        assert!(!label.contains("Clear finished"));
+        assert!(!label.contains('\u{2205}'));
+        assert!(!chrome.contains('\u{2205}'));
+    }
+
+    /// Named contract: clear chrome only when finished rows exist. Open board
+    /// with pending-only (focused or not) has no clear glyph. Hidden board
+    /// has no clear either.
+    #[test]
+    fn clear_finished_only_when_open_with_finished_rows() {
+        let mut agent = make_agent();
+        let chrome = crate::glyphs::clear_finished_button();
+
+        // Pending only, focused: no clear chrome.
+        agent.todo.update_todos(vec![TodoItem {
+            content: "open work".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = true;
+        agent.set_active_pane(super::super::AgentPane::Todo, false);
+        let _buf_pending = draw_hits(&mut agent);
         assert!(
-            label.contains("Clear"),
-            "buffer should paint Clear done at hit rect, got {label:?}"
+            agent.hit_todo_clear_done.rect.is_none(),
+            "focused pending-only must not show clear-finished"
+        );
+
+        // Finished + focused: live hit + [−] paint.
+        agent.todo.update_todos(vec![
+            TodoItem {
+                content: "open work".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+                size: None,
+            },
+            TodoItem {
+                content: "shipped".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Completed,
+                meta: None,
+                size: None,
+            },
+        ]);
+        let buf_done = draw_hits(&mut agent);
+        let hit = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("focused + finished must register clear-finished hit");
+        assert_eq!(hit.width, 3);
+        let mut label = String::new();
+        for x in hit.x..hit.x + hit.width {
+            if let Some(cell) = buf_done.cell((x, hit.y)) {
+                label.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(label, chrome, "must paint [−], got {label:?}");
+        assert!(!label.contains("Clear finished"));
+        assert!(!label.contains('\u{2205}'));
+
+        // Blur focus but keep pane open: clear chrome **stays** (discoverable).
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        agent.todo.overlay.focused = false;
+        let buf_blur = draw_hits(&mut agent);
+        let hit_blur = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("open + finished must keep clear hit after blur");
+        assert_eq!(hit_blur.width, 3);
+        let mut label_blur = String::new();
+        for x in hit_blur.x..hit_blur.x + hit_blur.width {
+            if let Some(cell) = buf_blur.cell((x, hit_blur.y)) {
+                label_blur.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(
+            label_blur, chrome,
+            "blur must still paint [−] when open + finished, got {label_blur:?}"
+        );
+
+        // Hide the pane: clear chrome gone.
+        agent.todo.overlay.visible = false;
+        let _buf_hidden = draw_hits(&mut agent);
+        assert!(
+            agent.hit_todo_clear_done.rect.is_none(),
+            "hidden todo pane must not register clear-finished hit"
+        );
+    }
+
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        let ax2 = a.x.saturating_add(a.width);
+        let ay2 = a.y.saturating_add(a.height);
+        let bx2 = b.x.saturating_add(b.width);
+        let by2 = b.y.saturating_add(b.height);
+        a.x < bx2 && b.x < ax2 && a.y < by2 && b.y < ay2
+    }
+
+    /// Named contract (compact smash case): clear-finished hit must not
+    /// intersect tasks subagent open chrome (model/timer/[↗]) or kill [x].
+    /// Covers focused and unfocused open boards (both paint clear when finished).
+    #[test]
+    fn clear_finished_hit_does_not_intersect_tasks_subagent_open_or_kill() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        // Compact collapses outer_vpad/pane_gap — the dogfood smash case.
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.tasks.overlay.visible = true;
+
+        let child_sid = "child-open-1";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+
+        let chrome = crate::glyphs::clear_finished_button();
+        for (label_case, focused) in [("focused", true), ("unfocused", false)] {
+            agent.todo.overlay.focused = focused;
+            if focused {
+                agent.set_active_pane(super::super::AgentPane::Todo, false);
+            } else {
+                agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+            }
+
+            let buf = draw_hits(&mut agent);
+            let clear = agent.hit_todo_clear_done.rect.expect(&format!(
+                "{label_case} open + finished must register clear-finished hit"
+            ));
+
+            assert!(
+                !agent.tasks.view_button_rects.is_empty(),
+                "{label_case}: tasks pane must register open chrome for the running subagent"
+            );
+            for (id, open) in &agent.tasks.view_button_rects {
+                assert!(
+                    !rects_overlap(clear, *open),
+                    "{label_case}: clear-finished {clear:?} must not intersect open chrome {open:?} for {id:?}"
+                );
+            }
+            for (id, kill) in &agent.tasks.kill_button_rects {
+                assert!(
+                    !rects_overlap(clear, *kill),
+                    "{label_case}: clear-finished {clear:?} must not intersect kill {kill:?} for {id:?}"
+                );
+            }
+
+            let mut label = String::new();
+            for x in clear.x..clear.x + clear.width {
+                if let Some(cell) = buf.cell((x, clear.y)) {
+                    label.push_str(cell.symbol());
+                }
+            }
+            assert_eq!(
+                label, chrome,
+                "{label_case}: label must be clear-finished [−], got {label:?}"
+            );
+            assert!(!label.contains("Clear finished"));
+            assert!(!label.contains("Clear done"));
+            assert!(!label.contains('\u{2205}'));
+            assert_eq!(clear.width, 3);
+        }
+    }
+
+    /// Named contract: click on tasks model/timer open chrome opens that subagent.
+    #[test]
+    fn click_tasks_model_timer_chrome_opens_subagent() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        let child_sid = "child-click-open";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+        agent.tasks.overlay.visible = true;
+
+        let _buf = draw_hits(&mut agent);
+        let (entry_id, open) = agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .find(|(id, _)| matches!(id, crate::views::tasks_pane::TaskEntryId::Agent(_)))
+            .cloned()
+            .expect("agent open chrome must exist");
+        // Prefer a cell that is left of the pure [↗] when model/timer expand the hit.
+        // Left edge is model/timer; rightmost 3 cols are the enlarge glyph.
+        let click_col = open.x;
+        let click_row = open.y;
+        assert!(
+            open.width >= 3,
+            "open chrome must cover at least the view button, got {open:?}"
+        );
+
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        assert!(agent.active_subagent.is_none());
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_col,
+                row: click_row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "open chrome click must open subagent, got {out:?} for {entry_id:?} at {open:?}"
+        );
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(child_sid),
+            "must open the correct child via open_subagent_fullscreen"
+        );
+    }
+
+    /// Named contract: Clear finished click (open board, including unfocused)
+    /// archives finished todos and does **not** open a subagent.
+    #[test]
+    fn clear_finished_click_does_not_open_subagent() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        // Unfocused open board is the dogfood path (looking at tasks).
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = false;
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+
+        let child_sid = "child-clear-no-open";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+        agent.tasks.overlay.visible = true;
+
+        let _buf = draw_hits(&mut agent);
+        let clear = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("unfocused open + finished Clear finished hit");
+        // Sanity: still not overlapping open after paint.
+        for (_, open) in &agent.tasks.view_button_rects {
+            assert!(
+                !rects_overlap(clear, *open),
+                "setup requires disjoint Clear vs open"
+            );
+        }
+
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: clear.x,
+                row: clear.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Clear finished click must clear, got {out:?}"
+        );
+        assert!(
+            agent.active_subagent.is_none(),
+            "Clear finished must not open a subagent"
         );
     }
 

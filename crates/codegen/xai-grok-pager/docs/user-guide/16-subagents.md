@@ -335,6 +335,12 @@ For blocking subagents the single entry updates its bullet color when the child 
 
 As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect.
 
+**Click to open:** on a subagent row, click the top-right **model name, elapsed
+timer, or `[↗]` enlarge control** to open that child's fullscreen transcript
+(same result as Enter / Ctrl-F on the scrollback block). The kill control
+(`[x]`) stays separate and does not open the view. Todo pane clear-finished
+icon (`[−]`, open board with finished rows) is laid out so it does not cover or steal those open/kill hits.
+
 ### Fullscreen framed view (the child transcript)
 
 When you open a subagent (from a scrollback block or the tasks pane), the parent view is replaced by a bordered frame containing the child's full transcript:

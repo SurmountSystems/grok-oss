@@ -912,6 +912,12 @@ pub(crate) async fn run(
         .unwrap_or(true);
     app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
     apply_session_recap_available(&mut app, connection.session_recap_available);
+    // Seed Settings mirror for master `[features] session_recap` (default ON).
+    // Effective ACP gate is `session_recap_available`; this tracks user config.
+    app.features_session_recap = xai_grok_shell::config::load_effective_config()
+        .ok()
+        .and_then(|cfg| cfg.get("features")?.get("session_recap")?.as_bool())
+        .unwrap_or(true);
 
     // Preserve auth methods so logout→re-login works without restarting.
     app.auth_methods = connection.auth_methods.clone();

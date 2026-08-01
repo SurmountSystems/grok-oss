@@ -524,6 +524,18 @@ pub enum Action {
     /// live-applied via `AppView::set_appearance` and persisted to
     /// pager.toml via `Effect::PersistSetting`.
     SetRespectManualFolds(bool),
+    /// Set `[scrollback.display].bubble_copy_buttons`. PAGER-owned:
+    /// live-applied via `AppView::set_appearance` and persisted to pager.toml.
+    SetBubbleCopyButtons(bool),
+    /// Set `[ui].cancel_subagents_on_turn_cancel` (`ask` | `always_stop` |
+    /// `always_continue`). Persists via `Effect::PersistSetting`.
+    SetCancelSubagentsOnTurnCancel(String),
+    /// Set auto return-from-away recap (`[ui.notifications] session_recap`).
+    SetNotificationsSessionRecap(bool),
+    /// Set auto recap debounce seconds.
+    SetNotificationsSessionRecapThresholdSecs(i64),
+    /// Set master `[features] session_recap` (restart-required for ACP gate).
+    SetFeaturesSessionRecap(bool),
     /// Set the canonical for `[ui].default_selected_permission`. Persists
     /// via `Effect::PersistSetting`. Payload is the registry's canonical
     /// string (`default` | `allow_once` | `allow_always` | `reject`).

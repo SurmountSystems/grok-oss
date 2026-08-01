@@ -26,8 +26,13 @@ impl AgentView {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
-                // Clear done: hit rect is set whenever the open todo pane has
-                // finished rows (focused or not). Does not require ActivePane::Todo.
+                // Tasks kill / open chrome first (before Clear finished) so a
+                // mis-placed Clear hit can never steal subagent open/close.
+                if let Some(out) = self.try_tasks_chrome_click(mouse.column, mouse.row) {
+                    return out;
+                }
+                // Clear finished: hit when open todo chrome painted it
+                // (finished rows + board visible). Slash / focused X remain.
                 if self.hit_todo_clear_done.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::ClearCompletedTodos);
                 }
@@ -555,104 +560,11 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     Some(AgentPane::Tasks) => {
-                        use crate::views::tasks_pane::TaskEntryId;
                         self.set_active_pane(AgentPane::Tasks, false);
-                        for (entry_id, rect) in &self.tasks.kill_button_rects {
-                            if rect.contains((mouse.column, mouse.row).into()) {
-                                match entry_id {
-                                    TaskEntryId::BgTask(tid) => {
-                                        return InputOutcome::Action(Action::KillBgTask(
-                                            tid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Agent(sid) => {
-                                        return InputOutcome::Action(Action::KillSubagent(
-                                            sid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Scheduled(tid) => {
-                                        return InputOutcome::Action(Action::CancelScheduledTask(
-                                            tid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Workflow(name) => {
-                                        return InputOutcome::Action(
-                                            Action::SendSlashCommandPreservingDraft(format!(
-                                                "/workflow stop {name}"
-                                            )),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        for (entry_id, rect) in &self.tasks.view_button_rects {
-                            if rect.contains((mouse.column, mouse.row).into()) {
-                                match entry_id {
-                                    TaskEntryId::BgTask(tid) => {
-                                        let already_open = self
-                                            .block_viewer
-                                            .as_ref()
-                                            .and_then(|v| v.bg_task_id.as_deref())
-                                            == Some(tid);
-                                        if already_open {
-                                            self.block_viewer = None;
-                                            return InputOutcome::Changed;
-                                        }
-                                        if let Some(task) = self.session.bg_tasks.get(tid) {
-                                            let entry_id =
-                                                task.scrollback_entry_id.unwrap_or_else(|| {
-                                                    crate::scrollback::entry::EntryId::new(0)
-                                                });
-                                            let is_running = task.status
-                                                == crate::app::agent::BgTaskStatus::Running;
-                                            self.block_viewer = Some(
-                                                crate::views::block_viewer::BlockViewerPane::for_bg_task(
-                                                    entry_id,
-                                                    tid,
-                                                    &task.stdout,
-                                                    is_running,
-                                                ),
-                                            );
-                                            self.set_active_pane(AgentPane::Scrollback, true);
-                                            return InputOutcome::Changed;
-                                        }
-                                    }
-                                    TaskEntryId::Agent(sid) => {
-                                        if let Some(child_sid) = self
-                                            .subagent_sessions
-                                            .iter()
-                                            .find(|(_, info)| {
-                                                info.subagent_id.as_ref() == sid.as_str()
-                                            })
-                                            .map(|(k, _)| k.clone())
-                                            && self.subagent_views.contains_key(&child_sid)
-                                        {
-                                            self.open_subagent_fullscreen(child_sid);
-                                            return InputOutcome::Changed;
-                                        }
-                                    }
-                                    TaskEntryId::Scheduled(tid) => {
-                                        if let Some(sid) = self
-                                            .session
-                                            .scheduled_tasks
-                                            .get(tid)
-                                            .and_then(|info| info.last_subagent_id.clone())
-                                            && let Some(child_sid) = self
-                                                .subagent_sessions
-                                                .iter()
-                                                .find(|(_, info)| {
-                                                    info.subagent_id.as_ref() == sid.as_str()
-                                                })
-                                                .map(|(k, _)| k.clone())
-                                            && self.subagent_views.contains_key(&child_sid)
-                                        {
-                                            self.open_subagent_fullscreen(child_sid);
-                                            return InputOutcome::Changed;
-                                        }
-                                    }
-                                    TaskEntryId::Workflow(_) => {}
-                                }
-                            }
+                        // Kill / open already handled early (before Clear). Re-check
+                        // here only if rects were empty on the early pass (shouldn't).
+                        if let Some(out) = self.try_tasks_chrome_click(mouse.column, mouse.row) {
+                            return out;
                         }
                         self.tasks.handle_mouse(
                             mouse.kind,
@@ -1272,6 +1184,93 @@ impl AgentView {
             _ => InputOutcome::Unchanged,
         }
     }
+    /// Hit-test tasks-pane kill / open chrome (model+timer+[↗]) from last paint.
+    ///
+    /// Used both as early global z-order (before Clear finished) and from the
+    /// Tasks pane click path. Opens subagents via [`Self::open_subagent_fullscreen`].
+    fn try_tasks_chrome_click(&mut self, col: u16, row: u16) -> Option<InputOutcome> {
+        use crate::views::tasks_pane::TaskEntryId;
+        for (entry_id, rect) in &self.tasks.kill_button_rects {
+            if !rect.contains((col, row).into()) {
+                continue;
+            }
+            return Some(match entry_id {
+                TaskEntryId::BgTask(tid) => InputOutcome::Action(Action::KillBgTask(tid.clone())),
+                TaskEntryId::Agent(sid) => InputOutcome::Action(Action::KillSubagent(sid.clone())),
+                TaskEntryId::Scheduled(tid) => {
+                    InputOutcome::Action(Action::CancelScheduledTask(tid.clone()))
+                }
+                TaskEntryId::Workflow(name) => InputOutcome::Action(
+                    Action::SendSlashCommandPreservingDraft(format!("/workflow stop {name}")),
+                ),
+            });
+        }
+        for (entry_id, rect) in self.tasks.view_button_rects.clone() {
+            if !rect.contains((col, row).into()) {
+                continue;
+            }
+            match entry_id {
+                TaskEntryId::BgTask(tid) => {
+                    let already_open = self
+                        .block_viewer
+                        .as_ref()
+                        .and_then(|v| v.bg_task_id.as_deref())
+                        == Some(tid.as_str());
+                    if already_open {
+                        self.block_viewer = None;
+                        return Some(InputOutcome::Changed);
+                    }
+                    if let Some(task) = self.session.bg_tasks.get(&tid) {
+                        let entry_id = task
+                            .scrollback_entry_id
+                            .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
+                        let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
+                        self.block_viewer =
+                            Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
+                                entry_id,
+                                &tid,
+                                &task.stdout,
+                                is_running,
+                            ));
+                        self.set_active_pane(AgentPane::Scrollback, true);
+                        return Some(InputOutcome::Changed);
+                    }
+                }
+                TaskEntryId::Agent(sid) => {
+                    if let Some(child_sid) = self
+                        .subagent_sessions
+                        .iter()
+                        .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                        .map(|(k, _)| k.clone())
+                        && self.subagent_views.contains_key(&child_sid)
+                    {
+                        self.open_subagent_fullscreen(child_sid);
+                        return Some(InputOutcome::Changed);
+                    }
+                }
+                TaskEntryId::Scheduled(tid) => {
+                    if let Some(sid) = self
+                        .session
+                        .scheduled_tasks
+                        .get(&tid)
+                        .and_then(|info| info.last_subagent_id.clone())
+                        && let Some(child_sid) = self
+                            .subagent_sessions
+                            .iter()
+                            .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                            .map(|(k, _)| k.clone())
+                        && self.subagent_views.contains_key(&child_sid)
+                    {
+                        self.open_subagent_fullscreen(child_sid);
+                        return Some(InputOutcome::Changed);
+                    }
+                }
+                TaskEntryId::Workflow(_) => {}
+            }
+        }
+        None
+    }
+
     /// Apply a scrollbar click/drag at the given screen row.
     ///
     /// Uses [`scrollbar_click_to_offset`] (same math as the thumb renderer)

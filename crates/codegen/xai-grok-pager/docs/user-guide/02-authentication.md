@@ -110,6 +110,13 @@ show **no data yet** until its billing pool has been polled. Meters stay
 distinct: personal **included** ≠ Business **included** ≠ SuperGrok **dollar
 extras** ≠ **console API spend**.
 
+**Honesty (not a code bug):** personal SuperGrok, Business SuperGrok, SuperGrok
+dollar extras, and console team prepaid are **separate product pools** on the
+xAI side (often separate seats or prepaid balances). Seeing more than one meter,
+or feeling like you are "paying double," is that billing structure — Grok OSS
+surfaces each pool honestly and can hop between identities; it does **not**
+merge them into one shared subscription.
+
 Re-auth clears the active base session so you can sign in again; multi-slot
 siblings stay until you log them out. Logout removes the active multi-slot (and
 base); other SuperGrok principals remain. Console API keys are a separate path

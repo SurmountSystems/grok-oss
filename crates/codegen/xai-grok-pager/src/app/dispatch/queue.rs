@@ -2433,11 +2433,11 @@ mod tests {
         assert_eq!(count_parked(agent), 1, "one marker per park");
     }
 
-    /// A re-park after new PARENT OUTPUT (streamed through the tracker, so
-    /// the agent-output epoch bumps) pushes a fresh marker for the new park
-    /// episode — otherwise the second park renders as a dead session.
+    /// A re-park after new parent output keeps a **single** parked marker for
+    /// the prompt turn. Epoch bumps must not stack another "Worked for" row
+    /// (regression: append-per-tick spam while subagents/waits run).
     #[test]
-    fn parked_marker_repushes_on_repark_after_new_parent_output() {
+    fn parked_marker_stays_single_on_repark_after_new_parent_output() {
         use crate::acp::meta::NotificationMeta;
 
         let mut app = test_app_with_agent();
@@ -2465,8 +2465,86 @@ mod tests {
 
         simulate_task_output_wait_call(agent, "wait-2", "bg-1", 600_000);
         agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 2, "new episode pushes a fresh marker");
+        assert_eq!(
+            count_parked(agent),
+            1,
+            "re-park must not stack a second Worked-for row"
+        );
         assert!(agent.renders_parked());
+    }
+
+    /// Named contract: N mid-park agent-output epoch ticks (same-stream
+    /// thoughts while still waiting) must not append N "Worked for" transcript
+    /// rows. One parked marker; elapsed refreshes in place.
+    #[test]
+    fn parked_marker_not_stacked_on_epoch_ticks_mid_park() {
+        use crate::acp::meta::NotificationMeta;
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::SessionEvent;
+
+        crate::appearance::cache::set_show_thinking_blocks(true);
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        dispatch(Action::SendPrompt("first".into()), &mut app);
+        let agent = app.agents.get_mut(&id).unwrap();
+        // Back-date turn start so elapsed advances across refreshes.
+        agent.turn_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(90));
+
+        simulate_task_output_wait_call(agent, "wait-1", "bg-1", 600_000);
+        agent.maybe_push_parked_marker();
+        assert_eq!(count_parked(agent), 1);
+
+        let first_msg = (0..agent.scrollback.len())
+            .rev()
+            .find_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+                Some(RenderBlock::SessionEvent(b)) if b.parked => Some(b.event.message()),
+                _ => None,
+            })
+            .expect("parked marker message");
+        assert!(
+            first_msg.starts_with("Worked for"),
+            "expected Worked for marker, got {first_msg:?}"
+        );
+
+        // Simulate the ACP path: each thought bumps agent_output_epoch, then
+        // maybe_push_parked_marker re-evaluates (was: append another row).
+        for i in 0..8 {
+            assert!(
+                agent.session.tracker.handle_update(
+                    acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(format!("tick-{i}"))),
+                    )),
+                    &NotificationMeta::default(),
+                    &mut agent.scrollback,
+                ),
+                "thought {i} should apply"
+            );
+            agent.maybe_push_parked_marker();
+            assert_eq!(
+                count_parked(agent),
+                1,
+                "epoch tick {i} must not stack another Worked-for row"
+            );
+        }
+
+        let last = (0..agent.scrollback.len())
+            .rev()
+            .find_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+                Some(RenderBlock::SessionEvent(b)) if b.parked => Some(&b.event),
+                _ => None,
+            })
+            .expect("single parked marker still present");
+        match last {
+            SessionEvent::TurnCompleted { elapsed: Some(e) } => {
+                assert!(
+                    e.as_secs() >= 90,
+                    "in-place refresh should keep live elapsed, got {e:?}"
+                );
+            }
+            other => panic!("expected parked TurnCompleted, got {other:?}"),
+        }
     }
 
     /// Rows landing during a park WITHOUT parent output (chips and other

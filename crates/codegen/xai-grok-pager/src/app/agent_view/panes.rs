@@ -302,7 +302,7 @@ impl AgentView {
             }
             return overlay_action_to_outcome(action);
         }
-        // X = clear completed (same as chrome Clear done / ActionId).
+        // X = clear completed (same as chrome Clear finished / ActionId).
         if !has_input
             && (key!('X').matches(key) || registry.matches_id(ActionId::ClearCompletedTodos, key))
         {
@@ -859,25 +859,22 @@ mod clear_completed_todos_key_tests {
         );
     }
 
-    /// Named contract: mouse click on Clear done works without ActivePane::Todo
-    /// (hit rect from open unfocused pane chrome). Focus must not gate dispatch.
+    /// Named contract: when a clear-finished hit rect is present (product paints
+    /// it for open board + finished rows), a mouse click on that rect dispatches
+    /// ClearCompletedTodos. Empty hit (hidden board / nothing finished) does not
+    /// invent the action.
     #[test]
-    fn clear_done_click_works_without_todo_pane_focus() {
+    fn clear_finished_click_dispatches_when_hit_rect_set() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
 
         let mut agent = make_agent();
-        agent.set_active_pane(AgentPane::Scrollback, false);
-        assert_ne!(
-            agent.active_pane,
-            AgentPane::Todo,
-            "setup: scrollback/prompt focus, not Todo"
-        );
-        // Simulate last-frame paint of unfocused Clear done chrome.
-        agent.hit_todo_clear_done.set(Some(Rect::new(10, 3, 10, 1)));
+        agent.set_active_pane(AgentPane::Todo, false);
+        // Simulate last-frame paint of clear-finished `[−]` chrome (open + finished).
+        agent.hit_todo_clear_done.set(Some(Rect::new(10, 3, 3, 1)));
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 12,
+            column: 11,
             row: 3,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
@@ -887,7 +884,18 @@ mod clear_completed_todos_key_tests {
         );
         assert!(
             matches!(out, InputOutcome::Action(Action::ClearCompletedTodos)),
-            "Clear done click without Todo focus must dispatch, got {out:?}"
+            "Clear finished click on hit rect must dispatch, got {out:?}"
+        );
+
+        // Empty hit (hidden / nothing finished): click does not invent ClearCompletedTodos.
+        agent.hit_todo_clear_done.clear();
+        let out_miss = agent.handle_input(
+            &crossterm::event::Event::Mouse(mouse),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            !matches!(out_miss, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "no clear hit must not dispatch ClearCompletedTodos, got {out_miss:?}"
         );
     }
 

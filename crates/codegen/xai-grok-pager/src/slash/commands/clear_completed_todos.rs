@@ -1,7 +1,8 @@
 //! `/clear-completed-todos` — archive finished board rows off the live session board.
 //!
-//! Same backend as the todo pane **Clear done** chrome control (open pane, focused
-//! or not) and optional focused `X`.
+//! Same backend as the todo pane clear-finished icon (`[−]`; when the todo
+//! board is open and finished rows exist, focused or not) and optional
+//! focused `X`. Hints still say "Clear finished."
 //! Does not hide-only (`h`); does not wipe open work via merge:false.
 
 use crate::app::actions::Action;

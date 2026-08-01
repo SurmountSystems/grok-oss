@@ -396,7 +396,7 @@ pub fn seed_ask_todo(state: &mut TodoState, prompt_id: &str, content: &str) -> b
 ///
 /// Returns how many items were archived (0 = no-op).
 ///
-/// This is the human **Clear done** path — not `merge: false` wipe and not the
+/// This is the human **Clear finished** path — not `merge: false` wipe and not the
 /// pane `h` hide-done view filter.
 pub fn clear_completed_todos(state: &mut TodoState) -> usize {
     let ids: Vec<TodoId> = state
@@ -684,7 +684,7 @@ pub enum ClearedReason {
     /// Dropped by [`prune_old_ask_todos`] when over the ask cap.
     AskPrune,
     /// Operator cleared completed/cancelled rows from the live board
-    /// (todo pane **Clear done**, key, or `/clear-completed-todos`).
+    /// (todo pane **Clear finished**, key, or `/clear-completed-todos`).
     UserClearCompleted,
 }
 
@@ -2527,7 +2527,7 @@ mod tests {
         assert_eq!(from_legacy.cleared_len(), 0);
     }
 
-    // ── clear_completed_todos (operator Clear done) ────────────────────
+    // ── clear_completed_todos (operator Clear finished) ────────────────
 
     #[test]
     fn clear_completed_archives_done_and_cancelled_leaves_open() {

@@ -26,6 +26,10 @@
             viewer.side_panel && !viewer.fullscreen,
             "soft park auto-open must be side panel, not fullscreen modal"
         );
+        assert!(
+            viewer.plan_ref().is_some_and(|p| p.feedback_active),
+            "soft park auto-open must arm approval footer CTAs (feedback_active)"
+        );
         assert_eq!(
             viewer.markdown_content_for_test(),
             Some("# Cursor Plan")

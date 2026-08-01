@@ -79,6 +79,17 @@ impl NotificationService {
         &self.config
     }
 
+    /// Live-update auto session-recap preference (Settings modal).
+    pub fn set_session_recap(&mut self, enabled: bool) {
+        self.config.session_recap = enabled;
+    }
+
+    /// Live-update auto recap debounce seconds (Settings modal).
+    pub fn set_session_recap_threshold_secs(&mut self, secs: u64) {
+        self.config.session_recap_threshold_secs = secs;
+        self.focus_tracker.set_recap_threshold_secs(secs);
+    }
+
     pub fn protocol(&self) -> protocol::NotificationProtocol {
         self.protocol
     }

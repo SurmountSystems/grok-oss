@@ -1819,8 +1819,10 @@ impl TasksPane {
             ));
         }
 
-        // View button
+        // View button glyph. Open hit (below) also covers model + timer so a
+        // click on top-right subagent chrome opens the child, not only [↗].
         rx = rx.saturating_sub(3);
+        let view_x = rx;
         let is_view_hovered = matches!(
             &self.hovered_view,
             Some(TaskEntryId::Agent(sid)) if sid == subagent_id
@@ -1836,10 +1838,6 @@ impl TasksPane {
             &Span::styled(crate::glyphs::enlarge_button(), view_style),
             3,
         );
-        self.view_button_rects.push((
-            TaskEntryId::Agent(subagent_id.to_string()),
-            Rect::new(rx, y, 3, 1),
-        ));
 
         // Time/status text
         let right_width = right_text.width() as u16;
@@ -1858,6 +1856,15 @@ impl TasksPane {
                 model_w,
             );
         }
+
+        // Open chrome hit: model + elapsed + [↗], not kill [x].
+        let open_x = rx.min(view_x);
+        let open_right = view_x.saturating_add(3);
+        let open_w = open_right.saturating_sub(open_x).max(3);
+        self.view_button_rects.push((
+            TaskEntryId::Agent(subagent_id.to_string()),
+            Rect::new(open_x, y, open_w, 1),
+        ));
 
         // Context badge (pre-computed above for overlay clearing)
         if !badge.is_empty() {

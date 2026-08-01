@@ -221,6 +221,26 @@ const PLAN_MODE_CHOICES: &[EnumChoice] = &[
 ];
 
 /// How `exit_plan_mode` presents plan approval (option D).
+/// Cancel-subagents sticky preference when cancelling a parent turn.
+/// Canonicals match `[ui].cancel_subagents_on_turn_cancel` / cancel picker.
+const CANCEL_SUBAGENTS_ON_TURN_CANCEL_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "ask",
+        display: "Ask each time",
+        description: "Show the cancel-turn picker when subagents are still running.",
+    },
+    EnumChoice {
+        canonical: "always_stop",
+        display: "Always stop subagents",
+        description: "Stop running subagents when you cancel the parent turn.",
+    },
+    EnumChoice {
+        canonical: "always_continue",
+        display: "Always leave running",
+        description: "Leave subagents running when you cancel the parent turn.",
+    },
+];
+
 const PLAN_APPROVAL_PARK_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "soft",
@@ -1082,6 +1102,32 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        // PAGER-owned, persisted to `[scrollback.display].bubble_copy_buttons`
+        // in pager.toml. Always-on ⧉ on user/assistant bubbles (no select-first).
+        SettingMeta {
+            key: "bubble_copy_buttons",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Pager,
+            label: "Bubble copy buttons",
+            description: "Show always-on ⧉ copy chrome on user and assistant message bubbles \
+                          (no need to select first). Default on.",
+            keywords: &[
+                "copy",
+                "bubble",
+                "clipboard",
+                "button",
+                "buttons",
+                "chrome",
+                "mouse",
+                "message",
+                "selection",
+            ],
+            kind: SettingKind::Bool {
+                default: crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned: `[ui].group_tool_verbs` + process-wide cache. Default ON.
         SettingMeta {
             key: "group_tool_verbs",
@@ -1410,6 +1456,35 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        // SHARED: `[ui].cancel_subagents_on_turn_cancel` — sticky cancel picker.
+        // Written by the cancel-turn "Always…" choices; also searchable here.
+        SettingMeta {
+            key: "cancel_subagents_on_turn_cancel",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Cancel subagents with turn",
+            description: "When you cancel a parent turn that still has running subagents: \
+                          ask each time (default), always stop them, or always leave them running.",
+            keywords: &[
+                "cancel",
+                "subagent",
+                "subagents",
+                "stop",
+                "turn",
+                "ctrl+c",
+                "always",
+                "ask",
+                "continue",
+                "leave",
+            ],
+            kind: SettingKind::Enum {
+                default: "ask",
+                choices: CANCEL_SUBAGENTS_ON_TURN_CANCEL_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned: `[ui].auto_run_implement` + process-wide cache. Default ON
         // for discoverability — auto-queues a sentence-leading `/implement`
         // follow-up from the prior user prompt after a successful turn.
@@ -1485,6 +1560,92 @@ pub fn default_settings() -> Vec<SettingMeta> {
             // New sessions pick up the global default; active sessions use
             // `/economic-mode` for an immediate override.
             restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned: auto return-from-away recap (`[ui.notifications] session_recap`).
+        // Live-applied to NotificationService; does not gate manual `/recap`.
+        SettingMeta {
+            key: "notifications.session_recap",
+            category: SettingCategory::Session,
+            owner: SettingOwner::Shell,
+            label: "Auto session recap",
+            description: "When you return to the terminal after being away, show a short \
+                          \"where was I\" recap. Manual /recap still works when this is off. \
+                          To disable all recaps (including /recap), use Master session recap \
+                          or GROK_SESSION_RECAP=0.",
+            keywords: &[
+                "recap",
+                "session",
+                "summarize",
+                "summarise",
+                "away",
+                "return",
+                "auto",
+                "notification",
+                "where",
+                "was",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.notifications.session_recap.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned: auto recap debounce (`[ui.notifications] session_recap_threshold_secs`).
+        SettingMeta {
+            key: "notifications.session_recap_threshold_secs",
+            category: SettingCategory::Session,
+            owner: SettingOwner::Shell,
+            label: "Auto recap after (seconds)",
+            description: "Minimum seconds the terminal must be unfocused before an automatic \
+                          session recap may be offered on return. Debounces quick tab switches. \
+                          The shell still enforces its own idle gates (e.g. minutes since last turn).",
+            keywords: &[
+                "recap",
+                "threshold",
+                "seconds",
+                "debounce",
+                "away",
+                "unfocused",
+                "idle",
+                "session",
+            ],
+            kind: SettingKind::Int {
+                default: ui_default
+                    .notifications
+                    .session_recap_threshold_secs
+                    .unwrap_or(30) as i64,
+                min: 5,
+                max: 3600,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned master: `[features] session_recap` (and env GROK_SESSION_RECAP).
+        // Restart-required so the shell re-advertises sessionRecap on ACP initialize.
+        SettingMeta {
+            key: "features.session_recap",
+            category: SettingCategory::Session,
+            owner: SettingOwner::Shell,
+            label: "Master session recap",
+            description: "Enable session recap at all: manual /recap and auto return-from-away. \
+                          Off kills both (same as GROK_SESSION_RECAP=0). Restart required so the \
+                          shell re-advertises the gate. Prefer Auto session recap off if you only \
+                          want to stop automatic recaps.",
+            keywords: &[
+                "recap",
+                "session",
+                "feature",
+                "master",
+                "kill",
+                "disable",
+                "enable",
+                "summarize",
+                "summarise",
+                "env",
+            ],
+            kind: SettingKind::Bool { default: true },
+            restart_required: true,
             hidden_in_minimal: false,
         },
         // SHELL-owned dual auto-compact preference (percent or absolute tokens).

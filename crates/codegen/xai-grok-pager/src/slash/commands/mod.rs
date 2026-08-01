@@ -316,6 +316,7 @@ mod tests {
             "note",
             "notes",
             "onboarding",
+            "options",
             "personas",
             "plan",
             "plan-view",

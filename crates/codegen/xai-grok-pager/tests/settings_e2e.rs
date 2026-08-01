@@ -69,10 +69,15 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "group_tool_verbs",
     "collapsed_edit_blocks",
     "respect_manual_folds",
+    "bubble_copy_buttons",
     "hunk_tracker_mode",
     "voice_keybind_enabled",
     "voice_capture_mode",
     "voice_stt_language",
+    "notifications.session_recap",
+    "notifications.session_recap_threshold_secs",
+    "features.session_recap",
+    "cancel_subagents_on_turn_cancel",
     // Contextual-hints group + its per-tip child toggles (exercised via the
     // group sub-sheet, not as top-level rows).
     "contextual_hints",
@@ -283,6 +288,24 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetRespectManualFolds value differs from expected"
+            )
+        }
+        ("bubble_copy_buttons", Action::SetBubbleCopyButtons(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetBubbleCopyButtons value differs from expected"
+            )
+        }
+        ("notifications.session_recap", Action::SetNotificationsSessionRecap(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetNotificationsSessionRecap value differs from expected"
+            )
+        }
+        ("features.session_recap", Action::SetFeaturesSessionRecap(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetFeaturesSessionRecap value differs from expected"
             )
         }
         ("show_thinking_blocks", Action::SetShowThinkingBlocks(b)) => {
@@ -1850,6 +1873,7 @@ fn registry_kind_membership_through_pr_14() {
             "auto_run_implement",
             "economic_mode",
             "respect_manual_folds",
+            "bubble_copy_buttons",
             "show_thinking_blocks",
             "show_timeline",
             "show_timestamps",
@@ -1863,6 +1887,8 @@ fn registry_kind_membership_through_pr_14() {
             "auto_update",
             "show_tips",
             "voice_keybind_enabled",
+            "notifications.session_recap",
+            "features.session_recap",
             // Per-tip contextual-hint children (hidden from the top-level list,
             // toggled inside the group sub-sheet) are still Bool settings.
             "contextual_hints.undo",
@@ -1887,6 +1913,7 @@ fn registry_kind_membership_through_pr_14() {
             "auto_compact_threshold_percent",
             "auto_dark_theme",
             "auto_light_theme",
+            "cancel_subagents_on_turn_cancel",
             "coding_data_sharing",
             "default_selected_permission",
             "hunk_tracker_mode",
@@ -1923,7 +1950,12 @@ fn registry_kind_membership_through_pr_14() {
     sorted_int.sort();
     assert_eq!(
         sorted_int,
-        vec!["max_thoughts_width", "scroll_lines", "scroll_speed"],
+        vec![
+            "max_thoughts_width",
+            "notifications.session_recap_threshold_secs",
+            "scroll_lines",
+            "scroll_speed",
+        ],
         "Int kind membership drift (PR 8)",
     );
 
@@ -1958,6 +1990,7 @@ fn enum_settings_membership_through_pr_14() {
             "auto_compact_threshold_percent",
             "auto_dark_theme",
             "auto_light_theme",
+            "cancel_subagents_on_turn_cancel",
             "coding_data_sharing",
             "default_selected_permission",
             "hunk_tracker_mode",
@@ -2054,6 +2087,11 @@ fn defaults_round_trip_through_registry() {
             "group_tool_verbs" => SettingValue::Bool(true),
             "collapsed_edit_blocks" => SettingValue::Bool(false),
             "respect_manual_folds" => SettingValue::Bool(false),
+            "bubble_copy_buttons" => SettingValue::Bool(true),
+            "notifications.session_recap" => SettingValue::Bool(true),
+            "notifications.session_recap_threshold_secs" => SettingValue::Int(30),
+            "features.session_recap" => SettingValue::Bool(true),
+            "cancel_subagents_on_turn_cancel" => SettingValue::Enum("ask"),
             // Per-tip contextual-hint children default ON (inherit → true).
             "contextual_hints.undo" => SettingValue::Bool(true),
             "contextual_hints.plan_mode" => SettingValue::Bool(true),
@@ -2139,7 +2177,10 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
             | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
-            | SettingsKeyOutcome::Action(Action::SetVoiceKeybindEnabled(_)) => {}
+            | SettingsKeyOutcome::Action(Action::SetVoiceKeybindEnabled(_))
+            | SettingsKeyOutcome::Action(Action::SetBubbleCopyButtons(_))
+            | SettingsKeyOutcome::Action(Action::SetNotificationsSessionRecap(_))
+            | SettingsKeyOutcome::Action(Action::SetFeaturesSessionRecap(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
                 meta.key, other
@@ -8049,7 +8090,7 @@ fn group_tool_verbs_renders_under_appearance_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for group_tool_verbs, got {other:?}"),
     }
-    // Must sit immediately below respect_manual_folds in the registry order.
+    // Appearance order: respect_manual_folds → bubble_copy_buttons → group_tool_verbs.
     let keys: Vec<&str> = reg
         .all()
         .iter()
@@ -8060,14 +8101,24 @@ fn group_tool_verbs_renders_under_appearance_category_shell_owned() {
         .iter()
         .position(|k| *k == "respect_manual_folds")
         .expect("respect_manual_folds in Appearance");
+    let bubble_idx = keys
+        .iter()
+        .position(|k| *k == "bubble_copy_buttons")
+        .expect("bubble_copy_buttons in Appearance");
     let group_idx = keys
         .iter()
         .position(|k| *k == "group_tool_verbs")
         .expect("group_tool_verbs in Appearance");
     assert_eq!(
         respect_idx + 1,
+        bubble_idx,
+        "bubble_copy_buttons must sit immediately below respect_manual_folds; \
+         Appearance order: {keys:?}"
+    );
+    assert_eq!(
+        bubble_idx + 1,
         group_idx,
-        "group_tool_verbs must be immediately below respect_manual_folds; \
+        "group_tool_verbs must sit immediately below bubble_copy_buttons; \
          Appearance order: {keys:?}"
     );
 }
@@ -8236,5 +8287,174 @@ fn hide_header_renders_under_appearance_category_shared() {
     match &meta.kind {
         SettingKind::Bool { default } => assert!(!*default, "default must be false"),
         other => panic!("expected Bool kind for hide_header, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session recap Settings rows (operator-requested Settings gaps)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn search_recap_finds_session_recap_settings() {
+    let reg = SettingsRegistry::defaults();
+    let hits = reg.search("recap");
+    let keys: Vec<&str> = hits.iter().map(|m| m.key).collect();
+    assert!(
+        keys.contains(&"notifications.session_recap"),
+        "search(recap) must find auto recap; got {keys:?}"
+    );
+    assert!(
+        keys.contains(&"features.session_recap"),
+        "search(recap) must find master recap; got {keys:?}"
+    );
+    assert!(
+        keys.contains(&"notifications.session_recap_threshold_secs"),
+        "search(recap) must find threshold; got {keys:?}"
+    );
+}
+
+#[test]
+fn notifications_session_recap_space_dispatches_typed_setter() {
+    // Default ON → toggle to false.
+    let mut s = make_state();
+    navigate_to(&mut s, "notifications.session_recap");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "notifications.session_recap", false);
+}
+
+#[test]
+fn notifications_session_recap_enter_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "notifications.session_recap");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert_set_bool_action(outcome, "notifications.session_recap", false);
+}
+
+#[test]
+fn features_session_recap_space_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "features.session_recap");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "features.session_recap", false);
+}
+
+#[test]
+fn features_session_recap_is_session_shell_restart_required() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("features.session_recap")
+        .expect("features.session_recap must be registered");
+    assert_eq!(meta.category, SettingCategory::Session);
+    assert_eq!(meta.owner, SettingOwner::Shell);
+    assert!(meta.restart_required);
+}
+
+#[test]
+fn bubble_copy_buttons_space_dispatches_typed_setter() {
+    // Default ON → toggle to false.
+    let mut s = make_state();
+    navigate_to(&mut s, "bubble_copy_buttons");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
+}
+
+#[test]
+fn bubble_copy_buttons_enter_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "bubble_copy_buttons");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
+}
+
+#[test]
+fn bubble_copy_buttons_mouse_click_two_stage_toggles() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "bubble_copy_buttons") as u16;
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click on a different row body should only select, got: {outcome:?}"
+    );
+    assert_eq!(s.selected, row_y as usize);
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
+}
+
+#[test]
+fn bubble_copy_buttons_renders_under_appearance_pager_owned() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("bubble_copy_buttons")
+        .expect("bubble_copy_buttons must be registered");
+    assert_eq!(meta.category, SettingCategory::Appearance);
+    assert_eq!(meta.owner, SettingOwner::Pager);
+    match &meta.kind {
+        SettingKind::Bool { default } => assert!(*default),
+        other => panic!("expected Bool kind for bubble_copy_buttons, got {other:?}"),
+    }
+}
+
+#[test]
+fn cancel_subagents_on_turn_cancel_enter_opens_picker_and_commits() {
+    let mut s = make_state();
+    navigate_to(&mut s, "cancel_subagents_on_turn_cancel");
+    // Enter opens enum picker.
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter should open enum picker, got {outcome:?}"
+    );
+    // Move to always_stop (index 1) and commit.
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetCancelSubagentsOnTurnCancel(s)) => {
+            assert_eq!(s, "always_stop");
+        }
+        other => panic!("expected SetCancelSubagentsOnTurnCancel, got {other:?}"),
+    }
+}
+
+#[test]
+fn cancel_subagents_registered_under_agent() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("cancel_subagents_on_turn_cancel")
+        .expect("cancel_subagents_on_turn_cancel must be registered");
+    assert_eq!(meta.category, SettingCategory::Agent);
+    assert_eq!(meta.owner, SettingOwner::Shared);
+}
+
+#[test]
+fn session_recap_threshold_int_stepper_commits() {
+    let mut s = make_state();
+    navigate_to(&mut s, "notifications.session_recap_threshold_secs");
+    // Enter opens int stepper.
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter should open int stepper, got {outcome:?}"
+    );
+    // Bump up then commit.
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Right));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetNotificationsSessionRecapThresholdSecs(v)) => {
+            assert!(v > 30, "stepper should bump above default 30, got {v}");
+        }
+        other => panic!("expected SetNotificationsSessionRecapThresholdSecs, got {other:?}"),
     }
 }

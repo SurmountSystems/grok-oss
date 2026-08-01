@@ -2014,6 +2014,76 @@ fn upsert_respect_manual_folds(content: &str, enabled: bool) -> Result<String, S
     Ok(doc.to_string())
 }
 
+/// Persist `[scrollback.display].bubble_copy_buttons` to pager.toml.
+pub fn persist_bubble_copy_buttons(enabled: bool) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    if xai_grok_config::user_grok_home().is_none() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            "no user grok home resolved; refusing to write a cwd-relative pager.toml \
+             that startup would never read",
+        ));
+    }
+    let _guard = PAGER_TOML_SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let path = crate::util::pager_toml_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let updated = upsert_bubble_copy_buttons(&content, enabled)
+        .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    #[cfg(unix)]
+    let prior_mode: Option<u32> = std::fs::metadata(&path).ok().map(|m| {
+        use std::os::unix::fs::PermissionsExt;
+        m.permissions().mode()
+    });
+
+    let suffix = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("toml.tmp.{}.{}", std::process::id(), nanos)
+    };
+    let tmp = path.with_extension(suffix);
+    std::fs::write(&tmp, updated)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = prior_mode {
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+        }
+    }
+    std::fs::rename(&tmp, &path)
+}
+
+fn upsert_bubble_copy_buttons(content: &str, enabled: bool) -> Result<String, String> {
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let scrollback = doc
+        .entry("scrollback")
+        .or_insert_with(implicit_table)
+        .as_table_mut()
+        .ok_or_else(|| "pager.toml `scrollback` is not a table".to_string())?;
+    let display = scrollback
+        .entry("display")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| "pager.toml `scrollback.display` is not a table".to_string())?;
+    display.insert("bubble_copy_buttons", toml_edit::value(enabled));
+    Ok(doc.to_string())
+}
+
 fn implicit_table() -> Item {
     let mut table = toml_edit::Table::new();
     table.set_implicit(true);

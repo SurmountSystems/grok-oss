@@ -322,6 +322,28 @@ pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
     .await
 }
 
+/// Persist `[ui.notifications].session_recap` (auto return-from-away recap).
+/// Does not gate manual `/recap` (that is `[features] session_recap`).
+pub async fn set_notifications_session_recap(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.notifications.session_recap = Some(value)).await
+}
+
+/// Persist `[ui.notifications].session_recap_threshold_secs` (debounce).
+/// Clamped to a sane range at the shell boundary.
+pub async fn set_notifications_session_recap_threshold_secs(value: i64) -> Result<()> {
+    let clamped = value.clamp(5, 3600) as u64;
+    update_config(|cfg| cfg.ui.notifications.session_recap_threshold_secs = Some(clamped)).await
+}
+
+/// Persist `[features].session_recap` (master kill for `/recap` + auto).
+///
+/// Only this key is written under `[features]` so other feature flags are
+/// not splatted from `Features` defaults. Restart / new session so the shell
+/// re-advertises `sessionRecap` on ACP initialize.
+pub async fn set_features_session_recap(value: bool) -> Result<()> {
+    super::persist::update_features_session_recap(value).await
+}
+
 /// Persist `[ui].screen_mode` (`fullscreen` | `minimal`). Empty clears the key.
 pub async fn set_screen_mode(value: String) -> Result<()> {
     update_config(|cfg| {

@@ -27,14 +27,27 @@ less than product code and tests. Do not invent long essays or git nags.
 
 1. **Never run `git commit`.** Commits are human-only on a real TTY (signed).
    Agents may do complex git labor when asked (conflict resolve, merge setup,
-   history diagnosis), then **stage and hand** exact `git commit -S …`
+   history diagnosis), then **hand** exact `git add` / `git commit -S …`
    commands — including after “fix conflicts” / “make the PR mergeable” /
    even “commit this.” Do **not** push unless the operator explicitly asked to push.
    Full policy: `~/.grok/AGENTS.md` § *Commits — agents never commit*.
+1a. **Never `git add` / stage unless the operator explicitly asked.** Do not
+   stage “to clean up,” after `cargo fmt`, after conflict resolve, or “to help
+   the commit.” Leave the index alone; report paths and hand `git add …` if
+   useful. Exception only when the operator clearly ordered staging (e.g. “stage
+   these files,” “git add the fix”).
 2. **Never bypass GPG** (`commit.gpgsign=false`, `--no-gpg-sign`, fake
    `gpg.program`, hook disables, etc.).
 3. **Never bulk find-and-replace.** Bulk **find** (`rg`) is fine. Edits must
    be surgical and reviewed in context.
+3a. **Rustfmt after every Rust save (targeted).** When you create or edit
+   `*.rs` files, run **`cargo fmt` for the touched packages** before join /
+   handoff (e.g. `cargo fmt -p xai-grok-pager` or multiple `-p` crates). Prefer
+   package-scoped fmt over a full `cargo fmt --all` every micro-edit when
+   packages are known. Do **not** call bare `rustfmt path.rs` without cargo
+   (workspace is **edition 2024**; path-only rustfmt can fail on let-chains).
+   Goal: operator never needs a second `cargo fmt --all` that leaves unstaged
+   noise after `git add`.
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
    replies, product docs, tests, or **filenames**. **No bare plan-step codes**
@@ -179,6 +192,14 @@ intent, or recon survival from prose alone.
 - **Plan approval:** product CTAs only (`exit_plan_mode` → soft-park →
   `a`/`A`/`?`/`s`/`q`). **Never** freeform chat “reply approve/revise/abandon.”
   Pin: `~/.grok/AGENTS.md` § *Plan approval — product CTAs only*.
+- **DOGE colour roles (do not invent from screenshots):** Human chrome is
+  **green** (`accent_user`: composer caret, human rails, OSC 12, success).
+  Agent activity is **magenta** (`accent_running`: active agent rails, tool
+  spinner, lower-left still-running throbber, model accent). **Do not** flip
+  the caret to magenta “because agent,” invent a “little guy” colour without a
+  plain operator name, or conflate caret residue with the lower-left throbber
+  or **Clear finished** (quiet secondary idle; not neon green, not magenta).
+  Lasting product pin: [`FORK.md`](FORK.md); user-guide `06-theming`.
 
 ## Skills (multi-source)
 

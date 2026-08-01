@@ -227,6 +227,53 @@ impl AgentView {
         }
         self.line_viewer = Some(viewer);
     }
+
+    /// Keep plan-viewer chrome aligned with whether approval is parked.
+    ///
+    /// Soft-park / side-panel CTAs key off `feedback_active`. That flag is set
+    /// on open, but dogfood can leave a plan viewer open with stale casual
+    /// flags while `plan_approval_view` is still live (or the reverse). Call
+    /// this every draw before painting so Approve/Notes/Clarify/Revise/Quit
+    /// never silently degrade to casual `c comment` while approval is pending.
+    pub(crate) fn sync_plan_viewer_approval_chrome(&mut self) {
+        let approval = self.plan_approval_view.is_some();
+        let Some(viewer) = self.line_viewer.as_mut() else {
+            return;
+        };
+        if viewer.kind != crate::views::file_search::line_viewer::LineViewerKind::PlanPreview {
+            return;
+        }
+        let plan = viewer.plan_mut();
+        plan.feedback_active = approval;
+        // Casual preview only: show `c comment` when no live reverse-request.
+        plan.show_action_buttons = !approval;
+    }
+
+    /// Drop leftover plan-approval chrome after a turn ends, but **never**
+    /// stale-cancel a live soft-park reverse-request.
+    ///
+    /// Named contract (dogfood 2026-08-01): while `response_tx` is still open,
+    /// the user has not answered Approve/Notes/Clarify/Revise/Quit. A turn-end
+    /// broadcast must not wipe the side panel / strip CTAs and leave casual
+    /// fullscreen plan.md with only `c comment`. Explicit user cancel (Esc
+    /// cancel-turn) still uses the hard wipe path.
+    pub(crate) fn dismiss_plan_approval_after_turn_if_stale(&mut self) {
+        let still_awaiting = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| p.response_tx.is_some());
+        if still_awaiting {
+            return;
+        }
+        if let Some(mut pav) = self.plan_approval_view.take() {
+            // Channel already consumed or missing — no live waiter to cancel.
+            let _ = pav.send_stale_cancel();
+            self.plan_next_comment_id = pav.next_comment_id;
+            self.restore_plan_stashed_prompt(pav.stashed_prompt);
+            self.line_viewer = None;
+        }
+    }
+
     /// Test fixture: drive the agent into casual-commenting state
     /// (line viewer open in plan-preview mode + `casual_commenting_range`
     /// armed) so the `Event::Paste` plan-feedback arm at ~1539 is
@@ -3591,6 +3638,294 @@ mod approve_plan_flush_tests {
             cell.symbol(),
             "a",
             "Approve button starts with bold key `a`"
+        );
+    }
+
+    /// Full agent draw after soft-park-style open: either panel footer CTAs
+    /// (with borders) paint, or soft-park strip CTAs — never silent zero chrome.
+    fn draw_agent_hits(agent: &mut AgentView, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        use crate::actions::ActionRegistry;
+        use crate::app::bundle::BundleState;
+        use crate::scrollback::render::ScratchBuffer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    fn soft_park_style_open(agent: &mut AgentView, plan: &str) {
+        let _rx = install_plan_approval(agent, plan);
+        // Mirror handle_exit_plan_mode soft path: Prompt focus + auto-open panel.
+        agent.active_modal = None;
+        agent.block_viewer = None;
+        agent.set_active_pane(ActivePane::Prompt, false);
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        agent.show_plan_preview_if_available();
+        if let Some(ref mut viewer) = agent.line_viewer {
+            viewer.plan_mut().feedback_active = true;
+        }
+    }
+
+    /// Named contract: after soft park auto-open, a normal-size frame paints
+    /// side-panel approval footer CTAs and border lines (not a barren box).
+    #[test]
+    fn soft_park_draw_paints_panel_approval_footer_chrome() {
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, "# Soft park chrome\n\n## Steps\nShip it\n");
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.side_panel && v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "soft park must open side panel with feedback_active"
+        );
+
+        let buf = draw_agent_hits(&mut agent, 120, 40);
+
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("plan extras after paint");
+        assert!(
+            plan.approve_button_area.is_some()
+                && plan.approve_notes_button_area.is_some()
+                && plan.questions_button_area.is_some()
+                && plan.send_button_area.is_some()
+                && plan.abandon_button_area.is_some(),
+            "panel footer must expose all five approval CTA hit targets after soft-park draw"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.last_modal_area.is_some()),
+            "panel must paint (last_modal_area set) — not size early-return"
+        );
+
+        // Border / footer line glyphs present somewhere in the frame.
+        let mut has_box_line = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    let s = cell.symbol();
+                    if s == "\u{2500}" || s == "\u{2502}" || s == "\u{256d}" || s == "\u{256e}" {
+                        has_box_line = true;
+                        break;
+                    }
+                }
+            }
+            if has_box_line {
+                break;
+            }
+        }
+        assert!(
+            has_box_line,
+            "soft-park side panel must paint rounded-border / title-footer lines"
+        );
+    }
+
+    /// Named contract: if the plan panel is open but too small to paint footer
+    /// CTAs, soft-park strip CTAs must still be hit-tested (no silent zero chrome).
+    #[test]
+    fn soft_park_draw_falls_back_to_strip_ctas_when_panel_cannot_paint() {
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, "# Soft park fallback\n\nNarrow terminal\n");
+        assert!(agent.line_viewer.is_some(), "panel state present");
+
+        // Width 10: side panel clamps under line_viewer early-return (width < 10),
+        // so footer CTAs never paint. Keep height generous so the shortcuts row
+        // still exists for soft-park strip fallback paint.
+        let _buf = draw_agent_hits(&mut agent, 10, 40);
+
+        let panel_has_cta = agent.line_viewer.as_ref().is_some_and(|v| {
+            v.plan_ref()
+                .is_some_and(|p| p.approve_button_area.is_some() || p.abandon_button_area.is_some())
+        });
+        let strip_has_cta = agent.hit_soft_park_ctas.approve.rect.is_some()
+            || agent.hit_soft_park_ctas.quit.rect.is_some();
+        assert!(
+            !panel_has_cta,
+            "narrow overlay must force panel size early-return (no panel CTA hits)"
+        );
+        assert!(
+            strip_has_cta,
+            "when panel cannot paint footer CTAs, soft-park strip must still expose clickable CTAs; \
+             strip_approve={:?} strip_quit={:?}",
+            agent.hit_soft_park_ctas.approve.rect, agent.hit_soft_park_ctas.quit.rect
+        );
+    }
+
+    /// Named contract: panel dismissed while approval parked paints soft-park
+    /// strip CTAs (mouse primary without reopening the panel).
+    #[test]
+    fn soft_park_draw_strip_ctas_when_panel_dismissed() {
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, "# Soft park strip\n\nDismissed panel\n");
+        agent.line_viewer = None;
+
+        let _buf = draw_agent_hits(&mut agent, 120, 40);
+        assert!(
+            agent.hit_soft_park_ctas.approve.rect.is_some()
+                && agent.hit_soft_park_ctas.notes.rect.is_some()
+                && agent.hit_soft_park_ctas.clarify.rect.is_some()
+                && agent.hit_soft_park_ctas.revise.rect.is_some()
+                && agent.hit_soft_park_ctas.quit.rect.is_some(),
+            "dismissed panel must leave all five soft-park strip CTA hits"
+        );
+    }
+
+    /// Named contract (dogfood 2026-08-01): if feedback_active was lost while
+    /// plan_approval_view is still parked, draw re-syncs approval chrome so
+    /// usual Approve/Notes/Clarify/Revise/Quit lines paint (not casual `c comment`).
+    #[test]
+    fn soft_park_draw_resyncs_approval_ctas_when_feedback_active_was_cleared() {
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, "# Soft park resync\n\n## Steps\nKeep CTAs\n");
+        {
+            let plan = agent.line_viewer.as_mut().expect("panel").plan_mut();
+            // Simulate drift / wrong casual open that left approval parked
+            // but painted casual footer flags.
+            plan.feedback_active = false;
+            plan.show_action_buttons = true;
+        }
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "approval must still be parked"
+        );
+
+        let _buf = draw_agent_hits(&mut agent, 120, 40);
+
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("plan extras after paint");
+        assert!(
+            plan.feedback_active,
+            "draw must re-sync feedback_active while plan_approval_view is Some"
+        );
+        assert!(
+            !plan.show_action_buttons,
+            "draw must not leave casual show_action_buttons while approval is parked"
+        );
+        assert!(
+            plan.approve_button_area.is_some()
+                && plan.approve_notes_button_area.is_some()
+                && plan.questions_button_area.is_some()
+                && plan.send_button_area.is_some()
+                && plan.abandon_button_area.is_some(),
+            "usual five approval CTA hits must paint after resync; comment_btn={:?}",
+            plan.comment_button_area
+        );
+        assert!(
+            plan.comment_button_area.is_none(),
+            "casual c-comment hit must not paint while approval is parked"
+        );
+    }
+
+    /// Named contract: Ctrl+F fullscreen while soft-parked still paints
+    /// approval footer CTAs (not casual comment-only chrome).
+    #[test]
+    fn soft_park_fullscreen_draw_paints_approval_ctas() {
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, "# Soft park fullscreen\n\nStill approval\n");
+        if let Some(ref mut viewer) = agent.line_viewer {
+            viewer.fullscreen = true;
+            viewer.side_panel = false;
+        }
+
+        let _buf = draw_agent_hits(&mut agent, 120, 40);
+
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("plan extras");
+        assert!(
+            plan.feedback_active
+                && plan.approve_button_area.is_some()
+                && plan.abandon_button_area.is_some(),
+            "fullscreen soft-park must keep approval CTAs (a/A/?/s/q), not casual only"
+        );
+        assert!(
+            plan.comment_button_area.is_none(),
+            "fullscreen approval must not paint casual c-comment as the only footer"
+        );
+    }
+
+    /// Named contract: turn-end must not wipe a live soft-park reverse-request
+    /// (response_tx still open). That wipe left dogfood on casual fullscreen
+    /// plan.md with only `c comment` and no Approve/Notes/Clarify/Revise/Quit.
+    #[test]
+    fn turn_end_preserves_live_soft_park_approval() {
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, "# Soft park survive turn end\n\nKeep me\n");
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|p| p.response_tx.is_some()),
+            "fixture must hold a live reverse-request channel"
+        );
+        assert!(agent.line_viewer.is_some());
+
+        agent.dismiss_plan_approval_after_turn_if_stale();
+
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "live soft-park must survive turn-end dismiss helper"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "side panel must stay open after turn-end while approval is still awaiting"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "approval footer arming must remain"
+        );
+    }
+
+    /// Counterpart: leftover plan approval with no response channel is cleaned up.
+    #[test]
+    fn turn_end_clears_plan_approval_without_live_channel() {
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, "# Stale leftover\n\nNo waiter\n");
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            // Simulate decision already sent (channel consumed).
+            let _ = pav.response_tx.take();
+        }
+
+        agent.dismiss_plan_approval_after_turn_if_stale();
+
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "stale plan_approval without response_tx must clear on turn end"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "stale panel must close when leftover approval is cleared"
         );
     }
 

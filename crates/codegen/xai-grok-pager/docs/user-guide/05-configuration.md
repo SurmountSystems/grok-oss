@@ -80,6 +80,8 @@ feedback = true                        # feedback system (default: true)
 lsp_tools = false                      # expose the lsp tool
 codebase_indexing = true               # code graph indexing (default: true)
 two_pass_compaction = false            # prefire two-pass compaction (default: false, opt-in)
+session_recap = true                   # /recap + auto return-from-away recap (default: true;
+                                       # set false or GROK_SESSION_RECAP=0 to disable both)
 remote_fetch = true                    # allow optional online model-catalog fetches (default: true;
                                        # set false for firewalled/air-gapped deployments; background
                                        # managed-config sync has its own switch: managed_config)
@@ -466,6 +468,8 @@ idle_threshold_secs = 3   # seconds unfocused before a notification fires
 events = ["turn_complete", "approval_required"]
 sleep_prevention = true   # prevent display sleep during agent turns
 progress_bar = true       # show tab progress bar (OSC 9;4)
+session_recap = true      # auto "where was I" recap on return-from-away (default: true)
+session_recap_threshold_secs = 30  # min unfocused seconds before auto recap is offered
 
 [ui.notifications.title]
 enabled = true
@@ -487,8 +491,41 @@ busy.
 | `events` | array | `["turn_complete", "approval_required"]` | Events that trigger notifications. Options: `turn_complete`, `approval_required`, `session_ready`, `task_complete`, `agent_error`. |
 | `sleep_prevention` | bool | `true` | Keep the display awake while the agent works (macOS/Linux). |
 | `progress_bar` | bool | `true` | Show a progress indicator in the terminal tab (OSC 9;4). |
+| `session_recap` | bool | `true` | Auto session recap when you return after being away. **Does not** disable manual `/recap` (see [Session recap](#session-recap)). Also in Settings search as **Auto session recap**. |
+| `session_recap_threshold_secs` | integer | `30` | Minimum seconds unfocused before an automatic recap may be requested (debounce against quick tab switches). Also in Settings as **Auto recap after (seconds)**. |
 | `title.enabled` | bool | `true` | Set the terminal/tab **window title** to reflect agent state (session, activity, agents, brand). Sole opt-out for dynamic titles; never emits empty SetTitle. Not the in-app header (`hide_header`). |
 | `title.items` | array | (see above) | Items shown in the title bar. Options: `action-required`, `spinner`, `activity`, `session-name`, `agents`, `cwd`, `model`, `turn-timer`, `grok` (displays as `grok-oss`). |
+
+#### Session recap
+
+Session recap is the short "where was I" summary: on demand via **`/recap`**
+(alias **`/summarize`**), and optionally automatic when you return to the
+terminal after being away. **Default on.** Search Settings (`/settings` /
+`/options`) for `recap` to toggle these live (master feature still needs a
+restart so the shell re-advertises the ACP gate).
+
+| Layer | Key / control | Default | What it gates |
+|-------|---------------|---------|----------------|
+| Shell feature (master) | Settings **Master session recap**, or `[features] session_recap` / `GROK_SESSION_RECAP` | `true` | Both manual `/recap` and auto away-recap |
+| Client preference | Settings **Auto session recap**, or `[ui.notifications] session_recap` | `true` | Auto away-recap only |
+| Auto debounce | Settings **Auto recap after (seconds)**, or `[ui.notifications] session_recap_threshold_secs` | `30` | Min unfocused seconds before auto recap |
+
+To disable **everything** (including `/recap`):
+
+```toml
+[features]
+session_recap = false
+```
+
+Or for one process: `GROK_SESSION_RECAP=0`. Restart / new session so the shell
+re-advertises the gate on ACP initialize (`sessionRecap`).
+
+To keep manual `/recap` but stop automatic return-from-away recaps:
+
+```toml
+[ui.notifications]
+session_recap = false
+```
 
 #### Terminal support matrix
 

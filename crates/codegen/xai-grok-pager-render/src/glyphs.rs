@@ -616,6 +616,39 @@ pub fn enlarge_button() -> &'static str {
     }
 }
 
+/// `"−"` (U+2212 MINUS SIGN) normally, `"-"` on legacy ConHost. Always 1
+/// column wide.
+///
+/// Todo-pane **clear finished** icon: remove finished rows off the live board
+/// (completed + cancelled). Minus reads as ordinary chrome "take off the
+/// board" without colliding with close/kill [`ballot_x`] or done
+/// [`check_mark`], and without the empty-set glyph that dogfood rejected as
+/// garbage in common fonts. No broom / trash glyph ships in the chrome set.
+/// Bracketed form: [`clear_finished_button`].
+pub fn clear_finished_icon() -> &'static str {
+    if is_legacy_windows_console() {
+        "-"
+    } else {
+        "\u{2212}"
+    }
+}
+
+/// `"[−]"` normally, `"[-]"` on legacy ConHost. Always 3 columns wide.
+///
+/// Pre-composed bracketed sibling of [`clear_finished_icon`] for todo-pane
+/// chrome (matches [`ballot_x_button`] / [`enlarge_button`] affordance).
+/// Tooltip / action label / status hints still say "Clear finished"; the
+/// painted control is this compact icon only. Product paints it when the todo
+/// board is open and finished rows exist (not always-on top-right; not
+/// focus-only).
+pub fn clear_finished_button() -> &'static str {
+    if is_legacy_windows_console() {
+        "[-]"
+    } else {
+        "[\u{2212}]"
+    }
+}
+
 /// Substitute the chrome glyphs that legacy ConHost can't render with
 /// legacy-console-safe equivalents (`✓` → `√`, `✗` → `x`, `⚠` → `!`) in
 /// free-flowing status text such as toasts.
@@ -1088,6 +1121,7 @@ mod tests {
         for (fancy, fallback, cols) in [
             ("[\u{2717}]", "[x]", 3), // ballot_x_button
             ("[\u{2197}]", "[o]", 3), // enlarge_button
+            ("[\u{2212}]", "[-]", 3), // clear_finished_button
         ] {
             assert_eq!(fancy.width(), cols, "button {fancy:?} must be {cols} cols");
             assert_eq!(

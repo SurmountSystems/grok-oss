@@ -56,7 +56,7 @@ impl SessionActor {
             .await;
     }
 
-    /// Operator **Clear done**: archive completed/cancelled board rows, persist
+    /// Operator **Clear finished**: archive completed/cancelled board rows, persist
     /// Resources + `plan.json`, re-emit ACP `Plan` (including empty board so the
     /// pane drops finished items). Returns how many items were cleared.
     pub(crate) async fn clear_completed_todos(&self) -> usize {

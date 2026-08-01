@@ -166,15 +166,20 @@ impl AgentView {
     }
 
     /// Push a "Worked for X" marker when the turn parks on a sendable wait —
-    /// the transcript boundary explaining the idle-looking chrome. One marker
-    /// per park episode: same agent-output epoch as the rendered slot means
-    /// no re-push (chips/completions don't bump it); an epoch bump means the
-    /// wait resumed and re-parked, which pushes a fresh marker. Completion
-    /// rails also call this to re-eval a park withheld at park time (e.g.
-    /// held queue since drained).
+    /// the transcript boundary explaining the idle-looking chrome.
     ///
-    /// Called from the ACP notification path — not the draw path — so
-    /// background tabs and minimal mode stamp the park at its true moment. A
+    /// **One marker per prompt turn** (not per park episode / epoch tick).
+    /// Mid-park agent-output epoch bumps (same-stream thoughts, wait re-issues,
+    /// subagent progress re-evals) used to append a fresh row each time with a
+    /// newer elapsed — stacking `Worked for 16m39s` × N. Once
+    /// [`ParkedMarkerSlot::Rendered`] for this prompt id, later calls only
+    /// refresh elapsed **in place** on that row. A re-park after parent output
+    /// keeps the same single boundary; the still-running status cue covers
+    /// ongoing work. Completion rails also call this to re-eval a park
+    /// withheld at park time (e.g. held queue since drained).
+    ///
+    /// Called from the ACP notification path — and from the draw path while
+    /// parked so the single line's duration can tick without stacking. A
     /// [`ParkedMarkerSlot::Forgone`] slot stays silent for the rest of the
     /// turn (see [`Self::suppress_parked_marker_on_interject`]). UI-only: no
     /// turn-lifecycle event, no stop hooks; the completion folds into an
@@ -193,23 +198,11 @@ impl AgentView {
         match &self.parked_wait_marker_for {
             // Interjection ordering: forgone is final for the turn.
             Some(ParkedMarkerSlot::Forgone(pid)) if *pid == prompt_id => return,
-            // Same park episode (no parent output since the marker): the one
-            // marker already explains this park — chips landing below it
-            // must not re-push.
-            Some(ParkedMarkerSlot::Rendered {
-                prompt_id: pid,
-                agent_output_epoch,
-                ..
-            }) if *pid == prompt_id
-                && *agent_output_epoch == self.session.tracker.agent_output_epoch() =>
-            {
-                return;
-            }
-            // A tail user prompt after a rendered marker is an interjection:
-            // a marker line beneath it would flip the transcript.
-            Some(ParkedMarkerSlot::Rendered { prompt_id: pid, .. })
-                if *pid == prompt_id && self.tail_is_user_prompt() =>
-            {
+            // Already stamped a park marker for this turn: never stack another
+            // "Worked for" row. Refresh elapsed in place so the single line
+            // can tick as the turn runs.
+            Some(ParkedMarkerSlot::Rendered { prompt_id: pid, .. }) if *pid == prompt_id => {
+                self.refresh_parked_marker_elapsed(&prompt_id);
                 return;
             }
             _ => {}
@@ -226,12 +219,21 @@ impl AgentView {
         self.push_parked_marker_block(prompt_id);
     }
 
-    /// The transcript tail is a user-authored prompt row.
-    fn tail_is_user_prompt(&self) -> bool {
-        matches!(
-            self.scrollback.last().map(|entry| &entry.block),
-            Some(crate::scrollback::block::RenderBlock::UserPrompt(_))
-        )
+    /// In-place elapsed refresh for the turn's parked "Worked for" row.
+    /// No-op when no uncommitted parked marker exists for `prompt_id`.
+    fn refresh_parked_marker_elapsed(&mut self, prompt_id: &str) {
+        let elapsed = self.turn_elapsed().unwrap_or_default();
+        if self
+            .scrollback
+            .refresh_parked_marker_elapsed(prompt_id, elapsed)
+        {
+            // Keep the slot epoch current so bookkeeping matches the tracker
+            // without implying a re-push.
+            self.parked_wait_marker_for = Some(ParkedMarkerSlot::Rendered {
+                prompt_id: prompt_id.to_string(),
+                agent_output_epoch: self.session.tracker.agent_output_epoch(),
+            });
+        }
     }
 
     /// The parked marker block shape: a `TurnCompleted` marker flagged

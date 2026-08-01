@@ -53,6 +53,24 @@ Aliases: `/economic`, `/econ`
 
 Show how the context window is being used: a category breakdown (system prompt, messages, reasoning and overhead, free space) plus informational rows for tool definitions, the skills listing, and MCP server announcements with their estimated token cost.
 
+### `/recap`
+
+Generate a short "where was I" summary of the session so far. Alias: `/summarize`.
+The summary is display-only (not added to the model conversation). Grok may also
+request the same kind of recap automatically when you return after being away.
+
+**Default on.** Search **Settings** (`/settings` / `/options`) for `recap` to
+toggle auto return-from-away, the debounce threshold, and the master feature
+kill. You can also set config or env:
+
+| Goal | How |
+|------|-----|
+| Turn off **all** recaps (`/recap` + auto) | Settings → **Master session recap** off; or `[features] session_recap = false` / `GROK_SESSION_RECAP=0` |
+| Turn off **auto** return-from-away only | Settings → **Auto session recap** off; or `[ui.notifications] session_recap = false` (manual `/recap` still works) |
+
+Restart the session (or start a new one) after changing the master feature flag
+so the shell re-advertises the gate. See [Configuration](05-configuration.md#session-recap).
+
 ### `/session-info`
 
 Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`.
@@ -179,7 +197,7 @@ Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
 
 ### `/clear-completed-todos`
 
-Remove **completed** and **cancelled** items from the live session todo board and archive them (toast reports how many). Pending and in-progress stay. Same as the todo pane **Clear done** chrome control (visible on an open pane even when unfocused) and optional focused `X`. Not the same as pane `h` (hide done in the view only) and not an agent `merge: false` wipe.
+Remove **completed** and **cancelled** items from the live session todo board and archive them (toast reports how many). Pending and in-progress stay. Same as the todo pane **clear-finished icon** (`[−]` next to close when the todo board is open and finished rows exist, focused or not; quiet idle paint; does not cover tasks model/timer or subagent open chrome) and optional focused `X`. Action hints still say “Clear finished.” Not the same as pane `h` (hide done in the view only) and not an agent `merge: false` wipe.
 
 ```
 /clear-completed-todos
@@ -505,7 +523,7 @@ Show or toggle privacy and data-retention status.
 
 ### `/settings`
 
-Open the settings modal to view and change configuration interactively. Aliases: `/config`, `/preferences`, `/prefs`.
+Open the settings modal to view and change configuration interactively. Aliases: `/config`, `/preferences`, `/prefs`, `/options`.
 
 ### `/timestamps`
 

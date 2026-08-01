@@ -45,10 +45,10 @@ Grok OSS maps roles as follows on DOGE:
 
 | Colour | Role in Grok OSS |
 |--------|------------------|
-| **Green** | **Human** — user prompt pointer (`❯`), left accent rail (`┃`), session cursor (OSC 12), success marks, slash skills, links |
-| **Magenta** | **Agent** — running activity, throbbers, model label, assistant/thinking chrome |
+| **Green** | **Human** — user prompt pointer (`❯`), left accent rail (`┃`), **composer box caret**, session cursor (OSC 12), success marks, slash skills, links |
+| **Magenta** | **Agent** — running activity, **lower-left throbbers** (tool spinner + still-running cue), model label, assistant/thinking chrome |
 | **Yellow** | Dates, times, timers, other useful context / secondary chrome |
-| **Cyan** | System tags, limits, credits, path and ambient meta |
+| **Cyan** | System tags, limits, credits, path and ambient meta (not the activity throbber) |
 | **Red / Blue** | Avoid unless contextually useful (errors stay red) |
 | **Gray / alpha** | Forbidden as theme palette colours |
 
@@ -56,6 +56,14 @@ Grok OSS maps roles as follows on DOGE:
 as the idle Recap white tool rail, via the shared accent column. Recap idle
 expanded still uses white (`accent_tool`); loading Recap uses animated yellow
 secondary chrome (`gray` token paints yellow on DOGE), not gray paint.
+
+**Do not confuse these three surfaces:**
+
+| Surface | DOGE colour | Notes |
+|---------|-------------|--------|
+| Composer box caret | Human **green** | Software caret on the prompt; stays green after you type or move arrows |
+| Lower-left activity throbber | Agent **magenta** | Tool-running spinner and “subagents still running” cue |
+| Todo clear-finished icon (`[−]`, open board + finished) | Quiet secondary (hover stronger) | Not neon green always-on; never agent magenta; not painted when board hidden or nothing finished |
 
 Project internal palette + role annex:
 `doc/dev/specs/doge-pure-8-colour-2026-07-26.md`.
@@ -178,6 +186,30 @@ Grok sets your terminal cursor to the current theme's `accent_user` color using 
 - Reset to the terminal's default on exit via OSC 112.
 
 This works in terminals that support OSC 12 (most modern terminals).
+
+### Composer box caret (software)
+
+While the prompt is focused, Grok paints a **software box caret** (filled block
+↔ empty cell blink) in the theme's **Human** accent (`accent_user` = pure green
+on DOGE). That caret is the human input surface, not agent chrome: it must stay
+Human green (not agent magenta).
+
+- Typed letters under the caret keep their grapheme (reverse plate or green
+  ink); the caret does not eat characters.
+- When you move the caret (arrows, Home, End), **previous cells repaint as
+  normal text**. There must be no leftover green plate, green letter ink, or
+  solid block glyph stuck on letters behind the real caret.
+
+Hardware terminal cursor is hidden while the software box caret paints, so you
+do not see two cursors. OSC 12 still marks the session as Grok-owned for hosts
+that show it when focus leaves the software caret path.
+
+### Lower-left activity throbber
+
+The lower-left turn-status area uses **agent magenta** (`accent_running` on
+DOGE) for busy tool activity and for the idle “still running” concentric icon
+when background subagents (or other watchers) keep work alive. That is not
+system cyan and not Human green.
 
 ---
 

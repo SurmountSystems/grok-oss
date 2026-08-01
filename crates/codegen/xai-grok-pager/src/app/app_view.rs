@@ -294,7 +294,7 @@ fn agent_wants_composer_cursor_blink(agent: &crate::app::agent_view::AgentView) 
 
 /// Live non-workflow L2 subagents that should keep window-title busy state
 /// and Agent-view ticks (mirrors dashboard tick demand for subagent_sessions).
-fn agent_has_running_title_subagents(agent: &crate::app::agent_view::AgentView) -> bool {
+pub(crate) fn agent_has_running_title_subagents(agent: &crate::app::agent_view::AgentView) -> bool {
     agent
         .subagent_sessions
         .values()
@@ -807,6 +807,10 @@ pub struct AppView {
     /// resolved by the shell and advertised on ACP initialize (`sessionRecap`).
     /// When false, the pager must not request recaps (zero `x.ai/recap` traffic).
     pub session_recap_available: bool,
+    /// User/config mirror for `[features] session_recap` (Settings master kill).
+    /// Seeded at connect from shell config; Settings toggles update this live
+    /// (toast still says restart so ACP re-advertises). Default true.
+    pub features_session_recap: bool,
     /// Stateful prompt widget rendered on the welcome screen (persists input across frames).
     pub welcome_prompt: PromptWidget,
     /// The single slash-command MRU/recency store. Owned here and injected
@@ -1614,6 +1618,7 @@ impl AppView {
             session_picker_grouped: false,
             cancel_rewind_enabled: true,
             session_recap_available: false,
+            features_session_recap: true,
             tutorial: None,
             dashboard: None,
             dashboard_return: None,
@@ -5642,11 +5647,19 @@ impl AppView {
                         // Parked chrome blanks activity for pure bg-command
                         // waits (progress bar off). Keep activity when L2
                         // subagents are still running so the DE title does
-                        // not look idle during long waits.
+                        // not look idle during long waits. Idle parent + live
+                        // children: inject Subagent wait (resolve returns None
+                        // once parent is no longer TurnRunning).
                         let activity = if parked && !has_running_subagents {
                             None
                         } else {
-                            agent.resolve_turn_activity()
+                            agent.resolve_turn_activity().or_else(|| {
+                                has_running_subagents.then_some(
+                                    crate::acp::tracker::TurnActivity::Waiting(
+                                        crate::acp::tracker::WaitingReason::Subagent,
+                                    ),
+                                )
+                            })
                         };
                         let has_perms = !agent.permission_queue.is_empty();
                         let elapsed = if parked && !has_running_subagents {
@@ -5996,6 +6009,7 @@ pub(crate) mod tests {
             session_picker_grouped: false,
             cancel_rewind_enabled: true,
             session_recap_available: false,
+            features_session_recap: true,
             tutorial: None,
             dashboard: None,
             dashboard_return: None,
@@ -10138,10 +10152,17 @@ pub(crate) mod tests {
             esc.contains("bg-sub-session"),
             "session must stay in title, got {esc:?}"
         );
-        let busy_signal = esc.contains("Waiting") || title_spinner_chars_present(esc);
+        // Prefer explicit subagent activity label; spinner / generic Waiting
+        // still count as busy if label composition changes.
+        let busy_signal =
+            esc.contains("subagent") || esc.contains("Waiting") || title_spinner_chars_present(esc);
         assert!(
             busy_signal,
             "idle parent + running subagent must still busy the window title, got {esc:?}"
+        );
+        assert!(
+            esc.contains("subagent"),
+            "idle parent + live L2 must name subagent activity in title, got {esc:?}"
         );
     }
 

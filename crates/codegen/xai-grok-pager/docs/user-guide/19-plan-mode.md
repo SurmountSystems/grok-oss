@@ -73,7 +73,18 @@ When the agent finishes planning, it calls the `exit_plan_mode` tool. By default
 - Live draft text is **kept** (not stashed/cleared). Prompt stays focused so typing is live.
 - Soft-park is **non-capturing** for the main thread when the panel is dismissed: bare printable keys type into the composer.
 
-The side panel has **clickable CTA buttons** in the panel footer (Approve / Approve w/ comment / Clarify / Revise / Quit). With an **empty** prompt and Preview focus, keys `a` / `A` / `?` / `s` / `q` are accelerators **in the panel**. On a narrow side panel the footer uses shorter labels (or key-only) so the hit targets always stay clickable. **Ctrl+F** enlarges the panel to fullscreen and back. The panel always re-reads the latest session `plan.md` when you open it (so rewrites while parked show up, not a frozen snapshot from park time).
+### Three approval surfaces
+
+There are **three** distinct plan surfaces after soft park. Looking only at the
+transcript card is **not** the full approval UI.
+
+| Surface | Borders | CTAs |
+|---------|---------|------|
+| **Side panel** (auto-open after `exit_plan_mode`, or `/view-plan`) | Full box / title-footer lines | Approve / Notes / Clarify / Revise / Quit in the **panel footer** |
+| **Soft-park strip** (panel dismissed, or terminal too small for panel paint) | None | Same five clickable strip buttons in the shortcuts row (never silent empty) |
+| **Transcript plan card** | None | Plain preview / pointer text only — **not** a fake button menu |
+
+The side panel has **clickable CTA buttons** in the panel footer (Approve / Approve w/ comment / Clarify / Revise / Quit). With an **empty** prompt and Preview focus, keys `a` / `A` / `?` / `s` / `q` are accelerators **in the panel**. On a narrow side panel the footer uses shorter labels (or key-only) so the hit targets always stay clickable. If the panel is open but too small to paint those footer hits, the soft-park strip CTAs reappear so approval is never zero-chrome. **Ctrl+F** enlarges the panel to fullscreen and back. The panel always re-reads the latest session `plan.md` when you open it (so rewrites while parked show up, not a frozen snapshot from park time).
 
 If you dismiss the panel, reopen with **`/view-plan`**, the status chip, or **`ShowPlan`**.
 

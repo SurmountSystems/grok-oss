@@ -145,7 +145,7 @@ pub enum SessionCommand {
     RestoreTodoBoard {
         plan_state: Option<crate::tools::todo::TodoState>,
     },
-    /// Operator **Clear done**: archive completed/cancelled active todos,
+    /// Operator **Clear finished**: archive completed/cancelled active todos,
     /// persist Resources + plan.json, re-emit ACP `Plan`. Responds with the
     /// number of items cleared (0 = no-op).
     ClearCompletedTodos {

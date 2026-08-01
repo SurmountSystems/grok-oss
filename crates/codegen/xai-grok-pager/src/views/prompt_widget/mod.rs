@@ -3138,6 +3138,23 @@ impl PromptWidget {
         };
         self.textarea_area = ta_area;
 
+        // Full-line dirty wipe before textarea paint. The software box caret
+        // restyles the insertion cell (and on blank cells may replace the
+        // symbol with solid `█`). TextArea only writes cells that still have
+        // draft text, so blanks beyond the draft would keep a previous
+        // frame's caret glyph / Human-green plate if we only set_style.
+        // Wipe every cell in the textarea rect so a moved caret never leaves
+        // residual green or a solid block on letters/spaces it has left.
+        let text_cell_style = Style::default().fg(theme.text_primary).bg(bg);
+        for y in ta_area.y..ta_area.y.saturating_add(ta_area.height) {
+            for x in ta_area.x..ta_area.x.saturating_add(ta_area.width) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.reset();
+                    cell.set_style(text_cell_style);
+                }
+            }
+        }
+
         (&self.textarea).render_ref(ta_area, buf, &mut self.textarea_state);
 
         // Slash overlays: teal command name + args ghost text. Both use the

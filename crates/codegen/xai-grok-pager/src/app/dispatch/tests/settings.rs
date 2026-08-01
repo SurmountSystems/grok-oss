@@ -1582,6 +1582,29 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
+        "bubble_copy_buttons" => {
+            let _ = dispatch(
+                Action::SetBubbleCopyButtons(
+                    !crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
+                ),
+                app,
+            );
+        }
+        "cancel_subagents_on_turn_cancel" => {
+            let _ = dispatch(
+                Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
+                app,
+            );
+        }
+        "notifications.session_recap" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecap(false), app);
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecapThresholdSecs(90), app);
+        }
+        "features.session_recap" => {
+            let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
+        }
         "hunk_tracker_mode" => {
             let _ = dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
         }

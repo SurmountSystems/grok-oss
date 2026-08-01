@@ -191,17 +191,16 @@
         assert_eq!(
             parked_marker_messages(agent),
             vec!["Worked for 0.0s".to_string()],
-            "subagent finishes never re-push or mutate the park marker"
+            "subagent finishes never stack a second park marker"
         );
         assert_eq!(parked_marker_ids(agent), vec![marker_id]);
     }
 
-    /// A re-park after new parent output (text / thought / tool) is a new
-    /// park episode: the wait-state update that creates the second wait
-    /// pushes a fresh marker (epoch mismatch), while completions within one
-    /// episode never re-push.
+    /// Parent output (text / thought / tool) between waits must **not** stack
+    /// a second "Worked for" row. One parked marker per prompt turn; epoch
+    /// ticks only refresh that row in place (spam regression).
     #[test]
-    fn parent_text_thought_and_tool_output_start_new_park_episodes() {
+    fn parent_text_thought_and_tool_output_keep_single_parked_marker() {
         use crate::acp::meta::NotificationMeta;
         use crate::app::agent_view::test_fixtures::simulate_task_output_wait_call;
 
@@ -245,7 +244,7 @@
             {
                 let agent = app.agents.get_mut(&AgentId(0)).unwrap();
                 // Same episode: a repeated push attempt (e.g. another wait
-                // update restating the same wait) is deduped by epoch.
+                // update restating the same wait) stays a single marker.
                 agent.maybe_push_parked_marker();
                 assert_eq!(parked_marker_ids(agent).len(), 1);
 
@@ -278,13 +277,12 @@
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             assert_eq!(
                 parked_marker_messages(agent),
-                vec!["Worked for 0.0s".to_string(), "Worked for 0.0s".to_string()],
-                "{output_kind} output must start a new park episode",
+                vec!["Worked for 0.0s".to_string()],
+                "{output_kind} output must not stack a second Worked-for row",
             );
             let marker_ids = parked_marker_ids(agent);
-            assert_eq!(marker_ids.len(), 2);
+            assert_eq!(marker_ids.len(), 1);
             assert_eq!(marker_ids[0], first_marker_id);
-            assert_ne!(marker_ids[0], marker_ids[1]);
         }
     }
 

@@ -29,12 +29,20 @@ pub struct TodoPaneStyle {
     pub in_progress: TodoStatusStyle,
     pub completed: TodoStatusStyle,
     pub cancelled: TodoStatusStyle,
+    /// Style for `meta.kind` tags (`[work]`, `[phase]`, …).
+    ///
+    /// Muted chrome: pure blue. Not cyan (`gray_dim` / `accent_system` system
+    /// info), not human green, not agent magenta. Blue can be hard to see on
+    /// black; that is intentional for secondary kind chrome.
+    pub kind_badge: Style,
 }
 
 impl Default for TodoPaneStyle {
     fn default() -> Self {
         // Sourced from theme to ensure colors are quantized for terminal compat.
         let theme = crate::theme::Theme::current();
+        // Kind tags: pure DOGE blue (not theme cyan meta slots). See `kind_badge`.
+        let kind_badge_fg = Color::Rgb(0, 0, 255);
 
         Self {
             pending: TodoStatusStyle {
@@ -57,6 +65,7 @@ impl Default for TodoPaneStyle {
                     .fg(theme.gray_bright)
                     .add_modifier(Modifier::CROSSED_OUT),
             },
+            kind_badge: Style::default().fg(kind_badge_fg),
         }
     }
 }
@@ -91,6 +100,7 @@ impl TodoListEntry {
             TodoStatus::Cancelled => style.cancelled,
         };
         // Light level badge from `meta.kind` when present (residual|phase|work|child).
+        // Colour: pure blue muted chrome (`style.kind_badge`), not cyan system/info.
         let kind = item
             .meta
             .as_ref()
@@ -99,10 +109,7 @@ impl TodoListEntry {
             .filter(|k| !k.is_empty());
         let styled = if let Some(kind) = kind {
             Line::from(vec![
-                Span::styled(
-                    format!("[{kind}] "),
-                    status_style.text_style.add_modifier(Modifier::DIM),
-                ),
+                Span::styled(format!("[{kind}] "), style.kind_badge),
                 Span::styled(item.content.clone(), status_style.text_style),
             ])
         } else {
@@ -705,6 +712,60 @@ mod tests {
             "expected kind badge prefix, got {text:?}"
         );
         assert!(text.contains("Wire the API"));
+    }
+
+    /// Kind tags (`[work]`, …) are muted chrome: pure blue, not cyan system/info
+    /// (`gray_dim` / `accent_system`), not human green, not agent magenta.
+    #[test]
+    fn list_entry_kind_badge_is_blue_muted_not_cyan() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let style = TodoPaneStyle::default();
+        let item = TodoItem {
+            content: "Implement the fix".into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::Pending,
+            meta: Some(serde_json::json!({"kind": "work"})),
+            size: None,
+        };
+        let entry = TodoListEntry::new(0, item, &style);
+        let spans = &entry.content().spans;
+        assert!(
+            !spans.is_empty() && spans[0].content.as_ref().starts_with("[work]"),
+            "expected [work] kind span, got {:?}",
+            spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+        );
+        let fg = spans[0].style.fg;
+        let pure_blue = Color::Rgb(0, 0, 255);
+        let cyan = Color::Rgb(0, 255, 255);
+        let green = Color::Rgb(0, 255, 0);
+        let magenta = Color::Rgb(255, 0, 255);
+        assert_eq!(
+            fg,
+            Some(pure_blue),
+            "kind badge must be pure blue muted chrome, got {fg:?}"
+        );
+        // Explicit non-goals: cyan system/info, human green, agent magenta.
+        assert_ne!(fg, Some(cyan), "kind badge must not be cyan system/info");
+        assert_ne!(
+            fg,
+            Some(theme.gray_dim),
+            "must not use gray_dim (cyan on DOGE)"
+        );
+        assert_ne!(
+            fg,
+            Some(theme.accent_system),
+            "must not use accent_system (cyan on DOGE)"
+        );
+        assert_ne!(fg, Some(green), "kind badge must not be human green");
+        assert_ne!(fg, Some(magenta), "kind badge must not be agent magenta");
+        // Title text stays on the status text style (not the kind blue).
+        assert_eq!(
+            spans.get(1).and_then(|s| s.style.fg),
+            Some(theme.text_primary),
+            "content span must keep status text colour"
+        );
     }
 
     #[test]

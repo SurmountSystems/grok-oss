@@ -1793,6 +1793,111 @@ fn prompt_response_routes_idle_title_through_frame_pipeline() {
     );
 }
 
+/// Braille spinner codepoints from TitleManager (shared with app_view title tests).
+fn title_spinner_chars_present(esc: &str) -> bool {
+    const SPINNER: &[char] = &[
+        '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
+        '\u{2827}',
+    ];
+    esc.chars().any(|c| SPINNER.contains(&c))
+}
+
+#[test]
+fn prompt_response_keeps_title_busy_while_subagents_still_run() {
+    // Named contract: parent EndTurn must not force an idle window title
+    // while live L2 subagents remain. Dogfood failure: parent finishes,
+    // title collapses to session-only, DE looks idle until (or unless)
+    // the next tick re-asserts busy — and draw can flush the idle OSC
+    // first because pending_notification_escapes skips recompute.
+    use crate::app::agent_view::test_fixtures::running_subagent_info;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.display_name = Some("bg-children-session".into());
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+    }
+
+    // Seed TitleManager with a parent-busy frame *without* children so the
+    // EndTurn rewrite (busy-with-subagents vs idle-only) is not dedup-silent.
+    app.update_notifications();
+    app.pending_notification_escapes = None;
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .subagent_sessions
+            .insert("child-a".into(), running_subagent_info("child-a"));
+        agent
+            .subagent_sessions
+            .insert("child-b".into(), running_subagent_info("child-b"));
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    assert!(
+        app.agents[&id].session.state.is_idle(),
+        "parent turn must end"
+    );
+    assert!(
+        app.agents[&id]
+            .subagent_sessions
+            .values()
+            .any(|i| i.is_running()),
+        "fixture must keep live subagents"
+    );
+
+    // EndTurn must not clobber to session-only idle brand. TitleManager may
+    // dedup-return None when the pre-EndTurn title was already the subagent
+    // busy string — that is fine; a pure idle rewrite is the failure mode.
+    if let Some(esc) = app.pending_notification_escapes.as_deref() {
+        let looks_idle_only = esc.contains("bg-children-session")
+            && !esc.contains("Waiting")
+            && !esc.contains("subagent")
+            && !title_spinner_chars_present(esc);
+        assert!(
+            !looks_idle_only,
+            "EndTurn with live subagents must not emit idle-only title OSC, got {esc:?}"
+        );
+        let busy =
+            esc.contains("Waiting") || esc.contains("subagent") || title_spinner_chars_present(esc);
+        assert!(
+            busy,
+            "EndTurn title rewrite with live subagents must stay busy, got {esc:?}"
+        );
+    }
+
+    // Tick/draw path: force a recompose (name change) so TitleManager is not
+    // dedup-silent; still must busy the DE title while children run.
+    app.agents.get_mut(&id).unwrap().display_name = Some("bg-children-session-2".into());
+    app.pending_notification_escapes = None;
+    app.update_notifications();
+    let esc = app
+        .pending_notification_escapes
+        .as_deref()
+        .expect("title OSC while subagents still run after parent EndTurn");
+    let busy =
+        esc.contains("Waiting") || esc.contains("subagent") || title_spinner_chars_present(esc);
+    assert!(
+        busy,
+        "post-EndTurn update_notifications must keep busy title with live subagents, got {esc:?}"
+    );
+    assert!(
+        esc.contains("bg-children-session-2"),
+        "renamed session must appear in busy title, got {esc:?}"
+    );
+}
+
 #[test]
 fn turn_complete_notification_suppressed_when_queue_non_empty() {
     let mut app = test_app_with_agent();
