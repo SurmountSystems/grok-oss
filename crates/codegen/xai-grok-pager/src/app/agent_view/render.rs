@@ -113,10 +113,39 @@ impl AgentView {
                 ]
             }
             PlanApprovalFocus::Prompt => {
+                // Soft-park (no panel): free typing, no empty-Enter approve
+                // hint. Mouse footer CTAs + `/view-plan` for decisions.
+                if self.line_viewer.is_none() {
+                    let has_content =
+                        !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
+                    if has_content {
+                        use crate::views::plan_approval_view::PlanPromptIntent;
+                        let enter_label = match pav.prompt_intent {
+                            PlanPromptIntent::ApproveNotes => "approve w/ comment",
+                            PlanPromptIntent::Questions => "clarify",
+                            PlanPromptIntent::Revise => "revise",
+                        };
+                        return vec![
+                            HintItem::new(key!(Enter), enter_label),
+                            HintItem::new(key!(Tab), "plan"),
+                            HintItem::new(key!(Esc), "back"),
+                        ];
+                    }
+                    return vec![
+                        HintItem::new(key!(Tab), "plan"),
+                        HintItem::new(key!(Esc), "back"),
+                    ];
+                }
                 let has_content = !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
                 if has_content {
+                    use crate::views::plan_approval_view::PlanPromptIntent;
+                    let enter_label = match pav.prompt_intent {
+                        PlanPromptIntent::ApproveNotes => "approve w/ comment",
+                        PlanPromptIntent::Questions => "clarify",
+                        PlanPromptIntent::Revise => "revise",
+                    };
                     vec![
-                        HintItem::new(key!(Enter), "request changes"),
+                        HintItem::new(key!(Enter), enter_label),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]
@@ -128,6 +157,12 @@ impl AgentView {
                     ]
                 }
             }
+            // Soft-park Preview: mouse footer CTAs only — no exclusive key
+            // accelerators (L1 modal-free). Cheatsheet points at Tab/panel.
+            PlanApprovalFocus::Preview if self.line_viewer.is_none() => vec![
+                HintItem::new(key!(Tab), "plan"),
+                HintItem::new(key!(Esc), "back"),
+            ],
             PlanApprovalFocus::Preview => vec![],
         }
     }
@@ -785,10 +820,19 @@ impl AgentView {
             .unwrap_or_else(|| "unknown".to_string());
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         let casual_commenting = self.is_casual_commenting();
+        // Soft-park (plan approval, no side panel): keep the composer visually
+        // focused when the Prompt pane is active, even if plan focus is still
+        // Preview (footer CTAs). Dogfood 2026-07-29: Preview-only paint showed
+        // the "Build anything" placeholder and looked like typing was dead.
         let prompt_focused = if self.plan_approval_view.is_some() {
-            self.plan_approval_view
+            let plan_prompt = self
+                .plan_approval_view
                 .as_ref()
-                .is_some_and(|pav| pav.focus != PlanApprovalFocus::Preview)
+                .is_some_and(|pav| pav.focus != PlanApprovalFocus::Preview);
+            let soft_park_prompt_pane = self.line_viewer.is_none()
+                && self.active_pane == AgentPane::Prompt
+                && !overlay_focused;
+            plan_prompt || soft_park_prompt_pane
         } else if casual_commenting {
             true
         } else {
@@ -1100,6 +1144,11 @@ impl AgentView {
         let queue_height = self.queue.desired_height();
         let drain_blocked = self.drain_blocked();
         let watchers = self.watchers();
+        // While parked, refresh the single "Worked for" row's elapsed so the
+        // duration ticks live without stacking a new transcript line per second.
+        if self.renders_parked() {
+            self.maybe_push_parked_marker();
+        }
         let parked = self.renders_parked();
         let turn_status_height = if turn_status::should_show(
             &self.session.state,
@@ -1137,6 +1186,7 @@ impl AgentView {
             area.width,
             self.scrollback.turn_count(),
         );
+        let hide_header = appearance.hide_header;
         let mut layout = AgentViewLayout::compute(
             area,
             layout_cfg,
@@ -1157,6 +1207,7 @@ impl AgentView {
             voice_recording_height,
             1,
             compact,
+            hide_header,
         );
         let search_active =
             self.scrollback_search.is_some() && self.active_pane == AgentPane::Scrollback;
@@ -1233,6 +1284,7 @@ impl AgentView {
                         voice_recording_height,
                         1,
                         compact,
+                        hide_header,
                     );
                     if search_reserved_rows > 0 {
                         layout.scrollback.height -= search_reserved_rows;
@@ -1255,247 +1307,324 @@ impl AgentView {
         agent::fill_background(buf, area, layout_cfg, compact, &theme);
         use crate::views::agent_status::AgentStatusBar;
         use crate::views::context_bar;
-        let mut status = AgentStatusBar::new(&theme);
-        if let Some(url) = self.highlighted_link_url() {
-            let max_len = layout.status_bar.width.saturating_sub(20) as usize;
-            let display = if url.len() > max_len {
-                let truncated: String = url.chars().take(max_len.saturating_sub(1)).collect();
-                format!("{truncated}\u{2026}")
-            } else {
-                url.to_string()
-            };
-            let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
-            status.push("link_url", Line::from(Span::styled(display, link_style)));
-        }
-        let running_count = self.tasks.running_count(
-            &self.session.bg_tasks,
-            &self.subagent_sessions,
-            &self.session.scheduled_tasks,
-            &self.workflow_runs,
-        );
-        if running_count > 0 {
-            let spinner_frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tasks.tick_count() / 4) as usize % spinner_frames.len();
-            let frame = spinner_frames[frame_idx];
-            let indicator = format!("{frame} {running_count}");
-            let mut indicator_style = Style::default().fg(theme.accent_running).bg(theme.bg_base);
-            if self.hit_bg_status.hovered {
-                indicator_style = indicator_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push(
-                "bg_tasks",
-                Line::from(Span::styled(indicator, indicator_style)),
-            );
-        }
-        if self.should_show_plan_chip(&appearance) {
-            let mut plan_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
-            if self.hit_plan_button.hovered {
-                plan_style = plan_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push("plan", Line::from(Span::styled("plan", plan_style)));
-        }
-        if let Some(ref goal) = self.goal_state {
-            let tick = self.tasks.tick_count() as usize;
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
-            status.push(
-                "goal",
-                crate::views::agent_status::goal_status_line(
-                    goal,
-                    &theme,
-                    self.hit_goal_status.hovered,
-                    tick,
-                    self.context_state.as_ref().map(|c| c.used),
-                    active_subagent_tokens,
-                ),
-            );
-        }
-        if let Some(mcp_line) = self.mcp_init_progress.as_ref().and_then(|p| {
-            crate::views::agent_status::mcp_status_line(p, self.scrollback.animation_tick(), &theme)
-        }) {
-            status.push("mcp", mcp_line);
-        }
-        let ctx_used = self.context_state.as_ref().map(|c| c.used);
-        let model_window = self.session.models.get_context_window();
-        let ctx_total = self
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or(model_window);
-        if let Some(ctx_line) = context_bar::context_bar_line_for_session(
-            ctx_used,
-            ctx_total,
-            self.hit_context.hovered,
-            &theme,
-            self.chat_kind,
-        ) {
-            status.push("context", ctx_line);
-        }
-        let running = self.session.current_prompt_id.as_deref();
-        let queue_len = self.session.queue_len()
-            + self
-                .shared_queue
-                .iter()
-                .filter(|e| Some(e.id.as_str()) != running)
-                .count();
-        if queue_len > 0 {
-            use ratatui::style::Modifier;
-            let mut queue_style = ratatui::style::Style::default()
-                .fg(theme.accent_user)
-                .bg(theme.bg_base);
-            if self.hit_queue_badge.hovered {
-                queue_style = queue_style.add_modifier(Modifier::BOLD);
-            }
-            status.push(
-                "queue",
-                Line::from(Span::styled(format!("+{queue_len}"), queue_style)),
-            );
-        }
-        let counts = self.todo.counts();
-        if let Some(badge_spans) = agent::render_todo_badge_spans(
-            &counts,
-            self.hit_badge.hovered,
-            self.todo.badge_flash_active(),
-            appearance.todo.badge_format,
-            &theme,
-        ) {
-            status.push("badge", Line::from(badge_spans));
-        }
-        let areas = status.render(buf, layout.status_bar);
-        self.hit_bg_status.rect = areas.get("bg_tasks").copied();
-        self.hit_goal_status.rect = areas.get("goal").copied();
-        self.hit_context.rect = areas.get("context").copied();
-        self.hit_credits.rect = areas.get("credits").copied();
-        self.hit_plan_button.rect = areas.get("plan").copied();
-        self.hit_queue_badge.rect = areas.get("queue").copied();
-        self.hit_badge.rect = areas.get("badge").copied();
-        let home = std::env::var("HOME").ok();
-        let display = self.session.cwd.display().to_string();
-        let short = match &home {
-            Some(h) if display.starts_with(h.as_str()) => {
-                format!("~{}", &display[h.len()..])
-            }
-            _ => display,
-        };
-        let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         use unicode_width::UnicodeWidthStr;
-        let mut parts: Vec<Span> = Vec::new();
-        let mut path_offset: u16 = 0;
-        let lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
-        let branch = self
-            .current_branch
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone()));
-        let git_text = branch.map(|b| {
-            let icon = crate::git_info::branch_icon();
-            if b.is_empty() {
-                format!("{icon} detached")
-            } else {
-                format!("{icon} {b}")
-            }
-        });
-        if let Some(git_text) = git_text {
-            let git_style = Style::default()
-                .fg(theme.text_primary)
-                .bg(theme.bg_base)
-                .add_modifier(ratatui::style::Modifier::DIM);
-            path_offset += git_text.width() as u16;
-            parts.push(Span::styled(git_text, git_style));
-            path_offset += 1;
-            parts.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
-        }
-        let show_worktree_label = self.is_worktree
-            || self.session.is_worktree
-            || lazy_git.as_ref().is_some_and(|i| i.is_worktree);
-        if show_worktree_label {
-            let label_style = Style::default().fg(theme.accent_user).bg(theme.bg_base);
-            path_offset += "worktree ".width() as u16;
-            parts.push(Span::styled("worktree ", label_style));
-        }
-        if let Some(profile) = xai_grok_sandbox::profile_name() {
-            let sandbox_text = format!("sandbox:{profile} ");
-            let sandbox_style = Style::default().fg(theme.warning).bg(theme.bg_base);
-            path_offset += sandbox_text.width() as u16;
-            parts.push(Span::styled(sandbox_text, sandbox_style));
-        }
-        let path_width = short.width() as u16;
-        let path_style = if self.hit_cwd.hovered {
-            Style::default().fg(theme.text_primary).bg(theme.bg_base)
-        } else {
-            cwd_style
-        };
-        parts.push(Span::styled(short, path_style));
-        let main_repo_display = self
-            .main_repo
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
-        if let Some(main_repo) = main_repo_display {
-            parts.push(Span::styled(
-                format!(" (worktree of {main_repo})"),
-                cwd_style,
-            ));
-        }
-        let cwd_line = Line::from(parts);
-        let max_cwd_width = areas
-            .values()
-            .map(|r| r.x)
-            .min()
-            .map(|min_x| min_x.saturating_sub(layout.status_bar.x).saturating_sub(1))
-            .unwrap_or(layout.status_bar.width);
-        let upgrade_cta =
-            crate::views::announcements::promo_cta(banner_announcements, hidden_announcement_ids);
-        let upgrade_reserve = upgrade_cta.map_or(0u16, |(_, label, _)| {
-            1 + crate::views::announcements::upgrade_cta_reserve(label, None)
-        });
-        let cwd_line = truncate_line(
-            cwd_line,
-            max_cwd_width.saturating_sub(upgrade_reserve) as usize,
-        );
-        let cwd_width = cwd_line.width() as u16;
-        buf.set_line_safe(
-            layout.status_bar.x,
-            layout.status_bar.y,
-            &cwd_line,
-            cwd_width,
-        );
-        let path_x = layout.status_bar.x + path_offset;
-        let visible_path_width = path_width.min(cwd_width.saturating_sub(path_offset));
-        self.hit_cwd.rect = (visible_path_width > 0).then_some(Rect {
-            x: path_x,
-            y: layout.status_bar.y,
-            width: visible_path_width,
-            height: 1,
-        });
-        let mut upgrade_cta_rect = None;
-        if let Some((_owner, label, _url)) = upgrade_cta {
-            let avail = max_cwd_width.saturating_sub(cwd_width);
-            if avail > 1 {
-                let cta_x = layout.status_bar.x + cwd_width;
-                buf.set_span(
-                    cta_x,
-                    layout.status_bar.y,
-                    &Span::styled(" ", Style::default().bg(theme.bg_base)),
-                    1,
-                );
-                upgrade_cta_rect = crate::views::announcements::render_cta_button(
-                    buf,
-                    &theme,
-                    cta_x + 1,
-                    layout.status_bar.y,
-                    avail - 1,
-                    label,
-                    None,
-                    self.hit_upgrade_cta.hovered,
-                );
-            }
-        }
         let dropdown_open = self.prompt.any_dropdown_open();
-        self.hit_upgrade_cta
-            .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
+        // `[ui] hide_header` → zero-height status_bar; skip paint + null hits.
+        if layout.status_bar.height == 0 {
+            self.hit_bg_status.rect = None;
+            self.hit_goal_status.rect = None;
+            self.hit_context.rect = None;
+            self.hit_credits.rect = None;
+            self.hit_plan_button.rect = None;
+            self.hit_queue_badge.rect = None;
+            self.hit_badge.rect = None;
+            self.hit_cwd.rect = None;
+            self.hit_upgrade_cta.rect = None;
+        } else {
+            let mut status = AgentStatusBar::new(&theme);
+            if let Some(url) = self.highlighted_link_url() {
+                let max_len = layout.status_bar.width.saturating_sub(20) as usize;
+                let display = if url.len() > max_len {
+                    let truncated: String = url.chars().take(max_len.saturating_sub(1)).collect();
+                    format!("{truncated}\u{2026}")
+                } else {
+                    url.to_string()
+                };
+                let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
+                status.push("link_url", Line::from(Span::styled(display, link_style)));
+            }
+            let running_count = self.tasks.running_count(
+                &self.session.bg_tasks,
+                &self.subagent_sessions,
+                &self.session.scheduled_tasks,
+                &self.workflow_runs,
+            );
+            if running_count > 0 {
+                let spinner_frames = crate::glyphs::dot_spinner_frames();
+                let frame_idx = (self.tasks.tick_count() / 4) as usize % spinner_frames.len();
+                let frame = spinner_frames[frame_idx];
+                let indicator = format!("{frame} {running_count}");
+                let mut indicator_style =
+                    Style::default().fg(theme.accent_running).bg(theme.bg_base);
+                if self.hit_bg_status.hovered {
+                    indicator_style = indicator_style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                status.push(
+                    "bg_tasks",
+                    Line::from(Span::styled(indicator, indicator_style)),
+                );
+            }
+            if self.should_show_plan_chip(&appearance) {
+                let mut plan_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+                if self.hit_plan_button.hovered {
+                    plan_style = plan_style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                status.push("plan", Line::from(Span::styled("plan", plan_style)));
+            }
+            if let Some(ref goal) = self.goal_state {
+                let tick = self.tasks.tick_count() as usize;
+                let active_subagent_tokens: u64 = self
+                    .subagent_sessions
+                    .values()
+                    .filter(|s| !s.finished && s.workflow_run_id.is_none())
+                    .filter_map(|s| s.tokens_used)
+                    .sum();
+                status.push(
+                    "goal",
+                    crate::views::agent_status::goal_status_line(
+                        goal,
+                        &theme,
+                        self.hit_goal_status.hovered,
+                        tick,
+                        self.context_state.as_ref().map(|c| c.used),
+                        active_subagent_tokens,
+                    ),
+                );
+            }
+            if let Some(mcp_line) = self.mcp_init_progress.as_ref().and_then(|p| {
+                crate::views::agent_status::mcp_status_line(
+                    p,
+                    self.scrollback.animation_tick(),
+                    &theme,
+                )
+            }) {
+                status.push("mcp", mcp_line);
+            }
+            let ctx_used = self.context_state.as_ref().map(|c| c.used);
+            let model_window = self.session.models.get_context_window();
+            let ctx_total = self
+                .context_state
+                .as_ref()
+                .and_then(|c| (c.total > 0).then_some(c.total))
+                .or(model_window);
+            if let Some(ctx_line) = context_bar::context_bar_line_for_session(
+                ctx_used,
+                ctx_total,
+                self.hit_context.hovered,
+                &theme,
+                self.chat_kind,
+            ) {
+                status.push("context", ctx_line);
+            }
+            let running = self.session.current_prompt_id.as_deref();
+            let queue_len = self.session.queue_len()
+                + self
+                    .shared_queue
+                    .iter()
+                    .filter(|e| Some(e.id.as_str()) != running)
+                    .count();
+            if queue_len > 0 {
+                use ratatui::style::Modifier;
+                let mut queue_style = ratatui::style::Style::default()
+                    .fg(theme.accent_user)
+                    .bg(theme.bg_base);
+                if self.hit_queue_badge.hovered {
+                    queue_style = queue_style.add_modifier(Modifier::BOLD);
+                }
+                status.push(
+                    "queue",
+                    Line::from(Span::styled(format!("+{queue_len}"), queue_style)),
+                );
+            }
+            let counts = self.todo.counts();
+            if let Some(badge_spans) = agent::render_todo_badge_spans(
+                &counts,
+                self.hit_badge.hovered,
+                self.todo.badge_flash_active(),
+                appearance.todo.badge_format,
+                &theme,
+            ) {
+                status.push("badge", Line::from(badge_spans));
+            }
+            // Compact SuperGrok / console meter in the always-visible status
+            // bar (click → /limits). Reuses existing credit_bar formatters;
+            // not a second billing system. Hidden for gateway/chat sessions
+            // and when the billing surface is off.
+            if self.billing_surface_visible && !self.chat_kind {
+                use crate::views::credit_bar;
+                let meter_line = if self.sampling_identity.is_console() {
+                    let console_prepaid = self
+                        .console_team_prepaid_cents
+                        .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+                    let gap = credit_bar::resolve_console_team_prepaid_gap_default();
+                    let (text, color) = match console_prepaid {
+                        Some(cents) => {
+                            let dollars = cents.abs() as f64 / 100.0;
+                            let t = if dollars.fract() == 0.0 {
+                                format!("console · ${dollars:.0}")
+                            } else {
+                                format!("console · ${dollars:.2}")
+                            };
+                            let c = if cents.abs() <= 1000 {
+                                theme.warning
+                            } else {
+                                theme.accent_success
+                            };
+                            (t, c)
+                        }
+                        None => (
+                            format!("console · {}", gap.as_display_str()),
+                            theme.gray_dim,
+                        ),
+                    };
+                    let mut style = Style::default().fg(color).bg(theme.bg_base);
+                    if self.hit_credits.hovered {
+                        style = style.add_modifier(ratatui::style::Modifier::BOLD);
+                    }
+                    Some(Line::from(Span::styled(text, style)))
+                } else if let Some(ref bal) = self.credit_balance {
+                    credit_bar::credit_bar_line_for_session(
+                        bal,
+                        self.hit_credits.hovered,
+                        &theme,
+                        false,
+                    )
+                    .map(|mut line| {
+                        if self.hit_credits.hovered {
+                            for span in &mut line.spans {
+                                span.style =
+                                    span.style.add_modifier(ratatui::style::Modifier::BOLD);
+                            }
+                        }
+                        line
+                    })
+                } else {
+                    None
+                };
+                if let Some(line) = meter_line {
+                    status.push("credits", line);
+                }
+            }
+            let areas = status.render(buf, layout.status_bar);
+            self.hit_bg_status.rect = areas.get("bg_tasks").copied();
+            self.hit_goal_status.rect = areas.get("goal").copied();
+            self.hit_context.rect = areas.get("context").copied();
+            self.hit_credits.rect = areas.get("credits").copied();
+            self.hit_plan_button.rect = areas.get("plan").copied();
+            self.hit_queue_badge.rect = areas.get("queue").copied();
+            self.hit_badge.rect = areas.get("badge").copied();
+            let home = std::env::var("HOME").ok();
+            let display = self.session.cwd.display().to_string();
+            let short = match &home {
+                Some(h) if display.starts_with(h.as_str()) => {
+                    format!("~{}", &display[h.len()..])
+                }
+                _ => display,
+            };
+            let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let mut parts: Vec<Span> = Vec::new();
+            let mut path_offset: u16 = 0;
+            let lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
+            let branch = self
+                .current_branch
+                .clone()
+                .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone()));
+            let git_text = branch.map(|b| {
+                let icon = crate::git_info::branch_icon();
+                if b.is_empty() {
+                    format!("{icon} detached")
+                } else {
+                    format!("{icon} {b}")
+                }
+            });
+            if let Some(git_text) = git_text {
+                // Branch glyph + name: primary white (no DIM — too much gray chrome).
+                let git_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+                path_offset += git_text.width() as u16;
+                parts.push(Span::styled(git_text, git_style));
+                path_offset += 1;
+                parts.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
+            }
+            let show_worktree_label = self.is_worktree
+                || self.session.is_worktree
+                || lazy_git.as_ref().is_some_and(|i| i.is_worktree);
+            if show_worktree_label {
+                let label_style = Style::default().fg(theme.accent_user).bg(theme.bg_base);
+                path_offset += "worktree ".width() as u16;
+                parts.push(Span::styled("worktree ", label_style));
+            }
+            if let Some(profile) = xai_grok_sandbox::profile_name() {
+                let sandbox_text = format!("sandbox:{profile} ");
+                let sandbox_style = Style::default().fg(theme.warning).bg(theme.bg_base);
+                path_offset += sandbox_text.width() as u16;
+                parts.push(Span::styled(sandbox_text, sandbox_style));
+            }
+            let path_width = short.width() as u16;
+            let path_style = if self.hit_cwd.hovered {
+                Style::default().fg(theme.text_primary).bg(theme.bg_base)
+            } else {
+                cwd_style
+            };
+            parts.push(Span::styled(short, path_style));
+            let main_repo_display = self
+                .main_repo
+                .clone()
+                .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
+            if let Some(main_repo) = main_repo_display {
+                parts.push(Span::styled(
+                    format!(" (worktree of {main_repo})"),
+                    cwd_style,
+                ));
+            }
+            let cwd_line = Line::from(parts);
+            let max_cwd_width = areas
+                .values()
+                .map(|r| r.x)
+                .min()
+                .map(|min_x| min_x.saturating_sub(layout.status_bar.x).saturating_sub(1))
+                .unwrap_or(layout.status_bar.width);
+            let upgrade_cta = crate::views::announcements::promo_cta(
+                banner_announcements,
+                hidden_announcement_ids,
+            );
+            let upgrade_reserve = upgrade_cta.map_or(0u16, |(_, label, _)| {
+                1 + crate::views::announcements::upgrade_cta_reserve(label, None)
+            });
+            let cwd_line = truncate_line(
+                cwd_line,
+                max_cwd_width.saturating_sub(upgrade_reserve) as usize,
+            );
+            let cwd_width = cwd_line.width() as u16;
+            buf.set_line_safe(
+                layout.status_bar.x,
+                layout.status_bar.y,
+                &cwd_line,
+                cwd_width,
+            );
+            let path_x = layout.status_bar.x + path_offset;
+            let visible_path_width = path_width.min(cwd_width.saturating_sub(path_offset));
+            self.hit_cwd.rect = (visible_path_width > 0).then_some(Rect {
+                x: path_x,
+                y: layout.status_bar.y,
+                width: visible_path_width,
+                height: 1,
+            });
+            let mut upgrade_cta_rect = None;
+            if let Some((_owner, label, _url)) = upgrade_cta {
+                let avail = max_cwd_width.saturating_sub(cwd_width);
+                if avail > 1 {
+                    let cta_x = layout.status_bar.x + cwd_width;
+                    buf.set_span(
+                        cta_x,
+                        layout.status_bar.y,
+                        &Span::styled(" ", Style::default().bg(theme.bg_base)),
+                        1,
+                    );
+                    upgrade_cta_rect = crate::views::announcements::render_cta_button(
+                        buf,
+                        &theme,
+                        cta_x + 1,
+                        layout.status_bar.y,
+                        avail - 1,
+                        label,
+                        None,
+                        self.hit_upgrade_cta.hovered,
+                    );
+                }
+            }
+            self.hit_upgrade_cta
+                .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
+        } // end status_bar.height > 0
         let mut inline_edit_cursor: Option<(u16, u16)> = None;
         {
             self.sync_pending_user_input_marks();
@@ -1664,20 +1793,26 @@ impl AgentView {
             );
             let any_drag_active =
                 self.drag_selection.is_some() || self.block_drag_selection.is_some();
-            if !any_drag_active
-                && !overlay_focused
-                && let Some(ref selection_box) = sb_output.selection_box
-            {
-                selection_box.render(buf);
-                self.render_selection_buttons(
-                    buf,
-                    selection_box,
-                    sb_output.selected_entry_area,
-                    &theme,
-                );
+            if !any_drag_active && !overlay_focused {
+                if let Some(ref selection_box) = sb_output.selection_box {
+                    selection_box.render(buf);
+                    self.render_selection_buttons(
+                        buf,
+                        selection_box,
+                        sb_output.selected_entry_area,
+                        &theme,
+                    );
+                } else {
+                    self.hit_sb_copy.clear();
+                    self.hit_sb_view.clear();
+                }
+                // Always-on bubble ⧉ after selection chrome (sibling pass).
+                self.render_bubble_copy_buttons(buf, &theme);
             } else {
                 self.hit_sb_copy.clear();
                 self.hit_sb_view.clear();
+                self.bubble_copy_hits.clear();
+                self.hovered_bubble_copy = None;
             }
             let rail_shown = self.timeline_rail.is_some();
             if !rail_shown {
@@ -1812,6 +1947,9 @@ impl AgentView {
                 &self.subagent_sessions,
                 &self.session.scheduled_tasks,
             );
+            // Always-on magenta agent rail (like Human green gutter).
+            agent::paint_side_pane_agent_rail(buf, layout.tasks, theme.accent_running);
+            // Agent / subagent list: magenta focus rails (`accent_running`).
             let close_rect = agent::render_todo_chrome(
                 buf,
                 layout.tasks,
@@ -1820,6 +1958,7 @@ impl AgentView {
                 false,
                 self.hit_bg_close.hovered,
                 &theme,
+                theme.accent_running,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_bg_close.set(close_rect);
@@ -1828,6 +1967,8 @@ impl AgentView {
             let cat_focused = self.active_pane == ActivePane::Catalog && !overlay_focused;
             self.catalog
                 .render(layout.catalog, buf, cat_focused, layout_cfg);
+            agent::paint_side_pane_agent_rail(buf, layout.catalog, theme.accent_running);
+            // Agent definitions catalog shares agent chrome (magenta).
             let close_rect = agent::render_todo_chrome(
                 buf,
                 layout.catalog,
@@ -1836,6 +1977,7 @@ impl AgentView {
                 false,
                 self.hit_catalog_close.hovered,
                 &theme,
+                theme.accent_running,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_catalog_close.set(close_rect);
@@ -1845,7 +1987,23 @@ impl AgentView {
         if todo_height > 0 {
             let todo_focused = self.active_pane == ActivePane::Todo && !overlay_focused;
             self.todo.render(layout.todo, buf, todo_focused, layout_cfg);
-            let close_rect = agent::render_todo_chrome(
+            // Always-on magenta agent rail on the status board.
+            agent::paint_side_pane_agent_rail(buf, layout.todo, theme.accent_running);
+            // Clear finished: compact [−] icon when the todo board is **open**
+            // and finished rows exist. Not focus-only (operators looking at
+            // the board while on scrollback/tasks never found it) and not
+            // always-on top-right next to pts/context. Collocates with close
+            // in the todo header gap. Quiet idle (hover stronger); never neon
+            // green or agent magenta. Slash + focused X still work.
+            // Action registry / hints still say "Clear finished".
+            let clear_enabled = self.todo.counts().completed + self.todo.counts().cancelled > 0;
+            let clear_label = if clear_enabled {
+                Some(crate::glyphs::clear_finished_button())
+            } else {
+                None
+            };
+            // Status board tracks agent work → magenta agent rails.
+            let sel = agent::render_todo_chrome_with_close_label(
                 buf,
                 layout.todo,
                 layout_cfg,
@@ -1853,11 +2011,22 @@ impl AgentView {
                 false,
                 self.hit_todo_close.hovered,
                 &theme,
-            )
-            .and_then(|sel| sel.close_button_rect());
-            self.hit_todo_close.set(close_rect);
+                None,
+                clear_label,
+                self.hit_todo_clear_done.hovered,
+                true, // label only passed when live; no dim reserved slot
+                theme.accent_running,
+            );
+            self.hit_todo_close
+                .set(sel.as_ref().and_then(|s| s.close_button_rect()));
+            self.hit_todo_clear_done.set(if clear_enabled {
+                sel.as_ref().and_then(|s| s.action_button_rect())
+            } else {
+                None
+            });
         } else {
             self.hit_todo_close.clear();
+            self.hit_todo_clear_done.clear();
         }
         if queue_height > 0 {
             let queue_focused = self.active_pane == ActivePane::Queue && !overlay_focused;
@@ -1867,8 +2036,10 @@ impl AgentView {
                 queue_focused,
                 layout_cfg,
                 Some(layout.scrollback),
-                self.session.state.is_turn_running(),
+                // Mid-turn soft interject, or idle force-drain while children hold.
+                self.session.state.is_turn_running() || self.holds_queue_for_background(),
             );
+            // Queued human prompts → Human green rail (not agent magenta).
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,
                 layout.queue,
@@ -1878,6 +2049,10 @@ impl AgentView {
                 self.hit_queue_close.hovered,
                 &theme,
                 Some(crate::glyphs::ballot_x_button()),
+                None,
+                false,
+                true,
+                theme.accent_user,
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_queue_close.set(close_rect);
@@ -2270,14 +2445,56 @@ impl AgentView {
             .models
             .current_model_id_str()
             .is_some_and(xai_grok_shell::auth::is_openrouter_catalog_id);
-        let warning = crate::views::credit_bar::usage_warning_for_session_with_openrouter(
-            self.credit_balance.as_ref(),
-            self.auto_topup.as_ref(),
-            self.openrouter_credit_balance.as_ref(),
-            self.billing_surface_visible,
-            self.chat_kind,
-            openrouter_model,
-        );
+        // Meter = live spend pool. Silent sticky console (SuperGrok still
+        // memoized out of allowance) must not keep SuperGrok extras as the
+        // footer when tracked identity is still the default SuperGrokSession.
+        // Probe only while tracked is SuperGrok; on hit, pin ConsoleKey so
+        // later frames skip dual-auth/disk work.
+        if !self.sampling_identity.is_console() {
+            let grok_home = xai_grok_shell::util::grok_home::grok_home();
+            if xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(&grok_home) {
+                self.sampling_identity = crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
+            }
+        }
+        // When dual SuperGrok principals exist, name which role's included pool
+        // the footer is talking about (active base identity).
+        let live_principal_role = if self.sampling_identity.is_console() {
+            None
+        } else {
+            let grok_home = xai_grok_shell::util::grok_home::grok_home();
+            xai_grok_shell::auth::active_supergrok_identity_id(&grok_home).and_then(|aid| {
+                let map =
+                    xai_grok_shell::auth::read_auth_json(&grok_home.join("auth.json")).ok()?;
+                let listings = xai_grok_shell::auth::list_supergrok_principal_listings(&map);
+                if listings.len() < 2 {
+                    return None;
+                }
+                listings
+                    .into_iter()
+                    .find(|p| p.identity_id == aid)
+                    .map(|p| p.role_label.to_string())
+            })
+        };
+        // Console team prepaid: agent field, else process cache when team_id set.
+        let console_prepaid = self
+            .console_team_prepaid_cents
+            .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+        // Honest gap when cents unknown (not soft "no $ meter yet").
+        let console_prepaid_gap =
+            crate::views::credit_bar::resolve_console_team_prepaid_gap_default();
+        let warning =
+            crate::views::credit_bar::usage_warning_for_session_with_identity_principal_and_gap(
+                self.credit_balance.as_ref(),
+                self.auto_topup.as_ref(),
+                self.openrouter_credit_balance.as_ref(),
+                self.billing_surface_visible,
+                self.chat_kind,
+                openrouter_model,
+                self.sampling_identity,
+                live_principal_role.as_deref(),
+                console_prepaid,
+                console_prepaid_gap,
+            );
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
         let usage_warning_critical = warning.is_some_and(|(_, critical)| critical);
@@ -3137,6 +3354,9 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
+        if self.plan_approval_view.is_none() {
+            self.hit_soft_park_ctas.clear();
+        }
         if let Some(ref viewer) = self.block_viewer {
             let hints = viewer.shortcuts_hints();
             ShortcutsBar::new(&hints)
@@ -3182,12 +3402,37 @@ impl AgentView {
             ShortcutsBar::new(&hints)
                 .with_pending(pending_hint)
                 .render(layout.shortcuts, buf);
-        } else if let Some(ref pav) = self.plan_approval_view {
-            let hints = self.plan_approval_shortcut_hints(pav);
-            if !hints.is_empty() {
-                ShortcutsBar::new(&hints)
-                    .with_pending(pending_hint)
-                    .render(layout.shortcuts, buf);
+        } else if self.plan_approval_view.is_some() {
+            // Soft-park (no side panel): always paint real clickable footer CTAs
+            // so a draft or Prompt focus never strands the user without mouse
+            // Approve/Quit. Panel open (`line_viewer`) paints its own footer.
+            let soft_park_no_panel = self.line_viewer.is_none();
+            if soft_park_no_panel {
+                // FileBacked: refresh soft-park transcript card from live plan.md
+                // while parked so dogfood does not show park-time freeze.
+                self.commit_parked_plan_card();
+                use crate::views::plan_approval_view::{
+                    SoftParkCtaHovers, paint_soft_park_cta_buttons,
+                };
+                let hovers = SoftParkCtaHovers {
+                    approve: self.hit_soft_park_ctas.approve.hovered,
+                    notes: self.hit_soft_park_ctas.notes.hovered,
+                    clarify: self.hit_soft_park_ctas.clarify.hovered,
+                    revise: self.hit_soft_park_ctas.revise.hovered,
+                    quit: self.hit_soft_park_ctas.quit.hovered,
+                };
+                let areas = paint_soft_park_cta_buttons(buf, layout.shortcuts, &theme, hovers);
+                self.hit_soft_park_ctas.apply_areas(areas);
+            } else {
+                self.hit_soft_park_ctas.clear();
+                if let Some(ref pav) = self.plan_approval_view {
+                    let hints = self.plan_approval_shortcut_hints(pav);
+                    if !hints.is_empty() {
+                        ShortcutsBar::new(&hints)
+                            .with_pending(pending_hint)
+                            .render(layout.shortcuts, buf);
+                    }
+                }
             }
         } else if self.line_viewer.is_some() && self.is_plan_viewer() {
             let suppress_shortcuts = self
@@ -3299,6 +3544,9 @@ impl AgentView {
         let is_plan_viewer = self.is_plan_viewer();
         let has_plan_comments = !self.plan_comments.is_empty();
         let casual_commenting = self.is_casual_commenting();
+        // Approval path must win over stale casual flags every frame so
+        // soft-park never paints `c comment` while exit_plan_mode is parked.
+        self.sync_plan_viewer_approval_chrome();
         if let Some(ref mut viewer) = self.line_viewer {
             use crate::views::file_search::line_viewer::render_line_viewer;
             use crate::views::shortcuts_bar::HintItem;
@@ -3343,6 +3591,17 @@ impl AgentView {
                 effective_comment_count,
             );
             let in_plan_approval = self.plan_approval_view.is_some();
+            // Panel early-return (too small) leaves no footer CTAs while
+            // `line_viewer` is still Some — soft-park strip was cleared above.
+            // Detect painted approval hits so we can fall back to strip CTAs.
+            let panel_has_approval_cta = in_plan_approval
+                && viewer.plan_ref().is_some_and(|p| {
+                    p.approve_button_area.is_some()
+                        || p.abandon_button_area.is_some()
+                        || p.approve_notes_button_area.is_some()
+                        || p.questions_button_area.is_some()
+                        || p.send_button_area.is_some()
+                });
             let on_comment = in_plan_approval
                 && viewer
                     .list_state
@@ -3371,6 +3630,7 @@ impl AgentView {
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
             } else if in_plan_approval {
+                // CTAs first (a/s/q); copy always live (not vim-gated).
                 let mut h = vec![HintItem::new(key!('c'), "comment")];
                 if approval_has_comments {
                     h.push(HintItem::new(key!('s'), "send"));
@@ -3382,6 +3642,8 @@ impl AgentView {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
                 h.push(HintItem::new(key!('v'), "select"));
+                h.push(HintItem::new(key!('y'), "copy"));
+                h.push(HintItem::new(key!('Y'), "copy plan"));
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
             } else if is_plan_viewer {
@@ -3408,6 +3670,8 @@ impl AgentView {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
                 h.push(HintItem::new(key!('v'), "select"));
+                h.push(HintItem::new(key!('y'), "copy"));
+                h.push(HintItem::new(key!('Y'), "copy plan"));
                 h.push(HintItem::new(key!('f', CONTROL), "fullscreen"));
                 h.push(HintItem::new(key!('/'), "search"));
                 h.push(HintItem::new(key!(Esc), "close"));
@@ -3432,6 +3696,24 @@ impl AgentView {
             if !(plan_prompt_focused || casual_commenting || viewer.fullscreen && input_bar_active)
             {
                 ShortcutsBar::new(&viewer_hints).render(layout.shortcuts, buf);
+            }
+            // Soft-park chrome fallback: line_viewer is open but panel did not
+            // paint approval footer CTAs (size early-return). Earlier branch
+            // cleared `hit_soft_park_ctas` because line_viewer.is_some().
+            // Re-paint strip CTAs so approval is never silent zero chrome.
+            if in_plan_approval && !panel_has_approval_cta {
+                use crate::views::plan_approval_view::{
+                    SoftParkCtaHovers, paint_soft_park_cta_buttons,
+                };
+                let hovers = SoftParkCtaHovers {
+                    approve: self.hit_soft_park_ctas.approve.hovered,
+                    notes: self.hit_soft_park_ctas.notes.hovered,
+                    clarify: self.hit_soft_park_ctas.clarify.hovered,
+                    revise: self.hit_soft_park_ctas.revise.hovered,
+                    quit: self.hit_soft_park_ctas.quit.hovered,
+                };
+                let areas = paint_soft_park_cta_buttons(buf, layout.shortcuts, &theme, hovers);
+                self.hit_soft_park_ctas.apply_areas(areas);
             }
             self.pane_areas = layout.pane_areas();
             let viewer_cursor = if plan_prompt_focused || self.is_casual_commenting() {
@@ -4288,12 +4570,12 @@ impl AgentView {
                 );
             }
         }
-        let on_link = self.hovered_link_idx.is_some();
-        if supports_osc22() && on_link != self.last_pointer_on_link {
-            self.last_pointer_on_link = on_link;
+        let want_pointer = self.mouse_wants_pointer_cursor();
+        if supports_osc22() && want_pointer != self.last_pointer_cursor {
+            self.last_pointer_cursor = want_pointer;
             use crossterm::Command;
             let mut seq = String::new();
-            if on_link {
+            if want_pointer {
                 let _ = crate::terminal::SetPointerCursor.write_ansi(&mut seq);
             } else {
                 let _ = crate::terminal::SetDefaultCursor.write_ansi(&mut seq);
@@ -4350,6 +4632,418 @@ mod toast_fit_tests {
         assert_eq!(fit_toast_text("Copied!", 0), None);
     }
 }
+#[cfg(test)]
+mod clear_done_and_limits_chrome_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::AgentView;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::credit_bar::CreditBalance;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+
+    fn draw_hits(agent: &mut AgentView) -> Buffer {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    /// Named contract: open todo board with finished rows paints compact `[−]`
+    /// and registers hit **even when unfocused** (operators looking at the
+    /// board while on scrollback/tasks must still find clear). Not always-on
+    /// top-right empty-set; only when open + finished > 0.
+    #[test]
+    fn open_todo_with_finished_paints_clear_even_when_unfocused() {
+        let mut agent = make_agent();
+        let chrome = crate::glyphs::clear_finished_button();
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = false;
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        let buf = draw_hits(&mut agent);
+        let hit = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("open + finished must register clear-finished hit when unfocused");
+        assert_eq!(hit.width, 3);
+        let mut label = String::new();
+        for x in hit.x..hit.x + hit.width {
+            if let Some(cell) = buf.cell((x, hit.y)) {
+                label.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(label, chrome, "must paint [−] unfocused, got {label:?}");
+        assert!(!label.contains("Clear finished"));
+        assert!(!label.contains('\u{2205}'));
+        assert!(!chrome.contains('\u{2205}'));
+    }
+
+    /// Named contract: clear chrome only when finished rows exist. Open board
+    /// with pending-only (focused or not) has no clear glyph. Hidden board
+    /// has no clear either.
+    #[test]
+    fn clear_finished_only_when_open_with_finished_rows() {
+        let mut agent = make_agent();
+        let chrome = crate::glyphs::clear_finished_button();
+
+        // Pending only, focused: no clear chrome.
+        agent.todo.update_todos(vec![TodoItem {
+            content: "open work".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = true;
+        agent.set_active_pane(super::super::AgentPane::Todo, false);
+        let _buf_pending = draw_hits(&mut agent);
+        assert!(
+            agent.hit_todo_clear_done.rect.is_none(),
+            "focused pending-only must not show clear-finished"
+        );
+
+        // Finished + focused: live hit + [−] paint.
+        agent.todo.update_todos(vec![
+            TodoItem {
+                content: "open work".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+                size: None,
+            },
+            TodoItem {
+                content: "shipped".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Completed,
+                meta: None,
+                size: None,
+            },
+        ]);
+        let buf_done = draw_hits(&mut agent);
+        let hit = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("focused + finished must register clear-finished hit");
+        assert_eq!(hit.width, 3);
+        let mut label = String::new();
+        for x in hit.x..hit.x + hit.width {
+            if let Some(cell) = buf_done.cell((x, hit.y)) {
+                label.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(label, chrome, "must paint [−], got {label:?}");
+        assert!(!label.contains("Clear finished"));
+        assert!(!label.contains('\u{2205}'));
+
+        // Blur focus but keep pane open: clear chrome **stays** (discoverable).
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        agent.todo.overlay.focused = false;
+        let buf_blur = draw_hits(&mut agent);
+        let hit_blur = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("open + finished must keep clear hit after blur");
+        assert_eq!(hit_blur.width, 3);
+        let mut label_blur = String::new();
+        for x in hit_blur.x..hit_blur.x + hit_blur.width {
+            if let Some(cell) = buf_blur.cell((x, hit_blur.y)) {
+                label_blur.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(
+            label_blur, chrome,
+            "blur must still paint [−] when open + finished, got {label_blur:?}"
+        );
+
+        // Hide the pane: clear chrome gone.
+        agent.todo.overlay.visible = false;
+        let _buf_hidden = draw_hits(&mut agent);
+        assert!(
+            agent.hit_todo_clear_done.rect.is_none(),
+            "hidden todo pane must not register clear-finished hit"
+        );
+    }
+
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        let ax2 = a.x.saturating_add(a.width);
+        let ay2 = a.y.saturating_add(a.height);
+        let bx2 = b.x.saturating_add(b.width);
+        let by2 = b.y.saturating_add(b.height);
+        a.x < bx2 && b.x < ax2 && a.y < by2 && b.y < ay2
+    }
+
+    /// Named contract (compact smash case): clear-finished hit must not
+    /// intersect tasks subagent open chrome (model/timer/[↗]) or kill [x].
+    /// Covers focused and unfocused open boards (both paint clear when finished).
+    #[test]
+    fn clear_finished_hit_does_not_intersect_tasks_subagent_open_or_kill() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        // Compact collapses outer_vpad/pane_gap — the dogfood smash case.
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.tasks.overlay.visible = true;
+
+        let child_sid = "child-open-1";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+
+        let chrome = crate::glyphs::clear_finished_button();
+        for (label_case, focused) in [("focused", true), ("unfocused", false)] {
+            agent.todo.overlay.focused = focused;
+            if focused {
+                agent.set_active_pane(super::super::AgentPane::Todo, false);
+            } else {
+                agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+            }
+
+            let buf = draw_hits(&mut agent);
+            let clear = agent.hit_todo_clear_done.rect.expect(&format!(
+                "{label_case} open + finished must register clear-finished hit"
+            ));
+
+            assert!(
+                !agent.tasks.view_button_rects.is_empty(),
+                "{label_case}: tasks pane must register open chrome for the running subagent"
+            );
+            for (id, open) in &agent.tasks.view_button_rects {
+                assert!(
+                    !rects_overlap(clear, *open),
+                    "{label_case}: clear-finished {clear:?} must not intersect open chrome {open:?} for {id:?}"
+                );
+            }
+            for (id, kill) in &agent.tasks.kill_button_rects {
+                assert!(
+                    !rects_overlap(clear, *kill),
+                    "{label_case}: clear-finished {clear:?} must not intersect kill {kill:?} for {id:?}"
+                );
+            }
+
+            let mut label = String::new();
+            for x in clear.x..clear.x + clear.width {
+                if let Some(cell) = buf.cell((x, clear.y)) {
+                    label.push_str(cell.symbol());
+                }
+            }
+            assert_eq!(
+                label, chrome,
+                "{label_case}: label must be clear-finished [−], got {label:?}"
+            );
+            assert!(!label.contains("Clear finished"));
+            assert!(!label.contains("Clear done"));
+            assert!(!label.contains('\u{2205}'));
+            assert_eq!(clear.width, 3);
+        }
+    }
+
+    /// Named contract: click on tasks model/timer open chrome opens that subagent.
+    #[test]
+    fn click_tasks_model_timer_chrome_opens_subagent() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        let child_sid = "child-click-open";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+        agent.tasks.overlay.visible = true;
+
+        let _buf = draw_hits(&mut agent);
+        let (entry_id, open) = agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .find(|(id, _)| matches!(id, crate::views::tasks_pane::TaskEntryId::Agent(_)))
+            .cloned()
+            .expect("agent open chrome must exist");
+        // Prefer a cell that is left of the pure [↗] when model/timer expand the hit.
+        // Left edge is model/timer; rightmost 3 cols are the enlarge glyph.
+        let click_col = open.x;
+        let click_row = open.y;
+        assert!(
+            open.width >= 3,
+            "open chrome must cover at least the view button, got {open:?}"
+        );
+
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        assert!(agent.active_subagent.is_none());
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_col,
+                row: click_row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "open chrome click must open subagent, got {out:?} for {entry_id:?} at {open:?}"
+        );
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(child_sid),
+            "must open the correct child via open_subagent_fullscreen"
+        );
+    }
+
+    /// Named contract: Clear finished click (open board, including unfocused)
+    /// archives finished todos and does **not** open a subagent.
+    #[test]
+    fn clear_finished_click_does_not_open_subagent() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        // Unfocused open board is the dogfood path (looking at tasks).
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = false;
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+
+        let child_sid = "child-clear-no-open";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+        agent.tasks.overlay.visible = true;
+
+        let _buf = draw_hits(&mut agent);
+        let clear = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("unfocused open + finished Clear finished hit");
+        // Sanity: still not overlapping open after paint.
+        for (_, open) in &agent.tasks.view_button_rects {
+            assert!(
+                !rects_overlap(clear, *open),
+                "setup requires disjoint Clear vs open"
+            );
+        }
+
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: clear.x,
+                row: clear.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Clear finished click must clear, got {out:?}"
+        );
+        assert!(
+            agent.active_subagent.is_none(),
+            "Clear finished must not open a subagent"
+        );
+    }
+
+    /// Named contract: SuperGrok balance with billing surface on paints status
+    /// credits meter and registers hit_credits for /limits click.
+    #[test]
+    fn status_bar_credits_meter_registers_hit_when_balance_known() {
+        let mut agent = make_agent();
+        agent.billing_surface_visible = true;
+        agent.chat_kind = false;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 42.0,
+            effective_usage_pct: 42.0,
+            period_end_display: None,
+            pay_as_you_go: false,
+            on_demand_cap_cents: None,
+            on_demand_used_cents: None,
+            prepaid_balance_cents: None,
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            is_unified_billing_user: None,
+        });
+        let buf = draw_hits(&mut agent);
+        assert!(
+            agent.hit_credits.rect.is_some(),
+            "status bar must register credits hit when balance is known"
+        );
+        let rect = agent.hit_credits.rect.unwrap();
+        let mut text = String::new();
+        for x in rect.x..rect.x + rect.width {
+            if let Some(cell) = buf.cell((x, rect.y)) {
+                text.push_str(cell.symbol());
+            }
+        }
+        assert!(
+            text.contains("Credits") || text.contains("42"),
+            "status meter should show credits used %, got {text:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod selection_state_tests {
     use super::super::test_fixtures::make_agent;

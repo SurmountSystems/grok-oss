@@ -15,7 +15,7 @@ Deep companion (not pasted here):
 
 ## 1. Global — Regressions and deep diagnosis — never in the parent thread
 
-From `/home/hunter/.grok/AGENTS.md`:
+From `~/.grok/AGENTS.md`:
 
 ```
 ### Regressions and deep diagnosis — never in the parent thread
@@ -55,12 +55,12 @@ knee, then compact, then lose the plot.
 
 ## 2. Global — Hard stop — parent is coordinator only (pinned 2026-07-24)
 
-From `/home/hunter/.grok/AGENTS.md`:
+From `~/.grok/AGENTS.md`:
 
 ```
 ### Hard stop — parent is coordinator only (pinned 2026-07-24)
 
-Hunter has re-flagged this **repeatedly**. Chat memory is not enough.
+The operator has re-flagged this **repeatedly**. Chat memory is not enough.
 
 **Parent may:** set goals, spawn/wait children, read **short on-disk join
 artifacts** children wrote, stage/hand human-only git commands, one-line
@@ -86,7 +86,7 @@ first; children own fetch/read/fix.
 
 ## 3. Project (grok-build) — Subagents — parent is coordinator only (hard)
 
-From `/home/hunter/Projects/surmount/grok-build/AGENTS.md`:
+From `$REPO/AGENTS.md`:
 
 ```
 ## Subagents — parent is coordinator only (hard)

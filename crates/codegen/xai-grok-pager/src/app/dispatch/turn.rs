@@ -43,7 +43,7 @@ fn cancel_subagents_pref_canonical_from_ui(
 
 /// Apply a global always-stop / always-continue preference to every agent and
 /// `app.current_ui` (in-memory only; caller emits `Effect::PersistSetting`).
-pub(super) fn apply_cancel_subagents_preference_global(app: &mut AppView, stop: bool) {
+pub(crate) fn apply_cancel_subagents_preference_global(app: &mut AppView, stop: bool) {
     let canonical = cancel_subagents_pref_canonical(stop);
     app.current_ui.cancel_subagents_on_turn_cancel = Some(canonical.to_string());
     for agent in app.agents.values_mut() {
@@ -258,7 +258,7 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     if let Some(mut pav) = agent.plan_approval_view.take() {
         pav.send_stale_cancel();
         agent.plan_next_comment_id = pav.next_comment_id;
-        agent.prompt.restore(pav.stashed_prompt);
+        agent.restore_plan_stashed_prompt(pav.stashed_prompt);
         agent.line_viewer = None;
     }
 

@@ -19,6 +19,10 @@ pub struct UiConfig {
     /// Compact mode. Read by pager, declared here for `serde_ignored`.
     #[serde(default)]
     pub compact_mode: bool,
+    /// Hide the top agent status bar (cwd/git left, context/queue/plan right).
+    /// Fullscreen agent chrome only; default false. Read by pager.
+    #[serde(default)]
+    pub hide_header: bool,
     /// Simple mode. Read by pager, declared here for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simple_mode: Option<bool>,
@@ -47,6 +51,12 @@ pub struct UiConfig {
     /// Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_flip_on_send: Option<bool>,
+    /// Scrub fancy punctuation in assistant AI text (em/en dash, smart
+    /// quotes, zero-width / NBSP-class spaces → ASCII-safe forms).
+    /// `None` = on (default). Env `GROK_SCRUB_ASCII_PUNCT=0` also disables
+    /// (ops kill-switch; see `xai_grok_tools::util::ascii_scrub`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrub_ascii_punct: Option<bool>,
     /// Theme to use when the OS is in dark mode. Written by the pager's theme persist module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_dark_theme: Option<String>,
@@ -154,8 +164,8 @@ pub struct UiConfig {
     /// Soft-cap effective model context at 200K tokens so Grok 4.5 requests
     /// stay on the lower pricing tier (prices double above 200K). Catalog
     /// windows remain larger (e.g. 500K); compaction and the context bar use
-    /// the capped size when this is on. `None` = on (client default). Also
-    /// clamps auto-queued `/implement --effort N` to 1. Written by the
+    /// the capped size when this is on. `None` = on (client default). Does
+    /// not rewrite auto-queued `/implement --effort N`. Written by the
     /// pager's settings modal; overridable per conversation via
     /// `/economic-mode` when that command is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,6 +197,45 @@ pub struct UiConfig {
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
     pub display_refresh: DisplayRefreshSettings,
+    /// How `exit_plan_mode` presents plan approval.
+    ///
+    /// - `"soft"` / unset: park durable approval, auto-open the non-capturing
+    ///   side panel + toast (keep live draft). Default. `/view-plan` reopens
+    ///   if dismissed.
+    /// - `"modal"`: open the fullscreen plan line-viewer immediately and stash
+    ///   the live draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_approval_park: Option<String>,
+    /// Settings-written subset of `[ui.notifications]` (auto session recap).
+    /// Full notification config is still loaded by the pager from raw TOML;
+    /// this nest lets Settings merge only the recap knobs without splatting
+    /// method/condition/hooks. Absent until a Settings toggle writes a value.
+    #[serde(default, skip_serializing_if = "NotificationsUiSettings::is_default")]
+    pub notifications: NotificationsUiSettings,
+}
+
+/// Settings-owned slice of `[ui.notifications]` (session recap prefs).
+///
+/// Other notification keys (`method`, `condition`, hooks, title, …) stay
+/// unmodeled here so `merge_section` deep-merge preserves them. The pager
+/// still loads the full `NotificationConfig` from raw TOML at startup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationsUiSettings {
+    /// Auto "where was I" recap when returning from away. `None` = inherit
+    /// client default (`true`). Does not gate manual `/recap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_recap: Option<bool>,
+    /// Min unfocused seconds before auto recap may fire. `None` = inherit
+    /// client default (`30`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_recap_threshold_secs: Option<u64>,
+}
+
+impl NotificationsUiSettings {
+    /// True when no recap field has a user-explicit value.
+    pub fn is_default(&self) -> bool {
+        self.session_recap.is_none() && self.session_recap_threshold_secs.is_none()
+    }
 }
 
 /// User-config opt-outs for the per-tip contextual hints, serialized as
@@ -265,6 +314,7 @@ impl Default for UiConfig {
             yolo: false,
             ui_theme: None,
             compact_mode: false,
+            hide_header: false,
             simple_mode: None,
             permission_mode: None,
             approval_mode: None,
@@ -272,6 +322,7 @@ impl Default for UiConfig {
             show_timestamps: None,
             show_timeline: None,
             page_flip_on_send: None,
+            scrub_ascii_punct: None,
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,
@@ -301,6 +352,8 @@ impl Default for UiConfig {
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
             display_refresh: DisplayRefreshSettings::default(),
+            plan_approval_park: None,
+            notifications: NotificationsUiSettings::default(),
         }
     }
 }
@@ -332,6 +385,16 @@ impl UiConfig {
             .unwrap_or(Self::PAGE_FLIP_ON_SEND_DEFAULT)
     }
 
+    /// Default for [`Self::scrub_ascii_punct`] when unset (hygiene ON).
+    pub const SCRUB_ASCII_PUNCT_DEFAULT: bool = true;
+
+    /// Resolved assistant ASCII scrub: configured value, or
+    /// [`Self::SCRUB_ASCII_PUNCT_DEFAULT`] when unset.
+    pub fn scrub_ascii_punct_enabled(&self) -> bool {
+        self.scrub_ascii_punct
+            .unwrap_or(Self::SCRUB_ASCII_PUNCT_DEFAULT)
+    }
+
     /// True when the highlight should not timer-dismiss (`hold` / `word_select`,
     /// or legacy duration 0).
     pub fn keep_text_selection_enabled(&self) -> bool {
@@ -339,6 +402,22 @@ impl UiConfig {
             return s == "hold" || s == "word_select";
         }
         matches!(self.selection_highlight_duration_ms, Some(0))
+    }
+
+    /// Default for [`Self::plan_approval_park`] when unset (soft park / option A).
+    pub const PLAN_APPROVAL_PARK_DEFAULT: &str = "soft";
+
+    /// Canonical park mode: `"soft"` or `"modal"`. Unknown values fall back to soft.
+    pub fn plan_approval_park_mode(&self) -> &'static str {
+        match self.plan_approval_park.as_deref().map(str::trim) {
+            Some("modal") => "modal",
+            Some("soft") | None | Some(_) => "soft",
+        }
+    }
+
+    /// True when `exit_plan_mode` should open the plan modal immediately.
+    pub fn plan_approval_force_modal(&self) -> bool {
+        self.plan_approval_park_mode() == "modal"
     }
 }
 
@@ -354,6 +433,64 @@ mod tests {
             ..Default::default()
         };
         assert!(!off.page_flip_on_send_enabled());
+    }
+
+    #[test]
+    fn scrub_ascii_punct_defaults_on() {
+        assert!(UiConfig::default().scrub_ascii_punct_enabled());
+        let off = UiConfig {
+            scrub_ascii_punct: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.scrub_ascii_punct_enabled());
+        let on: UiConfig = serde_json::from_value(serde_json::json!({ "scrub_ascii_punct": true }))
+            .expect("deserializes scrub_ascii_punct true");
+        assert!(on.scrub_ascii_punct_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.scrub_ascii_punct_enabled());
+    }
+
+    #[test]
+    fn plan_approval_park_defaults_soft() {
+        assert!(!UiConfig::default().plan_approval_force_modal());
+        assert_eq!(UiConfig::default().plan_approval_park_mode(), "soft");
+        let modal = UiConfig {
+            plan_approval_park: Some("modal".into()),
+            ..Default::default()
+        };
+        assert!(modal.plan_approval_force_modal());
+        assert_eq!(modal.plan_approval_park_mode(), "modal");
+        let weird = UiConfig {
+            plan_approval_park: Some("side-panel".into()),
+            ..Default::default()
+        };
+        assert!(!weird.plan_approval_force_modal());
+    }
+
+    #[test]
+    fn hide_header_defaults_false_and_parses() {
+        assert!(!UiConfig::default().hide_header);
+        let on: UiConfig = serde_json::from_value(serde_json::json!({ "hide_header": true }))
+            .expect("UiConfig deserializes hide_header true");
+        assert!(on.hide_header);
+        let off: UiConfig = serde_json::from_value(serde_json::json!({ "hide_header": false }))
+            .expect("UiConfig deserializes hide_header false");
+        assert!(!off.hide_header);
+        let missing: UiConfig = serde_json::from_value(serde_json::json!({}))
+            .expect("UiConfig defaults missing hide_header");
+        assert!(!missing.hide_header);
+    }
+
+    #[test]
+    fn stale_hide_title_bar_key_is_ignored() {
+        // Named contract: hide_title_bar was removed. Stale config keys must
+        // not fail deserialize (serde ignores unknown fields). Dynamic title
+        // opt-out is `[ui.notifications.title].enabled` only.
+        let stale: UiConfig = serde_json::from_value(serde_json::json!({ "hide_title_bar": true }))
+            .expect("stale hide_title_bar must not break UiConfig deserialize");
+        assert!(!stale.hide_header);
+        let _ = stale;
     }
 
     #[test]

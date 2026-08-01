@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
 
-use super::layout::{MIN_DASHBOARD_WIDTH, compute_layout};
+use super::layout::MIN_DASHBOARD_WIDTH;
 use super::row::{DashboardRow, RowBadge, build_rows_with_roster};
 use super::state::{
     DashboardRowId, DashboardState, Filter, Focusable, Grouping, LocationPickerState, RenameDraft,
@@ -117,6 +117,35 @@ pub fn render_dashboard(
     // (`None` = no CTA); field meanings live on [`HeaderUpgradeCta`].
     upgrade_cta: Option<HeaderUpgradeCta<'_>>,
 ) -> Option<(u16, u16)> {
+    // Default: header visible (tests + callers that do not pass the flag).
+    render_dashboard_with_hide_header(
+        buf,
+        area,
+        state,
+        agents,
+        registry,
+        pending_hint,
+        roster,
+        dashboard_sessions_loading,
+        upgrade_cta,
+        false,
+    )
+}
+
+/// Like [`render_dashboard`], optionally zeroing the top location header
+/// when `[ui] hide_header` is set.
+pub fn render_dashboard_with_hide_header(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut DashboardState,
+    agents: &mut IndexMap<AgentId, AgentView>,
+    registry: &crate::actions::ActionRegistry,
+    pending_hint: Option<crate::views::shortcuts_bar::PendingHint>,
+    roster: &[crate::app::roster::RosterEntry],
+    dashboard_sessions_loading: bool,
+    upgrade_cta: Option<HeaderUpgradeCta<'_>>,
+    hide_header: bool,
+) -> Option<(u16, u16)> {
     // Cache whether a pinned (non-dismissible) promo CTA is live so the key
     // handler can steal Ctrl+O for it; the dispatch re-resolves the gate.
     state.pinned_upgrade_cta_live = upgrade_cta.is_some_and(|cta| cta.pinned);
@@ -198,8 +227,8 @@ pub fn render_dashboard(
     // docs/internal/33-dashboard-peek-responsive-layout.md). Provisional
     // layout gives dispatch width for reply wrapping before we decide
     // whether peek fits.
-    let mut layout = compute_layout(area, false);
-    let fixed = super::layout::chrome_overhead(area);
+    let mut layout = super::layout::compute_layout_with_hide_header(area, false, hide_header);
+    let fixed = super::layout::chrome_overhead_with_hide_header(area, hide_header);
     let reply_text_w = layout.dispatch.width.saturating_sub(6);
 
     match state.selected.clone() {
@@ -258,7 +287,11 @@ pub fn render_dashboard(
                         p.auto = badge.auto;
                         p.plan_mode = badge.plan;
                     }
-                    layout = super::layout::compute_layout_with_peek_box(area, alloc.peek_box_h);
+                    layout = super::layout::compute_layout_with_peek_box_hide_header(
+                        area,
+                        alloc.peek_box_h,
+                        hide_header,
+                    );
                 } else {
                     state.set_peek_reply_target_cwd(None);
                     state.set_peek(None);
@@ -280,11 +313,16 @@ pub fn render_dashboard(
     if state.peek.is_none() && area.height > 8 && !state.dispatch.text().is_empty() {
         let rows = dispatch_text_rows(state, layout.dispatch.width, area.height);
         if rows > 1 {
-            layout = super::layout::compute_layout_with_dispatch(area, false, rows);
+            layout = super::layout::compute_layout_with_dispatch_hide_header(
+                area,
+                false,
+                rows,
+                hide_header,
+            );
         }
     }
 
-    // Header.
+    // Header (zero-height when hide_header — paint is a no-op on empty area).
     render_header(buf, layout.header, &theme, &rows, state, upgrade_cta);
 
     // Body: key off visible rows (local agents + roster), not the local map alone.
@@ -6766,10 +6804,16 @@ mod tests {
     fn render_row_two_line_layout_paints_title_and_secondary() {
         use std::path::PathBuf;
         use std::time::SystemTime;
+
+        // Layout geometry under classic dot spinner frames — pin GrokNight so
+        // DOGE striped marquee does not change the fixed glyph at tick=8.
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.spinner_tick = 8; // → dot_spinner_frames()[2] = `⸬`.
+        state.spinner_tick = 8; // → dot_spinner_frames()[2] = `⸬` (non-DOGE).
         let row = DashboardRow {
             id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
             label: "who are you?".to_string(),
@@ -6919,6 +6963,9 @@ mod tests {
     fn render_row_needs_input_yellow_blink_no_badge_pending_prefix() {
         use std::path::PathBuf;
         use std::time::SystemTime;
+        // Dim blink uses continuous blend; DOGE solid-steps so half-opacity
+        // stays full yellow. Pin GrokNight for a hermetic fade assert.
+        let _pin = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let make_row = || DashboardRow {
             id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),

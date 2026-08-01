@@ -24,7 +24,7 @@ pub(crate) fn default_coding_data_retention_opt_out() -> bool {
 }
 
 /// Token provenance (debugging/auth.json only -- no code branches on this).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     /// Deprecated. Kept for deserializing old auth.json files.
@@ -330,6 +330,204 @@ pub fn lookup_auth(map: &AuthStore, scope: &str) -> Option<GrokAuth> {
     Some(auth)
 }
 
+/// True for SuperGrok login sessions (OIDC or external provider), not console
+/// API keys or legacy WebLogin.
+pub fn is_supergrok_session_mode(mode: AuthMode) -> bool {
+    matches!(mode, AuthMode::Oidc | AuthMode::External)
+}
+
+/// Multi-slot key for a personal SuperGrok principal under a base OIDC scope.
+pub const SUPERGROK_PERSONAL_MULTI_SLOT: &str = "personal";
+
+/// auth.json multi-slot key for one SuperGrok principal (personal or Business).
+///
+/// Personal and Business can coexist under the same issuer/client base scope:
+/// - Personal: `{base}::personal`
+/// - Business/Team: `{base}::team::{team_id}`
+///
+/// The base scope itself still holds the **active** primary for AuthManager
+/// refresh; multi-slots keep siblings for ranking, doctor, and second login.
+pub fn multi_slot_scope_for_auth(base_scope: &str, auth: &GrokAuth) -> String {
+    if auth.principal_type.as_deref() == Some(TEAM_PRINCIPAL_TYPE) {
+        let id = auth
+            .team_id
+            .as_deref()
+            .or(auth.principal_id.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("unknown");
+        format!("{base_scope}::team::{id}")
+    } else {
+        format!("{base_scope}::{SUPERGROK_PERSONAL_MULTI_SLOT}")
+    }
+}
+
+/// Insert or update a SuperGrok session without wiping other SuperGrok principals.
+///
+/// 1. If `base_scope` holds a **different** principal, migrate it into its
+///    multi-slot when that slot is empty (legacy single-entry auth.json).
+/// 2. Write `auth` into its multi-slot.
+/// 3. Write `auth` to `base_scope` as the active primary (AuthManager scope).
+///
+/// Re-login of the same identity overwrites that multi-slot and the base.
+/// Console API-key scope and unrelated issuer/client entries are untouched.
+pub fn upsert_supergrok_session(map: &mut AuthStore, base_scope: &str, auth: GrokAuth) {
+    let new_slot = multi_slot_scope_for_auth(base_scope, &auth);
+
+    if let Some(existing) = map.get(base_scope).cloned() {
+        if is_supergrok_session_mode(existing.auth_mode) {
+            let existing_slot = multi_slot_scope_for_auth(base_scope, &existing);
+            if existing_slot != new_slot {
+                // Preserve sibling under multi-slot; do not clobber a fresher
+                // multi-slot entry that already exists for that identity.
+                map.entry(existing_slot).or_insert(existing);
+            }
+        }
+    }
+
+    map.insert(new_slot, auth.clone());
+    map.insert(base_scope.to_owned(), auth);
+}
+
+/// Resolve SuperGrok session for AuthManager: base active first, else multi-slots.
+///
+/// Used when base was cleared (logout of current) but a sibling SuperGrok
+/// multi-slot remains, and for first load of multi-principal stores.
+pub fn lookup_supergrok_session_for_base(map: &AuthStore, base_scope: &str) -> Option<GrokAuth> {
+    if let Some(auth) = lookup_auth(map, base_scope) {
+        if is_supergrok_session_mode(auth.auth_mode) {
+            return Some(auth);
+        }
+        // Base held non-session (e.g. unexpected); fall through to multi-slots.
+    }
+
+    let personal_key = format!("{base_scope}::{SUPERGROK_PERSONAL_MULTI_SLOT}");
+    if let Some(auth) = map.get(&personal_key).cloned() {
+        if is_supergrok_session_mode(auth.auth_mode) && auth.auth_mode != AuthMode::WebLogin {
+            return Some(auth);
+        }
+    }
+
+    let team_prefix = format!("{base_scope}::team::");
+    for (key, auth) in map {
+        if key.starts_with(&team_prefix)
+            && is_supergrok_session_mode(auth.auth_mode)
+            && auth.auth_mode != AuthMode::WebLogin
+        {
+            return Some(auth.clone());
+        }
+    }
+    None
+}
+
+/// Stable identity id for ranking / doctor (team_id, else user_id, else scope).
+pub fn supergrok_identity_id_from_auth(auth: &GrokAuth, store_scope: &str) -> String {
+    auth.team_id
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| {
+            let u = auth.user_id.trim();
+            if u.is_empty() {
+                None
+            } else {
+                Some(u.to_owned())
+            }
+        })
+        .unwrap_or_else(|| store_scope.to_owned())
+}
+
+/// Fingerprint of a SuperGrok access token (never the raw secret). Same hash as
+/// console key fingerprints so doctor listings stay consistent.
+pub fn fingerprint_session_token(token: &str) -> String {
+    blake3::hash(token.trim().as_bytes()).to_hex().to_string()
+}
+
+/// One SuperGrok principal for doctor / list (labels + fingerprint only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupergrokPrincipalListing {
+    /// `personal` or `business`.
+    pub role_label: &'static str,
+    /// `oidc` or `external`.
+    pub mode_label: &'static str,
+    /// Blake3 hex of access token (never raw).
+    pub fingerprint: String,
+    pub store_scope: String,
+    pub identity_id: String,
+}
+
+/// List SuperGrok principals from an auth store map (deduped by identity_id).
+///
+/// Skips API-key scope and WebLogin. When base + multi-slot hold the same
+/// identity, prefer the **fresher** entry (later `expires_at` / `create_time`)
+/// so doctor fingerprints match the live JWT used for ranking/inference — not
+/// a stale multi-slot left behind after base refresh. Multi-slot wins only on
+/// a true tie. Order: identity_id (BTreeMap). Safe for doctor: no secrets
+/// beyond fingerprints.
+pub fn list_supergrok_principal_listings(map: &AuthStore) -> Vec<SupergrokPrincipalListing> {
+    let mut by_identity: BTreeMap<String, (bool, &GrokAuth, SupergrokPrincipalListing)> =
+        BTreeMap::new();
+
+    for (scope, auth) in map {
+        if scope == API_KEY_SCOPE {
+            continue;
+        }
+        if !is_supergrok_session_mode(auth.auth_mode) {
+            continue;
+        }
+        let token = auth.key.trim();
+        if token.is_empty() {
+            continue;
+        }
+        // Inline role (avoid model ↔ rank cycle): team principal + team_id → business.
+        let role_label = if auth.principal_type.as_deref() == Some(TEAM_PRINCIPAL_TYPE)
+            && auth.team_id.as_ref().is_some_and(|t| !t.is_empty())
+        {
+            "business"
+        } else {
+            "personal"
+        };
+        let mode_label = match auth.auth_mode {
+            AuthMode::Oidc => "oidc",
+            AuthMode::External => "external",
+            AuthMode::ApiKey | AuthMode::WebLogin => continue,
+        };
+        let identity_id = supergrok_identity_id_from_auth(auth, scope);
+        let listing = SupergrokPrincipalListing {
+            role_label,
+            mode_label,
+            fingerprint: fingerprint_session_token(token),
+            store_scope: scope.clone(),
+            identity_id: identity_id.clone(),
+        };
+        let is_multi = scope.contains("::personal") || scope.contains("::team::");
+        match by_identity.get(&identity_id) {
+            None => {
+                by_identity.insert(identity_id, (is_multi, auth, listing));
+            }
+            Some((prev_multi, prev_auth, _)) => {
+                let take = match (prev_auth.expires_at, auth.expires_at) {
+                    (Some(a), Some(b)) if a != b => b > a,
+                    (None, Some(_)) => true,
+                    (Some(_), None) => false,
+                    _ if auth.create_time != prev_auth.create_time => {
+                        auth.create_time > prev_auth.create_time
+                    }
+                    _ => is_multi && !*prev_multi,
+                };
+                if take {
+                    by_identity.insert(identity_id, (is_multi, auth, listing));
+                }
+            }
+        }
+    }
+
+    by_identity
+        .into_values()
+        .map(|(_, _, listing)| listing)
+        .collect()
+}
+
 /// Early-invalidation buffer. Override with `GROK_AUTH_EARLY_INVALIDATION_SECS`
 /// for testing (e.g. `=5` to shrink the buffer to 5 seconds).
 pub(super) fn early_invalidation() -> Duration {
@@ -516,5 +714,120 @@ mod tests {
         );
         assert!(default_coding_data_retention_opt_out());
         assert!(GrokAuth::default().coding_data_retention_opt_out);
+    }
+
+    // ── Multi SuperGrok principal store (personal + Business) ──────────
+
+    #[test]
+    fn upsert_personal_then_business_keeps_both_multi_slots() {
+        let base = "https://auth.x.ai::client-multi";
+        let mut map = AuthStore::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-personal".into(),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-business".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-biz".into(),
+                principal_type: Some(TEAM_PRINCIPAL_TYPE.into()),
+                principal_id: Some("team-1".into()),
+                team_id: Some("team-1".into()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(map.get(base).map(|a| a.key.as_str()), Some("tok-business"));
+        assert_eq!(
+            map.get(&format!("{base}::personal"))
+                .map(|a| a.key.as_str()),
+            Some("tok-personal")
+        );
+        assert_eq!(
+            map.get(&format!("{base}::team::team-1"))
+                .map(|a| a.key.as_str()),
+            Some("tok-business")
+        );
+
+        let listings = list_supergrok_principal_listings(&map);
+        assert_eq!(listings.len(), 2);
+        let roles: Vec<_> = listings.iter().map(|p| p.role_label).collect();
+        assert!(roles.contains(&"personal"));
+        assert!(roles.contains(&"business"));
+        for p in &listings {
+            assert!(!p.fingerprint.is_empty());
+            assert!(!p.fingerprint.contains("tok-"));
+        }
+    }
+
+    #[test]
+    fn upsert_business_then_personal_keeps_business_slot() {
+        let base = "https://auth.x.ai::client-multi-2";
+        let mut map = AuthStore::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-biz".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u".into(),
+                principal_type: Some(TEAM_PRINCIPAL_TYPE.into()),
+                team_id: Some("t-9".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-pers".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(map.get(base).map(|a| a.key.as_str()), Some("tok-pers"));
+        assert_eq!(
+            map.get(&format!("{base}::team::t-9"))
+                .map(|a| a.key.as_str()),
+            Some("tok-biz"),
+            "Business multi-slot must survive personal re-login"
+        );
+    }
+
+    #[test]
+    fn fingerprint_session_token_is_not_raw() {
+        let fp = fingerprint_session_token("super-secret-session-jwt");
+        assert!(!fp.contains("super-secret"));
+        assert!(!fp.contains("jwt"));
+        assert_eq!(fp.len(), 64);
+    }
+
+    #[test]
+    fn lookup_supergrok_adopts_multi_slot_when_base_empty() {
+        let base = "https://auth.x.ai::client-orphan";
+        let mut map = AuthStore::new();
+        map.insert(
+            format!("{base}::team::t1"),
+            GrokAuth {
+                key: "orphan-biz".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u".into(),
+                principal_type: Some(TEAM_PRINCIPAL_TYPE.into()),
+                team_id: Some("t1".into()),
+                ..Default::default()
+            },
+        );
+        let found = lookup_supergrok_session_for_base(&map, base).unwrap();
+        assert_eq!(found.key, "orphan-biz");
     }
 }

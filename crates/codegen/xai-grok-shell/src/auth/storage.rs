@@ -373,6 +373,10 @@ pub fn read_api_key(grok_home: &Path) -> Option<String> {
 ///
 /// Uses the corrupt-recovery reader so a malformed auth.json (e.g. from a
 /// previous crash) can be healed when the user sets an API key.
+///
+/// Also best-effort mirrors into the Grok secret store (keyring /
+/// `provider_credentials.json`) for dual-auth console-key failover when
+/// `XAI_API_KEY` is not set (env wins; store write is skipped).
 pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
@@ -384,7 +388,20 @@ pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
             ..Default::default()
         },
     );
-    write_auth_json(&path, &map)
+    write_auth_json(&path, &map)?;
+    // Dual-write to secret store for dual-auth resolve (fail-open on store).
+    // Multi-add: append unique keys so `grok login --api-key` can stack.
+    let store = super::credentials_store::CredentialsStore::at_grok_home(grok_home);
+    if let Err(e) = super::xai_console::add_console_api_key(&store, api_key) {
+        match e {
+            super::xai_console::XaiConsoleAuthError::EnvVarSet => {}
+            other => tracing::debug!(
+                error = %other,
+                "auth: could not mirror console API key into secret store"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Remove the `xai::api_key` scope from auth.json.
@@ -397,6 +414,10 @@ pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
         } else {
             write_auth_json(&path, &map)?;
         }
+    }
+    let store = super::credentials_store::CredentialsStore::at_grok_home(grok_home);
+    if let Err(e) = super::xai_console::clear_console_api_key(&store) {
+        tracing::debug!(error = %e, "auth: could not clear console API key from secret store");
     }
     Ok(())
 }

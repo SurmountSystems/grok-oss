@@ -545,10 +545,16 @@ pub enum LineViewerKind {
 pub struct PlanViewerExtras {
     pub send_button_area: Option<Rect>,
     pub send_hovered: bool,
+    pub questions_button_area: Option<Rect>,
+    pub questions_hovered: bool,
     pub show_action_buttons: bool,
     pub feedback_active: bool,
     pub approve_button_area: Option<Rect>,
     pub approve_hovered: bool,
+    /// `A approve w/ comment` — approval mode only.
+    pub approve_notes_button_area: Option<Rect>,
+    pub approve_notes_hovered: bool,
+    /// Casual plan-preview comment CTA (not a primary approval action).
     pub comment_button_area: Option<Rect>,
     pub comment_hovered: bool,
     pub abandon_button_area: Option<Rect>,
@@ -597,6 +603,10 @@ pub struct LineViewerState {
     pub fullscreen_button_area: Option<Rect>,
     /// Whether the fullscreen button is hovered.
     pub fullscreen_hovered: bool,
+    /// Cached copy (⧉) button rect from last render (top bar, left of ↗).
+    pub copy_button_area: Option<Rect>,
+    /// Whether the copy button is hovered.
+    pub copy_hovered: bool,
     /// Plan-specific state. `Some` only when `kind == PlanPreview`.
     /// Keeps plan-only fields (buttons, approval, double-click) out of
     /// the generic viewer.
@@ -620,6 +630,10 @@ pub struct LineViewerState {
     /// When `true`, the viewer uses the full overlay area instead of the
     /// 75% centered popup. Toggled by Ctrl+F.
     pub fullscreen: bool,
+    /// When `true` (and not fullscreen), dock the viewer as a right-hand
+    /// side panel without dimming the chat — used for parked plan approval
+    /// (option B). File previews keep the centered popup.
+    pub side_panel: bool,
 }
 
 impl LineViewerState {
@@ -661,6 +675,8 @@ impl LineViewerState {
             close_hovered: false,
             fullscreen_button_area: None,
             fullscreen_hovered: false,
+            copy_button_area: None,
+            copy_hovered: false,
             plan: None,
             initial_scroll_range: None,
             title_override: None,
@@ -668,6 +684,7 @@ impl LineViewerState {
             last_table_width: None,
             last_comments: Vec::new(),
             fullscreen: false,
+            side_panel: false,
         })
     }
 
@@ -722,6 +739,8 @@ impl LineViewerState {
             close_hovered: false,
             fullscreen_button_area: None,
             fullscreen_hovered: false,
+            copy_button_area: None,
+            copy_hovered: false,
             plan: None,
             initial_scroll_range: None,
             title_override: None,
@@ -729,6 +748,7 @@ impl LineViewerState {
             last_table_width: None,
             last_comments: Vec::new(),
             fullscreen: false,
+            side_panel: false,
         })
     }
 
@@ -1199,12 +1219,65 @@ fn build_shortcut_button<'a>(
     ]
 }
 
+/// Key-only CTA button (no label) for narrow plan side panels.
+fn build_shortcut_button_key_only<'a>(
+    key: char,
+    hovered: bool,
+    theme: &crate::theme::Theme,
+) -> Vec<Span<'a>> {
+    let bg = if hovered {
+        theme.bg_highlight
+    } else {
+        theme.bg_base
+    };
+    let key_style = Style::default()
+        .fg(theme.text_primary)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    vec![Span::styled(key.to_string(), key_style)]
+}
+
+/// Preferred side-panel width as a fraction of the overlay.
+const SIDE_PANEL_WIDTH_FRAC: f32 = 0.45;
+/// Soft minimum columns for the plan side panel when the overlay is wide
+/// enough. Never forced above the available width (see [`side_panel_rect`]).
+const SIDE_PANEL_SOFT_MIN: u16 = 24;
+/// Columns reserved so the flush-right panel never fills the entire overlay
+/// when clamping preferred width. Not a painted gutter between panes — the
+/// panel docks flush to the right edge; chat remains in the uncovered left.
+const SIDE_PANEL_EDGE_RESERVE: u16 = 1;
+
+/// Geometry for the plan approval side panel (option B).
+///
+/// Pure helper so narrow overlays can be unit-tested without a full render.
+/// Safe for any width: never panics on `clamp` (min ≤ max always).
+pub(crate) fn side_panel_rect(full_area: Rect, top_pad: u16) -> Rect {
+    let edge_reserve = SIDE_PANEL_EDGE_RESERVE.min(full_area.width.saturating_sub(1));
+    // Max width leaves `edge_reserve` columns of chat when preferred is large.
+    let max_w = full_area.width.saturating_sub(edge_reserve).max(1);
+    // Soft min only applies when the overlay can host it; never min > max.
+    let min_w = SIDE_PANEL_SOFT_MIN.min(max_w);
+    let preferred = ((full_area.width as f32) * SIDE_PANEL_WIDTH_FRAC).round() as u16;
+    let panel_w = preferred.clamp(min_w, max_w);
+    // Flush-right dock (no painted gutter; left of panel is open chat).
+    let popup_x = full_area
+        .x
+        .saturating_add(full_area.width.saturating_sub(panel_w));
+    let popup_y = full_area.y + top_pad.min(full_area.height);
+    let popup_h = full_area.height.saturating_sub(top_pad);
+    Rect::new(popup_x, popup_y, panel_w, popup_h)
+}
+
 /// Render the line viewer popup.
 ///
-/// In normal mode, draws a 75% centered panel with dimmed background
-/// (modifiers reset). In fullscreen mode (`viewer.fullscreen`), fills
-/// the entire overlay area without dimming. Renders the ListPane
-/// inside the panel with syntax-highlighted lines.
+/// Layout modes:
+/// - **Fullscreen** (`viewer.fullscreen`): nearly fills the overlay, no dim.
+/// - **Side panel** (`viewer.side_panel` and not fullscreen): docks to the
+///   right ~45% of the overlay without dimming so chat stays visible (plan
+///   approval option B).
+/// - **Popup** (default): 75% centered panel with dimmed background.
+///
+/// Renders the ListPane inside the panel with syntax-highlighted lines.
 pub fn render_line_viewer(
     buf: &mut Buffer,
     full_area: Rect,
@@ -1213,11 +1286,9 @@ pub fn render_line_viewer(
     theme: &Theme,
     comment_count: usize,
 ) {
-    // Compute popup area. In enlarge (fullscreen) mode the popup
-    // nearly fills the overlay, but leaves 1 row of top padding and
-    // 2 cols of side padding so it doesn't crowd the screen edges
-    // (the caller already excludes the prompt + turn_status from
-    // `full_area`). In normal mode it sits in a 75% centered popup.
+    // Compute popup area. Fullscreen nearly fills the overlay (1 row top /
+    // 2 cols side pad). Side panel docks right without dim. Otherwise a
+    // 75% centered popup with dim.
     let (popup_area, should_dim) = if viewer.fullscreen {
         const TOP_PAD: u16 = 1;
         const SIDE_PAD: u16 = 2;
@@ -1227,6 +1298,11 @@ pub fn render_line_viewer(
         let popup_w = full_area.width.saturating_sub(pad_w);
         let popup_h = full_area.height.saturating_sub(TOP_PAD);
         (Rect::new(popup_x, popup_y, popup_w, popup_h), false)
+    } else if viewer.side_panel {
+        // Right-hand drawer: leave left ~55% for chat/scrollback.
+        const TOP_PAD: u16 = 0;
+        let popup_area = side_panel_rect(full_area, TOP_PAD);
+        (popup_area, false)
     } else {
         let popup_width = (full_area.width as f32 * 0.75) as u16;
         let popup_height = (full_area.height as f32 * 0.75) as u16;
@@ -1242,6 +1318,10 @@ pub fn render_line_viewer(
     if popup_area.width < 10 || popup_area.height < min_height {
         viewer.last_popup_area = None;
         viewer.last_modal_area = None;
+        // Drop stale chrome hit targets from a wider prior frame.
+        viewer.copy_button_area = None;
+        viewer.close_button_area = None;
+        viewer.fullscreen_button_area = None;
         return;
     }
 
@@ -1335,22 +1415,20 @@ pub fn render_line_viewer(
     }
 
     // 6. Action buttons on the top border, right-aligned.
-    //    Layout: ... [↗][✗]  (rightmost buttons first; the two abut
-    //    flush — see the spacing notes on the close/fullscreen labels
-    //    below).
+    //    Layout: ... [⧉][↗][✗]  (rightmost first; buttons abut flush).
     //    The close [✗] is omitted in plan-review (feedback) mode because
     //    the modal is not user-closeable in that state — clicking it
     //    would be a no-op (see the close-button branch of
     //    `handle_line_viewer_mouse` in agent_view.rs).
+    //    Copy [⧉] copies the whole body (same payload as `Y` on plans).
     let mut right_edge = popup_area.x + popup_area.width - 1;
 
     if !viewer.feedback_active() {
         let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
-        // Label is `[✗] ` (trailing space, no leading space). The
-        // fullscreen button's label has no trailing space when the
-        // close is visible, so the two buttons abut flush as `[↗][✗]`,
-        // tucked under the top-right corner with one space inside the
-        // frame on each side: ` [↗][✗] `.
+        // Label is `[✗] ` (trailing space, no leading space). Neighbor
+        // buttons drop their trailing space so the row sits flush as
+        // `[⧉][↗][✗]`, tucked under the top-right corner with one space
+        // inside the frame on each side: ` [⧉][↗][✗] `.
         let close_w: u16 = 4; // "[✗] "
         if popup_area.width > close_w + 2 {
             let close_x = right_edge - close_w;
@@ -1376,17 +1454,15 @@ pub fn render_line_viewer(
     // Fullscreen toggle button. The icon stays constant regardless of
     // current state — the button is a toggle, not a status indicator.
     //
-    // Spacing: when the close button is rendered (casual mode) the
-    // fullscreen drops its trailing space so the two sit flush as
-    // `[↗][✗]`. When the close is hidden (plan-review mode) the
-    // fullscreen keeps its trailing space so it doesn't crowd the
-    // corner `╮`.
+    // Spacing (copy always painted left of this when room allows):
+    // - close visible → `[↗]` abuts both neighbors: `[⧉][↗][✗]`
+    // - close hidden  → `[↗] ` trailing space for the corner: `[⧉][↗] `
     let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
     let close_visible = viewer.close_button_area.is_some();
     let (fs_label, fs_w): (String, u16) = if close_visible {
-        (format!(" [{fs_icon}]"), 4)
+        (format!("[{fs_icon}]"), 3)
     } else {
-        (format!(" [{fs_icon}] "), 5)
+        (format!("[{fs_icon}] "), 4)
     };
     if right_edge > popup_area.x + fs_w + 2 {
         let fs_x = right_edge - fs_w;
@@ -1401,8 +1477,30 @@ pub fn render_line_viewer(
         let fs_span = Span::styled(fs_label, fs_style);
         buf.set_span(fs_x, popup_area.y, &fs_span, fs_w);
         viewer.fullscreen_button_area = Some(Rect::new(fs_x, popup_area.y, fs_w, 1));
+        right_edge = fs_x;
     } else {
         viewer.fullscreen_button_area = None;
+    }
+
+    // Copy button (⧉) — whole-body copy, same path as `Y` on plans.
+    // Leading space so the cluster sits off the title: ` [⧉][↗]…`.
+    let copy_icon = crate::glyphs::copy_icon();
+    let (copy_label, copy_w): (String, u16) = (format!(" [{copy_icon}]"), 4);
+    if right_edge > popup_area.x + copy_w + 2 {
+        let copy_x = right_edge - copy_w;
+        let copy_style = if viewer.copy_hovered {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(theme.bg_base)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.gray).bg(theme.bg_base)
+        };
+        let copy_span = Span::styled(copy_label, copy_style);
+        buf.set_span(copy_x, popup_area.y, &copy_span, copy_w);
+        viewer.copy_button_area = Some(Rect::new(copy_x, popup_area.y, copy_w, 1));
+    } else {
+        viewer.copy_button_area = None;
     }
 
     // The legacy top-border "send" button is gone — both plan-approval
@@ -1411,7 +1509,10 @@ pub fn render_line_viewer(
     // mouse handlers don't act on positions from a previous render.
     if let Some(plan) = viewer.plan.as_mut() {
         plan.send_button_area = None;
+        plan.questions_button_area = None;
         plan.approve_button_area = None;
+        plan.approve_notes_button_area = None;
+        plan.comment_button_area = None;
         plan.abandon_button_area = None;
     }
 
@@ -1478,9 +1579,9 @@ pub fn render_line_viewer(
     //    `render_modal_shortcuts`, sit in a single row separated by
     //    `  |  `, centered within the modal frame.
     //
-    //    - Plan-approval:  q quit | c comment | s send / a approve
-    //    - Casual preview:           c comment | s send  (no `q` —
-    //      the close-X button handles closing in casual mode)
+    //    - Plan-approval:  a approve | A approve w/ comment | ? clarify
+    //                     | s revise | q quit  (no primary Comment)
+    //    - Casual preview: c comment | s send  (no `q` — close-X)
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
         let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
@@ -1492,56 +1593,13 @@ pub fn render_line_viewer(
         let abandon_hovered = viewer.plan_ref().is_some_and(|p| p.abandon_hovered);
         let comment_hovered = viewer.plan_ref().is_some_and(|p| p.comment_hovered);
         let approve_hovered = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
+        let approve_notes_hovered = viewer.plan_ref().is_some_and(|p| p.approve_notes_hovered);
         let is_approval = viewer.feedback_active();
 
-        let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
-        let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
+        let separator = "  |  ";
+        let sep_w: u16 = 5; // separator is fixed-width ASCII; matches modal_window.rs:565
+        let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
 
-        // In approval mode, always show `a approve`. When there are
-        // pending review comments, also show `s revise` (request changes).
-        // In approval mode, show `a approve` (or `a approve w/ comments`
-        // when inline comments are pending). In casual mode, show `s send`
-        // only when comments exist.
-        let (_action_label, action_w, action_spans): (&str, u16, Option<Vec<Span>>) = if is_approval
-        {
-            let label = if comment_count > 0 {
-                "approve w/ comments"
-            } else {
-                "approve"
-            };
-            let spans = build_shortcut_button('a', label, approve_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            (label, w, Some(spans))
-        } else if comment_count > 0 {
-            let spans = build_shortcut_button('s', "send", approve_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            ("send", w, Some(spans))
-        } else {
-            ("", 0, None)
-        };
-
-        // `s revise` button — always visible in approval mode so the
-        // user can request changes (switches to prompt for revision notes).
-        let (revise_w, revise_spans): (u16, Option<Vec<Span>>) = if is_approval {
-            let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
-            let spans = build_shortcut_button('s', "request changes", send_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            (w, Some(spans))
-        } else {
-            (0, None)
-        };
-
-        // Quit button only renders in approval mode (casual closes via X).
-        let quit_spans = if is_approval {
-            let s = build_shortcut_button('q', "quit plan", abandon_hovered, theme);
-            let w: u16 = s.iter().map(|s| s.width() as u16).sum();
-            Some((s, w))
-        } else {
-            None
-        };
-
-        // Pending-comment badge rendered after the `c comment` button
-        // as ` N ●` in `accent_plan`. Shown whenever comments exist.
         use unicode_width::UnicodeWidthStr;
         let badge_text: String = if comment_count > 0 {
             format!(" {comment_count} {}", crate::glyphs::filled_dot())
@@ -1551,96 +1609,230 @@ pub fn render_line_viewer(
         let badge_w: u16 = badge_text.width() as u16;
         let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
 
-        let separator = "  |  ";
-        let sep_w: u16 = 5; // separator is fixed-width ASCII; matches modal_window.rs:565
-        let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+        if is_approval {
+            // Clickable CTA buttons (mouse primary; keys remain accelerators).
+            // Side panels are often ~36 cols at 80-wide terminals — full labels
+            // (~80 cols) must not drop all hit targets. Try full → compact →
+            // key-only until the row fits.
+            let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
+            let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
 
-        // Total width: [action] + (sep + revise)? + sep + comment[badge?] + (sep + quit)?
-        let mut total_w: u16 = 0;
-        if action_w > 0 {
-            total_w = total_w.saturating_add(action_w).saturating_add(sep_w);
-        }
-        if revise_w > 0 {
-            total_w = total_w.saturating_add(revise_w).saturating_add(sep_w);
-        }
-        total_w = total_w.saturating_add(comment_w).saturating_add(badge_w);
-        if let Some((_, w)) = &quit_spans {
-            total_w = total_w.saturating_add(sep_w).saturating_add(*w);
-        }
+            // (approve, notes, clarify, revise, quit) label suffixes after key.
+            let label_modes: [[&str; 5]; 3] = [
+                ["approve", "approve w/ comment", "clarify", "revise", "quit"],
+                ["approve", "notes", "clarify", "revise", "quit"],
+                // Key-only: empty suffix → just bold key (fits ~15 cols).
+                ["", "", "", "", ""],
+            ];
+            let keys = ['a', 'A', '?', 's', 'q'];
+            let hovers = [
+                approve_hovered,
+                approve_notes_hovered,
+                questions_hovered,
+                send_hovered,
+                abandon_hovered,
+            ];
 
-        if total_w <= inner.width {
-            let mut x = inner.x + (inner.width - total_w) / 2;
+            let mut painted = false;
+            for labels in &label_modes {
+                let span_sets: Vec<Vec<Span>> = keys
+                    .iter()
+                    .zip(labels.iter())
+                    .zip(hovers.iter())
+                    .map(|((&k, &lab), &hov)| {
+                        if lab.is_empty() {
+                            build_shortcut_button_key_only(k, hov, theme)
+                        } else {
+                            build_shortcut_button(k, lab, hov, theme)
+                        }
+                    })
+                    .collect();
+                let widths: Vec<u16> = span_sets
+                    .iter()
+                    .map(|s| s.iter().map(|sp| sp.width() as u16).sum())
+                    .collect();
+                let mut total_w = widths.iter().copied().sum::<u16>();
+                // 4 separators between 5 buttons.
+                total_w = total_w.saturating_add(sep_w.saturating_mul(4));
+                total_w = total_w.saturating_add(badge_w);
 
-            // Action button (approve / send) — left-most.
-            if let Some(spans) = &action_spans {
-                let approve_x = x;
-                for span in spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
+                if total_w > inner.width {
+                    continue;
                 }
-                viewer.plan_mut().approve_button_area =
-                    Some(Rect::new(approve_x, bottom_y, action_w, 1));
 
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-            } else {
-                viewer.plan_mut().approve_button_area = None;
+                let mut x = inner.x + (inner.width - total_w) / 2;
+                let areas = [
+                    // approve
+                    {
+                        let ax = x;
+                        for span in &span_sets[0] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                        Some(Rect::new(ax, bottom_y, widths[0], 1))
+                    },
+                    // notes (+ optional comment badge)
+                    {
+                        let nx = x;
+                        for span in &span_sets[1] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        if badge_w > 0 {
+                            buf.set_string(x, bottom_y, &badge_text, badge_style);
+                            x += badge_w;
+                        }
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                        Some(Rect::new(nx, bottom_y, widths[1], 1))
+                    },
+                    // clarify
+                    {
+                        let cx = x;
+                        for span in &span_sets[2] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                        Some(Rect::new(cx, bottom_y, widths[2], 1))
+                    },
+                    // revise
+                    {
+                        let rx = x;
+                        for span in &span_sets[3] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                        Some(Rect::new(rx, bottom_y, widths[3], 1))
+                    },
+                    // quit
+                    {
+                        let qx = x;
+                        for span in &span_sets[4] {
+                            let w = span.width() as u16;
+                            buf.set_span(x, bottom_y, span, w);
+                            x += w;
+                        }
+                        Some(Rect::new(qx, bottom_y, widths[4], 1))
+                    },
+                ];
+
+                let plan = viewer.plan_mut();
+                plan.approve_button_area = areas[0];
+                plan.approve_notes_button_area = areas[1];
+                plan.questions_button_area = areas[2];
+                plan.send_button_area = areas[3];
+                plan.abandon_button_area = areas[4];
+                plan.comment_button_area = None;
+                painted = true;
+                break;
             }
 
-            // Revise button — approval mode with comments.
-            if let Some(spans) = &revise_spans {
-                let revise_x = x;
-                for span in spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
+            if !painted {
+                // Extreme narrow: left-align key-only buttons until width runs out.
+                let mut x = inner.x;
+                let mut areas: [Option<Rect>; 5] = [None; 5];
+                for (i, &k) in keys.iter().enumerate() {
+                    let spans = build_shortcut_button_key_only(k, hovers[i], theme);
+                    let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+                    let need = if i == 0 { w } else { sep_w.saturating_add(w) };
+                    if x.saturating_sub(inner.x).saturating_add(need) > inner.width {
+                        break;
+                    }
+                    if i > 0 {
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                    }
+                    let start = x;
+                    for span in &spans {
+                        let sw = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, sw);
+                        x += sw;
+                    }
+                    areas[i] = Some(Rect::new(start, bottom_y, w, 1));
                 }
-                viewer.plan_mut().send_button_area =
-                    Some(Rect::new(revise_x, bottom_y, revise_w, 1));
-
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-            } else {
-                viewer.plan_mut().send_button_area = None;
-            }
-
-            // Comment button — always present in both modes.
-            let comment_x = x;
-            for span in &comment_spans {
-                let w = span.width() as u16;
-                buf.set_span(x, bottom_y, span, w);
-                x += w;
-            }
-            viewer.plan_mut().comment_button_area =
-                Some(Rect::new(comment_x, bottom_y, comment_w, 1));
-
-            if badge_w > 0 {
-                buf.set_string(x, bottom_y, &badge_text, badge_style);
-                x += badge_w;
-            }
-
-            // Quit button — approval mode only.
-            if let Some((spans, w)) = quit_spans {
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-                let quit_x = x;
-                for span in &spans {
-                    let sw = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, sw);
-                    x += sw;
-                }
-                viewer.plan_mut().abandon_button_area = Some(Rect::new(quit_x, bottom_y, w, 1));
-            } else {
-                viewer.plan_mut().abandon_button_area = None;
+                let plan = viewer.plan_mut();
+                plan.approve_button_area = areas[0];
+                plan.approve_notes_button_area = areas[1];
+                plan.questions_button_area = areas[2];
+                plan.send_button_area = areas[3];
+                plan.abandon_button_area = areas[4];
+                plan.comment_button_area = None;
             }
         } else {
-            // Footer too narrow — disable hit-tests so stale rects
-            // from a previous render don't fire.
-            let plan = viewer.plan_mut();
-            plan.approve_button_area = None;
-            plan.comment_button_area = None;
-            plan.abandon_button_area = None;
+            // Casual: c comment [badge] | s send (when comments exist)
+            let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
+            let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
+
+            let (send_w, send_spans): (u16, Option<Vec<Span>>) = if comment_count > 0 {
+                let spans = build_shortcut_button('s', "send", approve_hovered, theme);
+                let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+                (w, Some(spans))
+            } else {
+                (0, None)
+            };
+
+            let mut total_w = comment_w.saturating_add(badge_w);
+            if send_w > 0 {
+                total_w = total_w.saturating_add(sep_w).saturating_add(send_w);
+            }
+
+            if total_w <= inner.width {
+                let mut x = inner.x + (inner.width - total_w) / 2;
+
+                let comment_x = x;
+                for span in &comment_spans {
+                    let w = span.width() as u16;
+                    buf.set_span(x, bottom_y, span, w);
+                    x += w;
+                }
+                viewer.plan_mut().comment_button_area =
+                    Some(Rect::new(comment_x, bottom_y, comment_w, 1));
+                if badge_w > 0 {
+                    buf.set_string(x, bottom_y, &badge_text, badge_style);
+                    x += badge_w;
+                }
+
+                if let Some(spans) = &send_spans {
+                    buf.set_string(x, bottom_y, separator, sep_style);
+                    x += sep_w;
+                    let send_x = x;
+                    for span in spans {
+                        let w = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, w);
+                        x += w;
+                    }
+                    // Casual reuses approve_button_area for the send hit target
+                    // (legacy mouse path treats it as send when not in approval).
+                    viewer.plan_mut().approve_button_area =
+                        Some(Rect::new(send_x, bottom_y, send_w, 1));
+                } else {
+                    viewer.plan_mut().approve_button_area = None;
+                }
+
+                let plan = viewer.plan_mut();
+                plan.approve_notes_button_area = None;
+                plan.questions_button_area = None;
+                plan.send_button_area = None;
+                plan.abandon_button_area = None;
+            } else {
+                let plan = viewer.plan_mut();
+                plan.approve_button_area = None;
+                plan.approve_notes_button_area = None;
+                plan.questions_button_area = None;
+                plan.send_button_area = None;
+                plan.comment_button_area = None;
+                plan.abandon_button_area = None;
+            }
         }
     }
 }
@@ -1829,5 +2021,143 @@ mod tests {
 
         assert_eq!(viewer.selected_line_range(), Some(1..4));
         assert_eq!(viewer.line_range_suffix(), Some(":1-3".to_owned()));
+    }
+
+    /// Regression: side-panel clamp must not panic when overlay width < 25
+    /// (soft min 24 would exceed max if written as clamp(24, width-1)).
+    #[test]
+    fn side_panel_rect_narrow_widths_do_not_panic() {
+        for w in [1u16, 10, 19, 20, 23, 24, 25, 40, 80] {
+            let area = Rect::new(0, 0, w, 30);
+            let panel = side_panel_rect(area, 0);
+            assert!(
+                panel.width <= w,
+                "width {w}: panel wider than overlay ({})",
+                panel.width
+            );
+            assert_eq!(panel.x + panel.width, area.x + area.width, "flush-right");
+            assert!(panel.height <= 30);
+            // min ≤ max always: panel width is at least 1 when overlay has room.
+            if w > 0 {
+                assert!(panel.width >= 1);
+            }
+        }
+    }
+
+    #[test]
+    fn side_panel_rect_wide_prefers_about_45_percent() {
+        let area = Rect::new(0, 0, 100, 40);
+        let panel = side_panel_rect(area, 0);
+        assert_eq!(panel.width, 45);
+        assert_eq!(panel.x, 55);
+        assert_eq!(panel.height, 40);
+    }
+
+    /// Named contract: line-viewer top bar paints a clickable ⧉ hit target
+    /// left of ↗/✗ so one-click whole-body copy works without the `Y` key.
+    #[test]
+    fn line_viewer_top_bar_sets_copy_button_hit_area() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nCopy me whole\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.side_panel = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(
+            &mut buf,
+            full,
+            &mut viewer,
+            std::path::Path::new("/tmp"),
+            &theme,
+            0,
+        );
+
+        assert!(
+            viewer.copy_button_area.is_some(),
+            "plan top bar must expose ⧉ copy hit target next to enlarge/close"
+        );
+        assert!(
+            viewer.fullscreen_button_area.is_some(),
+            "enlarge button still present beside copy"
+        );
+        // Copy sits left of enlarge on the same row.
+        let copy = viewer.copy_button_area.unwrap();
+        let fs = viewer.fullscreen_button_area.unwrap();
+        assert_eq!(copy.y, fs.y, "copy and enlarge share the top border row");
+        assert!(
+            copy.x + copy.width <= fs.x,
+            "copy must sit left of enlarge (copy.x={} w={} fs.x={})",
+            copy.x,
+            copy.width,
+            fs.x
+        );
+    }
+
+    /// Named contract: plan-approval side panel footer always exposes
+    /// clickable CTA hit targets (approve / notes / clarify / revise / quit),
+    /// even when the panel is too narrow for the full long labels.
+    #[test]
+    fn plan_approval_narrow_side_panel_footer_sets_cta_hit_areas() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.side_panel = true;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        // ~36 cols is a typical side-panel width at 80-col terminals (45%).
+        // Full labels need ~80 cols and used to drop all hit areas.
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(
+            &mut buf,
+            full,
+            &mut viewer,
+            std::path::Path::new("/tmp"),
+            &theme,
+            0,
+        );
+
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.approve_button_area.is_some(),
+            "narrow side panel must still expose Approve hit target"
+        );
+        assert!(
+            plan.approve_notes_button_area.is_some(),
+            "narrow side panel must still expose Approve-with-notes hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_some(),
+            "narrow side panel must still expose Clarify hit target"
+        );
+        assert!(
+            plan.send_button_area.is_some(),
+            "narrow side panel must still expose Revise hit target"
+        );
+        assert!(
+            plan.abandon_button_area.is_some(),
+            "narrow side panel must still expose Quit hit target"
+        );
     }
 }

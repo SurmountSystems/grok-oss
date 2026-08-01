@@ -1,8 +1,9 @@
 //! Syntax highlighting initialization.
 //!
 //! Provides lazily-initialized `Syntect` instances for code highlighting.
-//! Dark themes (GrokNight, TokyoNight) share `grok-night.tmTheme`;
-//! GrokDay uses `grok-day.tmTheme` with deepened colors for light backgrounds.
+//! Dark themes (GrokNight, RosePineMoon, OscuraMidnight) share
+//! `grok-night.tmTheme`; TokyoNight has its own; GrokDay uses
+//! `grok-day.tmTheme`; DOGE uses pure-primary `doge.tmTheme`.
 //!
 //! ## Minimal / terminal-native lock
 //!
@@ -33,6 +34,7 @@ use crate::theme::ThemeKind;
 static SYNTECT_GROKNIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_TOKYONIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_GROKDAY: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_DOGE: OnceLock<Syntect> = OnceLock::new();
 
 /// Convert syntect style to ratatui foreground-only style, quantized for
 /// terminal color support (or polarity-safe under the terminal-native lock).
@@ -150,11 +152,19 @@ pub fn get_syntect() -> &'static Syntect {
         | ThemeKind::OscuraMidnight
         | ThemeKind::Auto => SYNTECT_GROKNIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-night.tmTheme"))),
+        ThemeKind::Doge => {
+            SYNTECT_DOGE.get_or_init(|| Syntect::new(include_bytes!("../assets/doge.tmTheme")))
+        }
         ThemeKind::TokyoNight => SYNTECT_TOKYONIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme"))),
         ThemeKind::GrokDay => SYNTECT_GROKDAY
             .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-day.tmTheme"))),
     }
+}
+
+/// Bytes of the bundled pure-primary DOGE syntax theme (tests + diagnostics).
+pub fn doge_tmtheme_bytes() -> &'static [u8] {
+    include_bytes!("../assets/doge.tmTheme")
 }
 
 #[cfg(test)]
@@ -265,5 +275,174 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// DOGE pure primaries (channels only 0 or 255).
+    fn is_doge_rgb(r: u8, g: u8, b: u8) -> bool {
+        matches!(
+            (r, g, b),
+            (0, 0, 0)
+                | (255, 0, 0)
+                | (0, 255, 0)
+                | (255, 255, 0)
+                | (0, 0, 255)
+                | (255, 0, 255)
+                | (0, 255, 255)
+                | (255, 255, 255)
+        )
+    }
+
+    #[test]
+    fn doge_tmtheme_all_hex_colors_are_pure_primaries() {
+        // Every #RRGGBB (optional alpha) in the bundled theme must be a
+        // DOGE pure primary — residual for DOGE syntax.
+        let text = std::str::from_utf8(doge_tmtheme_bytes()).expect("doge.tmTheme is utf-8");
+        let bytes = text.as_bytes();
+        let mut count = 0usize;
+        let mut i = 0;
+        while i + 7 <= bytes.len() {
+            if bytes[i] == b'#' {
+                let hex = &text[i + 1..];
+                let digits: String = hex.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+                if digits.len() >= 6 {
+                    let r = u8::from_str_radix(&digits[0..2], 16).unwrap();
+                    let g = u8::from_str_radix(&digits[2..4], 16).unwrap();
+                    let b = u8::from_str_radix(&digits[4..6], 16).unwrap();
+                    assert!(
+                        is_doge_rgb(r, g, b),
+                        "doge.tmTheme colour #{digits} is not a DOGE pure primary"
+                    );
+                    count += 1;
+                    i += 1 + digits.len();
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        assert!(
+            count >= 10,
+            "expected many hex colours in doge.tmTheme, got {count}"
+        );
+    }
+
+    #[test]
+    fn doge_tmtheme_global_settings_are_pure_primaries() {
+        let text = std::str::from_utf8(doge_tmtheme_bytes()).unwrap();
+        // Global settings block (first settings dict without a scope key)
+        // uses pure black canvas + white body.
+        assert!(
+            text.contains("#000000"),
+            "doge.tmTheme must use pure black background"
+        );
+        // No mid-gray hex left over from night (common pastels).
+        for forbidden in ["#c8c8c8", "#b2b2b2", "#0e0e0e", "#bb9af7", "#9ece6a"] {
+            assert!(
+                !text.to_ascii_lowercase().contains(forbidden),
+                "doge.tmTheme still contains night pastel {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_syntect_doge_loads_doge_theme() {
+        let _guard = theme_cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        theme_cache::reset_for_test();
+        theme_cache::set(ThemeKind::Doge);
+        assert_eq!(crate::theme::Theme::current_kind(), ThemeKind::Doge);
+        let syn = get_syntect();
+        // Highlight a line; every RGB token after quantize must be DOGE or
+        // named ANSI (quantize may map pure primaries to Indexed/named).
+        let mut hl = syn.highlight_lines_for_token("rust");
+        let fallback = Style::default().fg(Color::Rgb(255, 255, 255));
+        let spans = highlight_line(
+            "fn main() { let x = 1; /* comment */ }",
+            &mut hl,
+            syn,
+            fallback,
+        );
+        assert!(!spans.is_empty());
+        for span in &spans {
+            if let Some(Color::Rgb(r, g, b)) = span.style.fg {
+                assert!(
+                    is_doge_rgb(r, g, b),
+                    "DOGE syntax span {:?} is off-palette Rgb({r},{g},{b})",
+                    span.content
+                );
+            }
+        }
+        theme_cache::reset_for_test();
+    }
+
+    /// Comment scope must be light on DOGE pure-black canvas.
+    /// Dogfood bug: `#000000` comment fg made shell/markdown comments invisible.
+    #[test]
+    fn doge_tmtheme_comment_foreground_is_white_not_black() {
+        let text = std::str::from_utf8(doge_tmtheme_bytes()).expect("utf-8");
+        // Named "Comment" rule (not "Comment Doc" / "Comment Doc Emphasized").
+        let marker = "<string>Comment</string>";
+        let start = text
+            .find(marker)
+            .expect("doge.tmTheme must define a Comment scope rule");
+        let chunk = &text[start..text.len().min(start + 800)];
+        let fg_key = chunk
+            .find("<key>foreground</key>")
+            .expect("Comment rule must set foreground");
+        let after = &chunk[fg_key..];
+        let hash = after
+            .find('#')
+            .expect("Comment foreground must be a #RRGGBB hex colour");
+        let hex = &after[hash..hash + 7];
+        assert_eq!(
+            hex.to_ascii_uppercase(),
+            "#FFFFFF",
+            "Comment syntax colour must be pure white on DOGE black bg, got {hex}"
+        );
+    }
+
+    /// Runtime: a pure-comment line under DOGE must not paint black-on-black.
+    #[test]
+    fn doge_highlight_comment_line_is_not_black() {
+        let _guard = theme_cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        theme_cache::reset_for_test();
+        theme_cache::set(ThemeKind::Doge);
+        let syn = get_syntect();
+        let mut hl = syn.highlight_lines_for_token("shellscript");
+        let fallback = Style::default().fg(Color::Rgb(255, 255, 255));
+        let spans = highlight_line("# 1) Normal warm up comment line", &mut hl, syn, fallback);
+        assert!(!spans.is_empty(), "expected highlighted comment spans");
+        let mut saw_comment_text = false;
+        for span in &spans {
+            let content = span.content.as_ref();
+            if content.trim().is_empty() {
+                continue;
+            }
+            saw_comment_text = true;
+            match span.style.fg {
+                Some(Color::Rgb(0, 0, 0)) | Some(Color::Black) => {
+                    panic!("comment span {content:?} is black-on-black (invisible on DOGE)");
+                }
+                Some(Color::Rgb(r, g, b)) => {
+                    // Must be light enough: prefer pure white / DOGE white primary.
+                    assert!(
+                        r >= 200 && g >= 200 && b >= 200,
+                        "comment span {content:?} fg Rgb({r},{g},{b}) must be light/white"
+                    );
+                }
+                Some(Color::White) | Some(Color::Gray) | None => {}
+                other => {
+                    // Named bright colours ok; reject only pure black (above).
+                    let _ = other;
+                }
+            }
+        }
+        assert!(
+            saw_comment_text,
+            "expected non-empty comment text spans for shell line"
+        );
+        theme_cache::reset_for_test();
     }
 }

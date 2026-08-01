@@ -1831,6 +1831,59 @@ async fn test_copy_session_data_copies_tool_state() {
         .unwrap();
     assert_eq!(copied_content, tool_state_json);
 }
+
+#[tokio::test]
+async fn test_copy_session_data_copies_resources_state() {
+    // Live SoT is resources_state.json; fork must copy it even when tool_state.json is absent.
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("source-with-resources-state"),
+        cwd: "/source/project".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    adapter
+        .append_chat_message(&source_info, &ConversationItem::user("Hello"))
+        .await
+        .unwrap();
+    let resources_json = serde_json::json!({
+        "state": {
+            "grok_build.TodoState": {
+                "todos": {
+                    "ask:abc": {
+                        "content": "Do the thing",
+                        "status": "pending",
+                        "priority": "medium"
+                    }
+                }
+            }
+        }
+    });
+    let source_dir = adapter.session_dir(&source_info);
+    std::fs::write(
+        source_dir.join("resources_state.json"),
+        serde_json::to_string_pretty(&resources_json).unwrap(),
+    )
+    .unwrap();
+    let target_info = Info {
+        id: acp::SessionId::new("fork-with-resources-state"),
+        cwd: "/target/worktree".to_string(),
+    };
+    let result = adapter
+        .copy_session_data(&source_info, &target_info, Default::default())
+        .await
+        .unwrap();
+    assert!(
+        result.tool_state_copied,
+        "resources_state.json alone should count as tool state copied"
+    );
+    let target_resources = adapter.session_dir(&target_info).join("resources_state.json");
+    assert!(target_resources.exists());
+    assert!(!adapter.session_dir(&target_info).join("tool_state.json").exists());
+    let copied: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target_resources).unwrap()).unwrap();
+    assert_eq!(copied, resources_json);
+}
 #[tokio::test]
 async fn test_copy_session_data_without_tool_state() {
     let temp_dir = TempDir::new().unwrap();

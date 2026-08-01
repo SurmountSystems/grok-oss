@@ -34,6 +34,7 @@ glob = { workspace = true }
 globset = { workspace = true }
 kanal = "0.1"
 regex = { workspace = true }
+rpassword = { workspace = true }
 # rmcp 2.1 + reqwest 0.13 are quarantined inside `xai-grok-mcp`. The remaining
 # MCP code in this crate (extensions/mcp.rs, mcp_doctor.rs) reaches rmcp model
 # types via `xai_grok_mcp::rmcp::model::*`. reqwest 0.13 is a private impl
@@ -184,6 +185,12 @@ nix = { workspace = true }
 # `crypto-rust` enables EncryptionType::Dh for encrypted session transport.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 dbus-secret-service = { version = "4", features = ["crypto-rust"] }
+
+# Secure non-D-Bus keyring fallback when Secret Service times out / is locked.
+# Kernel keyutils — no session unlock prompt; secrets are process/session lifetime.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring-core = "1"
+linux-keyutils-keyring-store = "1"
 
 [target.'cfg(windows)'.dependencies]
 siphasher = { workspace = true }

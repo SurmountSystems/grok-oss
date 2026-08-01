@@ -150,6 +150,156 @@
         );
     }
 
+    /// Contract: once the next sample stream is open after a retry, chrome must
+    /// leave `TurnActivity::Retrying` so the footer does not freeze on
+    /// "Retrying (attempt 1)" across a live post-retry stream / TTFB window.
+    #[test]
+    fn retry_chrome_clears_when_retry_stream_starts() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Retrying {
+                attempt: 1,
+                max_retries: u32::MAX,
+                reason: "connection interrupted".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match session.tracker.activity() {
+            Some(TurnActivity::Retrying { attempt: 1, .. }) => {}
+            other => panic!("expected Retrying attempt 1, got {other:?}"),
+        }
+
+        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
+        assert!(
+            !matches!(
+                session.tracker.activity(),
+                Some(TurnActivity::Retrying { .. })
+            ),
+            "StreamResumed must clear sticky Retrying chrome, got {:?}",
+            session.tracker.activity()
+        );
+    }
+
+    /// Dual-auth D3: hop reason is status chrome (and toast-eligible) with no raw keys.
+    #[test]
+    fn dual_auth_hop_reason_is_status_chrome_not_raw_key() {
+        let reason = "Switched SuperGrok session → console key (out of allowance)";
+        assert!(
+            xai_grok_shell::sampling::is_credential_hop_reason(reason),
+            "hop copy must be toast/status eligible"
+        );
+        assert!(!reason.contains("sk-") && !reason.contains("jwt"));
+
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Retrying {
+                attempt: 1,
+                max_retries: 5,
+                reason: reason.into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match session.tracker.activity() {
+            Some(TurnActivity::Retrying { reason: r, .. }) => {
+                assert_eq!(r, reason);
+            }
+            other => panic!("expected Retrying activity with hop reason, got {other:?}"),
+        }
+    }
+
+    /// Dual-auth D3: the x.ai session-notification RetryState arm must toast
+    /// hop copy (status chrome alone is a different path).
+    #[test]
+    fn dual_auth_hop_retry_state_shows_toast() {
+        let mut app = make_app_with_agent("sess-1");
+        let reason = "Switched SuperGrok session → console key (out of allowance)";
+        assert!(xai_grok_shell::sampling::is_credential_hop_reason(reason));
+
+        let update = XaiSessionUpdate::RetryState(RetryState::Retrying {
+            attempt: 1,
+            max_retries: 5,
+            reason: reason.into(),
+        });
+        let changed = handle(
+            make_ext_session_notification("sess-1", update),
+            &mut app,
+        );
+        assert!(changed, "hop RetryState must redraw");
+
+        let agent = app.agents.get(&AgentId(0)).expect("agent");
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some(reason),
+            "hop must show toast with label copy (no raw keys)"
+        );
+        assert!(!reason.contains("sk-") && !reason.contains("jwt"));
+        // Meter honesty: destination identity drives footer (not SuperGrok extras).
+        assert_eq!(
+            agent.sampling_identity,
+            crate::views::credit_bar::SamplingIdentityKind::ConsoleKey,
+            "hop to console must set sampling identity for meter"
+        );
+        // Status chrome still set.
+        match agent.session.tracker.activity() {
+            Some(TurnActivity::Retrying { reason: r, .. }) => assert_eq!(r, reason),
+            other => panic!("expected Retrying activity, got {other:?}"),
+        }
+    }
+
+    /// Non-hop Retrying must not toast (bare transport copy, not hop chrome).
+    #[test]
+    fn non_hop_retry_state_does_not_toast() {
+        let mut app = make_app_with_agent("sess-1");
+        let update = XaiSessionUpdate::RetryState(RetryState::Retrying {
+            attempt: 1,
+            max_retries: 3,
+            reason: "rate limited".into(),
+        });
+        let _ = handle(
+            make_ext_session_notification("sess-1", update),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).expect("agent");
+        assert!(
+            agent.toast.is_none(),
+            "non-hop retry must not toast, got {:?}",
+            agent.toast
+        );
+    }
+
+    /// Rate-limit identity hop uses distinct allow-listed toast (not credit copy).
+    #[test]
+    fn rate_limit_hop_retry_state_shows_toast() {
+        let mut app = make_app_with_agent("sess-1");
+        let reason = "Switched SuperGrok session → console key (rate limited)";
+        assert!(xai_grok_shell::sampling::is_credential_hop_reason(reason));
+        assert!(!reason.contains("credit"));
+
+        let update = XaiSessionUpdate::RetryState(RetryState::Retrying {
+            attempt: 1,
+            max_retries: 5,
+            reason: reason.into(),
+        });
+        let changed = handle(
+            make_ext_session_notification("sess-1", update),
+            &mut app,
+        );
+        assert!(changed, "rate-limit hop RetryState must redraw");
+
+        let agent = app.agents.get(&AgentId(0)).expect("agent");
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some(reason),
+            "rate-limit hop must toast with distinct copy"
+        );
+    }
+
     #[test]
     fn retry_exhausted_rate_limited_sets_flag() {
         let mut session = make_session(Some("s1"));

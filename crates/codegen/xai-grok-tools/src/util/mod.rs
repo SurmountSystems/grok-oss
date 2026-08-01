@@ -1,5 +1,7 @@
+pub mod ascii_scrub;
 pub mod base64_images;
 pub mod binary;
+pub mod bulk_edit_policy;
 pub mod command_display;
 pub mod env;
 pub mod fs;
@@ -8,14 +10,20 @@ pub mod grok_home;
 pub mod hash;
 pub mod image_compress;
 pub mod image_validate;
+pub mod implement_memory;
 pub mod mcp_truncate;
 pub mod path_suggestions;
+pub mod plan_validate;
 pub(crate) mod query_tools;
 pub mod remap;
 pub mod serde_base64;
+pub mod session_reader;
 pub mod shell_env_policy;
 pub mod spawn;
+pub mod toon;
+pub mod trailing_ws;
 pub mod truncate;
+pub mod ulid;
 pub mod unicode_confusables;
 
 pub use command_display::strip_redundant_session_cd;

@@ -1935,6 +1935,24 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                          truth.",
                 );
             }
+            // Contract: PAGER `bubble_copy_buttons` registry default must match
+            // the runtime default appearance on a fresh `AgentView` /
+            // `ScrollbackState` (ScrollbackDisplayConfig is SoT; default ON).
+            ("bubble_copy_buttons", SettingKind::Bool { default }) => {
+                let live = agent
+                    .scrollback
+                    .appearance()
+                    .scrollback
+                    .display
+                    .bubble_copy_buttons;
+                assert_eq!(
+                    *default, live,
+                    "registry default for `bubble_copy_buttons` ({default}) drifts \
+                         from the agent's default appearance config ({live}). Update one \
+                         to match the other — ScrollbackDisplayConfig::default() is the \
+                         source of truth.",
+                );
+            }
             _ => {
                 panic!(
                     "PAGER setting `{}` has no arm in \
@@ -2086,6 +2104,38 @@ fn show_tasks_no_active_agent_is_noop() {
     let mut app = test_app();
     let effects = dispatch(Action::ShowTasks, &mut app);
     assert!(effects.is_empty(), "ShowTasks without an agent is a no-op");
+}
+
+#[test]
+fn clear_completed_todos_noop_when_board_has_no_done() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::ClearCompletedTodos, &mut app);
+    assert!(
+        effects.is_empty(),
+        "no Effect when nothing completed/cancelled: {effects:?}"
+    );
+}
+
+#[test]
+fn clear_completed_todos_emits_effect_not_merge_false() {
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+    }
+    let effects = dispatch(Action::ClearCompletedTodos, &mut app);
+    assert_eq!(effects.len(), 1, "got: {effects:?}");
+    assert!(
+        matches!(&effects[0], Effect::ClearCompletedTodos { .. }),
+        "must use shell clear path, not local wipe: {effects:?}"
+    );
 }
 /// classify_top_level decision matrix.
 #[test]
@@ -2565,6 +2615,46 @@ fn toggle_fps_hud_round_trips() {
     let _ = dispatch(Action::ToggleFpsHud, &mut app);
     assert!(!app.fps_hud.enabled());
 }
+
+/// `/screenshot` and F9 arm a pending capture; the event loop writes the PNG after present.
+#[test]
+fn capture_tui_screenshot_arms_pending_flag() {
+    let mut app = test_app();
+    assert!(
+        !app.pending_tui_screenshot,
+        "pending capture must start false"
+    );
+    let effects = dispatch(Action::CaptureTuiScreenshot, &mut app);
+    assert!(
+        effects.is_empty(),
+        "capture is sync flag-only, got {effects:?}"
+    );
+    assert!(
+        app.pending_tui_screenshot,
+        "dispatch must arm pending_tui_screenshot for the event loop"
+    );
+}
+
+/// Global F9 → ActionId::CaptureTuiScreenshot must map through handle_global_action
+/// (registry Alone is not enough).
+#[test]
+fn capture_tui_screenshot_global_key_maps_to_action() {
+    use crate::actions::{ActionId, ActionRegistry, When};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let registry = ActionRegistry::defaults();
+    let f9 = KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE);
+    assert_eq!(
+        registry.lookup(&f9, When::Always),
+        Some(ActionId::CaptureTuiScreenshot)
+    );
+    // Same Action the slash command emits — one arm in dispatch.
+    let mut app = test_app();
+    let effects = dispatch(Action::CaptureTuiScreenshot, &mut app);
+    assert!(effects.is_empty());
+    assert!(app.pending_tui_screenshot);
+}
+
 /// `/debug` bare: one system line reporting every toggle's state.
 #[test]
 fn show_debug_status_emits_toggle_states_to_transcript() {

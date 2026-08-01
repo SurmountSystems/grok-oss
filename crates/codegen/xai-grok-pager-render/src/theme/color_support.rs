@@ -64,6 +64,38 @@ impl std::fmt::Display for ColorLevel {
 
 static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
 
+/// Test-only override of the cached level. `u8::MAX` means "no override".
+/// Lets hermetic paint tests force TrueColor even when the process env has
+/// `NO_COLOR` (CI / agent runners) so skill vs body accent asserts stay
+/// meaningful. Production builds never set this.
+#[cfg(any(test, feature = "test-support"))]
+static TEST_LEVEL_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
+#[cfg(any(test, feature = "test-support"))]
+fn level_from_u8(byte: u8) -> Option<ColorLevel> {
+    match byte {
+        x if x == ColorLevel::None as u8 => Some(ColorLevel::None),
+        x if x == ColorLevel::Basic as u8 => Some(ColorLevel::Basic),
+        x if x == ColorLevel::Ansi256 as u8 => Some(ColorLevel::Ansi256),
+        x if x == ColorLevel::TrueColor as u8 => Some(ColorLevel::TrueColor),
+        _ => None,
+    }
+}
+
+/// Force [`detect`] / [`get`] to return `level` until [`clear_test_override`].
+/// Intended for paint tests held under `theme::cache::pin_theme` (or the
+/// shared test lock). Does not write the process-global `OnceLock`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn force_for_test(level: ColorLevel) {
+    TEST_LEVEL_OVERRIDE.store(level as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Clear a level forced by [`force_for_test`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_test_override() {
+    TEST_LEVEL_OVERRIDE.store(u8::MAX, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Detect the terminal's color support and cache the result.
 ///
 /// Uses the `supports-color` crate which checks `COLORTERM`, `TERM`,
@@ -87,6 +119,13 @@ pub fn detect() -> ColorLevel {
 
 /// The raw cached detection, without the terminal-native lock cap.
 fn detect_raw() -> ColorLevel {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        let forced = TEST_LEVEL_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(level) = level_from_u8(forced) {
+            return level;
+        }
+    }
     *COLOR_LEVEL.get_or_init(|| {
         // Explicit opt-out via NO_COLOR takes priority.
         if std::env::var_os("NO_COLOR").is_some() {

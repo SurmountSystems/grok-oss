@@ -17,9 +17,9 @@ pub struct ExitPlanModeExtRequest {
 /// ACP `ext_method` response payload (client/pager returns to shell coordinator).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExitPlanModeExtResponse {
-    /// `"approved"`, `"cancelled"`, or `"abandoned"`.
+    /// `"approved"`, `"cancelled"`, `"abandoned"`, or `"questions"`.
     pub outcome: String,
-    /// Only present on `"cancelled"` when the user typed feedback.
+    /// Present on `"cancelled"` (revision notes) or `"questions"` (user question).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<String>,
 }
@@ -118,5 +118,20 @@ mod tests {
         let back: ExitPlanModeExtResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.outcome, "abandoned");
         assert!(back.feedback.is_none());
+    }
+
+    #[test]
+    fn ext_response_questions_with_feedback_round_trips() {
+        let resp = ExitPlanModeExtResponse {
+            outcome: "questions".into(),
+            feedback: Some("Why Redis instead of in-memory?".into()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: ExitPlanModeExtResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.outcome, "questions");
+        assert_eq!(
+            back.feedback.as_deref(),
+            Some("Why Redis instead of in-memory?")
+        );
     }
 }

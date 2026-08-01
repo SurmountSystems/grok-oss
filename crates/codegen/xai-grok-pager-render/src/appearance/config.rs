@@ -35,6 +35,9 @@ pub struct AppearanceConfig {
     pub show_timestamps: bool,
     /// Timeline sidebar (per-turn tick rail). Toggled via `/timeline`.
     pub show_timeline: bool,
+    /// Hide chrome headers (agent status bar, welcome top bar, dashboard
+    /// location header). From `[ui].hide_header`.
+    pub hide_header: bool,
     /// Whether hooks & plugins UI is disabled (hides /hooks, /plugins commands
     /// and scrollback annotations). `false` by default (plugins enabled).
     pub disable_plugins: bool,
@@ -150,9 +153,15 @@ pub struct ScrollbackDisplayConfig {
     pub expandable_indicator_running: bool,
     /// Character to use as the expand indicator. Default: "›".
     pub expandable_indicator_char: String,
-    /// Show ⧉ (copy) and ↗ (view) buttons on the selection box.
-    /// Default: false (opt-in while testing).
+    /// Show ⧉ (copy) and ↗ (view) buttons on the selection box when a
+    /// copyable/viewable block is selected.
+    /// Default: true (one-click copy chrome).
     pub selection_buttons: bool,
+    /// Always-visible ⧉ on user and assistant message bubbles (no select-first).
+    /// Independent of `selection_buttons`. When on, selection-box omits its ⧉
+    /// (Policy A: one icon per bubble; ↗ view chrome stays on the selection box).
+    /// Default: true.
+    pub bubble_copy_buttons: bool,
     /// Pin user prompts as sticky headers when scrolled past.
     /// Default: true.
     pub sticky_headers: bool,
@@ -178,7 +187,8 @@ impl Default for ScrollbackDisplayConfig {
             expandable_indicator: true,
             expandable_indicator_running: true,
             expandable_indicator_char: "›".to_string(),
-            selection_buttons: false,
+            selection_buttons: true,
+            bubble_copy_buttons: true,
             sticky_headers: true,
             tab_width: 4,
             group_max_visible: 10,
@@ -865,8 +875,11 @@ pub struct RawScrollbackDisplayConfig {
     pub expandable_indicator_running: Option<bool>,
     /// Character for the expand indicator. Default: "›".
     pub expandable_indicator_char: Option<String>,
-    /// Show ⧉/↗ buttons on the selection box. Default: false.
+    /// Show ⧉/↗ buttons on the selection box when a block is selected.
+    /// Default: true.
     pub selection_buttons: Option<bool>,
+    /// Always-visible ⧉ on user and assistant message bubbles. Default: true.
+    pub bubble_copy_buttons: Option<bool>,
     /// Pin user prompts as sticky headers when scrolled past. Default: true.
     pub sticky_headers: Option<bool>,
     /// Number of spaces to use when expanding tab characters (\t) in content.
@@ -889,7 +902,8 @@ impl Default for RawScrollbackDisplayConfig {
             expandable_indicator: Some(true),
             expandable_indicator_running: Some(true),
             expandable_indicator_char: Some("›".to_string()),
-            selection_buttons: Some(false),
+            selection_buttons: Some(true),
+            bubble_copy_buttons: Some(true),
             sticky_headers: Some(true),
             tab_width: Some(4),
             group_max_visible: Some(10),
@@ -1416,7 +1430,8 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
                         .display
                         .expandable_indicator_char
                         .unwrap_or_else(|| "›".to_string()),
-                    selection_buttons: raw.scrollback.display.selection_buttons.unwrap_or(false),
+                    selection_buttons: raw.scrollback.display.selection_buttons.unwrap_or(true),
+                    bubble_copy_buttons: raw.scrollback.display.bubble_copy_buttons.unwrap_or(true),
                     sticky_headers: raw.scrollback.display.sticky_headers.unwrap_or(true),
                     tab_width: raw.scrollback.display.tab_width.unwrap_or(4),
                     group_max_visible: raw.scrollback.display.group_max_visible.unwrap_or(10),
@@ -1429,6 +1444,7 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
             show_timestamps: true, // runtime-only, loaded from config.toml via persist
             // Single source: UiConfig::SHOW_TIMELINE_DEFAULT (loaded from config.toml via persist).
             show_timeline: UiConfig::SHOW_TIMELINE_DEFAULT,
+            hide_header: false, // runtime-only; seeded from UiConfig::hide_header at startup
             disable_plugins: raw.disable_plugins,
             show_plan_chip: raw.show_plan_chip,
             alt_screen: raw.terminal.alt_screen.into(),
@@ -1998,6 +2014,76 @@ fn upsert_respect_manual_folds(content: &str, enabled: bool) -> Result<String, S
     Ok(doc.to_string())
 }
 
+/// Persist `[scrollback.display].bubble_copy_buttons` to pager.toml.
+pub fn persist_bubble_copy_buttons(enabled: bool) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    if xai_grok_config::user_grok_home().is_none() {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            "no user grok home resolved; refusing to write a cwd-relative pager.toml \
+             that startup would never read",
+        ));
+    }
+    let _guard = PAGER_TOML_SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let path = crate::util::pager_toml_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let updated = upsert_bubble_copy_buttons(&content, enabled)
+        .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    #[cfg(unix)]
+    let prior_mode: Option<u32> = std::fs::metadata(&path).ok().map(|m| {
+        use std::os::unix::fs::PermissionsExt;
+        m.permissions().mode()
+    });
+
+    let suffix = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("toml.tmp.{}.{}", std::process::id(), nanos)
+    };
+    let tmp = path.with_extension(suffix);
+    std::fs::write(&tmp, updated)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = prior_mode {
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+        }
+    }
+    std::fs::rename(&tmp, &path)
+}
+
+fn upsert_bubble_copy_buttons(content: &str, enabled: bool) -> Result<String, String> {
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    let scrollback = doc
+        .entry("scrollback")
+        .or_insert_with(implicit_table)
+        .as_table_mut()
+        .ok_or_else(|| "pager.toml `scrollback` is not a table".to_string())?;
+    let display = scrollback
+        .entry("display")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| "pager.toml `scrollback.display` is not a table".to_string())?;
+    display.insert("bubble_copy_buttons", toml_edit::value(enabled));
+    Ok(doc.to_string())
+}
+
 fn implicit_table() -> Item {
     let mut table = toml_edit::Table::new();
     table.set_implicit(true);
@@ -2032,6 +2118,47 @@ fn annotate_table<T: DocumentedFields>(table: &mut toml_edit::Table) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Named contract: selection-box ⧉/↗ chrome is on by default so a
+    /// selected copyable block gets one-click copy without a config flip.
+    #[test]
+    fn selection_buttons_default_on() {
+        assert!(
+            ScrollbackDisplayConfig::default().selection_buttons,
+            "selection_buttons must default true for one-click copy chrome"
+        );
+        assert_eq!(
+            RawScrollbackDisplayConfig::default().selection_buttons,
+            Some(true)
+        );
+        // Omitted key in TOML uses the same default as runtime.
+        let raw: RawAppearanceConfig = toml::from_str("").unwrap();
+        let cfg: AppearanceConfig = raw.into();
+        assert!(
+            cfg.scrollback.display.selection_buttons,
+            "empty appearance TOML must enable selection_buttons"
+        );
+    }
+
+    /// Named contract: always-on per-bubble ⧉ chrome defaults on so user and
+    /// assistant messages get copy without select-first.
+    #[test]
+    fn bubble_copy_buttons_default_on() {
+        assert!(
+            ScrollbackDisplayConfig::default().bubble_copy_buttons,
+            "bubble_copy_buttons must default true for always-on bubble copy"
+        );
+        assert_eq!(
+            RawScrollbackDisplayConfig::default().bubble_copy_buttons,
+            Some(true)
+        );
+        let raw: RawAppearanceConfig = toml::from_str("").unwrap();
+        let cfg: AppearanceConfig = raw.into();
+        assert!(
+            cfg.scrollback.display.bubble_copy_buttons,
+            "empty appearance TOML must enable bubble_copy_buttons"
+        );
+    }
 
     #[test]
     fn test_parse_hex_color() {

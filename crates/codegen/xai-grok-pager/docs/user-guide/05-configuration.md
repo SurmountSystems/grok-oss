@@ -41,6 +41,8 @@ inference_idle_timeout_secs = 600
 stream_tool_calls = true
 
 [ui]
+theme = "doge"                         # default theme when unset is also DOGE; "groknight" for
+                                       # the previous neutral dark default (see 06-theming.md)
 simple_mode = true                     # readline-style prompt editing (default); false = vim editing in the prompt
 vim_mode = false                       # vim-style scrollback navigation keys (default: false)
 max_thoughts_width = 120               # max column width for reasoning display
@@ -57,15 +59,20 @@ collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat s
 page_flip_on_send = true               # pin a just-sent prompt at the top of the viewport so the
                                        # response starts on a fresh page (default: true); set false
                                        # so sending never moves the scroll position
+scrub_ascii_punct = true               # scrub fancy punctuation in assistant AI text to ASCII-safe
+                                       # forms (default: true); set false to keep curly quotes / dashes
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
 auto_run_implement = true              # after a successful turn, auto-queue a full multi-line
                                        # /implement block (token through EOF) from a follow-up or
                                        # trailing residual (default: true)
 economic_mode = true                   # soft-cap effective context at 200k (Grok 4.5 price cliff)
-                                       # for compaction / context bar; also clamps auto-run
-                                       # /implement --effort above 1 to 1 (default: true).
+                                       # for compaction / context bar (default: true). Does not
+                                       # rewrite explicit /implement --effort.
                                        # Override one conversation with /economic-mode
+hide_header = false                    # hide in-app status / welcome / dashboard headers only
+                                       # (default: false). Not the desktop/terminal window title.
+                                       # Window titles: [ui.notifications.title] enabled (default true).
 
 [features]
 telemetry = false                      # anonymous usage telemetry
@@ -73,6 +80,8 @@ feedback = true                        # feedback system (default: true)
 lsp_tools = false                      # expose the lsp tool
 codebase_indexing = true               # code graph indexing (default: true)
 two_pass_compaction = false            # prefire two-pass compaction (default: false, opt-in)
+session_recap = true                   # /recap + auto return-from-away recap (default: true;
+                                       # set false or GROK_SESSION_RECAP=0 to disable both)
 remote_fetch = true                    # allow optional online model-catalog fetches (default: true;
                                        # set false for firewalled/air-gapped deployments; background
                                        # managed-config sync has its own switch: managed_config)
@@ -81,7 +90,7 @@ remote_fetch = true                    # allow optional online model-catalog fet
 auto_compact_threshold_percent = 95    # auto-compact at this % of the *effective* context window
                                        # (0–100; settings UI offers 85 / 90 / 95 / 98;
                                        # default 95; stock Grok 4.5 catalog must not undercut
-                                       # this default; restart required for open sessions).
+                                       # this default; open sessions pick up Settings changes live).
                                        # With [ui] economic_mode = true the window is soft-capped
                                        # at 200k, so 95% ≈ 190k tokens.
                                        # The compaction banner shows usage % and the configured
@@ -165,6 +174,33 @@ A CLI flag always wins over the config value for that invocation.
 #### Snap prompt to top on send
 
 By default, sending a prompt scrolls it to the top of the viewport so the response starts on a fresh page. Set `[ui] page_flip_on_send = false` (or toggle **Snap prompt to top on send** in `/settings` → Appearance) to leave the scroll position alone when you send. It takes effect on the next send — no restart.
+
+#### ASCII-safe assistant punctuation
+
+By default, assistant AI text is scrubbed so fancy punctuation is terminal-safe:
+
+| Input | Output |
+|-------|--------|
+| Em dash (—) | `--` |
+| En dash (–) | `-` |
+| Smart double quotes | `"` |
+| Smart apostrophes / single quotes | `'` |
+| Zero-width / invisible format chars | stripped |
+| Non-breaking / exotic spaces | ASCII space |
+
+User messages, tool I/O, and reasoning blocks are **not** scrubbed.
+
+**Turn it off (durable):**
+
+| Layer | How |
+|-------|-----|
+| Settings | `/settings` → Appearance → **ASCII-safe assistant punctuation** |
+| Config | `[ui] scrub_ascii_punct = false` in `~/.grok/config.toml` |
+| Env (ops kill-switch) | `GROK_SCRUB_ASCII_PUNCT=0` (also `false` / `off` / `no` / `n`) |
+
+Either config or env off disables scrub. Env is the process-level kill-switch.
+
+**Agent override:** the agent cannot silently disable scrub. To leave curly quotes alone, the agent calls the `disable_ascii_scrub` tool, which always goes through the session permission prompt (Allow once / Allow always / Reject) — never a silent flip. Reject keeps scrub on; Allow once turns it off for the rest of the session; Allow always also writes the durable setting `[ui] scrub_ascii_punct = false` (same path as the Appearance setting).
 
 #### Scrolling
 
@@ -432,16 +468,20 @@ idle_threshold_secs = 3   # seconds unfocused before a notification fires
 events = ["turn_complete", "approval_required"]
 sleep_prevention = true   # prevent display sleep during agent turns
 progress_bar = true       # show tab progress bar (OSC 9;4)
+session_recap = true      # auto "where was I" recap on return-from-away (default: true)
+session_recap_threshold_secs = 30  # min unfocused seconds before auto recap is offered
 
 [ui.notifications.title]
 enabled = true
-items = ["action-required", "spinner", "activity", "session-name", "grok"]
+items = ["action-required", "spinner", "activity", "session-name", "agents", "grok"]
 ```
 
 The `grok` entry in `title.items` is the **product brand** slot (config name kept
 for compatibility). In Grok OSS it renders as **`grok-oss`** in the terminal/tab
-title (for example `Thinking - my-session - grok-oss`), matching the install
-binary. Session titles set outside the notifications path use the same suffix.
+title (for example `Thinking - my-session - 2 agents - grok-oss`), matching the
+install binary. Session titles set outside the notifications path use the same
+suffix. The `agents` item shows `N agents` when more than one top-level agent is
+busy.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -451,8 +491,41 @@ binary. Session titles set outside the notifications path use the same suffix.
 | `events` | array | `["turn_complete", "approval_required"]` | Events that trigger notifications. Options: `turn_complete`, `approval_required`, `session_ready`, `task_complete`, `agent_error`. |
 | `sleep_prevention` | bool | `true` | Keep the display awake while the agent works (macOS/Linux). |
 | `progress_bar` | bool | `true` | Show a progress indicator in the terminal tab (OSC 9;4). |
-| `title.enabled` | bool | `true` | Set the terminal title to reflect agent state. |
-| `title.items` | array | (see above) | Items shown in the title bar. Options: `action-required`, `spinner`, `activity`, `session-name`, `cwd`, `model`, `turn-timer`, `grok` (displays as `grok-oss`). |
+| `session_recap` | bool | `true` | Auto session recap when you return after being away. **Does not** disable manual `/recap` (see [Session recap](#session-recap)). Also in Settings search as **Auto session recap**. |
+| `session_recap_threshold_secs` | integer | `30` | Minimum seconds unfocused before an automatic recap may be requested (debounce against quick tab switches). Also in Settings as **Auto recap after (seconds)**. |
+| `title.enabled` | bool | `true` | Set the terminal/tab **window title** to reflect agent state (session, activity, agents, brand). Sole opt-out for dynamic titles; never emits empty SetTitle. Not the in-app header (`hide_header`). |
+| `title.items` | array | (see above) | Items shown in the title bar. Options: `action-required`, `spinner`, `activity`, `session-name`, `agents`, `cwd`, `model`, `turn-timer`, `grok` (displays as `grok-oss`). |
+
+#### Session recap
+
+Session recap is the short "where was I" summary: on demand via **`/recap`**
+(alias **`/summarize`**), and optionally automatic when you return to the
+terminal after being away. **Default on.** Search Settings (`/settings` /
+`/options`) for `recap` to toggle these live (master feature still needs a
+restart so the shell re-advertises the ACP gate).
+
+| Layer | Key / control | Default | What it gates |
+|-------|---------------|---------|----------------|
+| Shell feature (master) | Settings **Master session recap**, or `[features] session_recap` / `GROK_SESSION_RECAP` | `true` | Both manual `/recap` and auto away-recap |
+| Client preference | Settings **Auto session recap**, or `[ui.notifications] session_recap` | `true` | Auto away-recap only |
+| Auto debounce | Settings **Auto recap after (seconds)**, or `[ui.notifications] session_recap_threshold_secs` | `30` | Min unfocused seconds before auto recap |
+
+To disable **everything** (including `/recap`):
+
+```toml
+[features]
+session_recap = false
+```
+
+Or for one process: `GROK_SESSION_RECAP=0`. Restart / new session so the shell
+re-advertises the gate on ACP initialize (`sessionRecap`).
+
+To keep manual `/recap` but stop automatic return-from-away recaps:
+
+```toml
+[ui.notifications]
+session_recap = false
+```
 
 #### Terminal support matrix
 
@@ -677,7 +750,8 @@ tab_width = 4                         # spaces per tab character
 expandable_indicator = true           # show expand indicator on foldable entries
 expandable_indicator_running = true   # show indicator on running entries
 expandable_indicator_char = "›"       # character for the expand indicator (default: "›")
-selection_buttons = false             # show copy/view buttons on selection
+selection_buttons = true              # show ⧉/↗ on selection box (default on)
+bubble_copy_buttons = true            # always-on ⧉ on user/assistant bubbles (default on; no select-first)
 line_under_last_entry = false         # horizontal line below last entry
 group_selection_split = true          # split selection box for expanded blocks
 highlight_overlays_border = false     # highlight extends over selection box border
@@ -717,7 +791,7 @@ badge_format = "default"              # "default", "colon", or "comma"
 
 Badge format examples:
 
-- `default`: `2/5` — a `done/total` progress fraction (done = completed, total = all tasks except cancelled).
+- `default`: `2/5` — a `done/total` progress fraction (done = completed, total = all tasks except cancelled). When any non-cancelled **leaf** has a Fibonacci `size` of 1 or 2, the badge switches to points mode and shows **`N/M pts`** (completed leaf points / total leaf points). Parents never count toward points.
 - `colon`: `[>:1 [ ]:4 ok:3 x:2]` — icon:count.
 - `comma`: `[1 >, 4 [ ], 3 ok, 2 x]` — count icon, comma-separated.
 
@@ -776,6 +850,13 @@ The key ones. See the README for the complete list.
 |----------|-------------|
 | `GROK_HOME` | Override config directory (default: `~/.grok`) |
 | `GROK_RESPECT_GITIGNORE` | Force gitignore filtering on (`1`) or off (`0`); overrides `[tools] respect_gitignore` |
+
+### UI / hygiene
+
+| Variable | Description |
+|----------|-------------|
+| `GROK_SCRUB_ASCII_PUNCT` | Assistant-text ASCII scrub (default on when unset). Disable with `0` / `false` / `off` / `no` / `n`. See [ASCII-safe assistant punctuation](#ascii-safe-assistant-punctuation). |
+| `GROK_STRIP_TRAILING_WHITESPACE` | Strip trailing spaces/tabs after product file edits (default on). Disable with `0` / `false` / `off` / `no` / `n`. |
 
 ### Telemetry
 

@@ -15,7 +15,7 @@ Agents and personas both customize behavior, but they operate at different level
 | **What they configure** | The whole session: model, tools, prompt mode, system prompt | A behavioral overlay added to a subagent's prompt |
 | **Scope** | Primary session or subagent | Subagents only |
 | **How you set them** | At startup, or with agent definitions (`.md` files in `.grok/agents/` or `~/.grok/agents/`) | In `config.toml` (`[subagents.personas]`) or `.toml` files under `.grok/personas/`; applied during subagent resolution |
-| **What they control** | Model, tool availability, prompt body, skills | Tone, output format, task focus, and input/output contracts |
+| **What they control** | Model, tool availability, prompt text, skills | Tone, output format, task focus, and input/output contracts |
 | **Who edits them** | You -- create, delete, or toggle them in the agents modal or by editing files | You -- define custom personas in config or files; bundled personas are read-only |
 | **Examples** | `grok-build`, `explore`, `plan` | `researcher`, `concise` |
 
@@ -303,8 +303,8 @@ Subagents appear at the top of the tasks pane in their own collapsible "Subagent
 
 Queued follow-ups **hold** not only when the parent is blocked waiting on a subagent, but also whenever **any background subagent is still live** — even if the parent already looks idle. That keeps typed follow-ups from starting a conflicting main turn while children work.
 
-- Status cue: e.g. `N subagent(s) still running · M queued — send now to force`.
-- **Send now** force-starts the next parent turn despite live children.
+- Status cue: e.g. `N subagent(s) still running · M queued — Interject to force`.
+- **Interject** (chord or queue row `[Interject]`) force-starts the next parent turn despite live children.
 - When the last holding subagent finishes, the queue drains on its own (no extra keystroke).
 - **Monitors** and long-running background commands alone do **not** hold the queue (they can run indefinitely).
 
@@ -334,6 +334,12 @@ For blocking subagents the single entry updates its bullet color when the child 
 ### Tasks pane (Ctrl+G)
 
 As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect.
+
+**Click to open:** on a subagent row, click the top-right **model name, elapsed
+timer, or `[↗]` enlarge control** to open that child's fullscreen transcript
+(same result as Enter / Ctrl-F on the scrollback block). The kill control
+(`[x]`) stays separate and does not open the view. Todo pane clear-finished
+icon (`[−]`, open board with finished rows) is laid out so it does not cover or steal those open/kill hits.
 
 ### Fullscreen framed view (the child transcript)
 

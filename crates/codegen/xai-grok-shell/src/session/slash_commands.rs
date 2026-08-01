@@ -116,7 +116,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "economic-mode",
-        description: "Cap context at 200K for cheaper Grok 4.5 pricing; clamps auto /implement --effort to 1 (on by default)",
+        description: "Cap context at 200K for cheaper Grok 4.5 pricing (on by default)",
         argument_hint: Some("on|off|status|global on|global off"),
         aliases: &["economic", "econ"],
         gate: BuiltinGate::AlwaysOn,
@@ -555,6 +555,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "multiline",
             "new",
             "onboarding",
+            "options",
             "personas",
             "plan",
             "plan-view",

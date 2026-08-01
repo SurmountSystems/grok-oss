@@ -620,6 +620,32 @@ fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
     );
 }
 #[test]
+fn set_scrub_ascii_punct_emits_persist_setting_with_correct_payload() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let default_on = app.current_ui.scrub_ascii_punct_enabled();
+    crate::appearance::cache::set_scrub_ascii_punct(default_on);
+    let effects = dispatch(Action::SetScrubAsciiPunct(!default_on), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "scrub_ascii_punct");
+            assert_eq!(value, &SettingValue::Bool(!default_on));
+            assert_eq!(rollback_value, &SettingValue::Bool(default_on));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert_eq!(app.current_ui.scrub_ascii_punct, Some(!default_on));
+    assert_eq!(
+        crate::appearance::cache::load_scrub_ascii_punct(),
+        !default_on
+    );
+}
+#[test]
 fn set_simple_mode_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
@@ -1245,7 +1271,7 @@ fn set_auto_compact_threshold_idempotent_re_commit() {
 }
 
 #[test]
-fn set_auto_compact_threshold_toast_includes_restart_marker() {
+fn set_auto_compact_threshold_toast_no_restart() {
     use crate::settings::AutoCompactThresholdChoice;
     let mut app = test_app_with_agent();
     let _ = dispatch(
@@ -1258,8 +1284,8 @@ fn set_auto_compact_threshold_toast_includes_restart_marker() {
         "toast must include the value, got {toast:?}"
     );
     assert!(
-        toast.contains("restart to apply"),
-        "toast must include the deferred-effect cue, got {toast:?}"
+        !toast.contains("restart to apply"),
+        "live-applied setting must not toast restart, got {toast:?}"
     );
 }
 
@@ -1359,8 +1385,7 @@ fn pr13_show_tips_rollback_from_none_state_restores_none() {
 }
 /// Toast text includes the "(restart to apply)" cue —
 /// matches the modal pill so the user gets consistent restart
-/// feedback through both surfaces. Mirror of
-/// `set_auto_compact_threshold_percent_toast_includes_restart_marker`.
+/// feedback through both surfaces (startup-only settings like show_tips).
 #[test]
 fn pr13_set_show_tips_toast_includes_restart_marker() {
     let mut app = test_app_with_agent();
@@ -1390,6 +1415,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "compact_mode" => {
             let _ = dispatch(Action::SetCompactMode(true), app);
         }
+        "hide_header" => {
+            let _ = dispatch(Action::SetHideHeader(true), app);
+        }
         "show_timestamps" => {
             let _ = dispatch(Action::SetTimestamps(false), app);
         }
@@ -1400,6 +1428,10 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "page_flip_on_send" => {
             let away = !crate::appearance::cache::load_page_flip_on_send();
             let _ = dispatch(Action::SetPageFlipOnSend(away), app);
+        }
+        "scrub_ascii_punct" => {
+            let away = !crate::appearance::cache::load_scrub_ascii_punct();
+            let _ = dispatch(Action::SetScrubAsciiPunct(away), app);
         }
         "combine_queued_prompts" => {
             let away = !crate::appearance::cache::load_combine_queued_prompts();
@@ -1474,6 +1506,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
+        "plan_approval_park" => {
+            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_owned()), app);
+        }
         "show_tips" => {
             let _ = dispatch(Action::SetShowTips(false), app);
         }
@@ -1546,6 +1581,29 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 ),
                 app,
             );
+        }
+        "bubble_copy_buttons" => {
+            let _ = dispatch(
+                Action::SetBubbleCopyButtons(
+                    !crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
+                ),
+                app,
+            );
+        }
+        "cancel_subagents_on_turn_cancel" => {
+            let _ = dispatch(
+                Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
+                app,
+            );
+        }
+        "notifications.session_recap" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecap(false), app);
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecapThresholdSecs(90), app);
+        }
+        "features.session_recap" => {
+            let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
         }
         "hunk_tracker_mode" => {
             let _ = dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
@@ -3014,7 +3072,7 @@ fn set_auto_dark_theme_emits_persist_setting_with_correct_payload() {
             } => {
                 assert_eq!(*key, "auto_dark_theme");
                 assert_eq!(*value, SettingValue::Enum("grokday"));
-                assert_eq!(*rollback_value, SettingValue::Enum("groknight"));
+                assert_eq!(*rollback_value, SettingValue::Enum("doge"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
@@ -3141,9 +3199,10 @@ fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetTheme("auto".into()), &mut app);
         assert!(crate::theme::cache::is_auto_mode());
+        // Product default auto-dark mapping is DOGE.
         assert_eq!(
             crate::theme::cache::current_kind(),
-            crate::theme::ThemeKind::GrokNight,
+            crate::theme::ThemeKind::Doge,
         );
         let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
         assert_eq!(

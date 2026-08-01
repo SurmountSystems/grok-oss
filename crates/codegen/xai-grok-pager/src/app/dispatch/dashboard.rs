@@ -1401,6 +1401,13 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app,
+                notifications_session_recap: app.notification_service.config().session_recap,
+                notifications_session_recap_threshold_secs: app
+                    .notification_service
+                    .config()
+                    .session_recap_threshold_secs,
+                features_session_recap: app.features_session_recap,
+                bubble_copy_buttons: app.appearance.scrollback.display.bubble_copy_buttons,
             },
         };
         command.run(&mut ctx, invocation.args)

@@ -1466,9 +1466,14 @@ fn prefetch_models_blocking_gated(
     let _timer = crate::instrumentation_timer!("startup.fetch_models_blocking");
     match fetch_models_blocking(endpoints, auth, fetch_auth) {
         Ok(FetchModelsResult { models, etag }) if !models.is_empty() => {
+            // Session and ApiKey catalogs both need api_base_url for dual-auth
+            // hop (console key must leave cli-chat-proxy). Deployment / custom
+            // endpoints keep model-supplied URLs only.
             let api_base_url_override = match fetch_auth {
-                ModelFetchAuth::ApiKey => Some(endpoints.xai_api_base_url.clone()),
-                _ => None,
+                ModelFetchAuth::ApiKey | ModelFetchAuth::Session => {
+                    Some(endpoints.xai_api_base_url.clone())
+                }
+                ModelFetchAuth::Deployment | ModelFetchAuth::CustomEndpoint => None,
             };
             let map = build_prefetched_map(models, api_base_url_override);
 
@@ -3404,6 +3409,21 @@ mod tests {
             stream_tool_calls: None,
             laziness_detector: config::LazinessDetectorPerModelConfig::default(),
         }
+    }
+
+    /// Session catalog must stamp api_base_url (console host) even when the
+    /// remote model JSON omits it — dual-auth hop depends on split hosts.
+    #[test]
+    fn build_prefetched_map_session_override_fills_api_base_url() {
+        let mut entry = make_entry_config_with_id(Some("grok-4.5"), "grok-4.5", None);
+        entry.base_url = "https://cli-chat-proxy.grok.com/v1".into();
+        entry.api_base_url = None;
+        let map = build_prefetched_map(vec![entry], Some("https://api.x.ai/v1".into()));
+        assert_eq!(
+            map.get("grok-4.5").and_then(|e| e.api_base_url.as_deref()),
+            Some("https://api.x.ai/v1"),
+            "Session-fetch override must set console api_base_url for dual-auth hop"
+        );
     }
 
     /// Experiment: two entries share the same routing slug but have distinct ids.

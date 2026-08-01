@@ -867,3 +867,61 @@
         );
     }
 
+    /// Compaction must not wipe the user-visible todo board. Resources still
+    /// hold TodoState; the UI used to call `update_todos([])` on
+    /// AutoCompactCompleted, making the list look empty after compact.
+    #[test]
+    fn auto_compact_completed_preserves_todo_board() {
+        let mut app = make_app_with_agent("sess-compact");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.todo.update_todos(vec![
+                xai_grok_shell::tools::TodoItem {
+                    content: "impl: residual slice".into(),
+                    priority: Default::default(),
+                    status: xai_grok_shell::tools::TodoStatus::InProgress,
+                    meta: None,
+                    size: None,
+                },
+                xai_grok_shell::tools::TodoItem {
+                    content: "impl: verify gates".into(),
+                    priority: Default::default(),
+                    status: xai_grok_shell::tools::TodoStatus::Pending,
+                    meta: None,
+                    size: None,
+                },
+            ]);
+            assert_eq!(agent.todo.todos().len(), 2);
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-compact",
+                XaiSessionUpdate::AutoCompactCompleted {
+                    tokens_before: Some(90_000),
+                    tokens_after: 25_000,
+                    elapsed_ms: Some(300),
+                    summary_preview: None,
+                },
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.todo.todos().len(),
+            2,
+            "AutoCompactCompleted must not clear the todo board"
+        );
+        assert_eq!(
+            agent.todo.todos()[0].content,
+            "impl: residual slice",
+            "todo contents must survive compact"
+        );
+        assert_eq!(
+            agent.context_state.as_ref().map(|c| c.used),
+            Some(25_000),
+            "context bar still refreshes on compact"
+        );
+    }
+

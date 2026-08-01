@@ -1,7 +1,7 @@
 # Where skills come from (Surmount / Grok OSS)
 
 **Date:** 2026-07-24  
-**Workspace:** `/home/hunter/Projects/surmount/grok-build`  
+**Workspace:** `$REPO`  
 **Mode:** evidence-only (product code + host trees + docs). No product edits in this pass.
 
 ---
@@ -16,7 +16,7 @@
 **Nuance for this machine today**
 
 - There are **no committed `SKILL.md` skill packs** under the grok-build repo root (search: none outside this research note).
-- Hunter’s orchestrator **bodies** (`implement`, `pr-babysit`, …) live under **`~/.agents/skills`** (host git) and **shadow** same-named `~/.grok/skills` and `~/.grok/bundled/skills` copies.
+- The operator’s orchestrator skill packs (`implement`, `pr-babysit`, …) live under **`~/.agents/skills`** (host git) and **shadow** same-named `~/.grok/skills` and `~/.grok/bundled/skills` copies.
 - Editing **only** `~/.agents/skills` is correct for **this host’s effective slash skills**. It is **wrong** as a claim that skills are “off-branch only” or that product skill work has nothing to do with this git tree (loader + docs + optional project skills + bundle cache writer **are** on the branch).
 
 ---
@@ -26,7 +26,7 @@
 ### 2.1 Scope enum (bare-name priority)
 
 Source:  
-`/home/hunter/Projects/surmount/grok-build/crates/codegen/xai-grok-tools/src/implementations/skills/types.rs` **L20–33**
+`$REPO/crates/codegen/xai-grok-tools/src/implementations/skills/types.rs` **L20–33**
 
 | Rank | `SkillScope` | `repr` | Meaning |
 |------|--------------|--------|---------|
@@ -42,7 +42,7 @@ Cross-scope: higher scope shadows lower (after sort-by-scope + name dedup). Same
 ### 2.2 Config dir **names** at the same tier
 
 Source:  
-`/home/hunter/Projects/surmount/grok-build/crates/codegen/xai-grok-tools/src/types/compat.rs` **`skill_config_dirs` L360–378**, tests `skill_config_dirs_agents_before_grok` **L514+**
+`$REPO/crates/codegen/xai-grok-tools/src/types/compat.rs` **`skill_config_dirs` L360–378**, tests `skill_config_dirs_agents_before_grok` **L514+**
 
 ```text
 .agents → .grok → [.claude if compat] → [.cursor if compat]
@@ -61,7 +61,7 @@ Under each config dir:
 ### 2.3 Full pipeline (`list_skills_with_plugins`)
 
 Primary orchestration:  
-`/home/hunter/Projects/surmount/grok-build/crates/codegen/xai-grok-agent/src/prompt/skills.rs`
+`$REPO/crates/codegen/xai-grok-agent/src/prompt/skills.rs`
 
 | Step | What | Symbols / lines |
 |------|------|-----------------|
@@ -138,7 +138,7 @@ Primary orchestration:
 | `prod/mc/cli-chat-proxy-types/src/subagent_bundle.rs` | `SubagentBundle { skills: HashMap }` wire type |
 | `crates/codegen/xai-grok-plugin-marketplace/**` | Plugin `skills/` scan (`scanner.rs`) |
 | `crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md` | User-facing locations / bundled rules |
-| `crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md` | Subagent / token-efficiency **product policy** (not skill pack bodies) |
+| `crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md` | Subagent / token-efficiency **product policy** (not skill pack files) |
 | `AGENTS.md`, `docs/upstream-history.md` | Project process pins (not skill packs) |
 
 **Project skill roots supported by product (empty of packs on this checkout):**
@@ -160,7 +160,7 @@ Primary orchestration:
 4. Docs: never write bundled into `~/.grok/skills/`; same-named local/repo/user overrides — `08-skills.md` ~**L202–204**.
 
 **Observed host cache (2026-07-24 sample):**  
-`/home/hunter/.grok/bundled/skills/` includes e.g. `implement`, `pr-babysit`, `execute-plan`, `review`, `create-skill`, office/game skills, `resume-*`, etc. Authoritative **version** lives in cache `manifest.json` (product-managed checksums).
+`~/.grok/bundled/skills/` includes e.g. `implement`, `pr-babysit`, `execute-plan`, `review`, `create-skill`, office/game skills, `resume-*`, etc. Authoritative **version** lives in cache `manifest.json` (product-managed checksums).
 
 **Bundle archive provenance (who authors the remote payload)** is **outside** this repo’s tree; product only installs/syncs.
 
@@ -170,13 +170,13 @@ Primary orchestration:
 
 | Path | Role | Branch? |
 |------|------|---------|
-| `/home/hunter/.agents/skills/**` | **Maintained operator skill home** (own git). Zed/Surmount first; Grok loads **first** at User tier. Rules: `_SKILL_RULES-read-first-pls.md` | Host only |
-| `/home/hunter/.grok/skills/**` | Sparse Grok user skills; lag/mirror; **shadowed** by same-named agents skills | Host only |
-| `/home/hunter/.grok/bundled/skills/**` | Platform pack **cache** (product sync) | Host install path; content from network |
-| `/home/hunter/.grok/bundled/{agents,personas,roles}/**` | Sibling bundled catalog | Host |
-| `/home/hunter/.grok/docs/user-guide/**` | Install mirror of pager user-guide | Host install; **source** is in-repo pager |
-| `/home/hunter/.grok/config.toml` `[skills]` | `paths` / `ignore` / `disabled` / compat | Host |
-| `/home/hunter/.claude/skills`, `~/.cursor/skills` | Vendor compat (gated) | Host |
+| `~/.agents/skills/**` | **Maintained operator skill home** (own git). Zed/Surmount first; Grok loads **first** at User tier. Rules: `_SKILL_RULES-read-first-pls.md` | Host only |
+| `~/.grok/skills/**` | Sparse Grok user skills; lag/mirror; **shadowed** by same-named agents skills | Host only |
+| `~/.grok/bundled/skills/**` | Platform pack **cache** (product sync) | Host install path; content from network |
+| `~/.grok/bundled/{agents,personas,roles}/**` | Sibling bundled catalog | Host |
+| `~/.grok/docs/user-guide/**` | Install mirror of pager user-guide | Host install; **source** is in-repo pager |
+| `~/.grok/config.toml` `[skills]` | `paths` / `ignore` / `disabled` / compat | Host |
+| `~/.claude/skills`, `~/.cursor/skills` | Vendor compat (gated) | Host |
 | Plugin install roots | Marketplace content | Host; discovery on branch |
 | Server skill store dirs | Managed/workspace | Host/remote |
 
@@ -196,7 +196,7 @@ Primary orchestration:
 | Channel | Skills relationship |
 |---------|---------------------|
 | **Import** (`scripts/import-upstream-export.sh`) | Absorbs xAI **monorepo tree** into Surmount `import/*`. Brings/updates **product skill machinery** (agent/tools/shell/docs crates) when present in export — **not** a dedicated Surmount skill-pack tree. |
-| **Onto / put-history** (`put-history-on-xai.sh`, join scripts) | Replays Surmount product commits (including discovery/bundle code) onto xAI tip. Same: **code + docs**, not `~/.agents` bodies. |
+| **Onto / put-history** (`put-history-on-xai.sh`, join scripts) | Replays Surmount product commits (including discovery/bundle code) onto xAI tip. Same: **code + docs**, not `~/.agents` skill packs. |
 | **`scripts/detect-upstream-export.sh` / sync** | Detects new export tips; no special-case skill-pack export. |
 | **Network `SubagentBundle`** | Runtime platform skills from **cli-chat-proxy** `/v1/subagents/bundle` — parallel to git import; not written into grok-build’s git skill packs. |
 | **Host skill-maintenance** | Reconciles `~/.agents` ↔ `~/.grok/skills` ↔ `~/.grok/bundled/skills` on the **operator machine**; not an xAI git export path. |
@@ -209,7 +209,7 @@ There is **no** in-repo pipeline that exports Surmount `~/.agents/skills` back t
 
 ## 6. If skills ship with product — which **in-repo** paths must get process pins
 
-Interpret “ship with product” as: every install sees the pin without Hunter’s home skill git.
+Interpret “ship with product” as: every install sees the pin without the operator’s home skill git.
 
 | Must pin on branch | Why |
 |--------------------|-----|
@@ -217,12 +217,12 @@ Interpret “ship with product” as: every install sees the pin without Hunter�
 | `crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md` | Skill discovery UX; keep aligned with code (`.agents` first, bundled path, no gitignore filter) |
 | Project `AGENTS.md` | Repo process for work **in this tree** (Hard stop, never commit) |
 | `docs/upstream-history.md` (onto / multi-file conflict) | Branch workflow that triggers skill-heavy ops |
-| Optional: **project** `.agents/skills/**` or `.grok/skills/**` if Surmount chooses to **version** skill packs on the product branch | Only way skill **bodies** ride the git branch for collaborators |
+| Optional: **project** `.agents/skills/**` or `.grok/skills/**` if Surmount chooses to **version** skill packs on the product branch | Only way skill packs ride the git branch for collaborators |
 | Optional: fix stale `crates/codegen/xai-grok-shell/README.md` Skills section | Currently wrong vs code (omits `.agents`/bundled; claims gitignore filter) — **L1535–1546** area |
 
 | Host / cache (not durable “product ship” alone) | Why |
 |--------------------------------------------------|-----|
-| `~/.agents/skills/**` orchestrators + `_SKILL_RULES` + `shared/references/subagent-token-strategy.md` | This machine’s effective skill bodies; not the branch pack tree |
+| `~/.agents/skills/**` orchestrators + `_SKILL_RULES` + `shared/references/subagent-token-strategy.md` | This machine’s effective skill packs; not the branch pack tree |
 | `~/.grok/bundled/skills/**` | Platform defaults for users without agents overrides — but **cache**; durable change needs **bundle source pipeline**, not only local cache edit |
 | `~/.grok/skills/**` alone | Sparse/stale; loses to agents |
 
@@ -237,7 +237,7 @@ Interpret “ship with product” as: every install sees the pin without Hunter�
 | `08-skills.md` | Good multi-source story + bundled under `~/.grok/bundled/skills/`; table still heavier on `.grok` than code’s “`.agents` first” (prose has both) |
 | `xai-grok-shell/README.md` Skills | **Stale**: only `.grok` / `~/.claude`; claims repo skills respect `.gitignore` (**false** per `skills.rs` L269–274); omits `.agents` first and bundled |
 | `FORK.md` | No skills residual |
-| Earlier research `skill-subagent-pin-inventory-2026-07-24.md` | Correct that orchestrator **bodies** are host-dir; phrasing “not on branch” **understates** product loader + project roots + bundle distribution — corrected by **this** note |
+| Earlier research `skill-subagent-pin-inventory-2026-07-24.md` | Correct that orchestrator skill packs are host-dir; phrasing “not on branch” **understates** product loader + project roots + bundle distribution — corrected by **this** note |
 
 ---
 
@@ -263,7 +263,7 @@ Interpret “ship with product” as: every install sees the pin without Hunter�
 
 1. **Shell README** skill table is outdated relative to code and `08-skills.md`.
 2. **Bundle archive authorship** is outside this repo; only install/sync code is on-branch.
-3. Inventory notes that said “skills are only home-dir / not on branch” correctly locate **operator bodies**, but **misstate product ownership** of discovery + project roots + bundled distribution — that is the claim this note rejects.
+3. Inventory notes that said “skills are only home-dir / not on branch” correctly locate **operator skill packs**, but **misstate product ownership** of discovery + project roots + bundled distribution — that is the claim this note rejects.
 
 ---
 
@@ -273,7 +273,7 @@ Interpret “ship with product” as: every install sees the pin without Hunter�
 |----------|--------|
 | **1. Ranked load order** | Local → Repo (path walk; `.agents` then `.grok` [+vendors]) → User (`~/.agents` then `~/.grok` [+vendors]) → `[skills].paths` → Server → Bundled (`~/.grok/bundled`) → Plugin; name shadow by `SkillScope` + first-seen. Evidence: `skills.rs` + `types.rs` + `compat.rs` as above. |
 | **2. ON grok-oss branch** | Discovery/load/bundle-sync/plugin/workspace **code** + user-guide; **no** committed skill packs today; project `.agents`/`.grok` skills **supported** if added. |
-| **3. Host operator** | `~/.agents/skills` maintained bodies (win User tier); `~/.grok/skills` lag; `~/.grok/bundled` product cache; skill-maintenance reconciles peers. |
-| **4. Wrong claim fix** | Skills are multi-source; branch owns machinery + can hold project skills; host agents is maintained skill **bodies** for this operator, not “the only place skills exist.” |
-| **5. In-repo pin paths if skills ship with product** | User-guide `08`/`16`, project `AGENTS.md`, onto docs; optionally commit project `.agents/skills` or fix shell README; platform skill **bodies** need bundle pipeline or project packs — not only host agents. |
+| **3. Host operator** | `~/.agents/skills` maintained skill packs (win User tier); `~/.grok/skills` lag; `~/.grok/bundled` product cache; skill-maintenance reconciles peers. |
+| **4. Wrong claim fix** | Skills are multi-source; branch owns machinery + can hold project skills; host agents holds maintained skill packs for this operator, not “the only place skills exist.” |
+| **5. In-repo pin paths if skills ship with product** | User-guide `08`/`16`, project `AGENTS.md`, onto docs; optionally commit project `.agents/skills` or fix shell README; platform skill packs need bundle pipeline or project packs — not only host agents. |
 | **Upstream reconciliation** | Git import/onto move **code**; bundle is network; host skill-maintenance is operator-only; no skill-pack export path to xAI in this repo. |

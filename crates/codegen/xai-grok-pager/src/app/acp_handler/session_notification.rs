@@ -205,7 +205,28 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             );
             if let XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
                 refresh_context_used(agent, *tokens_after);
-                agent.todo.update_todos(Vec::new());
+                // Keep the existing todo board. Compaction does not clear
+                // Resources TodoState; wiping the UI here made the list look
+                // empty after compact while the model still held the board.
+                // A later Plan / todo_write refresh still replaces via the
+                // normal ACP Plan path.
+            }
+            // Dual-auth D3: hop reason is already status chrome via
+            // TurnActivity::Retrying; also toast so the operator notices the
+            // SuperGrok session ↔ console key switch (no raw keys in copy).
+            // Track destination identity so the credits meter does not keep
+            // showing SuperGrok prepaid extras while samples run on console.
+            if let XaiSessionUpdate::RetryState(
+                xai_grok_shell::extensions::notification::RetryState::Retrying { reason, .. },
+            ) = update
+                && xai_grok_shell::sampling::is_credential_hop_reason(reason)
+            {
+                agent.show_toast(reason);
+                if let Some(kind) =
+                    crate::views::credit_bar::sampling_identity_from_hop_reason(reason)
+                {
+                    agent.sampling_identity = kind;
+                }
             }
             changed
         }
@@ -1270,6 +1291,11 @@ pub(super) fn apply_retry_state(
                 max_retries: *max_retries,
                 reason: reason.clone(),
             }));
+        }
+        // Live stream after a retry: drop sticky Retrying chrome immediately.
+        // Without this, attempt N freezes for the whole next TTFB/stream window.
+        RetryState::StreamResumed => {
+            session.set_retry_activity(None);
         }
         RetryState::Exhausted {
             attempts,

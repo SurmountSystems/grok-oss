@@ -100,8 +100,15 @@ pub fn highlight_bash_command(command: &str) -> Vec<Span<'static>> {
 }
 
 /// Dim highlighted spans by blending each color toward background.
+///
+/// Under DOGE, skip alpha blend (solid-step at the usual 0.45 recede factor
+/// would snap to black and hide the command). Keep pure span colours; the
+/// finished-vs-running distinction still comes from the spinner/status chrome.
 fn dim_spans(spans: &[Span<'static>], blend_factor: f32) -> Vec<Span<'static>> {
     let theme = Theme::current();
+    if Theme::current_kind() == ThemeKind::Doge {
+        return spans.to_vec();
+    }
     spans
         .iter()
         .map(|span| {
@@ -114,6 +121,17 @@ fn dim_spans(spans: &[Span<'static>], blend_factor: f32) -> Vec<Span<'static>> {
             Span::styled(span.content.clone(), style)
         })
         .collect()
+}
+
+/// Finished / idle type-label colour: non-DOGE blends toward bg so rows recede;
+/// DOGE keeps the pure role primary (green/red/magenta) — mid-channel blend
+/// would invent grays, and solid-step at 0.45 would hide the label on black.
+fn finished_type_color(theme: &Theme, raw: Color) -> Color {
+    if Theme::current_kind() == ThemeKind::Doge {
+        raw
+    } else {
+        crate::render::color::blend_color(theme.bg_base, raw, 0.45).unwrap_or(raw)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,8 +404,7 @@ impl TaskEntry {
         let type_color = if info.is_running() || info.pending_kill {
             raw_type_color
         } else {
-            crate::render::color::blend_color(theme.bg_base, raw_type_color, 0.45)
-                .unwrap_or(raw_type_color)
+            finished_type_color(&theme, raw_type_color)
         };
         let type_style = Style::default().fg(type_color);
         let desc_style = if info.is_running() {
@@ -475,8 +492,7 @@ impl TaskEntry {
         let tag_color = if running {
             raw_tag_color
         } else {
-            crate::render::color::blend_color(theme.bg_base, raw_tag_color, 0.45)
-                .unwrap_or(raw_tag_color)
+            finished_type_color(&theme, raw_tag_color)
         };
         let name_style = if running {
             Style::default().fg(theme.text_primary)
@@ -1803,8 +1819,10 @@ impl TasksPane {
             ));
         }
 
-        // View button
+        // View button glyph. Open hit (below) also covers model + timer so a
+        // click on top-right subagent chrome opens the child, not only [↗].
         rx = rx.saturating_sub(3);
+        let view_x = rx;
         let is_view_hovered = matches!(
             &self.hovered_view,
             Some(TaskEntryId::Agent(sid)) if sid == subagent_id
@@ -1820,10 +1838,6 @@ impl TasksPane {
             &Span::styled(crate::glyphs::enlarge_button(), view_style),
             3,
         );
-        self.view_button_rects.push((
-            TaskEntryId::Agent(subagent_id.to_string()),
-            Rect::new(rx, y, 3, 1),
-        ));
 
         // Time/status text
         let right_width = right_text.width() as u16;
@@ -1842,6 +1856,15 @@ impl TasksPane {
                 model_w,
             );
         }
+
+        // Open chrome hit: model + elapsed + [↗], not kill [x].
+        let open_x = rx.min(view_x);
+        let open_right = view_x.saturating_add(3);
+        let open_w = open_right.saturating_sub(open_x).max(3);
+        self.view_button_rects.push((
+            TaskEntryId::Agent(subagent_id.to_string()),
+            Rect::new(open_x, y, open_w, 1),
+        ));
 
         // Context badge (pre-computed above for overlay clearing)
         if !badge.is_empty() {
@@ -1935,6 +1958,42 @@ mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
     use std::time::Instant;
+
+    /// Finished agent type labels under DOGE keep pure role primaries (no
+    /// mid-channel gray from 0.45 opacity blend toward black).
+    #[test]
+    fn doge_finished_type_color_stays_pure_primary_no_gray_blend() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(ThemeKind::Doge);
+
+        let theme = Theme::doge();
+        let green = theme.accent_success;
+        let red = theme.accent_error;
+        let magenta = theme.accent_running;
+
+        for raw in [green, red, magenta] {
+            let c = finished_type_color(&theme, raw);
+            assert_eq!(c, raw, "DOGE finished label must keep pure role color");
+            if let Color::Rgb(r, g, b) = c {
+                for ch in [r, g, b] {
+                    assert!(
+                        ch == 0 || ch == 255,
+                        "invented mid-channel in finished color {c:?}"
+                    );
+                }
+            }
+        }
+
+        // Non-DOGE still recedes via blend.
+        crate::theme::cache::set(ThemeKind::GrokNight);
+        let night = Theme::groknight();
+        let raw = night.accent_success;
+        let receded = finished_type_color(&night, raw);
+        assert_ne!(
+            receded, raw,
+            "GrokNight finished labels still alpha-recede toward bg"
+        );
+    }
 
     fn make_info() -> SubagentInfo {
         SubagentInfo {

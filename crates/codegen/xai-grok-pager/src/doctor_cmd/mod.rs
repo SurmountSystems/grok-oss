@@ -95,6 +95,11 @@ fn write_report(
         json::write(report, writer)
     } else {
         write!(writer, "{}", human::format(report))?;
+        // Dual-auth discoverability (counts + fingerprints only; no secrets).
+        // Human doctor only — keep JSON schema free of auth side effects.
+        let home = xai_grok_shell::util::grok_home::grok_home();
+        let status = xai_grok_shell::auth::collect_dual_auth_status(&home);
+        write!(writer, "\n{}", status.format_human())?;
         Ok(())
     }
 }

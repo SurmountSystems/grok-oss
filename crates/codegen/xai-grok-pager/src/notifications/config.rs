@@ -80,6 +80,7 @@ impl Default for TitleConfig {
                 TitleItem::Spinner,
                 TitleItem::Activity,
                 TitleItem::SessionName,
+                TitleItem::Agents,
                 TitleItem::Grok,
             ],
         }
@@ -92,6 +93,8 @@ pub enum TitleItem {
     Spinner,
     Activity,
     SessionName,
+    /// Busy top-level agent count (`2 agents` when count > 1).
+    Agents,
     Cwd,
     Model,
     TurnTimer,
@@ -177,9 +180,10 @@ session_recap_threshold_secs = 30
 # Set the terminal/tab title to reflect agent state.
 enabled = true
 # Items shown in the title. Options: action-required, spinner, activity,
-# session-name, cwd, model, turn-timer, grok
+# session-name, agents, cwd, model, turn-timer, grok
 # The \"grok\" item is the product brand slot; Grok OSS displays it as grok-oss.
-items = [\"action-required\", \"spinner\", \"activity\", \"session-name\", \"grok\"]
+# \"agents\" shows \"N agents\" when more than one top-level agent is busy.
+items = [\"action-required\", \"spinner\", \"activity\", \"session-name\", \"agents\", \"grok\"]
 
 # [[ui.notifications.hooks]]
 # command = \"terminal-notifier -title 'Grok' -message '$GROK_MESSAGE'\"

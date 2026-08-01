@@ -291,8 +291,13 @@ impl Theme {
 
 /// Compute animated brightness for a traveling wave effect.
 ///
-/// Creates a wave that travels along the accent line. Each row has a fixed phase
-/// offset so the wave appears to move smoothly regardless of block height.
+/// Creates a wave that travels **down** the left accent / loading bar (row 0
+/// = top). Each row has a fixed phase offset so the wave appears to move
+/// smoothly regardless of block height.
+///
+/// Phase uses `t - row_phase` (not `t + row_phase`): as tick advances, the
+/// brightness that was on row `r` appears on row `r + 1` — the bright band
+/// falls down the rail. `t + phase` made the band crawl **up**.
 ///
 /// # Arguments
 /// - `tick`: Frame counter (increments each render tick)
@@ -311,8 +316,8 @@ pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
     // Time-based oscillation
     let t = tick as f32 * speed;
 
-    // sin²(t + phase) gives smooth 0-1 oscillation
-    let sin_val = (t + phase).sin();
+    // sin²(t - phase): traveling wave toward increasing row (down the rail).
+    let sin_val = (t - phase).sin();
     sin_val * sin_val
 }
 
@@ -346,5 +351,63 @@ mod tests {
         let theme = Theme::tokyonight();
         assert!(matches!(theme.bg_base, Color::Rgb(36, 40, 59)));
         assert!(matches!(theme.accent_user, Color::Rgb(122, 162, 247)));
+    }
+
+    /// Left loading-bar wave: as tick advances by one spatial row of phase,
+    /// brightness at row `r` must equal brightness at row `r + 1` (pattern
+    /// shifts **down**). The old `sin²(t + phase)` made the bright band crawl
+    /// **up** (`r` → `r - 1`).
+    ///
+    /// Anti-up check uses whole-rail L1 error: sin² has half-period symmetry
+    /// so a single-row "≠ up" assert can false-fire at nodes; the aggregate
+    /// upward shift error must still dominate.
+    #[test]
+    fn wave_brightness_travels_down_not_up() {
+        use std::f32::consts::PI;
+
+        let wave_rows: u16 = 32;
+        // Choose speed so one row of spatial phase lands on an integer tick step:
+        // speed * dt_ticks = 2π / wave_rows  →  with dt_ticks = 4,
+        // speed = 2π / (wave_rows * 4).
+        let dt_ticks: u64 = 4;
+        let speed = (2.0 * PI) / (f32::from(wave_rows) * dt_ticks as f32);
+        let tick0: u64 = 20;
+        let tick1 = tick0 + dt_ticks;
+
+        let mut err_down = 0.0_f32;
+        let mut err_up = 0.0_f32;
+        for row in 0..wave_rows.saturating_sub(1) {
+            let b0 = wave_brightness(tick0, row, wave_rows, speed);
+            let b_down = wave_brightness(tick1, row + 1, wave_rows, speed);
+            let diff_down = (b0 - b_down).abs();
+            err_down += diff_down;
+            assert!(
+                diff_down < 1e-4,
+                "downward wave: brightness(t, row {row})={b0} must equal \
+                 brightness(t+{dt_ticks}, row {})={b_down} (diff {diff_down})",
+                row + 1
+            );
+            if row > 0 {
+                let b_up = wave_brightness(tick1, row - 1, wave_rows, speed);
+                err_up += (b0 - b_up).abs();
+            }
+        }
+        assert!(
+            err_down < 1e-3,
+            "downward L1 error across rail must be ~0, got {err_down}"
+        );
+        assert!(
+            err_up > 1.0,
+            "upward L1 error must be large (pattern is not crawling up); \
+             err_up={err_up} err_down={err_down}"
+        );
+
+        // Fixed row still advances over time.
+        let a = wave_brightness(tick0, 0, wave_rows, speed);
+        let b = wave_brightness(tick1, 0, wave_rows, speed);
+        assert_ne!(
+            a, b,
+            "wave must advance over time on a fixed row (got {a} at both ticks)"
+        );
     }
 }

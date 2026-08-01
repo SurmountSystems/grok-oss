@@ -1,7 +1,13 @@
 # FORK_PATHS hardening (2026-07-24)
 
-**Implements P0 from:** [`skills-survive-upstream-recon-2026-07-24.md`](skills-survive-upstream-recon-2026-07-24.md)  
-**Authority for list:** `scripts/import-upstream-export.sh` (`FORK_PATHS`)  
+**Status (2026-07-30):** historical implement note. **Live `FORK_PATHS` authority
+is `scripts/import-upstream-export.sh` + matching `scripts/assert-process-pins.sh`**
+(not the snapshot list below). Live list also restores `scripts/recon-status.sh`
+and `.grok/workflows` (among others). Product cargo harden:
+[`doc/dev/upstream-regression-filters.md`](../upstream-regression-filters.md).
+
+**Implements P0 from:** [`skills-survive-upstream-recon-2026-07-24.md`](skills-survive-upstream-recon-2026-07-24.md)
+**Authority for list:** `scripts/import-upstream-export.sh` (`FORK_PATHS`)
 **Assertion:** `scripts/assert-process-pins.sh` · `just upstream-assert-process-pins`
 
 ---
@@ -45,7 +51,12 @@ carry the pin-survival story for now).
 
 ---
 
-## Final `FORK_PATHS` list (2026-07-24)
+## Final `FORK_PATHS` list (2026-07-24 snapshot — do not treat as live)
+
+**Superseded for day-to-day work.** Read `FORK_PATHS` from
+`scripts/import-upstream-export.sh` and `REQUIRED_*` from
+`scripts/assert-process-pins.sh`. Known adds after this note: at least
+`scripts/recon-status.sh`, `.grok/workflows`.
 
 ```text
 # product identity / packaging
@@ -79,15 +90,19 @@ scripts/replay-onto-upstream.sh
 scripts/join-main-into-onto.sh
 scripts/with-ci-hermetic-path.sh
 scripts/assert-process-pins.sh
+# live also: scripts/recon-status.sh
 
 # workflows + Surmount-only crates
 .github/workflows/upstream-export.yml
 .github/workflows/ci.yml
+# live also: .grok/workflows
 crates/codegen/grok-rate-limit
 ```
 
 **Still not restored (by design):** seams inside `xai-grok-*` (OpenRouter,
-binary rename, sampler rate-limit) — re-apply via `git diff $BASE_REF -- …`.
+binary rename, sampler rate-limit, DOGE default, titles-on, stuck-retry, …) —
+re-apply via cherry-pick / `git diff $BASE_REF -- …` and **cargo filters**
+([`doc/dev/upstream-regression-filters.md`](../upstream-regression-filters.md)).
 User-guide under pager is upstream-owned path; product sections need conflict
 resolve / re-apply on onto, not FORK_PATHS wholesale (would pin an entire
 shared tree to Surmount and block legitimate upstream doc updates).
@@ -116,7 +131,8 @@ just upstream-assert-process-pins
 | `scripts/import-upstream-export.sh` | `FORK_PATHS` + post-restore assert |
 | `scripts/assert-process-pins.sh` | Presence check |
 | `docs/upstream-onto-log.md` | Short survival note |
-| `docs/upstream-history.md` | Canonical recon law (checklist may lag until next doc pass) |
+| `docs/upstream-history.md` | Canonical recon law + review checklist (product filters + user-guide) |
+| `doc/dev/upstream-regression-filters.md` | Durable cargo filter catalog for `xai-grok-*` seams |
 | `doc/dev/research/skills-survive-upstream-recon-2026-07-24.md` | Full recon × skills research |
 
 *End of hardening note.*

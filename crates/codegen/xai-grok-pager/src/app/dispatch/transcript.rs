@@ -13,41 +13,19 @@ use xai_grok_telemetry::session_ctx::log_event;
 /// Copy the selected block's content to the system clipboard.
 ///
 /// Respects the block's raw/pretty mode for markdown content.
-/// Shows a toast notification on theExtensionsTab
 pub(super) fn dispatch_copy_block_content(app: &mut AppView) {
     with_active_agent(app, |agent| {
         let Some(idx) = agent.scrollback.selected() else {
             return;
         };
-        if agent.scrollback.entry_content_hidden_by_group(idx) {
-            return;
-        }
-        let Some(entry) = agent.scrollback.entry(idx) else {
-            return;
-        };
+        agent.copy_entry_content(idx);
+    });
+}
 
-        // BgTask blocks: copy stdout from central store
-        let text = if let RenderBlock::BgTask(block) = &entry.block {
-            let stdout = agent
-                .session
-                .bg_tasks
-                .get(&block.task_id)
-                .map(|t| t.stdout.clone())
-                .unwrap_or_default();
-            if stdout.is_empty() {
-                None
-            } else {
-                Some(stdout)
-            }
-        } else {
-            entry.block.copy_text(entry.raw)
-        };
-
-        if let Some(text) = text
-            && !text.is_empty()
-        {
-            agent.copy_to_clipboard(&text);
-        }
+/// Copy entry `idx` without changing selection (always-on bubble ⧉ mouse path).
+pub(super) fn dispatch_copy_entry_content(app: &mut AppView, idx: usize) {
+    with_active_agent(app, |agent| {
+        agent.copy_entry_content(idx);
     });
 }
 

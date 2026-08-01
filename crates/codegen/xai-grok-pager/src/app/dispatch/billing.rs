@@ -349,6 +349,7 @@ pub(super) fn handle_billing_fetched(
     subscription_tier: Option<String>,
     autotopup: crate::views::credit_bar::AutoTopupFetch,
     openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+    console_team_prepaid_cents: Option<i64>,
 ) -> Vec<Effect> {
     // Parse/transport failures route to `BillingError`, so a `None`
     // balance here means the response carried no billing config. Clear
@@ -363,30 +364,81 @@ pub(super) fn handle_billing_fetched(
     if let Some(or) = openrouter_balance {
         app.openrouter_credit_balance = Some(or);
     }
+    // Console team prepaid (Management API): keep last good on miss.
+    if let Some(cents) = console_team_prepaid_cents {
+        app.console_team_prepaid_cents = Some(cents);
+    }
+    // Leave SuperGrok when included usage is full: if a console key is bound,
+    // mark the session out of allowance so the next sample prefers the console
+    // key without waiting for a 402 (extras would still succeed on SuperGrok and
+    // burn paid balance). Threshold is 100% (`INCLUDED_ALLOWANCE_EXHAUST_PCT`);
+    // poll floor remains 99% so we keep refreshing near the end of the pool
+    // (session-load + turn-end also fetch).
+    //
+    // When marked, sampler stays on the console key — update meter identity so
+    // the footer does not keep showing SuperGrok prepaid extras as spend.
+    let exhaust_action = if let Some(bal) = balance.as_ref() {
+        let grok_home = xai_grok_shell::util::grok_home::grok_home();
+        xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(bal.usage_pct, &grok_home)
+    } else {
+        xai_grok_shell::auth::AllowanceExhaustAction::None
+    };
+    // Meter honesty: Marked → console live; Cleared → SuperGrok again only when
+    // console is not the auth primary (preferred_method=api_key / is_api_key_auth).
+    let marked = matches!(
+        exhaust_action,
+        xai_grok_shell::auth::AllowanceExhaustAction::Marked
+    );
+    let cleared = matches!(
+        exhaust_action,
+        xai_grok_shell::auth::AllowanceExhaustAction::Cleared
+    );
+    if let Some(kind) = crate::views::credit_bar::sampling_identity_after_allowance_sync(
+        marked,
+        cleared,
+        app.is_api_key_auth,
+    ) {
+        for agent in app.agents.values_mut() {
+            agent.sampling_identity = kind;
+        }
+    }
     app.billing_poll_wanted = balance
         .as_ref()
         .map(|b| b.usage_pct >= 99.0)
         .unwrap_or(false)
-        // Keep polling when OpenRouter is in use so the footer balance refreshes.
-        || app.openrouter_credit_balance.is_some();
+        // Keep polling when OpenRouter or console team prepaid is in use so the
+        // footer balance refreshes.
+        || app.openrouter_credit_balance.is_some()
+        || app.console_team_prepaid_cents.is_some();
     if let Some(tier) = subscription_tier {
         app.subscription_tier = Some(tier);
     }
     // Render the `/usage` summary from the now-current cached rule.
+    // Console live → name console team prepaid (or honest gap); never sell
+    // SuperGrok session extras as the live console spend.
     let summary_topup = app.auto_topup.clone();
     let app_or = app.openrouter_credit_balance;
+    let app_console_prepaid = app.console_team_prepaid_cents;
+    // After a billing fetch: configured + still no cents → unavailable (fetch
+    // ran). Cold/pre-fetch surfaces use Loading via the default resolve.
+    let prepaid_gap =
+        crate::views::credit_bar::resolve_console_team_prepaid_gap_after_billing_fetch();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         // Gateway/chat-kind: do not attach Build coding credits.
         let mut topup = agent.auto_topup.clone();
         apply_auto_topup(&mut topup, &autotopup);
         agent.apply_credit_balance(balance.clone(), topup, app_or);
+        agent.apply_console_team_prepaid_cents(app_console_prepaid);
         if !silent && !agent.chat_kind {
-            let msg = match &balance {
-                Some(bal) => {
-                    crate::views::credit_bar::format_usage_summary(bal, summary_topup.as_ref())
-                }
-                None => "No billing data available.".to_string(),
-            };
+            let live = agent.sampling_identity;
+            let prepaid = agent.console_team_prepaid_cents.or(app_console_prepaid);
+            let msg = crate::views::credit_bar::format_usage_summary_with_live_identity_and_gap(
+                balance.as_ref(),
+                summary_topup.as_ref(),
+                live,
+                prepaid,
+                prepaid_gap,
+            );
             agent.scrollback.push_block(RenderBlock::System(
                 crate::scrollback::blocks::SystemMessageBlock::new(msg),
             ));

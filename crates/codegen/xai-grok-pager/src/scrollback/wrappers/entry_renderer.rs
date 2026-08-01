@@ -802,7 +802,22 @@ impl Renderable for EntryRenderer<'_> {
             let color = accent_style.color;
             let is_pending = self.entry.is_pending_user_input;
 
-            if is_pending && accent_style.animated {
+            if accent_style.striped {
+                // Yellow context/time rails: dashed/striped verticals, not solid ┃.
+                // Animated → DOGE striped-down marquee; static → fixed dashed bar.
+                // Pending freezes the marquee on the static dashed glyph.
+                let style = Style::default().fg(color);
+                for row in 0..accent_area.height {
+                    let y = accent_area.y + row;
+                    let glyph = if accent_style.animated && !is_pending {
+                        let logical_row = skip_rows + row;
+                        crate::glyphs::striped_accent_bar_frame(self.tick, logical_row)
+                    } else {
+                        crate::glyphs::striped_accent_bar()
+                    };
+                    buf.set_string_safe(accent_area.x, y, glyph, style);
+                }
+            } else if is_pending && accent_style.animated {
                 // Pending user input: freeze the running wave. A solid
                 // accent at full color reads as "paused on you" without
                 // the loading-spinner motion.

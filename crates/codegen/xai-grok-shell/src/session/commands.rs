@@ -138,6 +138,19 @@ pub enum SessionCommand {
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval,
+    /// Resume hook: rehydrate the todo board from Resources
+    /// (`resources_state.json`) and fall back to `plan.json` when tool state
+    /// is empty. Emits an ACP `Plan` update so the UI board matches durable
+    /// state after load.
+    RestoreTodoBoard {
+        plan_state: Option<crate::tools::todo::TodoState>,
+    },
+    /// Operator **Clear finished**: archive completed/cancelled active todos,
+    /// persist Resources + plan.json, re-emit ACP `Plan`. Responds with the
+    /// number of items cleared (0 = no-op).
+    ClearCompletedTodos {
+        respond_to: oneshot::Sender<usize>,
+    },
     GetToolOverrides {
         respond_to: oneshot::Sender<Option<xai_grok_sampling_types::ToolOverrides>>,
     },
@@ -214,6 +227,20 @@ pub enum SessionCommand {
         /// `None` keeps percent mode.
         auto_compact_threshold_tokens: Option<u64>,
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
+    },
+    /// Live-apply auto-compact threshold without a model switch.
+    ///
+    /// Fired when Settings commits `auto_compact_threshold_percent` /
+    /// tokens (ACP `x.ai/auto_compact_threshold_changed`). Updates the
+    /// session's `compaction.threshold_percent` / `threshold_tokens` Cells
+    /// so the next gate check uses the new boundary without restart.
+    ///
+    /// When `auto_compact_threshold_tokens` is `Some`, absolute-token mode
+    /// wins and `auto_compact_threshold_percent` is treated as a display
+    /// hint (the handler may recompute display % from the session window).
+    SetAutoCompactThreshold {
+        auto_compact_threshold_percent: u8,
+        auto_compact_threshold_tokens: Option<u64>,
     },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the
     /// session's `AgentRebuildSpec` and the new `AgentDefinition`,
@@ -667,11 +694,19 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<Option<String>>,
     },
     /// Ask a side question without interrupting the current turn.
-    /// The session snapshots the conversation context, makes a single
-    /// tool-free model call, and returns the response text.
+    /// The session snapshots the conversation context, makes a tool-free
+    /// model call, and returns the answer + `btw_session_id`. Follow-up
+    /// turns reuse `btw_session_id` and pass `prior_turns` so the model
+    /// sees the full side-thread.
     SideQuestion {
         question: String,
-        respond_to: oneshot::Sender<Result<String, String>>,
+        /// When set, continue this btw thread (same id for telemetry + history).
+        btw_session_id: Option<String>,
+        /// Completed prior Q/A turns in this btw thread (oldest first).
+        prior_turns: Vec<crate::session::helpers::side_question::BtwPriorTurn>,
+        respond_to: oneshot::Sender<
+            Result<crate::session::helpers::side_question::SideQuestionResult, String>,
+        >,
     },
     /// Generate a session recap (a short "where was I" summary) and broadcast
     /// it to clients via `SessionUpdate::SessionRecap`.

@@ -524,6 +524,10 @@ pub(crate) async fn run_shell_child(
         cwd: ctx.parent_cwd.to_string_lossy().to_string(),
     });
     let subagent_meta_dir = parent_session_dir.join("subagents").join(&subagent_id);
+    // Work join key: preserve across resume_from; mint only when absent.
+    let work_ulid =
+        super::resolve_subagent_work_ulid(request.resume_from.as_deref(), &parent_session_dir);
+    super::persist_subagent_work_ulid(&subagent_meta_dir, &child_session_dir, &work_ulid);
     let InitialContext {
         source: context_source,
         copy_error: fork_copy_error,
@@ -763,6 +767,9 @@ pub(crate) async fn run_shell_child(
         auth_type: inherited_auth_type,
         alpha_test_key: ctx.alpha_test_key.clone(),
         client_version: effective_sampling_config.client_version.clone(),
+        failover_base_url: effective_sampling_config.failover_base_url.clone(),
+        session_base_url: effective_sampling_config.session_base_url.clone(),
+        session_identity_key: effective_sampling_config.session_identity_key.clone(),
     };
     xai_grok_telemetry::unified_log::info(
         "subagent spawn credentials",
@@ -1039,6 +1046,8 @@ pub(crate) async fn run_shell_child(
             is_subagent: true,
             parent_session_id: Some(ctx.parent_session_id.clone()),
             subagent_type: Some(request.subagent_type.clone()),
+            // Join key for usage.jsonl / cleared_todos (stable across resume).
+            work_ulid: Some(work_ulid.clone()),
             preserve_inherited_system: verbatim_mirror_fork,
             ..Default::default()
         },
@@ -1230,7 +1239,9 @@ pub(crate) async fn run_shell_child(
             .send(SessionCommand::SetToolOverrides { overrides });
     }
     let (prompt_tx, prompt_rx) = oneshot::channel();
-    let prompt_text = task_prompt_text;
+    // T5: when the parent hands a pure structured JSON blob as the child task
+    // prompt, densify under the shared TOON policy (free text unchanged).
+    let prompt_text = xai_grok_tools::densify_structured_text(&task_prompt_text);
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     let _ = child_handle.cmd_tx.send(SessionCommand::Prompt {

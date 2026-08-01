@@ -444,6 +444,59 @@ async fn pre_flight_soft_expired_transient_fail_retains_seed() {
         .await;
 }
 
+/// Dual-auth after hop / prefer_live: chat-state holds the console API key as
+/// live primary and the SuperGrok JWT in `session_identity_key`. Pre-flight must
+/// **not** overwrite the console key with a fresh session JWT (session ACP method
+/// stays active; clobber left JWT on api.x.ai and burned SuperGrok extras).
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn pre_flight_keeps_console_primary_when_session_identity_differs() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_dir, am) = auth_manager_with_valid_token("session-jwt-live");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "xai-console-primary-key".to_string(),
+            )
+            .await;
+            // Prefer_live / hop shape: console key live, session JWT recorded.
+            actor
+                .chat_state_handle
+                .update_credentials(xai_chat_state::Credentials {
+                    api_key: Some("xai-console-primary-key".into()),
+                    failover_api_keys: vec!["session-jwt-live".into()],
+                    auth_type: xai_chat_state::AuthType::SessionToken,
+                    session_identity_key: Some("session-jwt-live".into()),
+                    failover_base_url: Some("https://api.x.ai/v1".into()),
+                    session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                    ..Default::default()
+                });
+            // Also put sampling on console host (post-hop chat-state shape).
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = "https://api.x.ai/v1".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            actor.refresh_token_if_expired().await;
+
+            let creds = actor.chat_state_handle.get_credentials().await;
+            assert_eq!(
+                creds.api_key.as_deref(),
+                Some("xai-console-primary-key"),
+                "pre-flight must not clobber console primary with session JWT after hop"
+            );
+            assert_ne!(
+                creds.api_key.as_deref(),
+                Some("session-jwt-live"),
+                "session JWT must not replace console key"
+            );
+        })
+        .await;
+}
+
 /// Proactive refresh keeps the cache hot so `refresh_token_if_expired`
 /// (per-turn pre-flight) is a cache hit — the refresher fires once
 /// (proactive), then the per-turn call sees the fresh token without
@@ -1092,6 +1145,9 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("byok-key".to_string()),
                 failover_api_keys: Vec::new(),
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: None,
                 base_url: "https://third-party.example/v1".to_string(),
                 model: model.clone(),
                 max_completion_tokens: None,
@@ -1115,6 +1171,8 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 origin_client: None,
                 attribution_callback: None,
                 bearer_resolver: None,
+                stashed_bearer_resolver: None,
+                session_bearer_resolver: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -1186,6 +1244,9 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("session-jwt".to_string()),
                 failover_api_keys: Vec::new(),
+                failover_base_url: None,
+                session_base_url: None,
+                session_identity_key: None,
                 base_url: "https://api.x.ai/v1".to_string(),
                 model,
                 max_completion_tokens: None,
@@ -1209,6 +1270,8 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 origin_client: None,
                 attribution_callback: None,
                 bearer_resolver: None,
+                stashed_bearer_resolver: None,
+                session_bearer_resolver: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,

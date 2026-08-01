@@ -1477,7 +1477,7 @@ impl acp::Agent for MvpAgent {
         let crate::session::persistence::PersistedInfoLight {
             summary,
             chat_history,
-            plan_state: _,
+            plan_state: restored_plan_state,
             plan_mode_state: persisted_plan_mode,
             updates_file_path,
             rewind_points_file_path,
@@ -2112,6 +2112,11 @@ impl acp::Agent for MvpAgent {
             if restored_awaiting_plan_approval {
                 let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
+            // Rehydrate todo board from Resources / plan.json after load so the
+            // UI Plan pane matches durable state (plan_state was previously discarded).
+            let _ = handle.cmd_tx.send(SessionCommand::RestoreTodoBoard {
+                plan_state: restored_plan_state,
+            });
         }
         if self.product_analytics_enabled() {
             log_event(xai_grok_telemetry::events::SessionLoad {
@@ -3413,6 +3418,9 @@ impl acp::Agent for MvpAgent {
             }
             "x.ai/session/repair" => crate::extensions::repair::handle(self, &args).await,
             "x.ai/session/usage" => crate::extensions::usage::handle(self, &args).await,
+            "x.ai/todo/clear_completed" => {
+                crate::extensions::todo::handle(self, &args).await
+            }
             "x.ai/memory/flush" | "x.ai/memory/rewrite" => {
                 crate::extensions::memory::handle(self, &args).await
             }
@@ -3828,6 +3836,59 @@ impl acp::Agent for MvpAgent {
                 total_sessions = sessions.len(),
                 "Permission state reset for matching sessions"
             );
+        }
+        // Settings live-apply: auto-compact threshold for open sessions.
+        // Mirrors yolo_mode_changed fan-out (client-scoped when clientIdentifier set).
+        if args.method.as_ref() == "x.ai/auto_compact_threshold_changed"
+            && let Ok(params) = serde_json::from_str::<serde_json::Value>(args.params.get())
+        {
+            let sender_id = params.get("clientIdentifier").and_then(|v| v.as_str());
+            let tokens = params
+                .get("auto_compact_threshold_tokens")
+                .and_then(|v| v.as_u64())
+                .filter(|&t| t > 0);
+            let percent = params
+                .get("auto_compact_threshold_percent")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u8::try_from(n).ok())
+                .unwrap_or(crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
+            // Require at least one of percent/tokens keys so a malformed
+            // notification does not silently reset every session to 95%.
+            let has_percent_key = params.get("auto_compact_threshold_percent").is_some();
+            let has_tokens_key = params
+                .get("auto_compact_threshold_tokens")
+                .is_some_and(|v| !v.is_null());
+            if has_percent_key || has_tokens_key {
+                let matches_sender = |h: &crate::session::SessionHandle| -> bool {
+                    sender_id.is_none()
+                        || h.origin_client.as_ref().map(|c| c.product.as_str()) == sender_id
+                };
+                let sessions = self.sessions.borrow();
+                let total_sessions = sessions.len();
+                let mut updated = 0;
+                for h in sessions.values() {
+                    if !matches_sender(h) {
+                        continue;
+                    }
+                    if h.cmd_tx
+                        .send(crate::session::SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent: percent,
+                            auto_compact_threshold_tokens: tokens,
+                        })
+                        .is_ok()
+                    {
+                        updated += 1;
+                    }
+                }
+                tracing::info!(
+                    percent,
+                    ?tokens,
+                    sender = ?sender_id,
+                    target_sessions = updated,
+                    total_sessions,
+                    "Live-applying auto_compact_threshold to matching sessions"
+                );
+            }
         }
         if args.method.as_ref() == "x.ai/internal/evict_sessions" {
             self.handle_evict_sessions(&args.params).await;

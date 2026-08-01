@@ -5,7 +5,7 @@
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
 //! - Phase timer `Xs` (gray, never truncates)
-//! - Queued-send hint `· N queued — Enter to send now` (gray, sendable waits only)
+//! - Queued-send hint `· N queued — Enter to interject` (gray, sendable waits only)
 //! - Fill space
 //! - Turn timer `Xm Ys` and optional token count `⇣Nk` (right-aligned, gray)
 //! - Cancel button `[stop]` (right-aligned, red on hover)
@@ -49,17 +49,30 @@ pub(crate) const USER_WAITING_PULSE_SPEED: f32 = 0.08;
 
 /// Compute the pulsing diamond color for any "waiting on you" cue.
 ///
-/// Blends `accent` toward `theme.bg_base` using a `sin²` pulse driven by
-/// [`USER_WAITING_PULSE_SPEED`]. Brightness ranges from 0.3 (dim) to 1.0
-/// (full accent) so the diamond stays visible at the trough.
+/// Default themes blend `accent` toward `theme.bg_base` using a `sin²`
+/// pulse driven by [`USER_WAITING_PULSE_SPEED`]. Brightness ranges from
+/// 0.3 (dim) to 1.0 (full accent) so the diamond stays visible at the
+/// trough.
+///
+/// Under DOGE, solid steps only: full `accent` on the bright half of the
+/// cycle, pure black (`bg_base`) on the dim half — no mid-channel gray
+/// blend (pure 8-colour law).
 ///
 /// Pass `theme.accent_user` for user-input waits (permission prompts,
 /// `ask_user_question`, the drain-blocked idle status) and
 /// `theme.accent_plan` for plan-approval waits.
 pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> Color {
     let brightness = crate::theme::pulse_brightness(tick, USER_WAITING_PULSE_SPEED);
-    crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
-        .unwrap_or(accent)
+    if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
+        if brightness >= 0.5 {
+            accent
+        } else {
+            theme.bg_base
+        }
+    } else {
+        crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
+            .unwrap_or(accent)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,14 +314,17 @@ pub fn render_turn_status(
     //
     // When background subagents hold the pending-prompt queue, append a
     // held-queue suffix so the operator sees why Enter did not start a turn.
-    // Sendable-wait holds use "Enter to send now"; idle background holds use
-    // "send now to force" (bare Enter only queues while children live).
+    // Sendable-wait holds use "Enter to interject"; idle background holds use
+    // "Interject to force" (bare Enter only queues while children live;
+    // Interject chord / queue [Interject] force-drains).
     if (state.is_idle() || parked)
         && let Some(cue) = still_running_label(watchers)
     {
         // Pulsing concentric circle (○ ◎ ◉ ◎) on a calm ambient cadence:
         // the agent is idle, so this breath runs slower than the active
-        // turn spinner (see MONITOR_PULSE_DIVISOR).
+        // turn spinner (see MONITOR_PULSE_DIVISOR). Icon uses accent_running
+        // (agent activity / subagent throbber; magenta under DOGE), not
+        // accent_system cyan (limits / path / system tags).
         let frames = crate::glyphs::monitor_icon_frames();
         let frame_idx = (tick / MONITOR_PULSE_DIVISOR) as usize % frames.len();
         let icon = format!("{} ", frames[frame_idx]);
@@ -319,7 +335,7 @@ pub fn render_turn_status(
         };
         let queue_suffix = if held_queue > 0 && state.is_idle() {
             if held_queue_top_sendable {
-                format!(" · {held_queue} queued — send now to force")
+                format!(" · {held_queue} queued — Interject to force")
             } else {
                 format!(" · {held_queue} queued")
             }
@@ -329,7 +345,7 @@ pub fn render_turn_status(
         let full_label = format!("{cue}{queue_suffix}");
         let cue_width = (icon.width() + full_label.width()).min(area.width as usize) as u16;
         let mut spans = vec![
-            Span::styled(icon, Style::default().fg(theme.accent_system)),
+            Span::styled(icon, Style::default().fg(theme.accent_running)),
             Span::styled(cue, Style::default().fg(label_fg)),
         ];
         if !queue_suffix.is_empty() {
@@ -484,8 +500,8 @@ pub fn render_turn_status(
     // ── Render left side: spinner + label (truncated) + phase_timer + queued_hint ──
     let mut left_spans: Vec<Span<'static>> = Vec::with_capacity(5);
 
-    // Spinner color: usually inherits the activity color (green for tools,
-    // secondary for thinking/responding, yellow for retries). While the
+    // Spinner color: usually inherits the activity color (accent_running for
+    // tools, secondary for thinking/responding, yellow for retries). While the
     // tool is parked on the user we render `◆` with a smooth pulse from
     // dim→bright in `accent_user`, matching the drain-blocked and
     // plan-approval indicators so every "your turn" status has the same
@@ -564,12 +580,12 @@ pub fn render_turn_status(
         // saying why the queue is paused and how to send anyway. On the status
         // row (not an ephemeral tip) so it stays visible for the whole wait,
         // and dropped before the label truncates on a narrow terminal.
-        // "Enter to send now" is advertised only when Enter would actually
-        // send the top row (bash / client-expanded local rows refuse with a
-        // toast — see `AgentView::held_queue_top_sendable`).
+        // "Enter to interject" is advertised only when Enter would actually
+        // soft-interject the top row (bash / client-expanded local rows refuse
+        // with a toast — see `AgentView::held_queue_top_sendable`).
         let suffix = if held_queue > 0 && is_sendable_wait(activity) {
             if held_queue_top_sendable {
-                format!(" · {held_queue} queued — Enter to send now")
+                format!(" · {held_queue} queued — Enter to interject")
             } else {
                 format!(" · {held_queue} queued")
             }
@@ -693,10 +709,12 @@ fn compute_activity(
         ),
         (AgentState::TurnRunning, Some(TurnActivity::ToolRunning { title, description })) => {
             // "Ask" tools (AskUserQuestion) use gray spinner like Thinking —
-            // green feels out of place when the user is answering questions.
+            // running green/success feels out of place when the user is answering.
             // Human descriptions (e.g. bash `description`) also use muted
             // secondary — they read as a wait subject (`Wait 5s…`), not a
-            // green `Run <command>` invocation.
+            // running `Run <command>` invocation.
+            // Busy tool chrome (spinner + bare Run title) uses accent_running
+            // (agent activity), not accent_success (skills/success green).
             let is_ask = title.starts_with("Ask: ") || title.starts_with("Ask ");
             let has_desc = description
                 .as_deref()
@@ -705,7 +723,7 @@ fn compute_activity(
             let style = if is_ask || has_desc {
                 Style::default().fg(theme.text_secondary)
             } else {
-                Style::default().fg(theme.accent_success)
+                Style::default().fg(theme.accent_running)
             };
             (style, String::new(), true)
         }
@@ -730,14 +748,11 @@ fn compute_activity(
             };
             let brief = reason.trim();
             if !brief.is_empty() {
-                // Keep status line readable: first line / first 48 chars of reason.
+                // Keep status line readable: first line, prefer meaningful
+                // transport detail over long reqwest/eventsource prefixes that
+                // used to clip to bare "Transport error: error".
                 let one_line = brief.lines().next().unwrap_or(brief);
-                let clipped = if one_line.chars().count() > 48 {
-                    let t: String = one_line.chars().take(45).collect();
-                    format!("{t}…")
-                } else {
-                    one_line.to_string()
-                };
+                let clipped = clip_retry_reason_brief(one_line);
                 label.push_str(" · ");
                 label.push_str(&clipped);
             }
@@ -859,6 +874,50 @@ pub fn should_show(
         || watchers.total() > 0
 }
 
+/// Clip a retry reason for the status footer (~45 visible chars).
+///
+/// Long `reqwest error stream: Transport error: error sending request…`
+/// strings used to clip right after the word `error`, leaving opaque
+/// `Transport error: error`. Strip known outer templates and keep the
+/// meaningful tail (or a short human label when that is all that remains).
+pub(crate) fn clip_retry_reason_brief(one_line: &str) -> String {
+    const MAX: usize = 45;
+    let s = one_line.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    // Already-short human labels from the sampler (preferred).
+    if s.chars().count() <= 48 {
+        return s.to_string();
+    }
+    let mut rest = s;
+    for prefix in [
+        "reqwest error stream: ",
+        "request error: ",
+        "Transport error: ",
+    ] {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped.trim_start();
+        }
+    }
+    // Second pass: eventsource still wraps after stripping the SamplingError prefix.
+    if let Some(stripped) = rest.strip_prefix("Transport error: ") {
+        rest = stripped.trim_start();
+    }
+    if rest.is_empty() {
+        return "connection interrupted".to_string();
+    }
+    if rest.chars().count() <= MAX {
+        return rest.to_string();
+    }
+    let t: String = rest.chars().take(MAX).collect();
+    // Avoid stranding a lone trailing "error" word from "error sending…".
+    if t == "error" || t.ends_with(" error") {
+        return "connection interrupted".to_string();
+    }
+    format!("{t}…")
+}
+
 /// Format a duration for the turn/phase timer.
 ///
 /// Re-exports [`crate::util::format_duration`] under the old name for
@@ -944,6 +1003,48 @@ mod tests {
     fn format_subsecond() {
         assert_eq!(format_turn_timer(Duration::from_millis(500)), "0.5s");
         assert_eq!(format_turn_timer(Duration::from_millis(120)), "0.1s");
+    }
+
+    /// Contract: long transport Display templates must not clip to bare
+    /// `Transport error: error` in the footer reason slot.
+    #[test]
+    fn clip_retry_reason_does_not_strand_bare_error_word() {
+        let long = "reqwest error stream: Transport error: error sending request for url (https://api.x.ai/v1/chat/completions)";
+        let clipped = clip_retry_reason_brief(long);
+        assert!(
+            !clipped.eq_ignore_ascii_case("error")
+                && !clipped.ends_with("Transport error: error")
+                && !clipped.ends_with("Transport error: error…"),
+            "clip must not strand bare 'error', got {clipped:?}"
+        );
+        assert!(
+            clipped.contains("sending request") || clipped == "connection interrupted",
+            "expected meaningful transport detail or short label, got {clipped:?}"
+        );
+    }
+
+    #[test]
+    fn clip_retry_reason_keeps_short_human_label() {
+        assert_eq!(
+            clip_retry_reason_brief("connection interrupted"),
+            "connection interrupted"
+        );
+    }
+
+    #[test]
+    fn retrying_activity_label_uses_clipped_reason() {
+        let theme = Theme::current();
+        let activity = Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "connection interrupted".into(),
+        });
+        let (_, label, _) =
+            compute_activity(&theme, &AgentState::TurnRunning, &activity, false, false);
+        assert!(
+            label.starts_with("Retrying (attempt 1) · connection interrupted"),
+            "got {label:?}"
+        );
     }
 
     #[test]
@@ -1038,6 +1139,59 @@ mod tests {
         // label — the view leaves it as `None` rather than Waiting(Model).
         let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, true, false);
         assert_eq!(label, "Running…");
+    }
+
+    /// Lower-left tool/activity throbber uses `accent_running`, not success
+    /// green — under DOGE that is pure magenta (#FF00FF). Skills keep
+    /// `accent_skill` green separately.
+    #[test]
+    fn doge_tool_running_spinner_uses_accent_running_not_success_green() {
+        let doge = Theme::doge();
+        let magenta = ratatui::style::Color::Rgb(255, 0, 255);
+        let green = ratatui::style::Color::Rgb(0, 255, 0);
+        assert_eq!(doge.accent_running, magenta);
+        assert_eq!(
+            doge.accent_success, green,
+            "success/skills family stays green"
+        );
+
+        let tool = TurnActivity::ToolRunning {
+            title: "Bash".into(),
+            description: None,
+        };
+        let (style, _, is_tool) =
+            compute_activity(&doge, &AgentState::TurnRunning, &Some(tool), false, false);
+        assert!(is_tool);
+        assert_eq!(
+            style.fg,
+            Some(doge.accent_running),
+            "tool activity spinner must use accent_running (magenta under DOGE)"
+        );
+        assert_ne!(
+            style.fg,
+            Some(doge.accent_success),
+            "must not paint agent throbber with accent_success green"
+        );
+    }
+
+    /// Shared paint maps to `accent_running`; GrokNight tokens stay as defined
+    /// (success still green; running still its own token).
+    #[test]
+    fn groknight_tool_running_uses_accent_running_tokens_unchanged() {
+        let gn = Theme::groknight();
+        let tool = TurnActivity::ToolRunning {
+            title: "Bash".into(),
+            description: None,
+        };
+        let (style, _, is_tool) =
+            compute_activity(&gn, &AgentState::TurnRunning, &Some(tool), false, false);
+        assert!(is_tool);
+        assert_eq!(style.fg, Some(gn.accent_running));
+        // Token inventory: success ≠ running (green skill/success vs running accent).
+        assert_ne!(
+            gn.accent_success, gn.accent_running,
+            "GrokNight success and running tokens must remain distinct"
+        );
     }
 
     #[test]
@@ -1387,6 +1541,46 @@ mod tests {
         );
     }
 
+    /// Lower-left still-running throbber (○ ◎ ◉ beside "N subagents still
+    /// running") is agent activity chrome: `accent_running` (magenta under
+    /// DOGE), not `accent_system` cyan used for limits / path / system tags.
+    #[test]
+    fn doge_idle_subagent_still_running_throbber_uses_accent_running_not_system_cyan() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let doge = Theme::doge();
+        let magenta = Color::Rgb(255, 0, 255);
+        let cyan = Color::Rgb(0, 255, 255);
+        assert_eq!(
+            doge.accent_running, magenta,
+            "DOGE accent_running is pure magenta"
+        );
+        assert_eq!(doge.accent_system, cyan, "DOGE accent_system is pure cyan");
+        assert_ne!(doge.accent_running, doge.accent_system);
+
+        let watchers = Watchers {
+            subagents: 2,
+            ..Watchers::default()
+        };
+        let (_, buf) = render_row(idle_args(watchers), 60);
+        let icon_fg = buf.cell((0, 0)).map(|c| c.fg);
+        assert_eq!(
+            icon_fg,
+            Some(doge.accent_running),
+            "still-running throbber must paint accent_running (magenta under DOGE), got {icon_fg:?}"
+        );
+        assert_ne!(
+            icon_fg,
+            Some(doge.accent_system),
+            "still-running throbber must not use accent_system cyan"
+        );
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("2 subagents still running"),
+            "sanity: cue text present, got: {text:?}"
+        );
+    }
+
     #[test]
     fn idle_with_subagents_and_held_queue_shows_force_hint() {
         let mut args = idle_args(Watchers {
@@ -1398,7 +1592,7 @@ mod tests {
         let text = render_row_text(args, 90);
         assert!(
             text.contains("1 subagent still running")
-                && text.contains("1 queued — send now to force"),
+                && text.contains("1 queued — Interject to force"),
             "idle background hold must explain the queue + how to force, got: {text:?}"
         );
     }
@@ -1547,7 +1741,7 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to send now"),
+            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to interject"),
             "phase timer must sit between the wait label and the queued hint, got: {text:?}"
         );
     }
@@ -1713,5 +1907,52 @@ mod tests {
         // so this assertion guards against an accidental tweak that
         // would silently change the cadence of every "your turn" cue.
         assert_eq!(USER_WAITING_PULSE_SPEED, 0.08);
+    }
+
+    /// DOGE waiting diamond must solid-step between pure primaries — never
+    /// mid-channel gray from `blend_color` alpha fade.
+    #[test]
+    fn doge_pending_diamond_color_stays_on_pure_palette_no_gray_blend() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::doge();
+        let accent = theme.accent_user; // pure green
+        let is_pure = |c: Color| -> bool {
+            matches!(
+                c,
+                Color::Rgb(0, 0, 0)
+                    | Color::Rgb(255, 0, 0)
+                    | Color::Rgb(0, 255, 0)
+                    | Color::Rgb(255, 255, 0)
+                    | Color::Rgb(0, 0, 255)
+                    | Color::Rgb(255, 0, 255)
+                    | Color::Rgb(0, 255, 255)
+                    | Color::Rgb(255, 255, 255)
+            )
+        };
+        let mut saw_accent = false;
+        let mut saw_black = false;
+        for tick in 0..200u64 {
+            let c = pending_diamond_color(&theme, accent, tick);
+            assert!(
+                is_pure(c),
+                "tick {tick}: diamond color {c:?} must be a DOGE pure primary (no gray blend)"
+            );
+            if c == accent {
+                saw_accent = true;
+            }
+            if c == theme.bg_base {
+                saw_black = true;
+            }
+            // Reject equal-channel mid grays explicitly.
+            if let Color::Rgb(r, g, b) = c {
+                assert!(
+                    !(r == g && g == b && r > 0 && r < 255),
+                    "tick {tick}: mid-gray RGB({r},{g},{b}) forbidden under DOGE"
+                );
+            }
+        }
+        assert!(saw_accent, "cycle must hit full accent");
+        assert!(saw_black, "cycle must hit pure black trough (solid step)");
     }
 }

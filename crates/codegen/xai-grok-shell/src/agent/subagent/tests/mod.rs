@@ -22,6 +22,28 @@ fn canonical_total_tokens_does_not_double_count_reasoning() {
     };
     assert_eq!(canonical_total_tokens(&totals), 140);
 }
+
+/// Resume must reuse the source subagent's work_ulid (not mint a new one).
+#[test]
+fn resolve_subagent_work_ulid_preserves_across_resume() {
+    let parent = tempfile::tempdir().unwrap();
+    let src_id = "src-sub-1";
+    let src_meta_dir = parent.path().join("subagents").join(src_id);
+    let original = xai_grok_tools::util::ulid::mint();
+    std::fs::create_dir_all(&src_meta_dir).unwrap();
+    std::fs::write(src_meta_dir.join(super::WORK_ULID_SESSION_FILE), &original).unwrap();
+
+    let resumed = super::resolve_subagent_work_ulid(Some(src_id), parent.path());
+    assert_eq!(resumed, original, "resume must keep source work_ulid");
+
+    let fresh = super::resolve_subagent_work_ulid(None, parent.path());
+    assert_ne!(fresh, original);
+    assert!(xai_grok_tools::util::ulid::is_valid(&fresh));
+
+    let missing_src = super::resolve_subagent_work_ulid(Some("no-such"), parent.path());
+    assert!(xai_grok_tools::util::ulid::is_valid(&missing_src));
+    assert_ne!(missing_src, original);
+}
 #[test]
 fn cancellation_makes_an_otherwise_complete_usage_snapshot_incomplete() {
     assert!(usage_is_incomplete(false, true, 0, false));

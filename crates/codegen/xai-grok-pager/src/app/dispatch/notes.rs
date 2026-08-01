@@ -281,11 +281,66 @@ fn extract_session_context(agent: &AgentView) -> String {
 
 /// Send a /btw side question. Bypasses the prompt queue — works even while
 /// the agent is mid-turn. Fires an ACP ext method and shows a loading overlay.
+///
+/// First-shot path: clears any open panel and starts a new btw thread.
 pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effect> {
+    dispatch_send_btw_inner(app, question, None, Vec::new())
+}
+
+/// Continue the open btw panel with a follow-up question (same session id).
+///
+/// If `question` is empty, takes the in-panel composer draft from Done state.
+pub(super) fn dispatch_send_btw_follow_up(app: &mut AppView, question: String) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let (q, prior, session_id) = if question.trim().is_empty() {
+        match agent
+            .btw_state
+            .as_mut()
+            .and_then(|s| s.take_follow_up_send())
+        {
+            Some(parts) => parts,
+            None => return vec![],
+        }
+    } else if let Some(crate::views::btw_overlay::BtwOverlayState::Done {
+        turns,
+        btw_session_id,
+        ..
+    }) = &agent.btw_state
+    {
+        (
+            question.trim().to_string(),
+            turns.clone(),
+            btw_session_id.clone(),
+        )
+    } else {
+        return vec![];
+    };
+    if q.is_empty() {
+        return vec![];
+    }
+    let prior_pairs: Vec<(String, String)> = prior
+        .iter()
+        .map(|t| (t.question.clone(), t.answer.clone()))
+        .collect();
+    dispatch_send_btw_inner(app, q, session_id, prior_pairs)
+}
+
+fn dispatch_send_btw_inner(
+    app: &mut AppView,
+    question: String,
+    btw_session_id: Option<String>,
+    prior_turns: Vec<(String, String)>,
+) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
     let minimal = app.screen_mode.is_minimal();
+    let is_follow_up = !prior_turns.is_empty() || btw_session_id.is_some();
     let (session_id, minimal_request_id) = {
         let Some(agent) = app.agents.get_mut(&id) else {
             return vec![];
@@ -303,15 +358,35 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
             return vec![];
         };
 
-        agent.prompt.set_text("");
+        if !is_follow_up {
+            agent.prompt.set_text("");
+            // Replacing an open Done/Error panel: flush successful turns to
+            // scrollback first so a new first-shot `/btw` does not drop them.
+            agent.flush_open_btw_to_scrollback();
+        }
+        let prior_btw: Vec<crate::views::btw_overlay::BtwTurn> = prior_turns
+            .iter()
+            .map(|(q, a)| crate::views::btw_overlay::BtwTurn {
+                question: q.clone(),
+                answer: a.clone(),
+            })
+            .collect();
         let minimal_request_id = if minimal {
-            Some(crate::minimal_api::start_minimal_btw(
+            Some(crate::minimal_api::start_minimal_btw_with_context(
                 agent,
                 question.clone(),
+                prior_btw,
+                btw_session_id.clone(),
             ))
         } else {
-            agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
-                question: question.clone(),
+            agent.btw_state = Some(if is_follow_up {
+                crate::views::btw_overlay::BtwOverlayState::loading_follow_up(
+                    question.clone(),
+                    prior_btw,
+                    btw_session_id.clone(),
+                )
+            } else {
+                crate::views::btw_overlay::BtwOverlayState::loading(question.clone())
             });
             // Prompt keeps focus while the answer is in flight (panel focuses on Done).
             agent.btw_focused = false;
@@ -324,6 +399,8 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
         agent_id: id,
         session_id,
         question,
+        btw_session_id,
+        prior_turns,
         minimal_request_id,
     }]
 }
@@ -536,28 +613,71 @@ pub(super) fn handle_btw_response(
     app: &mut AppView,
     agent_id: AgentId,
     result: Result<String, String>,
+    btw_session_id: Option<String>,
     minimal_request_id: Option<uuid::Uuid>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         use crate::views::btw_overlay::BtwOverlayState;
         if let Some(request_id) = minimal_request_id {
-            crate::minimal_api::finish_minimal_btw(agent, request_id, result);
+            crate::minimal_api::finish_minimal_btw(agent, request_id, result, btw_session_id);
             return vec![];
         }
-        let question = match &agent.btw_state {
-            Some(BtwOverlayState::Loading { question }) => question.clone(),
-            _ => String::new(),
-        };
-        match result {
-            Ok(response) => {
+        let loading = agent.btw_state.take();
+        match (loading, result) {
+            (Some(state @ BtwOverlayState::Loading { .. }), Ok(response)) => {
                 // Answer arrived: show it (until Esc) and focus the panel
                 // so Up/Down scroll it until the user returns to the prompt.
-                agent.btw_state = Some(BtwOverlayState::done(question, response));
+                agent.btw_state = Some(state.finish_loading(response, btw_session_id));
                 agent.btw_focused = true;
             }
-            Err(error) => {
+            (Some(state @ BtwOverlayState::Loading { .. }), Err(error)) => {
                 // Error stays until Esc; nothing to scroll, keep prompt focus.
-                agent.btw_state = Some(BtwOverlayState::Error { question, error });
+                agent.btw_state = Some(state.finish_loading_error(error));
+                agent.btw_focused = false;
+            }
+            (prior, Ok(response)) => {
+                // Late response after dismiss / unexpected state: still show
+                // a single-turn Done so the answer is not lost (legacy path).
+                let question = prior
+                    .as_ref()
+                    .map(|s| s.question().to_string())
+                    .unwrap_or_default();
+                agent.btw_state = Some(BtwOverlayState::done_with_session(
+                    question,
+                    response,
+                    btw_session_id,
+                ));
+                agent.btw_focused = true;
+            }
+            (prior, Err(error)) => {
+                let question = prior
+                    .as_ref()
+                    .map(|s| s.question().to_string())
+                    .unwrap_or_default();
+                let (prior_turns, sid) = match prior {
+                    Some(BtwOverlayState::Loading {
+                        prior_turns,
+                        btw_session_id: sid,
+                        ..
+                    })
+                    | Some(BtwOverlayState::Error {
+                        prior_turns,
+                        btw_session_id: sid,
+                        ..
+                    }) => (prior_turns, sid.or(btw_session_id)),
+                    Some(BtwOverlayState::Done {
+                        turns,
+                        btw_session_id: sid,
+                        ..
+                    }) => (turns, sid.or(btw_session_id)),
+                    None => (Vec::new(), btw_session_id),
+                };
+                agent.btw_state = Some(BtwOverlayState::Error {
+                    question,
+                    error,
+                    prior_turns,
+                    btw_session_id: sid,
+                });
                 agent.btw_focused = false;
             }
         }

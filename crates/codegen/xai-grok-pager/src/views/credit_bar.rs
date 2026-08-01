@@ -45,6 +45,187 @@ pub struct OpenRouterCreditBalance {
     pub balance_cents: i64,
 }
 
+/// Which identity is live for sampling (drives meter honesty in the prompt footer).
+///
+/// After SuperGrok included allowance is full, Build can stay on a **console**
+/// API key while SuperGrok billing still reports personal prepaid extras. The
+/// footer must not present those extras as what Build is burning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SamplingIdentityKind {
+    /// Live sampling uses the SuperGrok OAuth session (default when unknown).
+    #[default]
+    SuperGrokSession,
+    /// Live sampling uses a console / Business API key (`api.x.ai`).
+    ConsoleKey,
+}
+
+impl SamplingIdentityKind {
+    /// Plain-language label for status / meter copy (no secrets).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SuperGrokSession => "SuperGrok session",
+            Self::ConsoleKey => "console key",
+        }
+    }
+
+    /// True when live sampling is on a console / Business API key.
+    pub fn is_console(self) -> bool {
+        matches!(self, Self::ConsoleKey)
+    }
+}
+
+/// Why console team prepaid dollars are not shown (honest states, not a soft
+/// "feature unfinished" placeholder).
+///
+/// When Management GET balance succeeds, surfaces show real `$N` instead.
+/// Missing key and missing team id are **distinct** plain copy so the operator
+/// knows which credential to add (never one mushy "key/team id" line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsoleTeamPrepaidGap {
+    /// No management API key (config or keyring). Team id may still be set.
+    #[default]
+    MissingManagementKey,
+    /// Management key present; `[endpoints] management_team_id` unset/blank.
+    MissingTeamId,
+    /// Key + team id set; balance not in cache yet (fetch may be in flight).
+    Loading,
+    /// Key + team id set; balance still unknown (fetch failed or never succeeded).
+    Unavailable,
+}
+
+impl ConsoleTeamPrepaidGap {
+    /// Short honest phrase for footer / `/usage` / `/limits` (ASCII `...` only).
+    pub fn as_display_str(self) -> &'static str {
+        match self {
+            Self::MissingManagementKey => "no management key",
+            Self::MissingTeamId => "no management team id",
+            Self::Loading => "loading team prepaid...",
+            Self::Unavailable => "team prepaid unavailable",
+        }
+    }
+
+    /// From whether Management key and team id are each present.
+    ///
+    /// | key | team | gap |
+    /// |-----|------|-----|
+    /// | no  | *    | [`Self::MissingManagementKey`] (key is the first blocker) |
+    /// | yes | no   | [`Self::MissingTeamId`] |
+    /// | yes | yes  | [`Self::Loading`] (cold / fetch may be in flight) |
+    ///
+    /// There is no process-wide "last fetch failed" bit yet, so surfaces that
+    /// just finished a billing fetch and still have no cents should pass
+    /// [`Self::Unavailable`] explicitly (see [`Self::after_billing_fetch`]).
+    pub fn from_management_config(has_management_key: bool, has_management_team_id: bool) -> Self {
+        match (has_management_key, has_management_team_id) {
+            (false, _) => Self::MissingManagementKey,
+            (true, false) => Self::MissingTeamId,
+            (true, true) => Self::Loading,
+        }
+    }
+
+    /// Gap after a completed billing fetch when cents are still unknown.
+    ///
+    /// Configured → [`Self::Unavailable`] (fetch ran; still no balance).
+    /// Missing key / team → same distinct unconfigured variants as
+    /// [`Self::from_management_config`].
+    pub fn after_billing_fetch(has_management_key: bool, has_management_team_id: bool) -> Self {
+        match (has_management_key, has_management_team_id) {
+            (false, _) => Self::MissingManagementKey,
+            (true, false) => Self::MissingTeamId,
+            (true, true) => Self::Unavailable,
+        }
+    }
+}
+
+/// Resolve honest gap from the process Management key + team_id config.
+///
+/// Configured + cold → [`ConsoleTeamPrepaidGap::Loading`] (footer / pre-fetch).
+/// Post-fetch `/usage` should use [`resolve_console_team_prepaid_gap_after_billing_fetch`].
+pub fn resolve_console_team_prepaid_gap_default() -> ConsoleTeamPrepaidGap {
+    ConsoleTeamPrepaidGap::from_management_config(
+        xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
+        xai_grok_shell::auth::resolve_management_team_id_default().is_some(),
+    )
+}
+
+/// Gap after a billing fetch completed with cents still unknown.
+pub fn resolve_console_team_prepaid_gap_after_billing_fetch() -> ConsoleTeamPrepaidGap {
+    ConsoleTeamPrepaidGap::after_billing_fetch(
+        xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
+        xai_grok_shell::auth::resolve_management_team_id_default().is_some(),
+    )
+}
+
+/// Map a dual-auth hop status/toast reason to the **destination** identity.
+///
+/// Returns `None` when `reason` is not a known identity-switch string.
+pub fn sampling_identity_from_hop_reason(reason: &str) -> Option<SamplingIdentityKind> {
+    // Exact allow-list mirrors sampler hop copy (no loose substring match).
+    match reason {
+        "Switched SuperGrok session → console key (out of allowance)"
+        | "Switched SuperGrok session → console key (rate limited)"
+        | "Switched to next console key (out of allowance)"
+        | "Switched to next console key (rate limited)" => Some(SamplingIdentityKind::ConsoleKey),
+        "Switched console key → SuperGrok session (out of allowance)"
+        | "Switched console key → SuperGrok session (rate limited)"
+        | "Switched to next SuperGrok session (out of allowance)"
+        | "Switched to next SuperGrok session (rate limited)" => {
+            Some(SamplingIdentityKind::SuperGrokSession)
+        }
+        _ => None,
+    }
+}
+
+/// Meter identity from tracked UI state plus SuperGrok out-of-allowance memo.
+///
+/// Silent sticky prefer_live (and restart while the memo lives) can leave
+/// samples on the **console key** without hop toast chrome. Tracked state may
+/// still default to SuperGrokSession. The footer must follow the **live spend
+/// pool** — never SuperGrok prepaid extras while console is what Build burns.
+///
+/// `supergrok_out_of_allowance_with_console_ready` is true when dual-auth can
+/// use a console key and the SuperGrok session fingerprint is still memoized
+/// out of allowance (process + durable `$GROK_HOME/exhausted_credits/`).
+pub fn meter_sampling_identity(
+    tracked: SamplingIdentityKind,
+    supergrok_out_of_allowance_with_console_ready: bool,
+) -> SamplingIdentityKind {
+    if tracked.is_console() {
+        return SamplingIdentityKind::ConsoleKey;
+    }
+    if supergrok_out_of_allowance_with_console_ready {
+        SamplingIdentityKind::ConsoleKey
+    } else {
+        tracked
+    }
+}
+
+/// Tracked identity update after billing allowance-exhaust sync.
+///
+/// - `marked`: SuperGrok included full (or re-mark) → console is live next request
+/// - `cleared`: period reset; SuperGrok available again **unless** console is
+///   the auth primary (`preferred_method = api_key` / `is_api_key_auth`)
+/// - neither: leave tracked identity unchanged (`None`)
+///
+/// `marked` wins if both flags are ever true.
+pub fn sampling_identity_after_allowance_sync(
+    marked: bool,
+    cleared: bool,
+    console_auth_primary: bool,
+) -> Option<SamplingIdentityKind> {
+    if marked {
+        return Some(SamplingIdentityKind::ConsoleKey);
+    }
+    if cleared {
+        return Some(if console_auth_primary {
+            SamplingIdentityKind::ConsoleKey
+        } else {
+            SamplingIdentityKind::SuperGrokSession
+        });
+    }
+    None
+}
+
 impl CreditBalance {
     /// Label for the percentage allowance, chosen from the period type:
     /// "Weekly limit" / "Monthly limit", falling back to "Usage" when unknown.
@@ -107,12 +288,17 @@ fn fmt_dollars(cents: i64) -> String {
 
 /// Build the `/usage` summary block shown in scrollback.
 ///
-/// Always shows usage % and (when known) the next reset time. The credits
-/// block is rendered only when the user has a positive prepaid balance:
-/// - no prepaid balance       → credits block omitted entirely
+/// Always shows usage % and (when known) the next reset time. The SuperGrok
+/// extras block is rendered only when the user has a positive prepaid balance
+/// from the grok.com session billing fetch (not console.x.ai team credits):
+/// - no prepaid balance       → extras block omitted entirely
 /// - auto top-up off/unknown  → `Auto topup: disabled` (no max line)
 /// - auto top-up on, no max   → `Auto topup: $N`
 /// - auto top-up on, max set  → `Auto topup: $N` + `Max monthly topup: $M`
+///
+/// SuperGrok-primary path only. When live sampling is a console key, use
+/// [`format_usage_summary_with_live_identity`] so SuperGrok extras are never
+/// sold as the live console spend.
 pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopupInfo>) -> String {
     // Floor to match the backend SpendingLimiter's `as u8` truncation
     // (99.994% → 99%, never 100% until truly exhausted).
@@ -127,13 +313,15 @@ pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopu
 
     // Billing stores credit / top-up amounts as negative cents (accounting
     // convention); display the absolute USD value, matching the web clients.
+    // Label as SuperGrok extras so the footer is never mistaken for console
+    // team prepaid credits (those are a different pool on console.x.ai).
     if let Some(prepaid) = balance
         .prepaid_balance_cents
         .map(i64::abs)
         .filter(|c| *c > 0)
     {
         lines.push(String::new());
-        lines.push(format!("Credits: {}", fmt_dollars(prepaid)));
+        lines.push(format!("SuperGrok extras: {}", fmt_dollars(prepaid)));
         match autotopup {
             Some(at) if at.enabled && at.topup_amount_cents.is_some() => {
                 lines.push(format!(
@@ -159,6 +347,60 @@ pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopu
     }
 
     lines.join("\n")
+}
+
+/// `/usage` billing follow-up keyed by **live sampling identity**.
+///
+/// When live sampling is a **console key**, names **console team prepaid**
+/// (Management API cents) or an honest gap ([`ConsoleTeamPrepaidGap`]). Does
+/// **not** present SuperGrok session billing / SuperGrok $ extras as the live
+/// console spend (those are a different pool). SuperGrok-primary keeps
+/// [`format_usage_summary`].
+pub fn format_usage_summary_with_live_identity(
+    balance: Option<&CreditBalance>,
+    autotopup: Option<&AutoTopupInfo>,
+    sampling_identity: SamplingIdentityKind,
+    console_team_prepaid_cents: Option<i64>,
+) -> String {
+    format_usage_summary_with_live_identity_and_gap(
+        balance,
+        autotopup,
+        sampling_identity,
+        console_team_prepaid_cents,
+        // Callers that know config should pass an explicit gap; default is the
+        // most common dogfood miss (no management key stored yet).
+        ConsoleTeamPrepaidGap::MissingManagementKey,
+    )
+}
+
+/// Like [`format_usage_summary_with_live_identity`] with an explicit gap reason
+/// when cents are unknown.
+pub fn format_usage_summary_with_live_identity_and_gap(
+    balance: Option<&CreditBalance>,
+    autotopup: Option<&AutoTopupInfo>,
+    sampling_identity: SamplingIdentityKind,
+    console_team_prepaid_cents: Option<i64>,
+    console_team_prepaid_gap: ConsoleTeamPrepaidGap,
+) -> String {
+    if sampling_identity.is_console() {
+        let mut lines = vec![format!("Live sampling: {}", sampling_identity.as_str())];
+        match console_team_prepaid_cents {
+            Some(cents) => lines.push(format!(
+                "Console team prepaid: {}",
+                fmt_dollars(cents.abs())
+            )),
+            None => lines.push(format!(
+                "Console team prepaid: {}",
+                console_team_prepaid_gap.as_display_str()
+            )),
+        }
+        return lines.join("\n");
+    }
+
+    match balance {
+        Some(bal) => format_usage_summary(bal, autotopup),
+        None => "No billing data available.".to_string(),
+    }
 }
 
 /// Low-balance ($10) and pay-as-you-go critical ($5) warning thresholds, in cents.
@@ -202,9 +444,9 @@ pub fn usage_warning_for_session(
 /// Prompt info-row warning, optionally preferring OpenRouter account credits
 /// when the active model is OpenRouter-backed.
 ///
-/// When `openrouter_model` is true and an OR balance is known, always shows
-/// `Credits left: $N` (yellow when ≤ $10). xAI Build billing is ignored for
-/// that model so the footer matches the provider actually being charged.
+/// Defaults live sampling identity to SuperGrok session. Prefer
+/// [`usage_warning_for_session_with_identity`] when the pager knows the live
+/// primary (console key after stay-on-console, hop toast, etc.).
 pub fn usage_warning_for_session_with_openrouter(
     balance: Option<&CreditBalance>,
     autotopup: Option<&AutoTopupInfo>,
@@ -213,6 +455,102 @@ pub fn usage_warning_for_session_with_openrouter(
     gateway_chat: bool,
     openrouter_model: bool,
 ) -> Option<(String, bool)> {
+    usage_warning_for_session_with_identity(
+        balance,
+        autotopup,
+        openrouter,
+        usage_visible,
+        gateway_chat,
+        openrouter_model,
+        SamplingIdentityKind::SuperGrokSession,
+    )
+}
+
+/// Like [`usage_warning_for_session_with_openrouter`], but labels the meter by
+/// **live sampling identity**.
+///
+/// When `openrouter_model` is true and an OR balance is known, always shows
+/// `OpenRouter credits left: $N` (yellow when ≤ $10). xAI SuperGrok billing is
+/// ignored for that model so the footer matches the provider actually charged.
+///
+/// When live primary is a **console key**, never presents SuperGrok prepaid
+/// extras as the spend meter (personal SuperGrok $ is a different pool). Shows
+/// console team prepaid dollars when Management API cents are known, else an
+/// honest gap (`console key · no management key` / `no management team id` /
+/// loading / unavailable).
+///
+/// When live primary is SuperGrok, prepaid is labeled **SuperGrok extras left**
+/// — never generic "Credits left".
+pub fn usage_warning_for_session_with_identity(
+    balance: Option<&CreditBalance>,
+    autotopup: Option<&AutoTopupInfo>,
+    openrouter: Option<&OpenRouterCreditBalance>,
+    usage_visible: bool,
+    gateway_chat: bool,
+    openrouter_model: bool,
+    sampling_identity: SamplingIdentityKind,
+) -> Option<(String, bool)> {
+    usage_warning_for_session_with_identity_and_principal(
+        balance,
+        autotopup,
+        openrouter,
+        usage_visible,
+        gateway_chat,
+        openrouter_model,
+        sampling_identity,
+        None,
+        None,
+    )
+}
+
+/// Like [`usage_warning_for_session_with_identity`] with optional live SuperGrok
+/// principal role (`"personal"` / `"business"`) for dual-login footers.
+///
+/// `console_team_prepaid_cents` is Management API team prepaid remaining
+/// (absolute USD cents). Only used when live identity is console; never mixed
+/// with SuperGrok session extras. When cents are `None`, uses
+/// [`ConsoleTeamPrepaidGap::MissingManagementKey`] — prefer
+/// [`usage_warning_for_session_with_identity_principal_and_gap`] when the
+/// caller knows the real gap reason.
+pub fn usage_warning_for_session_with_identity_and_principal(
+    balance: Option<&CreditBalance>,
+    autotopup: Option<&AutoTopupInfo>,
+    openrouter: Option<&OpenRouterCreditBalance>,
+    usage_visible: bool,
+    gateway_chat: bool,
+    openrouter_model: bool,
+    sampling_identity: SamplingIdentityKind,
+    live_principal_role: Option<&str>,
+    console_team_prepaid_cents: Option<i64>,
+) -> Option<(String, bool)> {
+    usage_warning_for_session_with_identity_principal_and_gap(
+        balance,
+        autotopup,
+        openrouter,
+        usage_visible,
+        gateway_chat,
+        openrouter_model,
+        sampling_identity,
+        live_principal_role,
+        console_team_prepaid_cents,
+        ConsoleTeamPrepaidGap::MissingManagementKey,
+    )
+}
+
+/// Like [`usage_warning_for_session_with_identity_and_principal`] with an
+/// explicit [`ConsoleTeamPrepaidGap`] when cents are unknown.
+pub fn usage_warning_for_session_with_identity_principal_and_gap(
+    balance: Option<&CreditBalance>,
+    autotopup: Option<&AutoTopupInfo>,
+    openrouter: Option<&OpenRouterCreditBalance>,
+    usage_visible: bool,
+    gateway_chat: bool,
+    openrouter_model: bool,
+    sampling_identity: SamplingIdentityKind,
+    live_principal_role: Option<&str>,
+    console_team_prepaid_cents: Option<i64>,
+    console_team_prepaid_gap: ConsoleTeamPrepaidGap,
+) -> Option<(String, bool)> {
     if gateway_chat || !usage_visible {
         return None;
     }
@@ -220,14 +558,46 @@ pub fn usage_warning_for_session_with_openrouter(
     if openrouter_model {
         let or = openrouter?;
         // Show remaining even at $0 so the user sees the balance was fetched.
-        let text = format!("Credits left: {}", fmt_dollars(or.balance_cents.abs()));
+        let text = format!(
+            "OpenRouter credits left: {}",
+            fmt_dollars(or.balance_cents.abs())
+        );
         let critical = or.balance_cents.abs() <= LOW_BALANCE_CENTS || or.balance_cents <= 0;
         return Some((text, critical));
     }
 
-    let balance = balance?;
+    // Console / Business API key is live: do not show SuperGrok prepaid extras
+    // or included-% as if they were the pool Build is burning. When Management
+    // prepaid cents are known, show plain console team prepaid dollars.
+    // Honest gap still beats the wrong SuperGrok number.
+    if sampling_identity.is_console() {
+        let label = sampling_identity.as_str();
+        let mut chars = label.chars();
+        let labeled = match chars.next() {
+            None => String::new(),
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        };
+        if let Some(cents) = console_team_prepaid_cents {
+            let remaining = cents.abs();
+            let text = format!("{labeled} · team prepaid: {}", fmt_dollars(remaining));
+            let critical = remaining <= LOW_BALANCE_CENTS;
+            return Some((text, critical));
+        }
+        return Some((
+            format!("{labeled} · {}", console_team_prepaid_gap.as_display_str()),
+            false,
+        ));
+    }
 
-    // A non-zero prepaid balance (stored as signed cents) means the credits model.
+    let balance = balance?;
+    let role_suffix = live_principal_role
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" ({s})"))
+        .unwrap_or_default();
+
+    // A non-zero prepaid balance (stored as signed cents) means SuperGrok
+    // extras / bought credits from the session billing path.
     let credits = balance
         .prepaid_balance_cents
         .map(i64::abs)
@@ -255,19 +625,25 @@ pub fn usage_warning_for_session_with_openrouter(
             // floored summary (99.994% → "1% left", not "0%").
             let remaining = (100 - pct.floor() as i64).max(0);
             let label = balance.usage_label();
-            return Some((format!("{label} left: {remaining}%"), pct > 95.0));
+            return Some((
+                format!("{label} left{role_suffix}: {remaining}%"),
+                pct > 95.0,
+            ));
         }
         return None;
     };
 
-    // Credits are only drawn down at 100% usage; don't warn before then.
+    // Extras are only drawn down at 100% included usage; don't warn before then.
     if balance.usage_pct < 100.0 {
         return None;
     }
 
     let credits_warning = || {
         (
-            format!("Credits left: {}", fmt_dollars(credits_cents)),
+            format!(
+                "SuperGrok extras left{role_suffix}: {}",
+                fmt_dollars(credits_cents)
+            ),
             true,
         )
     };
@@ -376,12 +752,12 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, None),
-            "Usage: 25%\n\nCredits: $100\nAuto topup: disabled"
+            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"
         );
         // A disabled rule renders the same.
         assert_eq!(
             format_usage_summary(&b, Some(&topup(false, Some(2000), Some(10000)))),
-            "Usage: 25%\n\nCredits: $100\nAuto topup: disabled"
+            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"
         );
     }
 
@@ -393,7 +769,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(2000), None))),
-            "Usage: 25%\n\nCredits: $100\nAuto topup: $20"
+            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: $20"
         );
     }
 
@@ -406,7 +782,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(2000), Some(10000)))),
-            "Usage: 25%\nNext reset: June 14, 16:00\n\nCredits: $100\nAuto topup: $20\nMax monthly topup: $100"
+            "Usage: 25%\nNext reset: June 14, 16:00\n\nSuperGrok extras: $100\nAuto topup: $20\nMax monthly topup: $100"
         );
     }
 
@@ -418,7 +794,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(550), None))),
-            "Usage: 25%\n\nCredits: $12.50\nAuto topup: $5.50"
+            "Usage: 25%\n\nSuperGrok extras: $12.50\nAuto topup: $5.50"
         );
     }
 
@@ -432,7 +808,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(-500), Some(-1000)))),
-            "Usage: 100%\n\nCredits: $5\nAuto topup: $5\nMax monthly topup: $10"
+            "Usage: 100%\n\nSuperGrok extras: $5\nAuto topup: $5\nMax monthly topup: $10"
         );
     }
 
@@ -591,7 +967,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&exhausted, Some(&disabled), true),
-            Some(("Credits left: $4.53".to_string(), true))
+            Some(("SuperGrok extras left: $4.53".to_string(), true))
         );
     }
 
@@ -605,7 +981,7 @@ mod tests {
         let disabled = topup(false, None, None);
         assert_eq!(
             usage_warning(&b, Some(&disabled), true),
-            Some(("Credits left: $4.53".to_string(), true))
+            Some(("SuperGrok extras left: $4.53".to_string(), true))
         );
     }
 
@@ -624,7 +1000,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&at_ten, Some(&disabled), true),
-            Some(("Credits left: $10".to_string(), true))
+            Some(("SuperGrok extras left: $10".to_string(), true))
         );
     }
 
@@ -649,7 +1025,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&b, Some(&topup(true, Some(2000), Some(10000))), true),
-            Some(("Credits left: $15".to_string(), true))
+            Some(("SuperGrok extras left: $15".to_string(), true))
         );
         let plenty = CreditBalance {
             prepaid_balance_cents: Some(2500),
@@ -669,7 +1045,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&b, Some(&topup(true, Some(-2000), Some(-10000))), true),
-            Some(("Credits left: $4.53".to_string(), true))
+            Some(("SuperGrok extras left: $4.53".to_string(), true))
         );
     }
 
@@ -697,6 +1073,638 @@ mod tests {
         );
     }
 
+    // ── Meter honesty: live sampling identity (console vs SuperGrok) ─
+
+    #[test]
+    fn usage_summary_console_live_names_team_prepaid_not_supergrok_extras() {
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(996),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            period_end_display: Some("Jul 30, 12:00".into()),
+            ..bal(100.0)
+        };
+        let text = format_usage_summary_with_live_identity(
+            Some(&b),
+            None,
+            SamplingIdentityKind::ConsoleKey,
+            Some(12_500),
+        );
+        assert!(text.contains("Live sampling: console key"), "{text}");
+        assert!(text.contains("Console team prepaid: $125"), "{text}");
+        assert!(
+            !text.contains("SuperGrok extras"),
+            "console live must not sell SuperGrok extras as live: {text}"
+        );
+        assert!(
+            !text.contains("Weekly limit:"),
+            "console live must not lead with SuperGrok session %: {text}"
+        );
+    }
+
+    #[test]
+    fn usage_summary_console_live_without_prepaid_honest_gap() {
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(996),
+            ..bal(100.0)
+        };
+        let text = format_usage_summary_with_live_identity_and_gap(
+            Some(&b),
+            None,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+        );
+        assert!(
+            text.contains("Console team prepaid: no management key"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("no $ meter yet"),
+            "soft placeholder retired: {text}"
+        );
+        assert!(
+            !text.contains("no management key/team id"),
+            "mushy combined gap retired: {text}"
+        );
+        assert!(!text.contains("SuperGrok extras"), "{text}");
+    }
+
+    #[test]
+    fn usage_summary_console_live_missing_team_id_distinct_from_missing_key() {
+        let text = format_usage_summary_with_live_identity_and_gap(
+            None,
+            None,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            ConsoleTeamPrepaidGap::MissingTeamId,
+        );
+        assert!(
+            text.contains("Console team prepaid: no management team id"),
+            "{text}"
+        );
+        assert!(!text.contains("no management key/team id"), "{text}");
+        assert!(
+            !text.contains("no management key\n") && !text.ends_with("no management key"),
+            "missing team must not read as missing key alone: {text}"
+        );
+    }
+
+    #[test]
+    fn usage_summary_console_live_configured_cold_shows_loading_not_unavailable() {
+        // Product cold path: from_management_config / default resolve → Loading.
+        let cold = ConsoleTeamPrepaidGap::from_management_config(true, true);
+        assert_eq!(cold, ConsoleTeamPrepaidGap::Loading);
+        let text = format_usage_summary_with_live_identity_and_gap(
+            None,
+            None,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            cold,
+        );
+        assert!(
+            text.contains("Console team prepaid: loading team prepaid..."),
+            "{text}"
+        );
+        assert!(
+            !text.contains("team prepaid unavailable"),
+            "configured cold must not read as hard fail: {text}"
+        );
+        assert!(!text.contains("no $ meter yet"), "{text}");
+    }
+
+    #[test]
+    fn usage_summary_console_live_post_fetch_miss_shows_unavailable() {
+        let post = ConsoleTeamPrepaidGap::after_billing_fetch(true, true);
+        assert_eq!(post, ConsoleTeamPrepaidGap::Unavailable);
+        let unavailable = format_usage_summary_with_live_identity_and_gap(
+            None,
+            None,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            post,
+        );
+        assert!(
+            unavailable.contains("Console team prepaid: team prepaid unavailable"),
+            "{unavailable}"
+        );
+        assert!(!unavailable.contains("no $ meter yet"), "{unavailable}");
+        assert!(
+            !unavailable.contains("loading team prepaid"),
+            "post-fetch miss is unavailable, not loading: {unavailable}"
+        );
+    }
+
+    #[test]
+    fn console_team_prepaid_gap_display_strings_are_honest() {
+        // Named contract: missing key vs missing team vs loading vs unavailable
+        // are distinct plain operator-visible strings (no mushy key/team mash).
+        assert_eq!(
+            ConsoleTeamPrepaidGap::MissingManagementKey.as_display_str(),
+            "no management key"
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::MissingTeamId.as_display_str(),
+            "no management team id"
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::Loading.as_display_str(),
+            "loading team prepaid..."
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::Unavailable.as_display_str(),
+            "team prepaid unavailable"
+        );
+        // Distinct config → distinct variants.
+        assert_eq!(
+            ConsoleTeamPrepaidGap::from_management_config(false, false),
+            ConsoleTeamPrepaidGap::MissingManagementKey
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::from_management_config(false, true),
+            ConsoleTeamPrepaidGap::MissingManagementKey
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::from_management_config(true, false),
+            ConsoleTeamPrepaidGap::MissingTeamId
+        );
+        // Configured + cents unknown (cold) → Loading, not unavailable.
+        assert_eq!(
+            ConsoleTeamPrepaidGap::from_management_config(true, true),
+            ConsoleTeamPrepaidGap::Loading
+        );
+        // Post-fetch miss → Unavailable; unconfigured stays distinct miss.
+        assert_eq!(
+            ConsoleTeamPrepaidGap::after_billing_fetch(true, true),
+            ConsoleTeamPrepaidGap::Unavailable
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::after_billing_fetch(false, true),
+            ConsoleTeamPrepaidGap::MissingManagementKey
+        );
+        assert_eq!(
+            ConsoleTeamPrepaidGap::after_billing_fetch(true, false),
+            ConsoleTeamPrepaidGap::MissingTeamId
+        );
+        // Never emit the retired mushy combined string.
+        for gap in [
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            ConsoleTeamPrepaidGap::MissingTeamId,
+            ConsoleTeamPrepaidGap::Loading,
+            ConsoleTeamPrepaidGap::Unavailable,
+        ] {
+            assert!(
+                !gap.as_display_str().contains("key/team"),
+                "retired mushy gap: {:?}",
+                gap
+            );
+            assert!(!gap.as_display_str().contains("no $ meter yet"));
+        }
+    }
+
+    #[test]
+    fn footer_console_live_without_mgmt_config_keeps_honest_gap() {
+        let w = usage_warning_for_session_with_identity_principal_and_gap(
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+        );
+        let (text, critical) = w.expect("console gap");
+        assert!(
+            text.contains("no management key"),
+            "missing key footer: {text}"
+        );
+        assert!(
+            !text.contains("no management key/team id"),
+            "mushy combined gap retired: {text}"
+        );
+        assert!(!text.contains("no $ meter yet"), "{text}");
+        assert!(!text.contains('$'), "must not invent dollars: {text}");
+        assert!(!critical);
+    }
+
+    #[test]
+    fn footer_console_live_missing_team_id_distinct_from_missing_key() {
+        // Named contract: key present, team_id absent → plain "no management team id".
+        let gap = ConsoleTeamPrepaidGap::from_management_config(true, false);
+        assert_eq!(gap, ConsoleTeamPrepaidGap::MissingTeamId);
+        let w = usage_warning_for_session_with_identity_principal_and_gap(
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            None,
+            gap,
+        );
+        let (text, critical) = w.expect("team gap");
+        assert!(
+            text.contains("Console key · no management team id"),
+            "missing team footer: {text}"
+        );
+        assert!(
+            !text.contains("no management key/team id"),
+            "mushy combined retired: {text}"
+        );
+        // Must not be the missing-key line (operator needs team_id, not another key).
+        assert!(
+            !text.ends_with("no management key"),
+            "must distinguish missing team from missing key: {text}"
+        );
+        assert!(!text.contains("no $ meter yet"), "{text}");
+        assert!(!text.contains('$'), "must not invent dollars: {text}");
+        assert!(!critical);
+    }
+
+    #[test]
+    fn footer_console_live_with_mgmt_key_and_team_shows_prepaid_not_gap() {
+        let w = usage_warning_for_session_with_identity_principal_and_gap(
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            Some(12_500),
+            ConsoleTeamPrepaidGap::Unavailable, // ignored when cents present
+        );
+        let (text, critical) = w.expect("prepaid");
+        assert!(text.contains("team prepaid: $125"), "{text}");
+        assert!(!text.contains("no $ meter yet"), "{text}");
+        assert!(!text.contains("no management key"), "{text}");
+        assert!(!critical);
+    }
+
+    #[test]
+    fn footer_console_live_configured_cold_shows_loading_not_unavailable() {
+        // Same wiring as footer render: resolve gap from management config.
+        let gap = ConsoleTeamPrepaidGap::from_management_config(true, true);
+        assert_eq!(gap, ConsoleTeamPrepaidGap::Loading);
+        let w = usage_warning_for_session_with_identity_principal_and_gap(
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            None,
+            gap,
+        );
+        let (text, critical) = w.expect("gap");
+        assert!(
+            text.contains("loading team prepaid..."),
+            "configured cold footer must load, not hard-fail: {text}"
+        );
+        assert!(
+            !text.contains("team prepaid unavailable"),
+            "configured cold must not say unavailable: {text}"
+        );
+        assert!(!text.contains("no $ meter yet"), "{text}");
+        assert!(!critical);
+    }
+
+    #[test]
+    fn footer_console_live_configured_unavailable_not_soft_placeholder() {
+        // Explicit post-fail / after-fetch path still uses Unavailable.
+        let w = usage_warning_for_session_with_identity_principal_and_gap(
+            None,
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            None,
+            ConsoleTeamPrepaidGap::Unavailable,
+        );
+        let (text, _) = w.expect("gap");
+        assert!(text.contains("team prepaid unavailable"), "{text}");
+        assert!(!text.contains("no $ meter yet"), "{text}");
+    }
+
+    #[test]
+    fn usage_summary_supergrok_live_keeps_session_billing() {
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(10000),
+            ..bal(25.0)
+        };
+        let text = format_usage_summary_with_live_identity(
+            Some(&b),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+            Some(12_500),
+        );
+        // SuperGrok-primary still uses session billing; console cents are not mixed in.
+        assert_eq!(
+            text,
+            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"
+        );
+    }
+
+    #[test]
+    fn sampling_identity_labels_are_plain_language() {
+        assert_eq!(
+            SamplingIdentityKind::SuperGrokSession.as_str(),
+            "SuperGrok session"
+        );
+        assert_eq!(SamplingIdentityKind::ConsoleKey.as_str(), "console key");
+        assert!(SamplingIdentityKind::ConsoleKey.is_console());
+        assert!(!SamplingIdentityKind::SuperGrokSession.is_console());
+    }
+
+    #[test]
+    fn footer_names_live_principal_role_on_included_warning() {
+        let bal = CreditBalance {
+            usage_pct: 96.0,
+            effective_usage_pct: 96.0,
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..bal(96.0)
+        };
+        let w = usage_warning_for_session_with_identity_and_principal(
+            Some(&bal),
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::SuperGrokSession,
+            Some("business"),
+            None,
+        );
+        let (text, _) = w.expect("warning at 96%");
+        assert!(
+            text.contains("Weekly limit left (business):"),
+            "footer should name live SuperGrok principal: {text}"
+        );
+        assert!(text.contains("4%"), "{text}");
+    }
+
+    #[test]
+    fn sampling_identity_from_hop_reason_destination() {
+        assert_eq!(
+            sampling_identity_from_hop_reason(
+                "Switched SuperGrok session → console key (out of allowance)"
+            ),
+            Some(SamplingIdentityKind::ConsoleKey)
+        );
+        assert_eq!(
+            sampling_identity_from_hop_reason(
+                "Switched console key → SuperGrok session (out of allowance)"
+            ),
+            Some(SamplingIdentityKind::SuperGrokSession)
+        );
+        assert_eq!(
+            sampling_identity_from_hop_reason("Switched to next console key (rate limited)"),
+            Some(SamplingIdentityKind::ConsoleKey)
+        );
+        assert_eq!(sampling_identity_from_hop_reason("rate limited"), None);
+    }
+
+    /// Contract: live primary = console after allowance mark → meter must not
+    /// present SuperGrok prepaid extras as bare "Credits left" / SuperGrok
+    /// extras $ without a console active-identity label.
+    #[test]
+    fn warning_console_primary_does_not_show_supergrok_extras_dollars() {
+        // Dogfood shape: SuperGrok included full + ~$9.96 personal extras still
+        // in billing, but samples run on the console key.
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(996),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..bal(100.0)
+        };
+        let disabled = topup(false, None, None);
+        let w = usage_warning_for_session_with_identity(
+            Some(&b),
+            Some(&disabled),
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+        );
+        let (text, critical) = w.expect("console primary should show honest console meter copy");
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            lower.contains("console"),
+            "must label active identity as console: {text}"
+        );
+        assert!(
+            !text.starts_with("SuperGrok extras left:"),
+            "must not lead with SuperGrok extras $ while on console: {text}"
+        );
+        assert!(
+            !text.starts_with("Credits left:"),
+            "must not use bare Credits left: {text}"
+        );
+        // SuperGrok personal extras dollar amount must not be the primary story.
+        assert!(
+            !text.contains("$9.96"),
+            "must not show SuperGrok extras dollars as meter primary: {text}"
+        );
+        assert!(
+            !critical,
+            "honest console absence is not a critical low-balance warn"
+        );
+    }
+
+    /// Named contract: console live + Management prepaid fixture → plain
+    /// **team prepaid** dollars (never SuperGrok extras labels).
+    #[test]
+    fn console_live_with_management_fixture_shows_prepaid_balance() {
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(996),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..bal(100.0)
+        };
+        let w = usage_warning_for_session_with_identity_and_principal(
+            Some(&b),
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            Some(12_500),
+        );
+        let (text, critical) = w.expect("console prepaid meter");
+        let lower = text.to_ascii_lowercase();
+        assert!(lower.contains("console"), "identity: {text}");
+        assert!(
+            lower.contains("team prepaid"),
+            "plain console team prepaid label: {text}"
+        );
+        assert!(text.contains("$125"), "management prepaid dollars: {text}");
+        assert!(
+            !text.contains("$9.96") && !text.contains("SuperGrok extras"),
+            "must not show SuperGrok extras while console prepaid present: {text}"
+        );
+        assert!(
+            !text.contains("no $ meter yet"),
+            "must not claim absence when cents present: {text}"
+        );
+        assert!(!critical, "$125 is above low-balance threshold");
+    }
+
+    /// Contract: live primary = SuperGrok with prepaid extras → existing extras
+    /// path still works and is labeled SuperGrok.
+    #[test]
+    fn warning_supergrok_primary_still_shows_labeled_extras() {
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(996),
+            ..bal(100.0)
+        };
+        let disabled = topup(false, None, None);
+        assert_eq!(
+            usage_warning_for_session_with_identity(
+                Some(&b),
+                Some(&disabled),
+                None,
+                true,
+                false,
+                false,
+                SamplingIdentityKind::SuperGrokSession,
+            ),
+            Some(("SuperGrok extras left: $9.96".to_string(), true))
+        );
+        // Legacy openrouter wrapper defaults to SuperGrok session identity.
+        assert_eq!(
+            usage_warning_for_session_with_openrouter(
+                Some(&b),
+                Some(&disabled),
+                None,
+                true,
+                false,
+                false,
+            ),
+            Some(("SuperGrok extras left: $9.96".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn warning_console_primary_suppresses_supergrok_included_pct_too() {
+        // Included-% about SuperGrok is also the wrong pool when console is live.
+        let b = bal_period(92.0, "USAGE_PERIOD_TYPE_WEEKLY");
+        let w = usage_warning_for_session_with_identity(
+            Some(&b),
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+        );
+        let (text, _) = w.expect("console meter copy");
+        assert!(text.to_ascii_lowercase().contains("console"), "{text}");
+        assert!(
+            !text.contains("Weekly limit"),
+            "must not show SuperGrok included % as primary while on console: {text}"
+        );
+    }
+
+    /// Named contract (`bug:credits-meter-wrong-pool`): silent sticky console
+    /// (SuperGrok still memoized out of allowance + dual-auth ready) must not
+    /// present SuperGrok prepaid extras when tracked UI identity is still the
+    /// default SuperGrokSession (no hop toast yet / after restart).
+    #[test]
+    fn meter_identity_prefers_console_when_supergrok_memo_exhausted() {
+        assert_eq!(
+            meter_sampling_identity(SamplingIdentityKind::SuperGrokSession, true),
+            SamplingIdentityKind::ConsoleKey
+        );
+        // Tracked console stays console.
+        assert_eq!(
+            meter_sampling_identity(SamplingIdentityKind::ConsoleKey, true),
+            SamplingIdentityKind::ConsoleKey
+        );
+        // Live SuperGrok when memo not exhausted.
+        assert_eq!(
+            meter_sampling_identity(SamplingIdentityKind::SuperGrokSession, false),
+            SamplingIdentityKind::SuperGrokSession
+        );
+    }
+
+    #[test]
+    fn warning_silent_sticky_console_does_not_show_supergrok_extras() {
+        // Dogfood shape: SuperGrok included full + prepaid extras still in
+        // billing payload, samples already on console via silent prefer_live
+        // (tracked UI still SuperGrokSession default).
+        let b = CreditBalance {
+            prepaid_balance_cents: Some(996),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..bal(100.0)
+        };
+        let disabled = topup(false, None, None);
+        let identity = meter_sampling_identity(
+            SamplingIdentityKind::SuperGrokSession,
+            true, // SuperGrok out of allowance + console ready
+        );
+        let w = usage_warning_for_session_with_identity(
+            Some(&b),
+            Some(&disabled),
+            None,
+            true,
+            false,
+            false,
+            identity,
+        );
+        let (text, critical) = w.expect("console honest meter");
+        assert!(
+            text.to_ascii_lowercase().contains("console"),
+            "must label console live pool: {text}"
+        );
+        assert!(
+            !text.contains("$9.96") && !text.starts_with("SuperGrok extras left:"),
+            "must not sell SuperGrok extras as live spend: {text}"
+        );
+        assert!(
+            !critical,
+            "honest console absence is not critical low-balance"
+        );
+    }
+
+    /// Named contract: Cleared exhaust under console auth primary must not
+    /// re-label meter SuperGrok while preferred_method / login is console key.
+    #[test]
+    fn allowance_cleared_keeps_console_when_console_auth_primary() {
+        assert_eq!(
+            sampling_identity_after_allowance_sync(false, true, true),
+            Some(SamplingIdentityKind::ConsoleKey)
+        );
+        // Session primary + period reset → SuperGrok meter again.
+        assert_eq!(
+            sampling_identity_after_allowance_sync(false, true, false),
+            Some(SamplingIdentityKind::SuperGrokSession)
+        );
+        assert_eq!(
+            sampling_identity_after_allowance_sync(true, false, false),
+            Some(SamplingIdentityKind::ConsoleKey)
+        );
+        assert_eq!(
+            sampling_identity_after_allowance_sync(false, false, false),
+            None
+        );
+        // Marked wins over cleared if both somehow true.
+        assert_eq!(
+            sampling_identity_after_allowance_sync(true, true, true),
+            Some(SamplingIdentityKind::ConsoleKey)
+        );
+    }
+
     // ── usage_warning: OpenRouter account credits ────────────────────
 
     #[test]
@@ -710,7 +1718,7 @@ mod tests {
                 false,
                 true,
             ),
-            Some(("Credits left: $63.86".to_string(), false))
+            Some(("OpenRouter credits left: $63.86".to_string(), false))
         );
         // Low balance → critical (yellow).
         assert_eq!(
@@ -722,7 +1730,7 @@ mod tests {
                 false,
                 true,
             ),
-            Some(("Credits left: $5".to_string(), true))
+            Some(("OpenRouter credits left: $5".to_string(), true))
         );
         // OR model without a fetched balance → no warning (don't fall back to xAI).
         assert_eq!(

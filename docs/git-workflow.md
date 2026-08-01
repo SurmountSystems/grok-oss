@@ -32,7 +32,7 @@ packaging); combine when both sides change the same logic.
 
 **Agents:** never run `git commit`. “Fix the conflicts” / “make the PR
 mergeable” / even “commit this” → resolve + stage + hand the signed commands
-above for a real TTY. Push only if he explicitly asked to push. See
+above for a real TTY. Push only if the operator explicitly asked to push. See
 [`AGENTS.md`](../AGENTS.md) and `~/.grok/AGENTS.md` § *Commits — agents never
 commit*.
 
@@ -59,7 +59,7 @@ not choose rebase by default.
 | Normal `git push` **only if the human asked to push** | `git push --force` / `--force-with-lease` for conflict catch-up |
 | Match remote tip if you diverged locally (`reset --hard origin/<branch>`) then merge | Keep a rebased local tip and force-push “to match” |
 | Honor `commit.gpgsign` / signed commits | `git -c commit.gpgsign=false commit` |
-| Draft the exact `git commit -S` line for him to run | Invent commit/push from “finish it”, “fix it”, PR URL, or babysit |
+| Draft the exact `git commit -S` line for the operator to run | Invent commit/push from “finish it”, “fix it”, PR URL, or babysit |
 
 See also: [upstream-history.md](upstream-history.md) (xAI content import is
 separate from PR-vs-`main` integration).

@@ -114,7 +114,14 @@ pub fn peek_max_box_rows(h: u16) -> u16 {
 
 /// Chrome rows (header/gaps/footer/margins) — not list, not peek.
 pub fn chrome_overhead(area: Rect) -> u16 {
-    dashboard_fixed_overhead(area).0
+    chrome_overhead_with_hide_header(area, false)
+}
+
+/// Like [`chrome_overhead`], but when `hide_header` is true the top location
+/// header (+ its gap) is omitted — same `[ui] hide_header` opt-in as the
+/// agent status bar / welcome top bar.
+pub fn chrome_overhead_with_hide_header(area: Rect, hide_header: bool) -> u16 {
+    dashboard_fixed_overhead(area, hide_header).0
 }
 
 /// List-first peek allocation.
@@ -233,12 +240,37 @@ pub fn compute_layout(area: Rect, peek_visible: bool) -> DashboardLayout {
     compute_layout_with_dispatch(area, peek_visible, 1)
 }
 
-fn dashboard_chrome_heights(area: Rect) -> (u16, u16, u16, u16, u16, u16, u16, bool) {
+/// Like [`compute_layout`], optionally hiding the top location header.
+pub fn compute_layout_with_hide_header(
+    area: Rect,
+    peek_visible: bool,
+    hide_header: bool,
+) -> DashboardLayout {
+    compute_layout_with_dispatch_inner(area, peek_visible, 1, None, hide_header)
+}
+
+fn dashboard_chrome_heights(
+    area: Rect,
+    hide_header: bool,
+) -> (u16, u16, u16, u16, u16, u16, u16, bool) {
     // Match welcome/agent top margin; drop on short terminals.
     let top_margin_h: u16 = if area.height > 6 { 1 } else { 0 };
-    let header_h: u16 = if area.height > 4 { 1 } else { 0 };
-    // Header↔list gap; collapses with dispatch/shortcuts gaps on short terms.
-    let header_gap_h: u16 = if area.height > 10 { 1 } else { 0 };
+    // `[ui] hide_header` zeros the location / chips header (same knob as
+    // the agent status bar and welcome top bar).
+    let header_h: u16 = if hide_header {
+        0
+    } else if area.height > 4 {
+        1
+    } else {
+        0
+    };
+    // Header↔list gap; collapses with dispatch/shortcuts gaps on short terms,
+    // and when the header itself is hidden (no orphan gap).
+    let header_gap_h: u16 = if hide_header || area.height <= 10 {
+        0
+    } else {
+        1
+    };
     let footer_h: u16 = if area.height >= 2 { 1 } else { 0 };
     // Match agent prompt/shortcuts gaps; drop on short terminals.
     let dispatch_gap_h: u16 = if area.height > 10 { 1 } else { 0 };
@@ -258,7 +290,7 @@ fn dashboard_chrome_heights(area: Rect) -> (u16, u16, u16, u16, u16, u16, u16, b
     )
 }
 
-fn dashboard_fixed_overhead(area: Rect) -> (u16, bool) {
+fn dashboard_fixed_overhead(area: Rect, hide_header: bool) -> (u16, bool) {
     let (
         top_margin_h,
         header_h,
@@ -268,7 +300,7 @@ fn dashboard_fixed_overhead(area: Rect) -> (u16, bool) {
         shortcuts_gap_h,
         bottom_margin_h,
         short_terminal,
-    ) = dashboard_chrome_heights(area);
+    ) = dashboard_chrome_heights(area, hide_header);
     let fixed_overhead = top_margin_h
         + header_h
         + header_gap_h
@@ -299,7 +331,16 @@ pub fn max_peek_content_rows(area: Rect) -> u16 {
 /// Like [`compute_layout`] but with a fixed whole peek-box height
 /// (from [`allocate_peek`]). List band receives the rest after chrome.
 pub fn compute_layout_with_peek_box(area: Rect, peek_box_h: u16) -> DashboardLayout {
-    compute_layout_with_dispatch_inner(area, true, 0, Some(peek_box_h.max(3)))
+    compute_layout_with_dispatch_inner(area, true, 0, Some(peek_box_h.max(3)), false)
+}
+
+/// Like [`compute_layout_with_peek_box`] with optional header hide.
+pub fn compute_layout_with_peek_box_hide_header(
+    area: Rect,
+    peek_box_h: u16,
+    hide_header: bool,
+) -> DashboardLayout {
+    compute_layout_with_dispatch_inner(area, true, 0, Some(peek_box_h.max(3)), hide_header)
 }
 
 /// Like [`compute_layout`] but lets the caller request a taller
@@ -316,7 +357,17 @@ pub fn compute_layout_with_dispatch(
     peek_visible: bool,
     dispatch_text_rows: u16,
 ) -> DashboardLayout {
-    compute_layout_with_dispatch_inner(area, peek_visible, dispatch_text_rows, None)
+    compute_layout_with_dispatch_inner(area, peek_visible, dispatch_text_rows, None, false)
+}
+
+/// Like [`compute_layout_with_dispatch`] with optional header hide.
+pub fn compute_layout_with_dispatch_hide_header(
+    area: Rect,
+    peek_visible: bool,
+    dispatch_text_rows: u16,
+    hide_header: bool,
+) -> DashboardLayout {
+    compute_layout_with_dispatch_inner(area, peek_visible, dispatch_text_rows, None, hide_header)
 }
 
 fn compute_layout_with_dispatch_inner(
@@ -324,6 +375,7 @@ fn compute_layout_with_dispatch_inner(
     peek_visible: bool,
     dispatch_text_rows: u16,
     forced_peek_box_h: Option<u16>,
+    hide_header: bool,
 ) -> DashboardLayout {
     // When `area.height == 0`, every subrect collapses
     // to zero. A footer_h = 1 default would produce a non-zero
@@ -355,8 +407,8 @@ fn compute_layout_with_dispatch_inner(
         shortcuts_gap_h,
         bottom_margin_h,
         short_terminal,
-    ) = dashboard_chrome_heights(area);
-    let (fixed_overhead, _) = dashboard_fixed_overhead(area);
+    ) = dashboard_chrome_heights(area, hide_header);
+    let (fixed_overhead, _) = dashboard_fixed_overhead(area, hide_header);
 
     // Peek: list-first allocation (see `allocate_peek`). No peek → normal
     // dispatch chrome. `forced_peek_box_h` skips re-allocation when the
@@ -544,6 +596,27 @@ fn compute_layout_with_dispatch_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hide_header_zeroes_header_and_header_gap() {
+        let area = Rect::new(0, 0, 80, 30);
+        let shown = compute_layout(area, false);
+        let hidden = compute_layout_with_hide_header(area, false, true);
+        assert_eq!(shown.header.height, 1);
+        assert_eq!(shown.header_gap.height, 1);
+        assert_eq!(hidden.header.height, 0);
+        assert_eq!(hidden.header_gap.height, 0);
+        // List should reclaim the two chrome rows.
+        assert_eq!(
+            hidden.list.height,
+            shown.list.height + shown.header.height + shown.header_gap.height
+        );
+        // Chrome overhead drops by header + gap.
+        assert_eq!(
+            chrome_overhead_with_hide_header(area, true),
+            chrome_overhead(area).saturating_sub(shown.header.height + shown.header_gap.height)
+        );
+    }
 
     #[test]
     fn layout_assigns_disjoint_areas() {

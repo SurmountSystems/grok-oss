@@ -524,6 +524,9 @@ impl SessionActor {
     /// Exception: when the interject no-ops but the row is still queued, a
     /// version-matching `new_text` is saved to the row as an LWW edit so the
     /// edit isn't silently lost when the row later drains as its own turn.
+    /// Soft interject only: buffers into `pending_interjections` when a turn is
+    /// running. **Never** cancels the running turn (cancel is Esc/stop only).
+    /// Return value is always `false` (kept for call-site stability).
     pub(super) async fn handle_interject_queued_prompt(
         &self,
         id: &str,
@@ -531,13 +534,16 @@ impl SessionActor {
         owner: Option<&str>,
         new_text: Option<&str>,
     ) -> bool {
+        // Match `SessionCommand::Interject`: buffer only while the turn loop is
+        // active (`current_prompt_id`). Buffering after the loop ends strands.
+        let turn_running = self
+            .current_prompt_id
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_some();
         let mut state = self.state.lock().await;
         let running_front_id = state.running_prompt_id().map(str::to_string);
-        let turn_running = running_front_id.is_some();
-        let goal_active = self
-            .tool_context
-            .goal_loop_active_gate
-            .load(std::sync::atomic::Ordering::Relaxed);
         let row_matches = |item: &InputItem| {
             item.queue_meta.as_ref().is_some_and(|m| {
                 m.id == id
@@ -551,42 +557,60 @@ impl SessionActor {
         } else {
             state.pending_inputs.iter().position(row_matches)
         };
-        let mut cancel_running_turn = false;
-        if let Some(pos) = pos
-            && let Some(mut item) = state.pending_inputs.remove(pos)
-        {
-            // Client-edited text wins (LWW).
-            if let Some(new_text) = new_text.filter(|t| !t.trim().is_empty()) {
-                Self::apply_queued_prompt_edit(&mut item, new_text.to_string(), owner);
+
+        // Soft buffer payload collected under the lock, applied after broadcast
+        // so multi-client panes paint from `x.ai/session/interjection`.
+        let mut buffered: Option<(String, Vec<acp::ImageContent>)> = None;
+
+        if let Some(pos) = pos {
+            let is_bash =
+                Self::extract_bash_command(&state.pending_inputs[pos].prompt_blocks).is_some();
+            let is_plain_prompt = state.pending_inputs[pos]
+                .queue_meta
+                .as_ref()
+                .map(|m| m.kind.as_str())
+                == Some("prompt")
+                && !is_bash;
+
+            if turn_running && is_plain_prompt {
+                if let Some(mut item) = state.pending_inputs.remove(pos) {
+                    // Client-edited text wins (LWW) before harvest.
+                    if let Some(new_text) = new_text.filter(|t| !t.trim().is_empty()) {
+                        Self::apply_queued_prompt_edit(&mut item, new_text.to_string(), owner);
+                    }
+                    let text = item
+                        .queue_meta
+                        .as_ref()
+                        .map(|m| m.text.clone())
+                        .filter(|t| !t.trim().is_empty())
+                        .unwrap_or_else(|| Self::joined_text_blocks(&item.prompt_blocks));
+                    let attachments = crate::session::image_blocks(item.prompt_blocks);
+                    Self::respond_removed_prompt(item.respond_to);
+                    buffered = Some((text, attachments));
+                    tracing::info!(
+                        queued_id = %id,
+                        "soft interject: buffered queued prompt into running turn"
+                    );
+                }
+            } else if let Some(new_text) = new_text.filter(|t| !t.trim().is_empty()) {
+                // Soft no-op (idle / non-plain) but keep the edit as LWW so it
+                // isn't lost when the row later drains as its own turn.
+                if let Some(item) = state.pending_inputs.get_mut(pos) {
+                    Self::apply_queued_prompt_edit(item, new_text.to_string(), owner);
+                    tracing::info!(
+                        queued_id = %id,
+                        "soft interject no-op; saved the edit to the queued row"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    queued_id = %id,
+                    expected_version,
+                    turn_running,
+                    is_plain_prompt,
+                    "queue soft-interject no-op (idle / non-plain / not owner); rebroadcasting"
+                );
             }
-            // Send-now: promote the row to run as the next turn, not an
-            // interjection. Land behind earlier send-now prompts still queued
-            // (FIFO among sends), mirroring `queue_input`.
-            item.send_now = true;
-            let mut insert_at = usize::from(matches!(
-                (state.pending_inputs.front(), running_front_id.as_deref()),
-                (Some(front_item), Some(running)) if front_item.prompt_id == running
-            ));
-            while state
-                .pending_inputs
-                .get(insert_at)
-                .is_some_and(|queued| queued.send_now)
-            {
-                insert_at += 1;
-            }
-            state.pending_inputs.insert(insert_at, item);
-            cancel_running_turn = turn_running && !goal_active;
-            xai_grok_telemetry::unified_log::info(
-                "shell.prompt.send_now_cancels_turn",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "prompt_id": id,
-                    "from_queue_row": true,
-                    "cancels_turn": cancel_running_turn,
-                    "goal_active": goal_active,
-                })),
-            );
-            tracing::info!(queued_id = %id, cancel_running_turn, "send-now: promoted queued prompt to run next");
         } else if let Some(new_text) = new_text
             && !new_text.trim().is_empty()
             && !running_is_row
@@ -595,25 +619,41 @@ impl SessionActor {
                 .iter_mut()
                 .find(|item| row_matches(item))
         {
-            // The send-now no-opped but the row is still queued: keep the
-            // edit as an LWW write so it isn't silently lost. Stale versions
-            // get no fallback (LWW); the running turn is never edited.
+            // Version matched via a looser path than `pos` (should be rare);
+            // keep the edit as LWW.
             Self::apply_queued_prompt_edit(item, new_text.to_string(), owner);
             tracing::info!(
                 queued_id = %id,
-                "send-now no-opped; saved the edit to the queued row"
+                "soft interject no-op; saved the edit to the queued row"
             );
         } else {
             tracing::debug!(
                 queued_id = %id,
                 expected_version,
                 turn_running,
-                "queue send-now no-op (running id / stale / drained / not owner); rebroadcasting"
+                "queue soft-interject no-op (running id / stale / drained / not owner); rebroadcasting"
             );
         }
         // Always re-broadcast the authoritative queue so the client reconciles.
         self.broadcast_queue_changed(&state);
-        cancel_running_turn
+        drop(state);
+
+        if let Some((text, attachments)) = buffered {
+            // Multi-client paint: no client-minted id on the queue wire, so
+            // every pane (including the originator) renders from this broadcast
+            // — dispatch does not optimistic-paint for QueueInterjectShared.
+            self.broadcast_interjection(&text, None);
+            self.events
+                .emit(crate::session::events::Event::Interjected {
+                    source: crate::session::events::InterjectionSource::Queue,
+                    image_count: attachments.len() as u32,
+                    redirect_kind: crate::session::events::RedirectKind::Interjection,
+                });
+            self.pending_interjections
+                .push(PendingInterjection { text, attachments });
+        }
+        // Soft interject never cancels. Cancel is Esc/stop only.
+        false
     }
 
     /// Reorder queued prompts to match `ordered_ids`. The

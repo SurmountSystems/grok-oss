@@ -851,6 +851,7 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
 pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
     match key {
         "compact_mode" => Some(Action::SetCompactMode(new)),
+        "hide_header" => Some(Action::SetHideHeader(new)),
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),
@@ -874,6 +875,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
+        "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
@@ -881,6 +883,9 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
         "economic_mode" => Some(Action::SetEconomicMode(new)),
+        "notifications.session_recap" => Some(Action::SetNotificationsSessionRecap(new)),
+        "features.session_recap" => Some(Action::SetFeaturesSessionRecap(new)),
+        "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
         _ => None,
     }
 }
@@ -897,6 +902,7 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "permission_mode" => None,
         "coding_data_sharing" => None,
         "plan_mode" => None,
+        "plan_approval_park" => None,
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
@@ -941,6 +947,10 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             "off" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off)),
             _ => None,
         },
+        "plan_approval_park" => match choice {
+            "soft" | "modal" => Some(Action::SetPlanApprovalPark(choice.to_string())),
+            _ => None,
+        },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
@@ -957,6 +967,12 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
         }
+        "cancel_subagents_on_turn_cancel" => match choice {
+            "ask" | "always_stop" | "always_continue" => {
+                Some(Action::SetCancelSubagentsOnTurnCancel(choice.to_string()))
+            }
+            _ => None,
+        },
         "auto_compact_threshold_percent" => {
             crate::settings::parse_auto_compact_threshold_canonical(choice)
                 .map(Action::SetAutoCompactThreshold)
@@ -1007,6 +1023,9 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "max_thoughts_width" => Some(Action::SetMaxThoughtsWidth(value)),
         "scroll_speed" => Some(Action::SetScrollSpeed(value)),
         "scroll_lines" => Some(Action::SetScrollLines(value)),
+        "notifications.session_recap_threshold_secs" => {
+            Some(Action::SetNotificationsSessionRecapThresholdSecs(value))
+        }
         _ => None,
     }
 }

@@ -813,6 +813,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "hide_header" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("hide_header", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_hide_header(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "show_timestamps" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_timestamps", "Bool", &value));
@@ -826,6 +834,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("page_flip_on_send", "Bool", &value));
             };
             xai_grok_shell::util::config::set_page_flip_on_send(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "scrub_ascii_punct" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("scrub_ascii_punct", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_scrub_ascii_punct(b)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1009,6 +1025,43 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "notifications.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("notifications.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "notifications.session_recap_threshold_secs",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap_threshold_secs(i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "features.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("features.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_features_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "bubble_copy_buttons" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("bubble_copy_buttons", "Bool", &value));
+            };
+            tokio::task::spawn_blocking(move || crate::appearance::persist_bubble_copy_buttons(b))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
         "vim_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("vim_mode", "Bool", &value));
@@ -1114,6 +1167,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "plan_approval_park" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("plan_approval_park", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_plan_approval_park(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
         "hunk_tracker_mode" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("hunk_tracker_mode", "Enum", &value));
@@ -1214,6 +1275,60 @@ pub(crate) async fn persist_setting(
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
 }
+
+/// After a successful disk write of auto-compact threshold, notify the agent
+/// so open sessions update their `threshold_percent` / `threshold_tokens`
+/// Cells without restart.
+///
+/// Params use the **committed Settings enum value** (not a re-resolve that
+/// can race disk). That is intentional race-safety: open sessions see the
+/// preference the user just saved. Full resolve precedence (env
+/// `GROK_AUTO_COMPACT_THRESHOLD_PERCENT` / `_TOKENS` above session TOML) still
+/// applies on the next spawn / model-switch re-resolve — so a process env
+/// override can temporarily sit under a Settings live-apply until that next
+/// resolve. Do not add a second canonical-string parser here; reuse
+/// [`crate::settings::parse_auto_compact_threshold_canonical`].
+pub(crate) async fn notify_auto_compact_threshold_changed(
+    tx: &AcpAgentTx,
+    value: &crate::settings::SettingValue,
+) {
+    let crate::settings::SettingValue::Enum(canonical) = value else {
+        tracing::warn!(
+            "auto_compact_threshold live-apply skipped: expected Enum value, got {value:?}"
+        );
+        return;
+    };
+    let Some(choice) = crate::settings::parse_auto_compact_threshold_canonical(canonical) else {
+        tracing::warn!(
+            canonical,
+            "auto_compact_threshold live-apply skipped: unparseable canonical"
+        );
+        return;
+    };
+    use crate::settings::AutoCompactThresholdChoice;
+    let params = match choice {
+        AutoCompactThresholdChoice::Percent(pct) => serde_json::json!({
+            "auto_compact_threshold_percent": pct,
+            "auto_compact_threshold_tokens": serde_json::Value::Null,
+        }),
+        AutoCompactThresholdChoice::Tokens(t) => serde_json::json!({
+            // Display % recomputed per session from model_context_window.
+            "auto_compact_threshold_percent":
+                xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+            "auto_compact_threshold_tokens": t,
+        }),
+    };
+    let notification = acp::ExtNotification::new(
+        "x.ai/auto_compact_threshold_changed",
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize auto_compact_threshold_changed params")
+            .into(),
+    );
+    if let Err(e) = acp_send(notification, tx).await {
+        tracing::warn!("Failed to send auto_compact_threshold_changed notification: {e}");
+    }
+}
+
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 ///
 /// 1. Persist `ui.permission_mode` to disk.
@@ -1467,6 +1582,15 @@ pub(super) async fn fetch_openrouter_credit_balance(
     Some(crate::views::credit_bar::OpenRouterCreditBalance {
         balance_cents: cents,
     })
+}
+
+/// Fetch console team prepaid balance (Management API) when key + team_id are
+/// configured. Returns absolute remaining cents; `None` keeps prior UI cache
+/// and leaves process-cache / honest absence paths alone.
+pub(super) async fn fetch_console_team_prepaid_cents() -> Option<i64> {
+    xai_grok_shell::auth::fetch_console_team_prepaid_balance_default()
+        .await
+        .map(|m| m.balance_cents)
 }
 /// Fetch the user's auto top-up rule via the `x.ai/auto-topup-rule` extension.
 /// A transport failure yields [`AutoTopupFetch::Unchanged`] so the caller keeps

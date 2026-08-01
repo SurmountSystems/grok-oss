@@ -45,15 +45,33 @@ pub enum AuthScheme {
 /// `SamplerConfig` is handed to the actor. Auth is selected separately
 /// via `auth_scheme`, while `api_backend` controls only the request/response
 /// protocol shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Per-request sampler configuration.
+///
+/// [`Debug`] redacts API keys / session identity so logs never dump secrets.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SamplerConfig {
     pub api_key: Option<String>,
     /// Additional API keys tried when the active key hits a credit /
-    /// spending-limit error ([`xai_grok_sampling_types::SamplingError::is_credit_exhausted`]).
+    /// spending-limit error ([`xai_grok_sampling_types::SamplingError::is_credit_exhausted`])
+    /// **or** a plain HTTP 429 ([`xai_grok_sampling_types::SamplingError::is_rate_limited`]).
     /// Order is preference; keys already equal to `api_key` are ignored.
-    /// Empty (default) disables multi-key failover.
+    /// Empty (default) disables multi-key failover. Credit hops sticky-memo the
+    /// dead identity (~1h process-local); rate-limit hops use temporary shared
+    /// cooldown only (return to primary when cool).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failover_api_keys: Vec<String>,
+    /// When set, identity hop to a **non-session** failover key also switches
+    /// [`Self::base_url`] to this host (console / Business API vs session proxy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover_base_url: Option<String>,
+    /// Session host restored when hopping to [`Self::session_identity_key`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_base_url: Option<String>,
+    /// Exact token that marks the SuperGrok / OAuth session identity in the
+    /// failover list (or primary). Used when switching API host with the key
+    /// (SuperGrok proxy ↔ `api.x.ai`) and for bearer reinstall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_identity_key: Option<String>,
     pub base_url: String,
     pub model: String,
     pub max_completion_tokens: Option<u32>,
@@ -114,6 +132,17 @@ pub struct SamplerConfig {
     #[serde(skip)]
     pub bearer_resolver: Option<SharedBearerResolver>,
 
+    /// Stashed live resolver after hop-away-from-session; reinstalled on hop-to-session.
+    #[serde(skip)]
+    pub stashed_bearer_resolver: Option<SharedBearerResolver>,
+
+    /// Durable session live resolver for hop-to-session **without** a prior stash
+    /// (key-primary dual-auth mid-hop, or next-turn re-resolve). Shell wires
+    /// `AuthManager` here; hop-to-session prefers stash, then this field.
+    /// Not cleared when hopping session→key.
+    #[serde(skip)]
+    pub session_bearer_resolver: Option<SharedBearerResolver>,
+
     #[serde(default)]
     pub supports_backend_search: bool,
 
@@ -139,6 +168,99 @@ pub struct SamplerConfig {
     pub header_injector: Option<SharedHeaderInjector>,
 }
 
+/// Debug helper: show map keys, redact values (auth headers / query secrets).
+struct RedactedStrMap<'a> {
+    map: &'a IndexMap<String, String>,
+}
+
+impl std::fmt::Debug for RedactedStrMap<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_map();
+        for k in self.map.keys() {
+            d.entry(k, &"<redacted>");
+        }
+        d.finish()
+    }
+}
+
+impl std::fmt::Debug for SamplerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SamplerConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "failover_api_keys",
+                &format_args!("[{} redacted]", self.failover_api_keys.len()),
+            )
+            .field("failover_base_url", &self.failover_base_url)
+            .field("session_base_url", &self.session_base_url)
+            .field(
+                "session_identity_key",
+                &self.session_identity_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("max_completion_tokens", &self.max_completion_tokens)
+            .field("temperature", &self.temperature)
+            .field("top_p", &self.top_p)
+            .field("api_backend", &self.api_backend)
+            .field("auth_scheme", &self.auth_scheme)
+            .field(
+                "extra_headers",
+                &RedactedStrMap {
+                    map: &self.extra_headers,
+                },
+            )
+            .field(
+                "query_params",
+                &RedactedStrMap {
+                    map: &self.query_params,
+                },
+            )
+            .field(
+                "env_http_headers",
+                &RedactedStrMap {
+                    map: &self.env_http_headers,
+                },
+            )
+            .field("context_window", &self.context_window)
+            .field("force_http1", &self.force_http1)
+            .field("max_retries", &self.max_retries)
+            .field("stream_tool_calls", &self.stream_tool_calls)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("origin_client", &self.origin_client)
+            .field("client_identifier", &self.client_identifier)
+            .field("deployment_id", &self.deployment_id)
+            .field("user_id", &self.user_id)
+            .field("client_version", &self.client_version)
+            .field(
+                "attribution_callback",
+                &self.attribution_callback.as_ref().map(|_| "<callback>"),
+            )
+            .field(
+                "bearer_resolver",
+                &self.bearer_resolver.as_ref().map(|_| "<resolver>"),
+            )
+            .field(
+                "stashed_bearer_resolver",
+                &self.stashed_bearer_resolver.as_ref().map(|_| "<resolver>"),
+            )
+            .field(
+                "session_bearer_resolver",
+                &self.session_bearer_resolver.as_ref().map(|_| "<resolver>"),
+            )
+            .field("supports_backend_search", &self.supports_backend_search)
+            .field("compactions_remaining", &self.compactions_remaining)
+            .field("compaction_at_tokens", &self.compaction_at_tokens)
+            .field("doom_loop_recovery", &self.doom_loop_recovery)
+            .field(
+                "header_injector",
+                &self.header_injector.as_ref().map(|_| "<injector>"),
+            )
+            .finish()
+    }
+}
+
 impl Default for SamplerConfig {
     /// Empty defaults so callers can use `..Default::default()` and
     /// new fields don't ripple through every literal site.
@@ -146,6 +268,9 @@ impl Default for SamplerConfig {
         Self {
             api_key: None,
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             base_url: String::new(),
             model: String::new(),
             max_completion_tokens: None,
@@ -169,6 +294,8 @@ impl Default for SamplerConfig {
             client_version: None,
             attribution_callback: None,
             bearer_resolver: None,
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,

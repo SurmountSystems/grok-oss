@@ -263,6 +263,44 @@ pub enum TickDemand {
 /// `SHIMMER_FPS` so slow ticks sample every shimmer frame, and bounds the
 /// latency of the macOS Cmd link-hover underline.
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
+
+/// Whether the agent composer would paint the software Human-green box caret.
+///
+/// Used by [`AppView::tick_demand`] so idle sessions with a focused prompt
+/// keep Slow redraws for the filled↔hollow blink without a Fast 30fps loop.
+fn agent_wants_composer_cursor_blink(agent: &crate::app::agent_view::AgentView) -> bool {
+    use crate::views::agent::ActivePane;
+    // Modals / viewers own focus; no composer caret then.
+    if agent.active_modal.is_some()
+        || agent.block_viewer.is_some()
+        || agent.line_viewer.is_some()
+        || agent.image_viewer.is_some()
+        || agent.video_viewer.is_some()
+        || agent.gboom.is_some()
+        || !agent.permission_queue.is_empty()
+    {
+        return false;
+    }
+    // Soft-park plan approval can still leave the composer focused (Prompt pane).
+    if let Some(pav) = agent.plan_approval_view.as_ref() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+        if pav.focus != PlanApprovalFocus::Preview {
+            return true;
+        }
+        return agent.active_pane == ActivePane::Prompt;
+    }
+    agent.active_pane == ActivePane::Prompt
+}
+
+/// Live non-workflow L2 subagents that should keep window-title busy state
+/// and Agent-view ticks (mirrors dashboard tick demand for subagent_sessions).
+pub(crate) fn agent_has_running_title_subagents(agent: &crate::app::agent_view::AgentView) -> bool {
+    agent
+        .subagent_sessions
+        .values()
+        .any(|info| info.is_running() && info.workflow_run_id.is_none())
+}
+
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
 const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(4);
@@ -718,6 +756,9 @@ pub struct AppView {
     /// OpenRouter account credits (when an OR key is configured). Shown in the
     /// prompt footer when the active model is OpenRouter-backed.
     pub openrouter_credit_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+    /// Console team prepaid remaining USD cents (Management API). Distinct from
+    /// SuperGrok session extras. `None` = honest absence.
+    pub console_team_prepaid_cents: Option<i64>,
     /// Periodic billing poll requested (credits >= 99%).
     pub billing_poll_wanted: bool,
     /// Leader-mode session roster (FleetView dashboard). Populated from
@@ -766,6 +807,10 @@ pub struct AppView {
     /// resolved by the shell and advertised on ACP initialize (`sessionRecap`).
     /// When false, the pager must not request recaps (zero `x.ai/recap` traffic).
     pub session_recap_available: bool,
+    /// User/config mirror for `[features] session_recap` (Settings master kill).
+    /// Seeded at connect from shell config; Settings toggles update this live
+    /// (toast still says restart so ACP re-advertises). Default true.
+    pub features_session_recap: bool,
     /// Stateful prompt widget rendered on the welcome screen (persists input across frames).
     pub welcome_prompt: PromptWidget,
     /// The single slash-command MRU/recency store. Owned here and injected
@@ -804,6 +849,10 @@ pub struct AppView {
     /// colors show instead of literal escapes. Plain-text transcripts (`/export`
     /// markdown) leave this false.
     pub pending_pager_ansi: bool,
+    /// When true, the event loop captures the last presented TUI frame to a
+    /// PNG under `$GROK_HOME/screenshots/` after the next present and toasts
+    /// the path. Set by `/screenshot` / [`Action::CaptureTuiScreenshot`].
+    pub pending_tui_screenshot: bool,
     /// Minimal mode only: the Ctrl+T **force-show** pin for the todo panel.
     /// Minimal-mode-only per-session state, consolidated into a single field so
     /// the central `AppView` isn't peppered with loose minimal flags. Default-
@@ -1316,6 +1365,14 @@ impl AppView {
                 .is_some_and(is_api_key_label);
         self.usage_visible = meta.team_name.is_none() && !self.is_api_key_auth;
         self.sync_billing_surface_to_agents();
+        // Console API key primary: meter identity matches live spend pool from
+        // the start (not SuperGrokSession default until a hop toast).
+        if self.is_api_key_auth {
+            for agent in self.agents.values_mut() {
+                agent.sampling_identity =
+                    crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
+            }
+        }
         self.apply_tier_restrictions();
         if self.is_api_key_auth {
             self.ensure_voice_for_api_key();
@@ -1417,6 +1474,7 @@ impl AppView {
             pending_editor: None,
             pending_pager_path: None,
             pending_pager_ansi: false,
+            pending_tui_screenshot: false,
             minimal_state: crate::minimal_api::MinimalState::default(),
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
@@ -1549,6 +1607,7 @@ impl AppView {
             credit_balance: None,
             auto_topup: None,
             openrouter_credit_balance: None,
+            console_team_prepaid_cents: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
@@ -1559,6 +1618,7 @@ impl AppView {
             session_picker_grouped: false,
             cancel_rewind_enabled: true,
             session_recap_available: false,
+            features_session_recap: true,
             tutorial: None,
             dashboard: None,
             dashboard_return: None,
@@ -2951,6 +3011,7 @@ impl AppView {
                 git_ref: None,
             },
             ActionId::OpenDashboard => Action::OpenDashboard,
+            ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
             ActionId::VoiceToggle => {
                 if !self.current_ui.voice_keybind_enabled.unwrap_or(true) {
                     return InputOutcome::Unchanged;
@@ -4101,6 +4162,13 @@ impl AppView {
     /// synchronized output, cursor blink preservation). See that module's
     /// docs for the full rationale.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
+        // Refresh title/progress OSC on every present when nothing is pending.
+        // Covers deferred ACP draws and other present paths that never called
+        // update_notifications; avoids double-ticking when tick/ACP already
+        // filled pending_notification_escapes this cycle.
+        if self.pending_notification_escapes.is_none() {
+            self.update_notifications();
+        }
         self.draw_inner(terminal);
         crate::memory_release::run_deferred_release();
     }
@@ -4325,6 +4393,7 @@ impl AppView {
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
                             upgrade_cta: hero_cta.map(|(_owner, label, _)| label),
                             privacy_banner,
+                            hide_header: self.appearance.hide_header,
                         };
                         let result = crate::views::welcome::render_welcome(
                             view_area,
@@ -4643,17 +4712,19 @@ impl AppView {
                                     caption: crate::views::announcements::usable_cta_caption(owner),
                                 },
                             );
-                            let dash_cursor = crate::views::dashboard::render_dashboard(
-                                f.buffer_mut(),
-                                view_area,
-                                dashboard,
-                                agents,
-                                registry,
-                                pending_hint,
-                                dashboard_roster,
-                                self.dashboard_sessions_loading,
-                                dash_upgrade_cta,
-                            );
+                            let dash_cursor =
+                                crate::views::dashboard::render_dashboard_with_hide_header(
+                                    f.buffer_mut(),
+                                    view_area,
+                                    dashboard,
+                                    agents,
+                                    registry,
+                                    pending_hint,
+                                    dashboard_roster,
+                                    self.dashboard_sessions_loading,
+                                    dash_upgrade_cta,
+                                    self.appearance.hide_header,
+                                );
                             let (popup_cursor, popup_post_flush, drawn_popup_agent) =
                                 if let Some(agent_id) = dashboard.attached_agent {
                                     let theme = crate::theme::Theme::current();
@@ -5205,6 +5276,12 @@ impl AppView {
                     needs_redraw = true;
                 }
             }
+            // Software Human-green box caret samples wall-clock phase on every paint.
+            // Slow ticks keep the clock armed (`tick_demand`); this forces the
+            // present so filled↔hollow actually advances while idle/focused.
+            if agent_wants_composer_cursor_blink(agent) {
+                needs_redraw = true;
+            }
         }
         if let Some(commands) = bootstrap_commands_update {
             self.welcome_prompt
@@ -5215,6 +5292,13 @@ impl AppView {
             self.bootstrap_acp_commands = commands;
         }
         self.update_notifications();
+        // Title/progress OSC lives in pending_notification_escapes and only
+        // flushes on draw. Force a present when escapes are queued even if the
+        // cell buffer is visually unchanged (idle session title, progress
+        // keepalive) so DE window titles stay live.
+        if self.pending_notification_escapes.is_some() {
+            needs_redraw = true;
+        }
         if let Some((_, remaining)) = self.deferred_notification.as_mut() {
             if *remaining == 0 {
                 let event = self.deferred_notification.take().unwrap().0;
@@ -5413,6 +5497,9 @@ impl AppView {
                     || agent.acp_synced_generation != agent.session.available_commands_generation
                     || !agent.session.state.is_idle()
                     || agent.session.loading_replay
+                    // Live L2 subagents must keep ticks even when the parent is
+                    // Idle so window title / progress can refresh on finish.
+                    || agent_has_running_title_subagents(agent)
                     || agent
                         .mcp_init_progress
                         .as_ref()
@@ -5486,6 +5573,12 @@ impl AppView {
                 {
                     return TickDemand::Slow;
                 }
+                // Composer Human-green box caret blinks filled↔hollow on a slow
+                // wall-clock phase; Slow ticks keep it alive without a 30fps spin
+                // while the agent is idle and the prompt is focused.
+                if agent_wants_composer_cursor_blink(agent) {
+                    return TickDemand::Slow;
+                }
                 TickDemand::None
             }
             ActiveView::AgentDashboard => {
@@ -5521,41 +5614,121 @@ impl AppView {
     /// Also clears the permission notification flag when no permissions
     /// remain queued, so the next batch fires a fresh bell/popup.
     pub fn update_notifications(&mut self) {
-        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
-            if let ActiveView::Agent(id) = self.active_view
-                && let Some(agent) = self.agents.get(&id)
-            {
-                let name = agent
-                    .display_name
-                    .as_deref()
-                    .or(agent.generated_session_title.as_deref());
-                let model = agent.session.models.current_model_name();
-                let parked = agent.renders_parked();
-                let activity = if parked {
-                    None
-                } else {
-                    agent.resolve_turn_activity()
-                };
-                let has_perms = !agent.permission_queue.is_empty();
-                let elapsed = if parked { None } else { agent.turn_elapsed() };
-                let is_busy = agent.session.state.is_busy() && !parked;
-                (name, model, activity, has_perms, elapsed, is_busy)
-            } else {
-                (None, None, None, false, None, false)
-            };
+        // Top-level busy (unparked) agents, plus any agent that still has live
+        // L2 subagents — parked TaskOutput chrome must not hide multi-agent
+        // discoverability while children run.
+        let busy_agent_count = self
+            .agents
+            .values()
+            .filter(|a| {
+                (a.session.state.is_busy() && !a.renders_parked())
+                    || agent_has_running_title_subagents(a)
+            })
+            .count();
         let any_agent_has_perms = self.agents.values().any(|a| !a.permission_queue.is_empty());
         if !any_agent_has_perms {
             self.notification_service.clear_permission_notification();
         }
+
+        // Own the session label so later agent-map scans do not conflict
+        // with a borrow into TitleState.
+        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
+            match self.active_view {
+                ActiveView::Agent(id) => {
+                    if let Some(agent) = self.agents.get(&id) {
+                        let name = crate::notifications::title::resolve_session_title_name(
+                            agent.display_name.as_deref(),
+                            agent.generated_session_title.as_deref(),
+                        )
+                        .map(str::to_owned);
+                        let model = agent.session.models.current_model_name();
+                        let parked = agent.renders_parked();
+                        let has_running_subagents = agent_has_running_title_subagents(agent);
+                        // Parked chrome blanks activity for pure bg-command
+                        // waits (progress bar off). Keep activity when L2
+                        // subagents are still running so the DE title does
+                        // not look idle during long waits. Idle parent + live
+                        // children: inject Subagent wait (resolve returns None
+                        // once parent is no longer TurnRunning).
+                        let activity = if parked && !has_running_subagents {
+                            None
+                        } else {
+                            agent.resolve_turn_activity().or_else(|| {
+                                has_running_subagents.then_some(
+                                    crate::acp::tracker::TurnActivity::Waiting(
+                                        crate::acp::tracker::WaitingReason::Subagent,
+                                    ),
+                                )
+                            })
+                        };
+                        let has_perms = !agent.permission_queue.is_empty();
+                        let elapsed = if parked && !has_running_subagents {
+                            None
+                        } else {
+                            agent.turn_elapsed()
+                        };
+                        // Progress + title spinner: unparked parent busy, or
+                        // any live subagent (idle parent / parked wait).
+                        let is_busy =
+                            (agent.session.state.is_busy() && !parked) || has_running_subagents;
+                        (name, model, activity, has_perms, elapsed, is_busy)
+                    } else {
+                        (None, None, None, false, None, false)
+                    }
+                }
+                ActiveView::AgentDashboard => {
+                    // Selected / primary agent session name when available.
+                    let selected_id = self.dashboard.as_ref().and_then(|d| {
+                        d.selected.as_ref().and_then(|row| match row {
+                            crate::views::dashboard::DashboardRowId::TopLevel(id) => Some(*id),
+                            crate::views::dashboard::DashboardRowId::Subagent {
+                                parent, ..
+                            } => Some(*parent),
+                            crate::views::dashboard::DashboardRowId::Roster { .. } => None,
+                        })
+                    });
+                    let agent = selected_id
+                        .and_then(|id| self.agents.get(&id))
+                        .or_else(|| self.agents.values().next());
+                    let name = agent
+                        .and_then(|a| {
+                            crate::notifications::title::resolve_session_title_name(
+                                a.display_name.as_deref(),
+                                a.generated_session_title.as_deref(),
+                            )
+                        })
+                        .map(str::to_owned);
+                    let model = agent.and_then(|a| a.session.models.current_model_name());
+                    let is_busy = busy_agent_count > 0;
+                    (name, model, None, any_agent_has_perms, None, is_busy)
+                }
+                ActiveView::Welcome => {
+                    // Prefer a live agent's session name when one exists so
+                    // Welcome still brands the DE title with the session
+                    // (resume/fork flows, multi-agent return to welcome).
+                    let agent = self.agents.values().next();
+                    let name = agent
+                        .and_then(|a| {
+                            crate::notifications::title::resolve_session_title_name(
+                                a.display_name.as_deref(),
+                                a.generated_session_title.as_deref(),
+                            )
+                        })
+                        .map(str::to_owned);
+                    let model = agent.and_then(|a| a.session.models.current_model_name());
+                    (name, model, None, false, None, busy_agent_count > 0)
+                }
+            };
         let cwd_str = self.cwd.to_string_lossy();
         let title_state = crate::notifications::TitleState {
-            session_name,
+            session_name: session_name.as_deref(),
             model: model.as_deref(),
             activity: activity.as_ref(),
             has_pending_permissions: has_perms,
             cwd: Some(&cwd_str),
             turn_elapsed,
             is_busy,
+            busy_agent_count,
             focused: self.notification_service.focus_tracker.is_focused(),
         };
         if let Some(esc) = self.notification_service.on_tick(&title_state) {
@@ -5813,6 +5986,7 @@ pub(crate) mod tests {
             pending_editor: None,
             pending_pager_path: None,
             pending_pager_ansi: false,
+            pending_tui_screenshot: false,
             minimal_state: crate::minimal_api::MinimalState::default(),
             reconnect_pending: false,
             show_resolved_model: true,
@@ -5824,6 +5998,7 @@ pub(crate) mod tests {
             credit_balance: None,
             auto_topup: None,
             openrouter_credit_balance: None,
+            console_team_prepaid_cents: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
@@ -5834,6 +6009,7 @@ pub(crate) mod tests {
             session_picker_grouped: false,
             cancel_rewind_enabled: true,
             session_recap_available: false,
+            features_session_recap: true,
             tutorial: None,
             dashboard: None,
             dashboard_return: None,
@@ -6148,9 +6324,14 @@ pub(crate) mod tests {
             app.needs_animation(),
             "an open prompt history overlay must request animation ticks"
         );
+        // Do not gate on `tick()`'s bool return: activate may already have
+        // grabbed a fast daemon snapshot (poll then no-ops, tick returns
+        // false) while still leaving result_count == 2. Match the
+        // scrollback-search delivery loop — tick, then check results.
         let mut delivered = false;
         for _ in 0..1000 {
-            if app.tick() && app.agents[&id].prompt.history_search.result_count() == 2 {
+            let _ = app.tick();
+            if app.agents[&id].prompt.history_search.result_count() == 2 {
                 delivered = true;
                 break;
             }
@@ -6256,6 +6437,7 @@ pub(crate) mod tests {
     fn tick_demand_fast_while_modal_session_picker_loads() {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
+        // test_app_with_agent parks on Scrollback (no composer caret).
         assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
         app.agents.get_mut(&id).unwrap().active_modal =
             Some(crate::views::modal::ActiveModal::SessionPicker {
@@ -6314,6 +6496,85 @@ pub(crate) mod tests {
             "settled picker must not keep demanding ticks"
         );
     }
+    /// Focused composer demands Slow ticks for the filled↔hollow box caret
+    /// blink without upgrading to Fast.
+    #[test]
+    fn tick_demand_slow_while_composer_caret_blinks() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        assert_eq!(app.tick_demand(), TickDemand::None, "scrollback pane parks");
+        app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Slow,
+            "focused prompt must Slow-tick for Human-green box caret blink"
+        );
+        assert!(app.needs_animation());
+        // Modal steals focus → park again (no software caret).
+        app.agents.get_mut(&id).unwrap().active_modal =
+            Some(crate::views::modal::ActiveModal::CommandPalette {
+                entries: Vec::new(),
+                state: crate::views::picker::PickerState::default(),
+                window: crate::views::modal_window::ModalWindowState::new(),
+            });
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "modal open suppresses composer caret ticks"
+        );
+    }
+
+    /// Idle focused composer must *redraw* on each animation tick so the
+    /// filled↔hollow box caret advances. `tick_demand` only schedules the
+    /// clock; `tick()` returning true is what arms `presenter.request`.
+    #[test]
+    fn tick_redraws_while_composer_caret_blinks() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+
+        // Settle one-shot tick side effects (title OSC queue, command sync).
+        // Title escapes force redraw until drawn; clear them so this test
+        // measures caret-blink redraw alone.
+        let _ = app.tick();
+        app.pending_notification_escapes = None;
+        let _ = app.tick();
+        app.pending_notification_escapes = None;
+
+        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert!(
+            !app.tick() && app.pending_notification_escapes.is_none(),
+            "scrollback-focused settled idle must not force redraw"
+        );
+
+        app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+        assert_eq!(app.tick_demand(), TickDemand::Slow);
+        app.pending_notification_escapes = None;
+        assert!(
+            app.tick(),
+            "focused composer caret blink must request a redraw each Slow tick"
+        );
+        app.pending_notification_escapes = None;
+        assert!(
+            app.tick(),
+            "caret blink redraw must hold across ticks, not a one-shot"
+        );
+
+        // Modal steals the caret → no blink redraw.
+        app.agents.get_mut(&id).unwrap().active_modal =
+            Some(crate::views::modal::ActiveModal::CommandPalette {
+                entries: Vec::new(),
+                state: crate::views::picker::PickerState::default(),
+                window: crate::views::modal_window::ModalWindowState::new(),
+            });
+        let _ = app.tick();
+        app.pending_notification_escapes = None;
+        assert_eq!(app.tick_demand(), TickDemand::None);
+        assert!(
+            !app.tick() && app.pending_notification_escapes.is_none(),
+            "modal open must not keep caret redraws"
+        );
+    }
+
     /// An idle agent view demands no ticks at all; the macOS Cmd link-hover
     /// poll (when it is the only pending work) demands Slow, never Fast.
     #[test]
@@ -6746,9 +7007,8 @@ pub(crate) mod tests {
         let mut app = test_app_with_agent();
         let id = super::super::agent::AgentId(0);
         assert!(!app.needs_animation());
-        app.agents.get_mut(&id).unwrap().btw_state = Some(BtwOverlayState::Loading {
-            question: "what is X?".into(),
-        });
+        app.agents.get_mut(&id).unwrap().btw_state =
+            Some(BtwOverlayState::loading("what is X?".into()));
         assert!(app.needs_animation());
         let saw_redraw = (0..SPINNER_DIVISOR).any(|_| app.tick());
         assert!(
@@ -6761,6 +7021,8 @@ pub(crate) mod tests {
         app.agents.get_mut(&id).unwrap().btw_state = Some(BtwOverlayState::Error {
             question: "what is X?".into(),
             error: "boom".into(),
+            prior_turns: Vec::new(),
+            btw_session_id: None,
         });
         assert!(!app.needs_animation());
     }
@@ -6778,6 +7040,7 @@ pub(crate) mod tests {
                 priority: Default::default(),
                 status: xai_grok_shell::tools::TodoStatus::InProgress,
                 meta: None,
+                size: None,
             }]);
         assert!(
             app.agents[&id].todo.badge_needs_tick(),
@@ -7481,9 +7744,8 @@ pub(crate) mod tests {
     /// Apple Terminal (interject = Ctrl+O), minimal mode: at idle the interject
     /// path would silently no-op, so Ctrl+O must open the transcript — this was
     /// the "Ctrl+O appears dead on Mac" report. With a running turn and text in
-    /// the composer the same key must send-now (cancel-and-send). With a running
-    /// turn, empty composer, and a queued follow-up it must force-send that row
-    /// (send-now).
+    /// the composer the same key soft-interjects (never cancels). With a running
+    /// turn, empty composer, and a queued follow-up it soft-interjects that row.
     #[test]
     fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() {
         let mut app = test_app_with_agent();
@@ -7502,8 +7764,8 @@ pub(crate) mod tests {
         }
         let out = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(
-            matches!(out, InputOutcome::Action(Action::SendPromptNow { ref text, .. }) if text == "steer it"),
-            "running Apple-Terminal Ctrl+O with payload must send-now, got {out:?}"
+            matches!(out, InputOutcome::Action(Action::Interject { ref text, .. }) if text == "steer it"),
+            "running Apple-Terminal Ctrl+O with payload must soft-interject, got {out:?}"
         );
         {
             let agent = app.agents.get_mut(&id).unwrap();
@@ -7514,14 +7776,14 @@ pub(crate) mod tests {
         assert!(
             matches!(
                 out,
-                InputOutcome::Action(Action::SendPromptNow { ref text, .. })
+                InputOutcome::Action(Action::Interject { ref text, .. })
                     if text == "queued follow-up"
             ),
-            "running + empty + queue: Apple-Terminal Ctrl+O must send-now, got {out:?}"
+            "running + empty + queue: Apple-Terminal Ctrl+O must soft-interject, got {out:?}"
         );
         assert!(
             app.agents[&id].session.pending_prompts.is_empty(),
-            "queued row must be consumed by prompt-path send-now"
+            "queued row must be consumed by prompt-path soft interject"
         );
     }
     fn assert_background_routing_for_mode(
@@ -9732,6 +9994,202 @@ pub(crate) mod tests {
         let result = AppView::merge_escapes(None, None);
         assert!(result.is_none());
     }
+
+    #[test]
+    fn welcome_update_notifications_includes_agent_session_name_in_escapes() {
+        // Named contract: Welcome still applies session name to the window
+        // title when an agent exists (resume / multi-agent return to welcome).
+        // OSC payload must carry the session substring so DE switchers show it.
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("welcome-session".into());
+        app.active_view = ActiveView::Welcome;
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        let esc = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("TitleManager must emit OSC on first welcome tick with session");
+        assert!(
+            esc.contains("welcome-session"),
+            "welcome title OSC must include session name, got {esc:?}"
+        );
+        assert!(
+            esc.contains('\u{1b}') || esc.contains("\x1b"),
+            "expected OSC escape framing, got {esc:?}"
+        );
+    }
+
+    #[test]
+    fn agent_update_notifications_osc_includes_session_name() {
+        // Named contract: Agent view TitleManager path includes session in OSC.
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("dash session".into());
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        let esc = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("agent title OSC");
+        assert!(
+            esc.contains("dash session"),
+            "agent title OSC must include session, got {esc:?}"
+        );
+    }
+
+    #[test]
+    fn window_title_shows_activity_when_parked_with_running_subagents() {
+        // Named contract: parked TaskOutput chrome must not hide DE window
+        // title activity while L2 subagents are still running. Dogfood failure
+        // mode: parent parks on get_command_or_subagent_output → title goes
+        // idle even though subagents are live.
+        use crate::app::actions::Action;
+        use crate::app::agent_view::test_fixtures::{
+            running_subagent_info, simulate_task_output_wait,
+        };
+
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("proj-alpha".into());
+        let _ =
+            crate::app::dispatch::dispatch(Action::SendPrompt("spawn workers".into()), &mut app);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent
+                .subagent_sessions
+                .insert("child-a".into(), running_subagent_info("child-a"));
+            agent
+                .subagent_sessions
+                .insert("child-b".into(), running_subagent_info("child-b"));
+            simulate_task_output_wait(agent, "child-a");
+            agent.maybe_push_parked_marker();
+            assert!(
+                agent.renders_parked(),
+                "fixture must park on TaskOutput wait"
+            );
+            assert!(
+                agent.session.state.is_busy(),
+                "parent turn remains running while parked"
+            );
+        }
+
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        let esc = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("TitleManager must emit OSC while subagents run");
+        assert!(
+            esc.contains("proj-alpha"),
+            "session name must remain in window title, got {esc:?}"
+        );
+        // Must not collapse to idle "proj-alpha - grok-oss" only.
+        let activity_signal = esc.contains("Waiting") || title_spinner_chars_present(esc);
+        assert!(
+            activity_signal,
+            "window title must signal running subagent wait (activity/spinner), got {esc:?}"
+        );
+    }
+
+    /// Any braille spinner codepoint from TitleManager's spinner set.
+    fn title_spinner_chars_present(esc: &str) -> bool {
+        const SPINNER: &[char] = &[
+            '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
+            '\u{2827}',
+        ];
+        esc.chars().any(|c| SPINNER.contains(&c))
+    }
+
+    #[test]
+    fn tick_demand_fast_when_idle_parent_has_running_subagent() {
+        // Named contract: Agent-view ticks must keep running while L2
+        // subagents are live even if the parent AgentState is Idle, so the
+        // window title (and progress) can refresh on spawn/finish.
+        use crate::app::agent_view::test_fixtures::running_subagent_info;
+
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::None,
+            "idle agent with no subagents must not force fast ticks"
+        );
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .subagent_sessions
+            .insert("bg-child".into(), running_subagent_info("bg-child"));
+        assert_eq!(
+            app.tick_demand(),
+            TickDemand::Fast,
+            "running subagent must keep Agent-view ticks alive for title refresh"
+        );
+    }
+
+    #[test]
+    fn window_title_is_busy_signal_when_idle_parent_has_running_subagent() {
+        // Named contract: background L2 subagents with an idle parent still
+        // mark the DE title as busy (spinner / Waiting), not a fully idle
+        // session-only string.
+        use crate::app::agent_view::test_fixtures::running_subagent_info;
+
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("bg-sub-session".into());
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .subagent_sessions
+            .insert("bg-child".into(), running_subagent_info("bg-child"));
+        app.pending_notification_escapes = None;
+        app.update_notifications();
+        let esc = app
+            .pending_notification_escapes
+            .as_deref()
+            .expect("title OSC while bg subagent runs");
+        assert!(
+            esc.contains("bg-sub-session"),
+            "session must stay in title, got {esc:?}"
+        );
+        // Prefer explicit subagent activity label; spinner / generic Waiting
+        // still count as busy if label composition changes.
+        let busy_signal =
+            esc.contains("subagent") || esc.contains("Waiting") || title_spinner_chars_present(esc);
+        assert!(
+            busy_signal,
+            "idle parent + running subagent must still busy the window title, got {esc:?}"
+        );
+        assert!(
+            esc.contains("subagent"),
+            "idle parent + live L2 must name subagent activity in title, got {esc:?}"
+        );
+    }
+
+    #[test]
+    fn pending_notification_escapes_force_tick_redraw() {
+        // Named contract: title/progress OSC only flushes on draw. When tick
+        // queues pending_notification_escapes, needs_redraw must be true even
+        // if the cell buffer is otherwise static.
+        let mut app = test_app_with_agent();
+        let id = *app.agents.keys().next().expect("agent");
+        app.agents.get_mut(&id).unwrap().display_name = Some("force-draw-session".into());
+        // First update fills last_title; clear pending then force a new title
+        // by changing the name so tick sees a fresh escape.
+        app.update_notifications();
+        app.pending_notification_escapes = None;
+        app.agents.get_mut(&id).unwrap().display_name = Some("force-draw-session-2".into());
+        let needs = app.tick();
+        assert!(
+            app.pending_notification_escapes.is_some(),
+            "tick must queue title escapes when session name changes"
+        );
+        assert!(
+            needs,
+            "pending notification escapes must force tick redraw so OSC flushes"
+        );
+    }
+
     #[test]
     fn dashboard_stale_clears_modal_placement_under_kitty() {
         use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
@@ -11182,10 +11640,10 @@ pub(crate) mod tests {
         );
     }
     /// Install a plan-approval overlay showing the plan in the line
-    /// viewer (`Preview` focus) — the default shape when the plan has
-    /// content (`acp_handler` opens the preview). This is the state the
-    /// user reported as stuck: `Esc` / `Left` are dead no-ops in the
-    /// plan line viewer.
+    /// viewer (`Preview` focus) — the engaged-modal shape after soft park
+    /// (user reopened via `/view-plan` / status / `ShowPlan`). This is the
+    /// state the user reported as stuck: `Esc` / `Left` are dead no-ops in
+    /// the plan line viewer.
     fn install_plan_preview_overlay(app: &mut AppView, id: super::super::agent::AgentId) {
         let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
             session_id: "s".into(),

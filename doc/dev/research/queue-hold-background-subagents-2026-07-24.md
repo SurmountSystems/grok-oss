@@ -32,9 +32,9 @@ starts without another keystroke.
 
 | Surface | Behavior |
 |---------|----------|
-| Status (idle + live children + held rows) | `… still running · N queued — send now to force` (or `· N queued` if top not sendable) |
-| Mid-turn sendable wait | Existing `· N queued — Enter to send now` path unchanged |
-| Send-now while idle + hold | Force drain / enqueue-front + force drain; toast *Send now — starting despite background subagents* |
+| Status (idle + live children + held rows) | `… still running · N queued — Interject to force` (or `· N queued` if top not sendable) |
+| Mid-turn sendable wait | `· N queued — Enter to interject` (soft; never cancel) |
+| Interject while idle + hold | Force drain / enqueue-front + force drain; toast *Interject — starting despite background subagents*; queue row `[Interject]` shown |
 | Bare Enter idle + hold | Enqueue + hold (local drip-feed); no conflicting turn |
 | Monitors only | No hold; drain proceeds |
 

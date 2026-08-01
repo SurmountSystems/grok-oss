@@ -31,6 +31,8 @@ const TIMESTAMPS_DEFAULT: bool = true;
 /// const context and the effective-config fallback read.
 const TIMELINE_DEFAULT: bool = UiConfig::SHOW_TIMELINE_DEFAULT;
 const PAGE_FLIP_ON_SEND_DEFAULT: bool = UiConfig::PAGE_FLIP_ON_SEND_DEFAULT;
+/// Assistant ASCII scrub default ON when unset (matches UiConfig).
+const SCRUB_ASCII_PUNCT_DEFAULT: bool = UiConfig::SCRUB_ASCII_PUNCT_DEFAULT;
 /// Combine-queued-prompts rollout flag defaults OFF (opt-in).
 const COMBINE_QUEUED_PROMPTS_DEFAULT: bool = false;
 const SIMPLE_MODE_DEFAULT: bool = true;
@@ -168,6 +170,34 @@ pub fn load_page_flip_on_send() -> bool {
 pub fn set_page_flip_on_send(enabled: bool) {
     PAGE_FLIP_ON_SEND_CURRENT.with(|c| c.set(enabled));
     PAGE_FLIP_ON_SEND_LOADED.with(|l| l.set(true));
+}
+
+// -- Scrub ASCII punctuation (assistant text) ---------------------------------
+
+thread_local! {
+    static SCRUB_ASCII_PUNCT_CURRENT: Cell<bool> = const { Cell::new(SCRUB_ASCII_PUNCT_DEFAULT) };
+    static SCRUB_ASCII_PUNCT_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `scrub_ascii_punct`, seeding from `[ui]` on first call.
+pub fn load_scrub_ascii_punct() -> bool {
+    SCRUB_ASCII_PUNCT_LOADED.with(|loaded| {
+        if !loaded.get() {
+            SCRUB_ASCII_PUNCT_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "scrub_ascii_punct",
+                    SCRUB_ASCII_PUNCT_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    SCRUB_ASCII_PUNCT_CURRENT.with(|c| c.get())
+}
+
+pub fn set_scrub_ascii_punct(enabled: bool) {
+    SCRUB_ASCII_PUNCT_CURRENT.with(|c| c.set(enabled));
+    SCRUB_ASCII_PUNCT_LOADED.with(|l| l.set(true));
 }
 
 // -- Combine queued prompts ---------------------------------------------------
@@ -789,6 +819,7 @@ mod tests {
         assert_eq!(TIMESTAMPS_DEFAULT, ui.show_timestamps.unwrap_or(true));
         assert_eq!(TIMELINE_DEFAULT, ui.show_timeline_enabled());
         assert_eq!(PAGE_FLIP_ON_SEND_DEFAULT, ui.page_flip_on_send_enabled());
+        assert_eq!(SCRUB_ASCII_PUNCT_DEFAULT, ui.scrub_ascii_punct_enabled());
         assert_eq!(
             COMBINE_QUEUED_PROMPTS_DEFAULT,
             ui.combine_queued_prompts

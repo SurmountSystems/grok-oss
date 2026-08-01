@@ -228,6 +228,7 @@ fn minimal_btw_response_after_esc_is_ignored() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: id,
             result: Ok("late".into()),
+            btw_session_id: None,
             minimal_request_id: Some(request_id),
         }),
         &mut app,
@@ -247,6 +248,7 @@ fn minimal_done_dismisses_to_exactly_one_btw_block() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: id,
             result: Ok("original answer".into()),
+            btw_session_id: Some("btw-test".into()),
             minimal_request_id: Some(request_id),
         }),
         &mut app,
@@ -286,31 +288,33 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: first,
             result: Ok("stale first answer".into()),
+            btw_session_id: None,
             minimal_request_id: Some(first_old),
         }),
         &mut app,
     );
     assert!(matches!(
         app.agents[&first].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Loading { ref question })
+        Some(crate::views::btw_overlay::BtwOverlayState::Loading { ref question, .. })
             if question == "first new"
     ));
     dispatch(
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: first,
             result: Ok("current first answer".into()),
+            btw_session_id: Some("btw-first".into()),
             minimal_request_id: Some(first_current),
         }),
         &mut app,
     );
     assert!(matches!(
         app.agents[&first].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question == "first new"
+        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref turns, .. })
+            if turns.last().map(|t| t.question.as_str()) == Some("first new")
     ));
     assert!(matches!(
         app.agents[&second].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Loading { ref question })
+        Some(crate::views::btw_overlay::BtwOverlayState::Loading { ref question, .. })
             if question == "second"
     ));
 
@@ -321,6 +325,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: second,
             result: Ok("late second answer".into()),
+            btw_session_id: None,
             minimal_request_id: Some(second_request),
         }),
         &mut app,
@@ -329,8 +334,8 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
     assert!(app.agents[&second].minimal_btw_lifecycle.is_none());
     assert!(matches!(
         app.agents[&first].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question == "first new"
+        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref turns, .. })
+            if turns.last().map(|t| t.question.as_str()) == Some("first new")
     ));
 
     // Reverse delivery order on fresh requests: active second completes first,
@@ -343,6 +348,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: second,
             result: Ok("second reverse answer".into()),
+            btw_session_id: Some("btw-2".into()),
             minimal_request_id: Some(second_request),
         }),
         &mut app,
@@ -351,19 +357,20 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: first,
             result: Ok("first reverse answer".into()),
+            btw_session_id: Some("btw-1".into()),
             minimal_request_id: Some(first_request),
         }),
         &mut app,
     );
     assert!(matches!(
         app.agents[&second].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question == "second reverse"
+        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref turns, .. })
+            if turns.last().map(|t| t.question.as_str()) == Some("second reverse")
     ));
     assert!(matches!(
         app.agents[&first].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question == "first reverse"
+        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref turns, .. })
+            if turns.last().map(|t| t.question.as_str()) == Some("first reverse")
     ));
 }
 
@@ -385,6 +392,7 @@ fn fullscreen_btw_response_after_dismiss_keeps_existing_behavior() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: id,
             result: Ok("late".into()),
+            btw_session_id: Some("btw-late".into()),
             minimal_request_id: None,
         }),
         &mut app,
@@ -392,8 +400,8 @@ fn fullscreen_btw_response_after_dismiss_keeps_existing_behavior() {
 
     assert!(matches!(
         app.agents[&id].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question.is_empty()
+        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref turns, .. })
+            if turns.last().map(|t| t.question.is_empty()).unwrap_or(false)
     ));
 }
 
@@ -419,6 +427,181 @@ fn btw_no_session_feedback_is_mode_specific() {
         Some("No active session")
     );
     assert_eq!(fullscreen.agents[&id].scrollback.len(), 0);
+}
+
+/// Error dismiss after a failed follow-up flushes successful prior turns.
+#[test]
+fn btw_error_dismiss_flushes_prior_turns_to_scrollback() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::btw_overlay::{BtwOverlayState, BtwTurn};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.btw_state = Some(BtwOverlayState::Error {
+            question: "follow-up?".into(),
+            error: "boom".into(),
+            prior_turns: vec![BtwTurn {
+                question: "first q".into(),
+                answer: "first a".into(),
+            }],
+            btw_session_id: Some("btw-err".into()),
+        });
+        agent.btw_focused = true;
+        agent.active_pane = ActivePane::Prompt;
+    }
+    let _ = app.handle_input(&esc());
+    let agent = app.agents.get(&id).unwrap();
+    assert!(agent.btw_state.is_none());
+    let btw_blocks: Vec<_> = agent
+        .scrollback
+        .iter_entries()
+        .filter_map(|(_, e)| match &e.block {
+            RenderBlock::Btw(b) => Some(b),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(btw_blocks.len(), 1, "expected one flushed BtwBlock");
+    assert_eq!(btw_blocks[0].question, "first q");
+    assert!(
+        btw_blocks[0].content().text().contains("first a"),
+        "flushed body should keep prior answer"
+    );
+}
+
+/// First-shot `/btw` while Done is open flushes the prior thread first.
+#[test]
+fn btw_first_shot_flushes_open_done_to_scrollback() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::btw_overlay::BtwOverlayState;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.btw_state = Some(BtwOverlayState::done(
+            "old q".into(),
+            "old answer body".into(),
+        ));
+    }
+    let effects = dispatch(Action::SendBtw("brand new".into()), &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendBtw {
+            question,
+            btw_session_id: None,
+            prior_turns,
+            ..
+        }] if question == "brand new" && prior_turns.is_empty()
+    ));
+    let agent = app.agents.get(&id).unwrap();
+    assert!(matches!(
+        agent.btw_state,
+        Some(crate::views::btw_overlay::BtwOverlayState::Loading {
+            ref question,
+            ..
+        }) if question == "brand new"
+    ));
+    let btw_blocks: Vec<_> = agent
+        .scrollback
+        .iter_entries()
+        .filter_map(|(_, e)| match &e.block {
+            RenderBlock::Btw(b) => Some(b),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(btw_blocks.len(), 1);
+    assert_eq!(btw_blocks[0].question, "old q");
+    assert!(
+        btw_blocks[0].content().text().contains("old answer body"),
+        "old Done must be flushed before new Loading"
+    );
+}
+
+/// B2: follow-up reuses btw_session_id and ships prior turns on the effect.
+#[test]
+fn btw_follow_up_reuses_session_id_and_prior_turns() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(Action::SendBtw("first q".into()), &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendBtw {
+            btw_session_id: None,
+            prior_turns,
+            ..
+        }] if prior_turns.is_empty()
+    ));
+    dispatch(
+        Action::TaskComplete(TaskResult::BtwResponse {
+            agent_id: id,
+            result: Ok("first a".into()),
+            btw_session_id: Some("btw-shared".into()),
+            minimal_request_id: None,
+        }),
+        &mut app,
+    );
+    match &app.agents[&id].btw_state {
+        Some(crate::views::btw_overlay::BtwOverlayState::Done {
+            turns,
+            btw_session_id,
+            ..
+        }) => {
+            assert_eq!(turns.len(), 1);
+            assert_eq!(btw_session_id.as_deref(), Some("btw-shared"));
+        }
+        other => panic!("expected Done after first answer, got {other:?}"),
+    }
+
+    let effects = dispatch(Action::SendBtwFollowUp("second q".into()), &mut app);
+    match effects.as_slice() {
+        [
+            Effect::SendBtw {
+                question,
+                btw_session_id: Some(sid),
+                prior_turns,
+                minimal_request_id: None,
+                ..
+            },
+        ] => {
+            assert_eq!(question, "second q");
+            assert_eq!(sid, "btw-shared");
+            assert_eq!(
+                prior_turns.as_slice(),
+                &[("first q".into(), "first a".into())]
+            );
+        }
+        other => panic!("expected follow-up SendBtw with session + prior, got {other:?}"),
+    }
+    assert!(matches!(
+        app.agents[&id].btw_state,
+        Some(crate::views::btw_overlay::BtwOverlayState::Loading {
+            ref question,
+            ref prior_turns,
+            btw_session_id: Some(ref sid),
+        }) if question == "second q"
+            && prior_turns.len() == 1
+            && sid == "btw-shared"
+    ));
+
+    dispatch(
+        Action::TaskComplete(TaskResult::BtwResponse {
+            agent_id: id,
+            result: Ok("second a".into()),
+            btw_session_id: Some("btw-shared".into()),
+            minimal_request_id: None,
+        }),
+        &mut app,
+    );
+    let state = app.agents[&id].btw_state.as_ref().expect("Done");
+    assert_eq!(state.completed_turns().len(), 2);
+    assert_eq!(state.btw_session_id(), Some("btw-shared"));
+    let copy = state.full_copy_text().expect("copy");
+    assert!(
+        copy.contains("first q") && copy.contains("second a"),
+        "multi-turn copy should include whole thread: {copy}"
+    );
 }
 
 // ── Session notes (`/note`) — not pending prompts ───────────────────

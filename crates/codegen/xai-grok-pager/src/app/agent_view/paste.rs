@@ -256,7 +256,8 @@ impl AgentView {
                 }
                 let images = self.prompt.drain_images();
                 self.prompt.set_text("");
-                Some(Action::SendPromptNow { text, images })
+                // Soft interject only — never cancel-and-send.
+                Some(Action::Interject { text, images })
             }
         }
     }
@@ -1129,18 +1130,28 @@ pub(super) mod paste_key_tests {
             agent.line_viewer = None;
         });
     }
+    /// Soft-park Preview paste routes into the plan composer (screenshots /
+    /// notes for approve/revise/clarify). Plain text appends to the prompt.
     #[test]
-    fn event_paste_plan_preview_does_not_mutate_hidden_prompt() {
+    fn event_paste_plan_preview_soft_park_attaches_to_composer() {
         let mut agent = make_agent();
-        agent.prompt.set_text("hidden prompt");
+        agent.prompt.set_text("notes ");
         agent.plan_approval_view = Some(make_plan_approval_view_state());
+        // Soft park: Preview focus, no line viewer.
         agent.line_viewer = None;
         let outcome = agent.handle_input(
-            &Event::Paste("ignored".to_owned()),
+            &Event::Paste("see screenshot".to_owned()),
             &ActionRegistry::defaults(),
         );
-        assert!(matches!(outcome, InputOutcome::Unchanged));
-        assert_eq!(agent.prompt.text(), "hidden prompt");
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "soft-park Preview paste must attach to plan composer; got {outcome:?}"
+        );
+        assert!(
+            agent.prompt.text().contains("see screenshot"),
+            "plain text paste must land in plan composer; got {:?}",
+            agent.prompt.text()
+        );
     }
     /// Question-view `Event::Paste` arm routes through the classifier when
     /// the question view is in `InputMode` focus.
@@ -1290,6 +1301,7 @@ pub(super) mod paste_key_tests {
             0,
             0,
             1,
+            false,
             false,
         );
         assert!(layout.prompt.y + layout.prompt.height <= area.height);

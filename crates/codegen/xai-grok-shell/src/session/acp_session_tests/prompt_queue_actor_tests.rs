@@ -1586,10 +1586,11 @@ async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {
         .await;
 }
 
-/// Queue-row send-now: the row (any kind) promotes to run behind the running
-/// front with its RPC live and an LWW edit applied, and cancels the turn.
+/// Soft interject contract: a plain queued row mid-turn buffers into
+/// `pending_interjections` with an LWW edit, leaves other rows alone, and
+/// **never** requests cancel.
 #[tokio::test]
-async fn queue_send_now_promotes_row_and_requests_cancel() {
+async fn interject_contract_queued_prompt_buffers_without_cancel() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1599,6 +1600,52 @@ async fn queue_send_now_promotes_row_and_requests_cancel() {
                 state.pending_inputs.push_back(user_item("running", "A"));
                 state.running_task = Some(running_task_stub("running"));
                 state.pending_inputs.push_back(user_item("held", "A"));
+                state.pending_inputs.push_back(user_item("p1", "A"));
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".into());
+
+            let cancel = actor
+                .handle_interject_queued_prompt("p1", 0, Some("A"), Some("EDITED steer"))
+                .await;
+            assert!(!cancel, "soft interject must never request cancel");
+
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(
+                order,
+                vec!["running", "held"],
+                "interjected row leaves the queue; held stays"
+            );
+            drop(state);
+            assert_eq!(
+                actor.pending_interjections.len(),
+                1,
+                "soft interject buffers into the running turn"
+            );
+            let entry = actor.pending_interjections.drain_all();
+            assert_eq!(entry[0].text, "EDITED steer");
+        })
+        .await;
+}
+
+/// Soft interject contract: bash rows never buffer (they stay queued).
+#[tokio::test]
+async fn interject_contract_bash_row_stays_queued_no_cancel() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.running_task = Some(running_task_stub("running"));
                 state.pending_inputs.push_back(bash_item("b1", "A", "ls"));
             }
             *actor
@@ -1609,36 +1656,33 @@ async fn queue_send_now_promotes_row_and_requests_cancel() {
             let cancel = actor
                 .handle_interject_queued_prompt("b1", 0, Some("A"), Some("ls -la"))
                 .await;
-            assert!(cancel, "promoting a row behind a running turn cancels it");
+            assert!(!cancel, "soft interject must never request cancel");
 
             let state = actor.state.lock().await;
-            let order: Vec<&str> = state
-                .pending_inputs
-                .iter()
-                .map(|i| i.prompt_id.as_str())
-                .collect();
             assert_eq!(
-                order,
-                vec!["running", "b1", "held"],
-                "promoted row runs next; the held row stays behind it"
+                ids(&actor.build_queue_wire(&state)),
+                vec!["b1"],
+                "bash row stays queued"
             );
-            let promoted = &state.pending_inputs[1];
             assert_eq!(
-                promoted.queue_meta.as_ref().map(|m| m.text.as_str()),
+                state
+                    .pending_inputs
+                    .iter()
+                    .find(|i| i.prompt_id == "b1")
+                    .and_then(|i| i.queue_meta.as_ref())
+                    .map(|m| m.text.as_str()),
                 Some("ls -la"),
-                "edit applies LWW before promotion"
+                "edit still applies LWW when interject is refused"
             );
-            assert!(
-                actor.pending_interjections.is_empty(),
-                "send-now never merges into the running turn"
-            );
+            assert!(actor.pending_interjections.is_empty());
         })
         .await;
 }
 
-/// Queue-row send-now with no running turn: the row fronts but nothing cancels.
+/// Soft interject with no running turn: row stays in place (no front promote,
+/// no cancel, nothing buffered).
 #[tokio::test]
-async fn queue_send_now_idle_fronts_row_without_cancel() {
+async fn interject_contract_idle_keeps_row_queued_no_cancel() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1652,7 +1696,7 @@ async fn queue_send_now_idle_fronts_row_without_cancel() {
             let cancel = actor
                 .handle_interject_queued_prompt("q2", 0, Some("A"), None)
                 .await;
-            assert!(!cancel, "no running turn — nothing to cancel");
+            assert!(!cancel, "soft interject must never request cancel");
 
             let state = actor.state.lock().await;
             let order: Vec<&str> = state
@@ -1660,7 +1704,12 @@ async fn queue_send_now_idle_fronts_row_without_cancel() {
                 .iter()
                 .map(|i| i.prompt_id.as_str())
                 .collect();
-            assert_eq!(order, vec!["q2", "q1"], "send-now row runs first");
+            assert_eq!(
+                order,
+                vec!["q1", "q2"],
+                "idle soft-interject must not reorder the queue"
+            );
+            assert!(actor.pending_interjections.is_empty());
         })
         .await;
 }
