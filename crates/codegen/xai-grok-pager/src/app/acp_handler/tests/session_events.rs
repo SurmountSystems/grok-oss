@@ -150,18 +150,19 @@
         );
     }
 
-    /// Contract: once the next sample stream is open after a retry, chrome must
-    /// leave `TurnActivity::Retrying` so the footer does not freeze on
-    /// "Retrying (attempt 1)" across a live post-retry stream / TTFB window.
+    /// Contract: after a timeout/transport retry, StreamResumed must keep soft
+    /// reconnect chrome (not fall through to zombie "Waiting for response…")
+    /// for the post-retry headers/TTFB window. Real stream content still
+    /// clears via `handle_update` → `retry_activity = None`.
     #[test]
-    fn retry_chrome_clears_when_retry_stream_starts() {
+    fn retry_chrome_soft_reconnects_when_retry_stream_starts() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Retrying {
                 attempt: 1,
                 max_retries: u32::MAX,
-                reason: "connection interrupted".into(),
+                reason: "timed out · next try in 2s".into(),
             },
             &mut session,
             &mut scrollback,
@@ -173,12 +174,32 @@
         }
 
         apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
+        match session.tracker.activity() {
+            Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries,
+                reason,
+            }) => {
+                assert_eq!(max_retries, u32::MAX);
+                assert_eq!(
+                    reason, "reconnecting",
+                    "StreamResumed after Retrying must soft-reconnect, not hard-clear"
+                );
+            }
+            other => panic!("expected soft reconnect Retrying, got {other:?}"),
+        }
+    }
+
+    /// Contract: StreamResumed with no prior Retrying (first stream open) does
+    /// not invent retry chrome.
+    #[test]
+    fn stream_resumed_without_prior_retry_clears_activity() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
         assert!(
-            !matches!(
-                session.tracker.activity(),
-                Some(TurnActivity::Retrying { .. })
-            ),
-            "StreamResumed must clear sticky Retrying chrome, got {:?}",
+            session.tracker.activity().is_none(),
+            "first-stream StreamResumed must not invent Retrying chrome, got {:?}",
             session.tracker.activity()
         );
     }

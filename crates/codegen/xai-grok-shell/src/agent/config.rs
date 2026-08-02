@@ -5029,8 +5029,9 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
 ///   session JWT as failover (exclusive pin still refuses session-only when no
 ///   console key exists)
 /// - `auto_use_included_limits = true` (and not api_key pin) → prefer included
-///   SuperGrok limits; rank multi-identity by headroom (sooner reset heuristic)
-///   before console / $ extras
+///   SuperGrok limits; rank multi-identity by headroom (sooner reset heuristic);
+///   omit console keys from primary/failover while any SuperGrok still has
+///   included remaining (limits-before-credits); after ExhaustedAll, console leads
 ///
 /// OpenRouter never receives an xAI session. Enterprise
 /// [`enforce_disable_api_key_auth`] clears console-key failover.
@@ -5088,8 +5089,10 @@ pub fn resolve_credentials_preferring_with_rank(
 /// Dual SuperGrok + console under `auto_use_included_limits` (or fixture sessions).
 ///
 /// Uses pure ranking: SuperGrok with included headroom first (sooner reset
-/// heuristic among included pools), then console. When all SuperGrok included
-/// pools are exhausted, console leads. When ranking is off, falls through to
+/// heuristic among included pools). While any SuperGrok still has included
+/// headroom, console keys are **omitted** from the sampling chain (limits
+/// before credits). When all SuperGrok included pools are exhausted, console
+/// leads. When ranking is off, falls through to
 /// [`resolve_credentials_preferring_inner`] with the first candidate token.
 pub fn resolve_credentials_preferring_with_supergrok_sessions(
     model: &ModelEntry,
@@ -7808,8 +7811,8 @@ reasoning_effort = "low"
             creds.failover_api_keys
         );
         assert!(
-            creds.failover_api_keys.iter().any(|k| k == "console-key"),
-            "env console key must remain after SuperGrok: {:?}",
+            !creds.failover_api_keys.iter().any(|k| k == "console-key"),
+            "limits-before-credits: env console key omitted while SuperGrok included headroom: {:?}",
             creds.failover_api_keys
         );
     }
@@ -7931,8 +7934,8 @@ reasoning_effort = "low"
             creds.failover_api_keys
         );
         assert!(
-            creds.failover_api_keys.iter().any(|k| k == "console-key"),
-            "console remains after live SuperGrok: {:?}",
+            !creds.failover_api_keys.iter().any(|k| k == "console-key"),
+            "console omitted while other SuperGrok still has included headroom: {:?}",
             creds.failover_api_keys
         );
     }
@@ -8099,11 +8102,11 @@ reasoning_effort = "low"
             "SuperGrok session host (cli-chat-proxy), not api.x.ai console"
         );
         assert!(
-            creds
+            !creds
                 .failover_api_keys
                 .iter()
                 .any(|k| k == "console-biz-api-key"),
-            "console Business API key is failover only: {:?}",
+            "limits-before-credits: console Business API key omitted while SuperGrok included headroom: {:?}",
             creds.failover_api_keys
         );
         assert!(
@@ -8113,6 +8116,80 @@ reasoning_effort = "low"
         );
 
         clear_all_including_durable();
+    }
+
+    /// Named contract: `auto_use_included_limits` + live SuperGrok with included
+    /// headroom → resolve must not put console API key in primary or failover
+    /// (silent hop cannot burn console $ while included weekly has room).
+    #[test]
+    #[serial_test::serial]
+    fn resolve_auto_omits_console_from_chain_while_supergrok_included_headroom() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::{
+            PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+            SupergrokSessionCandidate,
+        };
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-not-hop");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let sessions = vec![SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-live".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 35, // ~65% used
+                reset_at: None,
+            },
+            access_token: "tok-supergrok-live".into(),
+        }];
+        let model = test_model_entry(
+            "m",
+            crate::env::PROD_CLI_CHAT_PROXY_BASE_URL,
+            None,
+            None,
+            None,
+        );
+        let creds = resolve_credentials_preferring_with_supergrok_sessions(
+            &model,
+            &sessions,
+            Some(PreferredAuthMethod::Oidc),
+            true,
+        );
+        assert_eq!(creds.auth_type, AuthType::SessionToken);
+        assert_eq!(creds.api_key.as_deref(), Some("tok-supergrok-live"));
+        assert_ne!(creds.api_key.as_deref(), Some("console-must-not-hop"));
+        assert!(
+            !creds
+                .failover_api_keys
+                .iter()
+                .any(|k| k == "console-must-not-hop"),
+            "console must not be in failover chain while included headroom: primary={:?} failover={:?}",
+            creds.api_key,
+            creds.failover_api_keys
+        );
+        // ExhaustedAll still admits console as primary.
+        let exhausted = vec![SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-live".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 0,
+                reset_at: None,
+            },
+            access_token: "tok-supergrok-live".into(),
+        }];
+        let after = resolve_credentials_preferring_with_supergrok_sessions(
+            &model,
+            &exhausted,
+            Some(PreferredAuthMethod::Oidc),
+            true,
+        );
+        assert_eq!(after.api_key.as_deref(), Some("console-must-not-hop"));
+        assert_eq!(after.auth_type, AuthType::ApiKey);
     }
 
     /// auto_use_included_limits=false does not take the multi-identity rank path.

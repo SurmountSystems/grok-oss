@@ -70,6 +70,13 @@ pub enum Command {
     },
     /// Check terminal, clipboard, color, and input support without starting Grok
     Doctor(crate::doctor_cmd::DoctorArgs),
+    /// Print live sampling principal + SuperGrok / console spend meters
+    ///
+    /// Agent-usable: no TUI. Same meters as in-session `/limits` (SuperGrok
+    /// included weekly %, SuperGrok dollar extras, console team prepaid when
+    /// configured). Never prints raw keys or tokens. Prefer `--json` for
+    /// scripts and subagents.
+    Limits(crate::limits_cmd::LimitsArgs),
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
@@ -84,13 +91,13 @@ pub enum Command {
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "openrouter"])]
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "openrouter", "management_key"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
             long = "device-auth",
             visible_alias = "device-code",
-            conflicts_with_all = ["oauth", "openrouter"]
+            conflicts_with_all = ["oauth", "openrouter", "management_key"]
         )]
         device_auth: bool,
         /// Store an OpenRouter API key (for Grok 4.5 via OpenRouter).
@@ -98,7 +105,7 @@ pub enum Command {
         /// Keys go to the OS secret store (or `$GROK_HOME/provider_credentials.json`
         /// when the keyring is unavailable). Prefer `OPENROUTER_API_KEY` env over
         /// storing a key. Does not replace xAI login.
-        #[arg(long = "openrouter", conflicts_with_all = ["oauth", "device_auth", "list_api_keys"])]
+        #[arg(long = "openrouter", conflicts_with_all = ["oauth", "device_auth", "list_api_keys", "management_key"])]
         openrouter: bool,
         /// Add a console / Business API key (or OpenRouter key with `--openrouter`).
         ///
@@ -112,14 +119,28 @@ pub enum Command {
             num_args = 0..=1,
             default_missing_value = "",
             value_name = "VALUE",
-            conflicts_with_all = ["oauth", "device_auth", "list_api_keys"]
+            conflicts_with_all = ["oauth", "device_auth", "list_api_keys", "management_key"]
         )]
         api_key: Option<ApiKeyCliValue>,
+        /// Store a Management API key for **console team prepaid** (Business
+        /// Usage remaining on console.x.ai). Not the inference `XAI_API_KEY`
+        /// and not SuperGrok $ extras. Flag only: no-echo prompt; `-` reads
+        /// non-TTY stdin. Prefer `XAI_MANAGEMENT_API_KEY` env for CI. Team id
+        /// is auto-discovered when the key validates; optional pin via
+        /// `[endpoints] management_team_id` or `XAI_MANAGEMENT_TEAM_ID`.
+        #[arg(
+            long = "management-key",
+            num_args = 0..=1,
+            default_missing_value = "",
+            value_name = "VALUE",
+            conflicts_with_all = ["oauth", "device_auth", "openrouter", "api_key", "list_api_keys"]
+        )]
+        management_key: Option<ApiKeyCliValue>,
         /// Dual-auth status: SuperGrok session?, N console keys (fingerprints),
         /// env wins?, preferred method. Never prints raw keys or tokens.
         #[arg(
             long = "list-api-keys",
-            conflicts_with_all = ["oauth", "device_auth", "openrouter", "api_key"]
+            conflicts_with_all = ["oauth", "device_auth", "openrouter", "api_key", "management_key"]
         )]
         list_api_keys: bool,
         /// Authenticate for remote development environments (hidden).
@@ -1548,11 +1569,79 @@ mod tests {
             Some(Command::Login {
                 list_api_keys: true,
                 api_key: None,
+                management_key: None,
                 openrouter: false,
                 ..
             }) => {}
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn login_management_key_bare_flag_parses() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--management-key"])
+            .expect("login --management-key bare parses");
+        match args.command {
+            Some(Command::Login {
+                management_key: Some(key),
+                api_key: None,
+                openrouter: false,
+                list_api_keys: false,
+                oauth: false,
+                device_auth: false,
+                ..
+            }) => {
+                assert!(
+                    key.is_empty(),
+                    "bare --management-key must be empty missing value, got {key:?}"
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_management_key_stdin_sentinel_parses() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--management-key", "-"])
+            .expect("login --management-key - parses");
+        match args.command {
+            Some(Command::Login {
+                management_key: Some(key),
+                api_key: None,
+                ..
+            }) => assert_eq!(key.as_str(), "-"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_management_key_debug_redacts_secret_value() {
+        let args =
+            PagerArgs::try_parse_from(["grok", "login", "--management-key", "mgmt-secret-value"])
+                .expect("parses");
+        let dbg = format!("{:?}", args.command);
+        assert!(
+            !dbg.contains("mgmt-secret-value"),
+            "Debug must not dump argv secret: {dbg}"
+        );
+    }
+
+    #[test]
+    fn limits_parses_human_and_json() {
+        let bare = PagerArgs::try_parse_from(["grok", "limits"]).expect("limits parses");
+        assert!(matches!(
+            bare.command,
+            Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                json: false
+            }))
+        ));
+        let json = PagerArgs::try_parse_from(["grok", "limits", "--json"]).expect("limits --json");
+        assert!(matches!(
+            json.command,
+            Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                json: true
+            }))
+        ));
     }
 
     #[test]

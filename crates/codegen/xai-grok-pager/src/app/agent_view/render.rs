@@ -838,6 +838,9 @@ impl AgentView {
         } else {
             self.active_pane == AgentPane::Prompt && !overlay_focused
         };
+        // Bottom prompt outline (╭─╮│╰─╯) stays on in normal chat, plan mode,
+        // soft-park, and open plan panel. A prior gate hid it for plan surfaces;
+        // that inverted the operator contract (absence is the bug).
         let prompt_style = PromptStyle {
             focused: prompt_focused,
             show_prefix: appearance.prompt.show_prefix,
@@ -854,8 +857,12 @@ impl AgentView {
             } else {
                 None
             },
+            // Plan / casual-comment outline tint. Opacity must stay ≥ 0.5 so
+            // DOGE solid-step keeps `accent_plan` (yellow). Below that step
+            // the blend returns `bg_base` and the box paints black-on-black
+            // (dogfood: outline gone while Responding in plan mode).
             border_color_override: if effective_plan || casual_commenting {
-                crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.4)
+                crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.5)
             } else {
                 None
             },
@@ -1438,9 +1445,17 @@ impl AgentView {
             }
             // Compact SuperGrok / console meter in the always-visible status
             // bar (click → /limits). Reuses existing credit_bar formatters;
-            // not a second billing system. Hidden for gateway/chat sessions
-            // and when the billing surface is off.
-            if self.billing_surface_visible && !self.chat_kind {
+            // not a second billing system.
+            //
+            // Gate is **not** `billing_surface_visible` / consumer slash surface.
+            // That flag is false for team principals (`team_name` set) and API
+            // keys so `/usage manage` and prompt credit *warnings* stay off —
+            // but dual-auth dogfood still burns SuperGrok included weekly %
+            // (or console team prepaid) and must show the compact meter.
+            // Session start / turn end still FetchBilling for agents; hide
+            // only gateway/chat sessions. SuperGrok cold → honest `...%`
+            // placeholder so the slot is never invisible until first fetch.
+            if !self.chat_kind {
                 use crate::views::credit_bar;
                 let meter_line = if self.sampling_identity.is_console() {
                     let console_prepaid = self
@@ -1489,7 +1504,11 @@ impl AgentView {
                         line
                     })
                 } else {
-                    None
+                    // SuperGrok live, billing cache cold: still show the slot.
+                    Some(credit_bar::credit_bar_loading_line(
+                        self.hit_credits.hovered,
+                        &theme,
+                    ))
                 };
                 if let Some(line) = meter_line {
                     status.push("credits", line);
@@ -5007,39 +5026,179 @@ mod clear_done_and_limits_chrome_tests {
         );
     }
 
-    /// Named contract: SuperGrok balance with billing surface on paints status
-    /// credits meter and registers hit_credits for /limits click.
-    #[test]
-    fn status_bar_credits_meter_registers_hit_when_balance_known() {
-        let mut agent = make_agent();
-        agent.billing_surface_visible = true;
-        agent.chat_kind = false;
-        agent.credit_balance = Some(CreditBalance {
-            usage_pct: 42.0,
-            effective_usage_pct: 42.0,
+    fn warm_supergrok_balance(pct: f64) -> CreditBalance {
+        CreditBalance {
+            usage_pct: pct,
+            effective_usage_pct: pct,
             period_end_display: None,
+            period_end_at: None,
             pay_as_you_go: false,
             on_demand_cap_cents: None,
             on_demand_used_cents: None,
             prepaid_balance_cents: None,
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
             is_unified_billing_user: None,
-        });
-        let buf = draw_hits(&mut agent);
-        assert!(
-            agent.hit_credits.rect.is_some(),
-            "status bar must register credits hit when balance is known"
-        );
-        let rect = agent.hit_credits.rect.unwrap();
+            grok_build_usage_pct: None,
+        }
+    }
+
+    fn credits_hit_text(agent: &AgentView, buf: &Buffer) -> String {
+        let rect = agent
+            .hit_credits
+            .rect
+            .expect("status bar must register credits hit rect when meter paints");
         let mut text = String::new();
         for x in rect.x..rect.x + rect.width {
             if let Some(cell) = buf.cell((x, rect.y)) {
                 text.push_str(cell.symbol());
             }
         }
+        text
+    }
+
+    /// Named contract: SuperGrok balance paints status credits meter and
+    /// registers hit_credits for /limits click.
+    #[test]
+    fn status_bar_credits_meter_registers_hit_when_balance_known() {
+        let mut agent = make_agent();
+        agent.billing_surface_visible = true;
+        agent.chat_kind = false;
+        agent.credit_balance = Some(warm_supergrok_balance(42.0));
+        let buf = draw_hits(&mut agent);
+        let text = credits_hit_text(&agent, &buf);
         assert!(
-            text.contains("Credits") || text.contains("42"),
-            "status meter should show credits used %, got {text:?}"
+            text.contains("42%") && !text.contains("Credits"),
+            "status meter should show just 42% (no Credits used label), got {text:?}"
+        );
+    }
+
+    /// Named contract (`bug:limits-pct-still-missing`): team dual-auth dogfood
+    /// sets consumer `billing_surface_visible = false` (team_name on AuthMeta),
+    /// but SuperGrok included weekly limits still burn. Status bar must paint
+    /// a visible `N%` label (and hit rect) anyway — cold and warm.
+    #[test]
+    fn status_bar_credits_meter_visible_when_team_hides_consumer_surface_warm() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        let mut agent = make_agent();
+        // Dogfood: Team Surmount principal → usage_visible/billing_surface off.
+        agent.billing_surface_visible = false;
+        agent.chat_kind = false;
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(warm_supergrok_balance(37.0));
+        let buf = draw_hits(&mut agent);
+        let text = credits_hit_text(&agent, &buf);
+        assert!(
+            text.contains("37%") && !text.contains("Credits"),
+            "team dual-auth SuperGrok warm must paint 37% (not hide for billing_surface off), got {text:?}"
+        );
+    }
+
+    /// Same team dogfood, cold billing cache — honest placeholder, still clickable.
+    #[test]
+    fn status_bar_credits_meter_visible_when_team_hides_consumer_surface_cold() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut agent = make_agent();
+        agent.billing_surface_visible = false;
+        agent.chat_kind = false;
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = None;
+        let buf = draw_hits(&mut agent);
+        let text = credits_hit_text(&agent, &buf);
+        assert!(
+            text.contains("...%") && !text.contains("Credits"),
+            "team dual-auth SuperGrok cold must paint ...%, got {text:?}"
+        );
+        let rect = agent.hit_credits.rect.unwrap();
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + rect.width / 2,
+                row: rect.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(
+                out,
+                crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::ShowLimits)
+            ),
+            "team dual-auth cold meter click must open limits modal, got {out:?}"
+        );
+    }
+
+    /// Named contract: when SuperGrok is live, the compact status meter is
+    /// always visible — even before billing cache is warm. Cold state shows an
+    /// honest placeholder (not invisible), and the hit rect still opens
+    /// `/limits` via ShowLimits.
+    #[test]
+    fn status_bar_credits_meter_always_visible_when_billing_surface_on_cold() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut agent = make_agent();
+        agent.billing_surface_visible = true;
+        agent.chat_kind = false;
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = None; // cold — no billing fetch yet
+        let buf = draw_hits(&mut agent);
+        let text = credits_hit_text(&agent, &buf);
+        assert!(
+            text.contains("...%") || text.contains("loading"),
+            "cold status meter must show honest placeholder (not blank), got {text:?}"
+        );
+        // Click still dispatches ShowLimits (same path as warm meter).
+        let rect = agent.hit_credits.rect.unwrap();
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + rect.width / 2,
+                row: rect.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(
+                out,
+                crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::ShowLimits)
+            ),
+            "cold credits meter click must open limits modal, got {out:?}"
+        );
+    }
+
+    /// Gateway / chat sessions must not invent a coding-credits meter.
+    #[test]
+    fn status_bar_credits_meter_hidden_for_gateway_chat() {
+        let mut agent = make_agent();
+        agent.billing_surface_visible = true;
+        agent.chat_kind = true;
+        agent.credit_balance = None;
+        let _ = draw_hits(&mut agent);
+        assert!(
+            agent.hit_credits.rect.is_none(),
+            "gateway chat must not paint SuperGrok credits meter"
+        );
+    }
+
+    /// Team + console live: still paint console meter (consumer surface off).
+    #[test]
+    fn status_bar_console_meter_visible_when_team_hides_consumer_surface() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        let mut agent = make_agent();
+        agent.billing_surface_visible = false;
+        agent.chat_kind = false;
+        agent.sampling_identity = SamplingIdentityKind::ConsoleKey;
+        agent.console_team_prepaid_cents = Some(12_500);
+        let buf = draw_hits(&mut agent);
+        let text = credits_hit_text(&agent, &buf);
+        assert!(
+            text.contains("console") && text.contains("125"),
+            "console live under team must paint console · $125, got {text:?}"
         );
     }
 }
@@ -5077,6 +5236,168 @@ mod selection_state_tests {
         assert!(agent.last_scrollback_selection_boundaries.is_empty());
     }
 }
+#[cfg(test)]
+mod prompt_outline_plan_view_tests {
+    use super::super::paste::paste_key_tests::make_plan_approval_view_state;
+    use super::super::test_fixtures::make_agent;
+    use super::AgentView;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn draw_buf(agent: &mut AgentView) -> Buffer {
+        let reg = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    /// Count bottom-prompt box corners (╭ / ╰) on the left edge of the lower
+    /// half. Plan panel borders live on the right column, so left-edge corners
+    /// in the lower half are the composer outline.
+    fn left_edge_prompt_corners(buf: &Buffer, area: Rect) -> (usize, usize) {
+        let mid_y = area.y + area.height / 2;
+        let mut top = 0usize;
+        let mut bottom = 0usize;
+        for y in mid_y..area.y + area.height {
+            // Composer outline sits after hpad; scan first few columns.
+            for x in area.x..area.x.saturating_add(6).min(area.x + area.width) {
+                if let Some(cell) = buf.cell((x, y)) {
+                    match cell.symbol() {
+                        "\u{256d}" => top += 1,    // ╭
+                        "\u{2570}" => bottom += 1, // ╰
+                        _ => {}
+                    }
+                }
+            }
+        }
+        (top, bottom)
+    }
+
+    /// Named contract: bottom prompt always paints ╭ / ╰ in normal chat, plan
+    /// approval soft-park, and open plan panel. Absence of the outline is the
+    /// bug (prior inverted "suppress in plan" gate).
+    #[test]
+    fn normal_agent_draw_paints_prompt_outline_corners() {
+        let mut agent = make_agent();
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let (top, bottom) = left_edge_prompt_corners(&buf, area);
+        assert!(
+            top >= 1 && bottom >= 1,
+            "normal chat must paint prompt ╭ and ╰ on the lower-left outline; top={top} bottom={bottom}"
+        );
+    }
+
+    #[test]
+    fn plan_approval_draw_paints_prompt_outline_corners() {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(make_plan_approval_view_state());
+        agent.reopen_plan_approval();
+        assert!(agent.line_viewer.is_some(), "approval opens plan panel");
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let (top, bottom) = left_edge_prompt_corners(&buf, area);
+        assert!(
+            top >= 1 && bottom >= 1,
+            "plan approval + panel must paint bottom prompt outline (╭/╰ on lower-left); top={top} bottom={bottom}"
+        );
+    }
+
+    #[test]
+    fn soft_park_without_panel_paints_prompt_outline() {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(make_plan_approval_view_state());
+        assert!(
+            agent.line_viewer.is_none(),
+            "soft-park with panel dismissed: no line_viewer"
+        );
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let (top, bottom) = left_edge_prompt_corners(&buf, area);
+        assert!(
+            top >= 1 && bottom >= 1,
+            "soft-park without panel must still paint prompt outline; top={top} bottom={bottom}"
+        );
+    }
+
+    #[test]
+    fn plan_mode_writing_paints_prompt_outline() {
+        // Bare plan mode (writing a plan, no approval, no panel) keeps outline.
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let (top, bottom) = left_edge_prompt_corners(&buf, area);
+        assert!(
+            top >= 1 && bottom >= 1,
+            "plan mode (writing) must paint prompt outline; top={top} bottom={bottom}"
+        );
+    }
+
+    /// Named contract (dogfood 2026-08-01): plan mode on DOGE must not paint
+    /// the composer outline in `bg_base` (black-on-black). DOGE solid-steps
+    /// `blend(bg, accent_plan, opacity)` to bg when opacity < 0.5 — a 0.4 tint
+    /// made ╭│╰ invisible while Responding in plan mode. Outline glyphs stay
+    /// on; fg must remain a visible plan/chrome colour.
+    #[test]
+    fn doge_plan_mode_prompt_outline_fg_not_canvas() {
+        use crate::theme::cache;
+        use crate::theme::{Theme, ThemeKind};
+
+        let _pin = cache::pin_theme();
+        cache::set(ThemeKind::Doge);
+        let theme = Theme::current();
+        assert_eq!(theme.bg_base, ratatui::style::Color::Rgb(0, 0, 0));
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let mid_y = area.y + area.height / 2;
+        let mut corner_fgs = Vec::new();
+        for y in mid_y..area.y + area.height {
+            for x in area.x..area.x.saturating_add(6).min(area.x + area.width) {
+                if let Some(cell) = buf.cell((x, y)) {
+                    match cell.symbol() {
+                        "\u{256d}" | "\u{2570}" => {
+                            // ╭ or ╰
+                            corner_fgs.push(cell.fg);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(
+            !corner_fgs.is_empty(),
+            "plan mode must still paint ╭/╰ outline glyphs under DOGE"
+        );
+        for fg in &corner_fgs {
+            assert_ne!(
+                *fg, theme.bg_base,
+                "plan outline fg must not be canvas black (invisible); got {fg:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod voice_recording_overlay_tests {
     use super::super::paste::paste_key_tests::make_plan_approval_view_state;

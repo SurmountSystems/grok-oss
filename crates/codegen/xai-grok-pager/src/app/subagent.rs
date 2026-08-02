@@ -479,18 +479,12 @@ pub(crate) fn format_activity_label(activity: &crate::acp::tracker::TurnActivity
             max_retries,
             reason,
         } => {
-            let head = if *max_retries == u32::MAX {
-                format!("Retrying (#{attempt})")
-            } else {
-                format!("Retrying ({attempt}/{max_retries})")
-            };
-            let brief = reason.trim();
-            if brief.is_empty() {
-                head
-            } else {
-                let one = brief.lines().next().unwrap_or(brief);
-                format!("{head}: {one}")
-            }
+            // Same graceful chrome as main turn status (shared formatter).
+            crate::views::turn_status::format_retrying_activity_label(
+                *attempt,
+                *max_retries,
+                reason,
+            )
         }
         TurnActivity::Waiting(reason) => reason.label(),
     }
@@ -1056,24 +1050,61 @@ mod tests {
             "Compacting",
         );
     }
+    /// Contract: nested subagent detail / scrollback activity uses the same
+    /// graceful retry chrome as the main turn status line — never the old
+    /// `Retrying (#1): request timed out` form.
     #[test]
-    fn activity_label_retrying() {
+    fn activity_label_retrying_matches_main_graceful_format() {
         use crate::acp::tracker::TurnActivity;
+        // Finite budget: N/M + middle-dot reason + trailing ellipsis.
         assert_eq!(
             format_activity_label(&TurnActivity::Retrying {
                 attempt: 2,
                 max_retries: 5,
-                reason: "rate limited".into(),
+                reason: "rate limited · next try in 4s".into(),
             }),
-            "Retrying (2/5): rate limited",
+            "Retrying (2/5) · rate limited · next try in 4s…",
         );
+        // Unlimited budget: "attempt N", not "#N", middle-dot not colon.
+        let unlimited = format_activity_label(&TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "timed out · next try in 2s".into(),
+        });
+        assert_eq!(
+            unlimited,
+            "Retrying (attempt 1) · timed out · next try in 2s…",
+        );
+        assert!(
+            !unlimited.contains("Retrying (#"),
+            "must not use old #attempt form, got {unlimited:?}"
+        );
+        assert!(
+            !unlimited.contains(": "),
+            "must not use old colon separator, got {unlimited:?}"
+        );
+        // Soft-reconnect reason after StreamResumed.
         assert_eq!(
             format_activity_label(&TurnActivity::Retrying {
-                attempt: 3,
+                attempt: 1,
                 max_retries: u32::MAX,
-                reason: "502 Bad Gateway".into(),
+                reason: "reconnecting".into(),
             }),
-            "Retrying (#3): 502 Bad Gateway",
+            "Retrying (attempt 1) · reconnecting…",
+        );
+        // Stale raw timeout wording must not reappear as the nested chrome.
+        let raw = format_activity_label(&TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "request timed out".into(),
+        });
+        assert!(
+            raw.starts_with("Retrying (attempt 1) · "),
+            "nested must share main head form, got {raw:?}"
+        );
+        assert!(
+            !raw.starts_with("Retrying (#1):"),
+            "old ungraceful nested form forbidden, got {raw:?}"
         );
     }
     #[test]

@@ -57,8 +57,8 @@ pub use allowance_exhaust_from_billing::{
     clear_included_billing_cache, included_billing_fields_snapshot, load_all_session_access_tokens,
     load_non_active_supergrok_billing_poll_targets, load_session_access_token,
     load_supergrok_billing_poll_targets, load_supergrok_session_candidates,
-    remember_active_supergrok_included_billing, remember_supergrok_included_billing,
-    supergrok_out_of_allowance_with_console_ready,
+    remember_active_supergrok_included_billing, remember_supergrok_dollar_extras,
+    remember_supergrok_included_billing, supergrok_out_of_allowance_with_console_ready,
 };
 pub use dual_auth_status::{
     DualAuthStatus, collect_dual_auth_status, collect_dual_auth_status_with,
@@ -73,7 +73,7 @@ pub use meta::{AuthMeta, GateInfo};
 pub use model::{
     AuthMode, GrokAuth, SupergrokPrincipalListing, fingerprint_session_token,
     list_supergrok_principal_listings, lookup_auth, multi_slot_scope_for_auth,
-    upsert_supergrok_session,
+    supergrok_identity_id_from_auth, upsert_supergrok_session,
 };
 pub(crate) use model::{
     TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired, token_suffix,
@@ -108,6 +108,7 @@ pub use supergrok_identity_rank::{
 };
 pub use xai_console::{
     XAI_CONSOLE_API_URL, XaiConsoleAuthError, add_console_api_key, clear_console_api_key,
+    console_inference_key_present, console_inference_key_present_default,
     credential_url as xai_console_credential_url, fingerprint_console_key,
     list_console_api_key_fingerprints, load_stored_console_api_key, load_stored_console_api_keys,
     run_list_console_api_keys, run_xai_console_login, store_console_api_key,
@@ -116,13 +117,21 @@ pub use xai_console::{
 pub use xai_grok_sampler::AllowanceExhaustAction;
 pub use xai_management::{
     ConsoleTeamPrepaidMeter, MANAGEMENT_API_BASE_URL, MANAGEMENT_CREDENTIAL_URL,
-    ManagementAuthError, PrepaidBalanceResponse, UsdCentsVal, cached_console_team_prepaid,
-    cached_console_team_prepaid_cents_default, clear_console_team_prepaid_cache,
-    clear_management_api_key, console_team_prepaid_from_response,
+    MANAGEMENT_KEY_VALIDATION_PATH, ManagementAuthError, ManagementKeyValidateFailure,
+    ManagementKeyValidateOutcome, ManagementKeyValidation, PrepaidBalanceResponse, UsdCentsVal,
+    XAI_MANAGEMENT_API_KEY_ENV, XAI_MANAGEMENT_TEAM_ID_ENV, cached_console_team_prepaid,
+    cached_console_team_prepaid_cents_default, cached_discovered_team_id,
+    clear_console_team_prepaid_cache, clear_discovered_team_id_cache, clear_management_api_key,
+    console_team_prepaid_from_response, console_team_prepaid_setup_note,
     fetch_console_team_prepaid_balance, fetch_console_team_prepaid_balance_at,
     fetch_console_team_prepaid_balance_default, fingerprint_management_key,
-    load_stored_management_api_key, management_api_base, management_credential_url,
-    prepaid_balance_path, prepaid_remaining_cents_from_total_val, resolve_management_api_key,
+    format_management_key_validate_failure, has_management_api_key_env,
+    load_stored_management_api_key, management_api_base, management_api_key_from_env,
+    management_credential_url, management_team_id_from_env, prepaid_balance_path,
+    prepaid_remaining_cents_from_total_val, resolve_management_api_key,
     resolve_management_api_key_default, resolve_management_team_id,
-    resolve_management_team_id_default, store_management_api_key,
+    resolve_management_team_id_default, resolve_management_team_id_with_discovery,
+    run_management_key_login, store_management_api_key, validate_management_key,
+    validate_management_key_at, validate_management_key_outcome,
+    validate_management_key_outcome_at,
 };

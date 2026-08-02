@@ -398,6 +398,19 @@ impl AgentView {
             }
         }
 
+        // Limits: dismissible meters popup (Esc / q).
+        if let ActiveModal::Limits { state } = modal {
+            use crate::views::limits_modal::{LimitsModalOutcome, handle_limits_key};
+            match handle_limits_key(state, key) {
+                LimitsModalOutcome::Close => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                LimitsModalOutcome::Changed => return InputOutcome::Changed,
+                LimitsModalOutcome::Unchanged => return InputOutcome::Unchanged,
+            }
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let ActiveModal::Settings { state } = modal {
             // Sub-mode short-circuit: FilterFocused, PickingEnum, PickingGroup,
@@ -484,7 +497,8 @@ impl AgentView {
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
-            | ActiveModal::RememberNoteReview { .. } => unreachable!(),
+            | ActiveModal::RememberNoteReview { .. }
+            | ActiveModal::Limits { .. } => unreachable!(),
         }
     }
 
@@ -1597,6 +1611,24 @@ impl AgentView {
             }
         }
 
+        // Limits: dismiss via [x], Esc shortcut, or click outside (dimmed backdrop).
+        if let Some(ActiveModal::Limits { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            match outcome {
+                ModalWindowOutcome::CloseRequested | ModalWindowOutcome::ShortcutActivated(_) => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Handled => return InputOutcome::Changed,
+                ModalWindowOutcome::Unhandled => {
+                    // Content is read-only meters — consume clicks inside chrome.
+                    return InputOutcome::Changed;
+                }
+                _ => return InputOutcome::Changed,
+            }
+        }
+
         // ResetSettingsConfirm: route mouse events through the
         // modal-window chrome.
         if let Some(ActiveModal::ResetSettingsConfirm { settings_state, .. }) =
@@ -2355,6 +2387,18 @@ impl AgentView {
                 }
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
+            } else if let modal::ActiveModal::Limits {
+                state: limits_state,
+            } = active_modal
+            {
+                crate::views::limits_modal::render_limits_modal(
+                    buf,
+                    area,
+                    limits_state,
+                    &theme,
+                    compact,
+                    chrono::Utc::now(),
+                );
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal

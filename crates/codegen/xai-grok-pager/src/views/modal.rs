@@ -318,6 +318,10 @@ pub enum ActiveModal {
         /// different note's review modal.
         rewrite_nonce: u64,
     },
+    /// `/limits` spend meters popup (live countdown; not a scrollback dump).
+    Limits {
+        state: Box<crate::views::limits_modal::LimitsModalState>,
+    },
 }
 /// Snapshot of the command palette state, saved when opening an arg picker
 /// and restored on Esc.
@@ -637,7 +641,8 @@ impl ActiveModal {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
-            | ActiveModal::RememberNoteReview { .. } => vec![],
+            | ActiveModal::RememberNoteReview { .. }
+            | ActiveModal::Limits { .. } => vec![],
         }
     }
     pub fn message(&self, drain_blocked: bool) -> &str {
@@ -668,6 +673,7 @@ impl ActiveModal {
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
+            ActiveModal::Limits { .. } => crate::views::limits_modal::MODAL_TITLE,
         }
     }
 }

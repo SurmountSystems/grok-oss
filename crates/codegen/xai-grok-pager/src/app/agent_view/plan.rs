@@ -62,6 +62,71 @@ impl AgentView {
             && self.is_plan_viewer()
             && self.casual_commenting_range.is_some()
     }
+
+    /// True when a line-comment draft is armed (approval `Commenting` or casual
+    /// range) and the draft body is still empty.
+    ///
+    /// Dogfood 2026-08-01: "commenting L17" with no typed body still looks like
+    /// the plan viewer is focused; arrows / PageUp / PageDown must scroll the
+    /// plan, not die on an empty composer. Once the operator types, the
+    /// composer owns cursor motion.
+    pub(super) fn is_empty_plan_line_comment_draft(&self) -> bool {
+        if !self.prompt.text().is_empty() {
+            return false;
+        }
+        if self.is_casual_commenting() {
+            return true;
+        }
+        self.plan_approval_view.as_ref().is_some_and(|pav| {
+            pav.focus == PlanApprovalFocus::Commenting && pav.commenting_range.is_some()
+        })
+    }
+
+    /// Bare plan-viewer navigation keys (arrows, page, home/end).
+    ///
+    /// No modifiers: Shift-arrows stay with visual select when Preview owns
+    /// keys; Ctrl/Alt chords stay global or composer chords.
+    pub(super) fn is_plan_viewer_scroll_key(key: &KeyEvent) -> bool {
+        if !key.modifiers.is_empty() {
+            return false;
+        }
+        matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        )
+    }
+
+    /// When the plan line viewer is open, bare scroll keys navigate the plan
+    /// even if focus is dual (soft-park Prompt, empty line-comment draft).
+    ///
+    /// Only a **non-empty line-comment** draft keeps Up/Down/Page for caret
+    /// motion in the composer. Freeform Prompt notes and empty drafts still
+    /// scroll the open plan so operators do not need a focus click first.
+    pub(super) fn plan_viewer_owns_scroll_keys(&self, key: &KeyEvent) -> bool {
+        if self.line_viewer.is_none() || !self.is_plan_viewer() {
+            return false;
+        }
+        if !Self::is_plan_viewer_scroll_key(key) || self.prompt.slash_open() {
+            return false;
+        }
+        // Empty line-comment draft ("commenting L#") scrolls the plan.
+        if self.is_empty_plan_line_comment_draft() {
+            return true;
+        }
+        // Non-empty line-comment draft keeps composer caret motion.
+        let nonempty_line_comment = !self.prompt.text().is_empty()
+            && (self.is_casual_commenting()
+                || self.plan_approval_view.as_ref().is_some_and(|p| {
+                    p.focus == PlanApprovalFocus::Commenting && p.commenting_range.is_some()
+                }));
+        !nonempty_line_comment
+    }
+
     /// Whether the prompt "auto" (LLM classifier mode) flag should render.
     /// Extracted for unit testing the precedence: auto shows only when the
     /// session is in auto mode and neither yolo (always-approve wins) nor plan
@@ -202,17 +267,13 @@ impl AgentView {
         } else {
             "plan.md".to_string()
         });
-        // Plan approval opens as a right-hand side panel (option B) so chat
-        // stays visible; casual plan preview keeps the full overlay. Force-
-        // modal (`plan_approval_park=modal`) upgrades to fullscreen after
-        // reopen in `handle_exit_plan_mode`.
-        if self.plan_approval_view.is_some() {
-            viewer.side_panel = true;
-            viewer.fullscreen = false;
-        } else {
-            viewer.side_panel = false;
-            viewer.fullscreen = true;
-        }
+        // Casual `/view-plan` and approval soft-park both open as a right-hand
+        // side panel (half screen) so chat stays visible. Fullscreen is opt-in
+        // via Ctrl+F / the enlarge control. Force-modal
+        // (`plan_approval_park=modal`) upgrades to fullscreen after reopen in
+        // `handle_exit_plan_mode`.
+        viewer.side_panel = true;
+        viewer.fullscreen = false;
         {
             let plan = viewer.plan_mut();
             plan.show_action_buttons = self.plan_approval_view.is_none();
@@ -1982,6 +2043,56 @@ mod approve_plan_flush_tests {
         assert!(agent.plan_approval_view.is_none());
     }
 
+    /// Named contract (dogfood 2026-08-01): casual `/view-plan` / ShowPlan
+    /// opens as a half-screen side panel by default — not a full-screen
+    /// takeover. Ctrl+F remains the opt-in enlarge.
+    #[test]
+    fn casual_view_plan_opens_as_side_panel_not_fullscreen() {
+        let mut agent = make_agent();
+        agent.latest_inline_plan_content = Some(long_plan_body(20));
+        agent.show_plan_preview();
+        let viewer = agent
+            .line_viewer
+            .as_ref()
+            .expect("casual /view-plan must open a plan viewer");
+        assert!(
+            viewer.side_panel,
+            "casual view-plan must dock as side panel (half screen)"
+        );
+        assert!(
+            !viewer.fullscreen,
+            "casual view-plan must not hard-takeover fullscreen by default"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "fixture is casual preview (no live approval)"
+        );
+        assert!(
+            viewer.plan_ref().is_some_and(|p| p.show_action_buttons),
+            "casual preview keeps c-comment chrome"
+        );
+        // Ctrl+F still enlarges; leaving fullscreen restores side panel.
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        let _ = agent.handle_line_viewer_key(&ctrl_f);
+        {
+            let v = agent.line_viewer.as_ref().unwrap();
+            assert!(
+                v.fullscreen,
+                "Ctrl+F must enlarge casual plan to fullscreen"
+            );
+            assert!(!v.side_panel);
+        }
+        let _ = agent.handle_line_viewer_key(&ctrl_f);
+        {
+            let v = agent.line_viewer.as_ref().unwrap();
+            assert!(!v.fullscreen);
+            assert!(
+                v.side_panel,
+                "leaving fullscreen must restore casual plan side panel"
+            );
+        }
+    }
+
     /// Option B: Ctrl+F enlarges side panel to fullscreen and back.
     #[test]
     fn plan_side_panel_ctrl_f_toggles_fullscreen() {
@@ -2005,6 +2116,372 @@ mod approve_plan_flush_tests {
                 "leaving fullscreen must restore plan side panel"
             );
         }
+    }
+
+    /// Long plan body so viewport navigation can move selection / offset.
+    fn long_plan_body(lines: usize) -> String {
+        let mut s = String::from("# Long plan for scroll tests\n\n");
+        for i in 1..=lines {
+            s.push_str(&format!("Line {i}: content for plan review scrolling\n"));
+        }
+        s
+    }
+
+    /// Named contract (dogfood 2026-08-01): soft-park dual focus (Prompt +
+    /// open side panel) must still scroll the plan with arrows / page keys
+    /// immediately — no click-to-focus ritual. Empty freeform draft.
+    #[test]
+    fn plan_prompt_focus_empty_draft_arrows_scroll_viewer() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        // Mirror soft-park: Prompt focus + open side panel + empty draft.
+        soft_park_style_open(&mut agent, &long_plan_body(80));
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Prompt),
+            "soft-park dual focus stays Prompt"
+        );
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan side panel");
+            viewer.prepare_layout(60, 12);
+            if let Some(id) = viewer.lines.first().map(|l| l.stable_id()) {
+                viewer.list_state.select_by_id(id);
+            }
+            viewer.list_state.set_scroll_offset(0);
+            viewer.prepare_layout(60, 12);
+        }
+        let sel_before = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection");
+
+        let registry = ActionRegistry::defaults();
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let outcome = agent.handle_input(&Event::Key(down), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Prompt-focus empty draft Down must scroll plan; got {outcome:?}"
+        );
+        let sel_after = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection after Down");
+        assert!(
+            sel_after > sel_before,
+            "Prompt-focus empty: Down must advance plan selection ({sel_before} → {sel_after})"
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Prompt),
+            "scroll must not force Preview (dual focus / L1 typing stays free)"
+        );
+        assert!(agent.prompt.text().is_empty());
+    }
+
+    /// Named contract (dogfood 2026-08-01): dual focus with a freeform Prompt
+    /// draft (soft-park live text or A/?/s notes) still routes Up/Down/Page to
+    /// the open plan. Line-comment non-empty drafts keep composer caret.
+    #[test]
+    fn plan_prompt_focus_freeform_draft_arrows_still_scroll_viewer() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, &long_plan_body(80));
+        agent.prompt.set_text("still drafting");
+        agent.prompt.set_cursor(0);
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan side panel");
+            viewer.prepare_layout(60, 12);
+            if let Some(id) = viewer.lines.first().map(|l| l.stable_id()) {
+                viewer.list_state.select_by_id(id);
+            }
+            viewer.list_state.set_scroll_offset(0);
+            viewer.prepare_layout(60, 12);
+        }
+        let sel_before = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection");
+
+        let registry = ActionRegistry::defaults();
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let _ = agent.handle_input(&Event::Key(down), &registry);
+        let sel_after = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection after Down");
+        assert!(
+            sel_after > sel_before,
+            "Prompt freeform draft: Down must still scroll plan ({sel_before} → {sel_after})"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "still drafting",
+            "scroll keys must not rewrite freeform draft"
+        );
+    }
+
+    /// Casual `/view-plan` side panel: arrows scroll immediately (no focus
+    /// ritual) through the normal line-viewer key path.
+    #[test]
+    fn casual_view_plan_arrows_scroll_without_extra_focus() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        agent.latest_inline_plan_content = Some(long_plan_body(80));
+        agent.show_plan_preview();
+        {
+            let viewer = agent.line_viewer.as_mut().expect("casual plan panel");
+            assert!(viewer.side_panel && !viewer.fullscreen);
+            viewer.prepare_layout(60, 12);
+            if let Some(id) = viewer.lines.first().map(|l| l.stable_id()) {
+                viewer.list_state.select_by_id(id);
+            }
+            viewer.list_state.set_scroll_offset(0);
+            viewer.prepare_layout(60, 12);
+        }
+        let sel_before = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection");
+
+        let registry = ActionRegistry::defaults();
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let outcome = agent.handle_input(&Event::Key(down), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "casual plan Down must be consumed; got {outcome:?}"
+        );
+        let sel_after = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection after Down");
+        assert!(
+            sel_after > sel_before,
+            "casual plan Down must advance selection ({sel_before} → {sel_after})"
+        );
+    }
+
+    /// Named contract (dogfood 2026-08-01): when the plan line viewer is open
+    /// with Preview focus, Up/Down and PageUp/PageDown navigate the plan body
+    /// like a normal file viewer (not swallowed by the composer).
+    #[test]
+    fn plan_preview_focus_arrows_and_page_keys_scroll_viewer() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, &long_plan_body(80));
+        agent.reopen_plan_approval();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview)
+        );
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan side panel");
+            viewer.prepare_layout(60, 12);
+            // Start at first line so Down/PageDown can advance.
+            if let Some(id) = viewer.lines.first().map(|l| l.stable_id()) {
+                viewer.list_state.select_by_id(id);
+            }
+            viewer.list_state.set_scroll_offset(0);
+            viewer.prepare_layout(60, 12);
+        }
+        let sel_before = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection");
+        let scroll_before = agent
+            .line_viewer
+            .as_ref()
+            .map(|v| v.list_state.scroll_offset())
+            .unwrap_or(0);
+
+        let registry = ActionRegistry::defaults();
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let outcome = agent.handle_input(&Event::Key(down), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Preview Down must be consumed by the plan viewer; got {outcome:?}"
+        );
+        let sel_after_down = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection after Down");
+        assert!(
+            sel_after_down > sel_before,
+            "Preview Down must advance plan selection ({sel_before} → {sel_after_down})"
+        );
+
+        let page_down = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        let outcome = agent.handle_input(&Event::Key(page_down), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Preview PageDown must be consumed; got {outcome:?}"
+        );
+        let scroll_after = agent
+            .line_viewer
+            .as_ref()
+            .map(|v| v.list_state.scroll_offset())
+            .unwrap_or(0);
+        let sel_after_page = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection after PageDown");
+        assert!(
+            scroll_after > scroll_before || sel_after_page > sel_after_down,
+            "Preview PageDown must move scroll or selection (scroll {scroll_before}→{scroll_after}, sel {sel_after_down}→{sel_after_page})"
+        );
+        // CTAs still live: approval view remains open.
+        assert!(agent.plan_approval_view.is_some());
+        assert!(agent.line_viewer.is_some());
+    }
+
+    /// Named contract (dogfood 2026-08-01): after Enter arms line comment
+    /// ("commenting L17") with an empty draft, arrows / Page keys still scroll
+    /// the plan viewer. Only mid-text-entry should capture those keys for the
+    /// comment composer.
+    #[test]
+    fn plan_commenting_empty_draft_arrows_and_page_keys_scroll_viewer() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, &long_plan_body(80));
+        agent.reopen_plan_approval();
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan side panel");
+            viewer.prepare_layout(60, 12);
+            viewer.set_initial_selection(5..6);
+            viewer.prepare_layout(60, 12);
+        }
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_line_viewer_key(&enter);
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Commenting),
+            "Enter on a line must arm Commenting focus"
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "new line comment starts with empty draft"
+        );
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|p| p.commenting_range.is_some()),
+            "commenting range must be armed"
+        );
+
+        let sel_before = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection");
+        let scroll_before = agent
+            .line_viewer
+            .as_ref()
+            .map(|v| v.list_state.scroll_offset())
+            .unwrap_or(0);
+
+        let registry = ActionRegistry::defaults();
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let outcome = agent.handle_input(&Event::Key(down), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "empty-comment Down must be consumed; got {outcome:?}"
+        );
+        let sel_after_down = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection after Down");
+        assert!(
+            sel_after_down > sel_before,
+            "empty-comment Down must scroll/select plan content ({sel_before} → {sel_after_down})"
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "scroll keys must not type into empty comment draft"
+        );
+
+        let page_down = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        let outcome = agent.handle_input(&Event::Key(page_down), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "empty-comment PageDown must be consumed; got {outcome:?}"
+        );
+        let scroll_after = agent
+            .line_viewer
+            .as_ref()
+            .map(|v| v.list_state.scroll_offset())
+            .unwrap_or(0);
+        let sel_after_page = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index())
+            .expect("selection after PageDown");
+        assert!(
+            scroll_after > scroll_before || sel_after_page > sel_after_down,
+            "empty-comment PageDown must move scroll or selection (scroll {scroll_before}→{scroll_after}, sel {sel_after_down}→{sel_after_page})"
+        );
+        // Still commenting; Esc cancel path and CTAs remain available.
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Commenting)
+        );
+    }
+
+    /// When the comment draft has text, arrow keys stay with the composer
+    /// (cursor motion), not the plan viewer.
+    #[test]
+    fn plan_commenting_nonempty_draft_arrows_stay_with_composer() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let _rx = install_plan_approval(&mut agent, &long_plan_body(40));
+        agent.reopen_plan_approval();
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan side panel");
+            viewer.prepare_layout(60, 12);
+            viewer.set_initial_selection(3..4);
+            viewer.prepare_layout(60, 12);
+        }
+        let _ = agent.handle_line_viewer_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        agent.prompt.set_text("note");
+        agent.prompt.set_cursor(0);
+
+        let sel_before = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index());
+
+        let registry = ActionRegistry::defaults();
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let _ = agent.handle_input(&Event::Key(right), &registry);
+        assert!(
+            agent.prompt.cursor() > 0,
+            "non-empty comment draft: Right must move the composer caret"
+        );
+        let sel_after = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.list_state.selected_index());
+        assert_eq!(
+            sel_before, sel_after,
+            "non-empty draft: arrows must not move plan selection"
+        );
     }
 
     /// Named contract: FileBacked soft-park transcript card SoT is live

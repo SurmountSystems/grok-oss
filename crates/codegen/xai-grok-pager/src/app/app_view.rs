@@ -5159,6 +5159,7 @@ impl AppView {
                 needs_redraw |= child.edit_hl_tick();
             }
         }
+        let mut limits_zero_refresh_for: Option<crate::app::agent::AgentId> = None;
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
@@ -5206,6 +5207,17 @@ impl AppView {
                     lanes,
                 )
             ) && spinner_frame_tick;
+            // Live d/h/m/s countdown while /limits modal is open.
+            if let Some(crate::views::modal::ActiveModal::Limits { state }) =
+                agent.active_modal.as_mut()
+            {
+                needs_redraw = true;
+                let now = chrono::Utc::now();
+                if state.should_request_zero_refresh(now) {
+                    state.mark_zero_refresh_sent();
+                    limits_zero_refresh_for = Some(id);
+                }
+            }
             needs_redraw |= agent.drain_blocked();
             agent.prompt.slash_controller.set_workflows_available(
                 agent
@@ -5282,6 +5294,14 @@ impl AppView {
             if agent_wants_composer_cursor_blink(agent) {
                 needs_redraw = true;
             }
+        }
+        // Countdown hit zero while /limits modal open → silent billing re-fetch.
+        if let Some(agent_id) = limits_zero_refresh_for {
+            self.pending_effects
+                .push(crate::app::actions::Effect::FetchBilling {
+                    agent_id,
+                    silent: true,
+                });
         }
         if let Some(commands) = bootstrap_commands_update {
             self.welcome_prompt
@@ -5577,6 +5597,13 @@ impl AppView {
                 // wall-clock phase; Slow ticks keep it alive without a 30fps spin
                 // while the agent is idle and the prompt is focused.
                 if agent_wants_composer_cursor_blink(agent) {
+                    return TickDemand::Slow;
+                }
+                // /limits live countdown (d/h/m/s) needs Slow ticks while open.
+                if matches!(
+                    agent.active_modal.as_ref(),
+                    Some(crate::views::modal::ActiveModal::Limits { .. })
+                ) {
                     return TickDemand::Slow;
                 }
                 TickDemand::None

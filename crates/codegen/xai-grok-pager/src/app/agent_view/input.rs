@@ -896,6 +896,13 @@ impl AgentView {
                     if key!('q', CONTROL).matches(key) {
                         return InputOutcome::Unchanged;
                     }
+                    // Plan open + dual focus (soft-park Prompt, empty line
+                    // comment, freeform notes): arrows / Page keys scroll the
+                    // plan without a second focus click. Only a non-empty
+                    // line-comment draft keeps those keys for caret motion.
+                    if self.plan_viewer_owns_scroll_keys(key) {
+                        return self.handle_line_viewer_key(key);
+                    }
                     if casual_commenting {
                         self.handle_casual_plan_feedback_key(key)
                     } else {

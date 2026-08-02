@@ -4745,6 +4745,69 @@
         assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "\u{256e}");
     }
 
+    /// Named contract: when `show_borders` is false (inline / minimal-style),
+    /// the rounded box outline is gone but the model · flags caption still
+    /// paints on the info row. Plan surfaces keep borders on; this is the
+    /// widget capability for chromeless embeds only.
+    #[test]
+    fn no_outline_still_paints_info_caption_without_box_glyphs() {
+        use crate::views::prompt_widget::{PromptFlag, PromptInfo};
+
+        let mut pw = PromptWidget::new();
+        let style = PromptStyle {
+            focused: true,
+            chrome: true,
+            show_borders: false,
+            show_prefix: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let flags = [PromptFlag {
+            text: "plan approval",
+            color: None,
+            bold: false,
+        }];
+        let info = PromptInfo {
+            model_name: "Grok 4.5 (high)",
+            flags: &flags,
+            multiline: false,
+            usage_warning: None,
+            usage_warning_critical: false,
+        };
+        let area = Rect::new(0, 0, 60, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, Some(&info), None);
+
+        // No box outline glyphs anywhere in the prompt rect.
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let sym = buf.cell((x, y)).map(|c| c.symbol()).unwrap_or("");
+                assert!(
+                    !matches!(
+                        sym,
+                        "\u{256d}" | "\u{256e}" | "\u{2570}" | "\u{256f}" | "\u{2502}"
+                    ),
+                    "outline glyph {sym:?} must not paint when show_borders is false at ({x},{y})"
+                );
+            }
+        }
+
+        // Info caption survives without the bottom border rule.
+        let bottom = buf_text_at(&buf, 0, area.width, area.height - 1);
+        assert!(
+            bottom.contains("Grok 4.5 (high)"),
+            "model caption must remain without outline; row={bottom:?}"
+        );
+        assert!(
+            bottom.contains("plan approval"),
+            "mode flag must remain without outline; row={bottom:?}"
+        );
+        assert!(
+            !bottom.contains('\u{2500}'),
+            "bottom row must not be a ─ border rule when outline is off; row={bottom:?}"
+        );
+    }
+
     /// Focused composer paints a Human-green solid/empty block caret and hides
     /// the terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
     ///

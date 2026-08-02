@@ -1016,11 +1016,13 @@ fn test_bal(usage_pct: f64) -> crate::views::credit_bar::CreditBalance {
         usage_pct,
         effective_usage_pct: usage_pct,
         period_end_display: None,
+        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
         prepaid_balance_cents: None,
         period_type: None,
         is_unified_billing_user: None,
+        grok_build_usage_pct: None,
     }
 }

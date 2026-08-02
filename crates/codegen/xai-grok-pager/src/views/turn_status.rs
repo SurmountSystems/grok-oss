@@ -740,23 +740,7 @@ fn compute_activity(
                 reason,
             }),
         ) => {
-            // Unlimited budget (u32::MAX) shows attempt only; finite shows N/M.
-            let mut label = if *max_retries == u32::MAX {
-                format!("Retrying (attempt {attempt})")
-            } else {
-                format!("Retrying ({attempt}/{max_retries})")
-            };
-            let brief = reason.trim();
-            if !brief.is_empty() {
-                // Keep status line readable: first line, prefer meaningful
-                // transport detail over long reqwest/eventsource prefixes that
-                // used to clip to bare "Transport error: error".
-                let one_line = brief.lines().next().unwrap_or(brief);
-                let clipped = clip_retry_reason_brief(one_line);
-                label.push_str(" · ");
-                label.push_str(&clipped);
-            }
-            label.push('…');
+            let label = format_retrying_activity_label(*attempt, *max_retries, reason);
             (Style::default().fg(theme.warning), label, false)
         }
         (AgentState::TurnRunning, Some(TurnActivity::Waiting(reason))) => (
@@ -872,6 +856,35 @@ pub fn should_show(
         || drain_blocked
         || starting_session_visible(mcp_init_progress)
         || watchers.total() > 0
+}
+
+/// Shared Retrying chrome for main turn status **and** nested/subagent
+/// activity labels (`format_activity_label`). Unlimited budget shows
+/// `attempt N`; finite shows `N/M`. Reason uses a middle-dot separator and
+/// trailing ellipsis — never the old `Retrying (#N): raw error` form.
+pub(crate) fn format_retrying_activity_label(
+    attempt: u32,
+    max_retries: u32,
+    reason: &str,
+) -> String {
+    // Unlimited budget (u32::MAX) shows attempt only; finite shows N/M.
+    let mut label = if max_retries == u32::MAX {
+        format!("Retrying (attempt {attempt})")
+    } else {
+        format!("Retrying ({attempt}/{max_retries})")
+    };
+    let brief = reason.trim();
+    if !brief.is_empty() {
+        // Keep status line readable: first line, prefer meaningful
+        // transport detail over long reqwest/eventsource prefixes that
+        // used to clip to bare "Transport error: error".
+        let one_line = brief.lines().next().unwrap_or(brief);
+        let clipped = clip_retry_reason_brief(one_line);
+        label.push_str(" · ");
+        label.push_str(&clipped);
+    }
+    label.push('…');
+    label
 }
 
 /// Clip a retry reason for the status footer (~45 visible chars).
@@ -1044,6 +1057,57 @@ mod tests {
         assert!(
             label.starts_with("Retrying (attempt 1) · connection interrupted"),
             "got {label:?}"
+        );
+    }
+
+    /// Contract: network recovery status is plain (timed out / reconnecting /
+    /// N of M when budget is finite), never zombie "Waiting for response…".
+    #[test]
+    fn retrying_label_shows_timeout_backoff_and_reconnecting() {
+        let theme = Theme::current();
+        let timed_out = Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "timed out · next try in 2s".into(),
+        });
+        let (_, label, _) =
+            compute_activity(&theme, &AgentState::TurnRunning, &timed_out, false, false);
+        assert!(
+            label.starts_with("Retrying (attempt 1) · timed out · next try in 2s"),
+            "got {label:?}"
+        );
+        assert!(
+            !label.contains("Waiting for response"),
+            "retry chrome must not look like a zombie wait, got {label:?}"
+        );
+
+        let finite = Some(TurnActivity::Retrying {
+            attempt: 2,
+            max_retries: 5,
+            reason: "connection interrupted · next try in 4s".into(),
+        });
+        let (_, label, _) =
+            compute_activity(&theme, &AgentState::TurnRunning, &finite, false, false);
+        assert!(
+            label.starts_with("Retrying (2/5) · connection interrupted · next try in 4s"),
+            "finite budget must show N/M, got {label:?}"
+        );
+
+        let reconnecting = Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "reconnecting".into(),
+        });
+        let (_, label, _) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &reconnecting,
+            false,
+            false,
+        );
+        assert!(
+            label.starts_with("Retrying (attempt 1) · reconnecting"),
+            "post-StreamResumed soft reconnect, got {label:?}"
         );
     }
 

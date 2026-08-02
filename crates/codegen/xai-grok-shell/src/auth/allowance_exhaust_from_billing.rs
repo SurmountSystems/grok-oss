@@ -34,6 +34,8 @@ static INCLUDED_BILLING_BY_IDENTITY: Mutex<BTreeMap<String, IncludedBillingField
 /// when present; unparseable / empty → leave prior `reset_at` or `None`.
 /// `period_type` is the billing proto name (`USAGE_PERIOD_TYPE_WEEKLY`, …)
 /// when known; empty/None leaves any prior value.
+/// Does **not** clear a prior `prepaid_balance_cents` (use
+/// [`remember_supergrok_dollar_extras`] after a full credits config parse).
 pub fn remember_supergrok_included_billing(
     identity_id: &str,
     usage_pct: f64,
@@ -52,6 +54,7 @@ pub fn remember_supergrok_included_billing(
         usage_pct: None,
         reset_at: None,
         period_type: None,
+        prepaid_balance_cents: None,
     });
     entry.usage_pct = Some(usage_pct);
     if let Some(r) = reset_at {
@@ -60,6 +63,28 @@ pub fn remember_supergrok_included_billing(
     if let Some(pt) = period_type.map(str::trim).filter(|s| !s.is_empty()) {
         entry.period_type = Some(pt.to_owned());
     }
+}
+
+/// Remember SuperGrok Extra Usage Credits (`prepaidBalance`) for one principal.
+///
+/// Process cache only. Signed cents as returned by billing (UI takes abs).
+/// Distinct from console team prepaid. Call after a successful credits poll
+/// so dual `/limits` can show sibling dollar extras without inventing $.
+pub fn remember_supergrok_dollar_extras(identity_id: &str, prepaid_balance_cents: i64) {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut map = INCLUDED_BILLING_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let entry = map.entry(id.to_owned()).or_insert(IncludedBillingFields {
+        usage_pct: None,
+        reset_at: None,
+        period_type: None,
+        prepaid_balance_cents: None,
+    });
+    entry.prepaid_balance_cents = Some(prepaid_balance_cents);
 }
 
 /// Remember included billing for the **active** SuperGrok session (base token).
@@ -300,8 +325,11 @@ fn prefer_supergrok_store_entry(
 /// Build SuperGrok session candidates for auto ranking from `auth.json`.
 ///
 /// Default remaining: `0` when the token fingerprint is memoized exhausted,
-/// else `1` (unknown headroom still treated as "try SuperGrok included first").
-/// When billing has been remembered for an identity
+/// **or the JWT is hard-expired on the wall clock**, else `1` (unknown headroom
+/// still treated as "try SuperGrok included first"). Hard-expired multi-slots
+/// must not rank as live included headroom ahead of another live SuperGrok
+/// principal (or silently queue a dead JWT as primary while console sits
+/// ready). When billing has been remembered for an identity
 /// ([`remember_supergrok_included_billing`]), remaining comes from usage % and
 /// `reset_at` from the period end (honest `None` when never polled / unparseable).
 ///
@@ -311,10 +339,14 @@ fn prefer_supergrok_store_entry(
 pub fn load_supergrok_session_candidates(
     grok_home: &Path,
 ) -> Vec<super::supergrok_identity_rank::SupergrokSessionCandidate> {
-    use super::model::{GrokAuth, is_supergrok_session_mode, supergrok_identity_id_from_auth};
+    use super::model::{
+        GrokAuth, is_expired_with_buffer, is_supergrok_session_mode,
+        supergrok_identity_id_from_auth,
+    };
     use super::supergrok_identity_rank::{
         SupergrokIdentityHeadroom, SupergrokSessionCandidate, role_from_session_fields,
     };
+    use chrono::Duration;
 
     let path = grok_home.join("auth.json");
     let Ok(map) = read_auth_json(&path) else {
@@ -346,11 +378,20 @@ pub fn load_supergrok_session_candidates(
             }
         }
     }
+    // Tokens hard-expired on wall clock (for billing enrich force-zero).
+    let mut hard_expired_tokens: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     let mut candidates: Vec<SupergrokSessionCandidate> = by_id
         .into_iter()
         .map(|(identity_id, (_is_multi, auth))| {
             let token = auth.key.trim();
-            let remaining = if xai_grok_sampler::is_credential_exhausted(token) {
+            // Hard wall-clock expiry (no early-invalidation buffer): a JWT that
+            // the wire would reject must not count as included headroom.
+            let hard_expired = is_expired_with_buffer(&auth, Duration::zero());
+            if hard_expired {
+                hard_expired_tokens.insert(token.to_owned());
+            }
+            let remaining = if hard_expired || xai_grok_sampler::is_credential_exhausted(token) {
                 0
             } else {
                 1
@@ -370,8 +411,11 @@ pub fn load_supergrok_session_candidates(
         .collect();
     let billing = included_billing_fields_snapshot();
     if !billing.is_empty() {
+        // Billing usage % must not resurrect a hard-expired multi-slot as
+        // "included headroom" (personal % can still poll for a dead JWT).
         enrich_candidates_with_included_billing(&mut candidates, &billing, |tok| {
-            xai_grok_sampler::is_credential_exhausted(tok)
+            let t = tok.trim();
+            xai_grok_sampler::is_credential_exhausted(t) || hard_expired_tokens.contains(t)
         });
     }
     candidates
@@ -471,6 +515,34 @@ mod tests {
         let out = f(dir.path());
         clear_all_including_durable();
         out
+    }
+
+    /// Named contract: sibling/full credits poll can remember SuperGrok Extra
+    /// Usage Credits (`prepaidBalance`) without inventing console team $.
+    #[test]
+    fn remember_dollar_extras_stores_prepaid_cents_for_limits_fill() {
+        clear_included_billing_cache();
+        remember_supergrok_included_billing(
+            "team-surmount",
+            65.0,
+            Some("2026-08-04T01:25:32Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("team-surmount", 10029);
+        let snap = included_billing_fields_snapshot();
+        let fields = snap.get("team-surmount").expect("remembered identity");
+        assert_eq!(fields.usage_pct, Some(65.0));
+        assert_eq!(fields.prepaid_balance_cents, Some(10029));
+        // Second remember of included must not wipe prepaid.
+        remember_supergrok_included_billing("team-surmount", 70.0, None, None);
+        let snap2 = included_billing_fields_snapshot();
+        assert_eq!(
+            snap2.get("team-surmount").unwrap().prepaid_balance_cents,
+            Some(10029),
+            "included re-remember must keep prepaidBalance"
+        );
+        assert_eq!(snap2.get("team-surmount").unwrap().usage_pct, Some(70.0));
+        clear_included_billing_cache();
     }
 
     fn write_oidc(home: &Path, key: &str) {
@@ -637,8 +709,8 @@ mod tests {
             "SuperGrok included primary (not console Business API)"
         );
         assert!(
-            order.failover.iter().any(|k| k == "console-biz-key"),
-            "console remains failover only: {:?}",
+            !order.failover.iter().any(|k| k == "console-biz-key"),
+            "console must be omitted from failover while SuperGrok included headroom remains: {:?}",
             order.failover
         );
 
@@ -700,6 +772,137 @@ mod tests {
             crate::auth::SupergrokAccountRole::Business
         );
         assert!(candidates[0].headroom.included_remaining > 0);
+
+        clear_all_including_durable();
+        clear_included_billing_cache();
+    }
+
+    /// Dogfood (2026-08-01): live Team SuperGrok + hard-expired personal multi-slot
+    /// + console key + included usage well below 100% must keep SuperGrok session
+    /// primary (not console). Expired personal must not rank as included headroom.
+    ///
+    /// Named contract: while SuperGrok included headroom remains on a live
+    /// session JWT, `auto_use_included_limits` must not prefer the console key
+    /// just because a second SuperGrok multi-slot is dead on the wall clock.
+    #[test]
+    #[serial_test::serial]
+    fn load_candidates_expired_personal_does_not_push_live_team_to_console() {
+        use crate::auth::supergrok_identity_rank::order_credentials_for_preferred_auto;
+        use chrono::{Duration, Utc};
+        use xai_grok_sampler::clear_all_including_durable;
+
+        clear_all_including_durable();
+        clear_included_billing_cache();
+
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let team_id = "team-surmount-live";
+        let personal_teamish = "personal-default-team";
+        let live_team = "tok-live-team-supergrok";
+        let dead_personal = "tok-expired-personal-multi";
+        let base = "https://auth.x.ai::dogfood-client";
+
+        let mut map = AuthStore::default();
+        // Live Team SuperGrok (base + team multi-slot same token).
+        map.insert(
+            base.to_owned(),
+            GrokAuth {
+                key: live_team.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-dogfood".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some(team_id.into()),
+                team_name: Some("Surmount".into()),
+                create_time: now,
+                expires_at: Some(now + Duration::hours(6)),
+                ..Default::default()
+            },
+        );
+        map.insert(
+            format!("{base}::team::{team_id}"),
+            GrokAuth {
+                key: live_team.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-dogfood".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some(team_id.into()),
+                team_name: Some("Surmount".into()),
+                create_time: now,
+                expires_at: Some(now + Duration::hours(6)),
+                ..Default::default()
+            },
+        );
+        // Hard-expired personal multi-slot (different identity_id via team_id).
+        map.insert(
+            format!("{base}::personal"),
+            GrokAuth {
+                key: dead_personal.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-dogfood".into(),
+                principal_type: Some("User".into()),
+                team_id: Some(personal_teamish.into()),
+                create_time: now - Duration::hours(20),
+                expires_at: Some(now - Duration::hours(12)),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        // Billing says 65% used (included headroom remains) for both identities.
+        remember_supergrok_included_billing(team_id, 65.0, None, Some("USAGE_PERIOD_TYPE_WEEKLY"));
+        remember_supergrok_included_billing(
+            personal_teamish,
+            65.0,
+            None,
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+
+        let candidates = load_supergrok_session_candidates(dir.path());
+        assert_eq!(
+            candidates.len(),
+            2,
+            "Team + personal are distinct SuperGrok identities"
+        );
+        let team = candidates
+            .iter()
+            .find(|c| c.headroom.identity_id == team_id)
+            .expect("live Team SuperGrok candidate");
+        let personal = candidates
+            .iter()
+            .find(|c| c.headroom.identity_id == personal_teamish)
+            .expect("expired personal candidate still listed");
+        assert_eq!(team.access_token.as_str(), live_team);
+        assert!(
+            team.headroom.included_remaining > 0,
+            "live Team with usage 65% must keep included headroom"
+        );
+        assert_eq!(
+            personal.headroom.included_remaining, 0,
+            "hard-expired personal multi-slot must not rank as included headroom \
+             even when billing still reports 65% for that pool"
+        );
+
+        let order = order_credentials_for_preferred_auto(&candidates, &["console-team-key".into()]);
+        assert_eq!(
+            order.primary.as_deref(),
+            Some(live_team),
+            "primary must stay live SuperGrok session, not console; got {:?}",
+            order.primary
+        );
+        assert!(
+            order.primary_is_supergrok_included,
+            "must not ExhaustedAll → console while live SuperGrok has headroom"
+        );
+        assert!(
+            !order.failover.iter().any(|k| k == dead_personal),
+            "expired personal JWT must not sit in failover: {:?}",
+            order.failover
+        );
+        assert!(
+            !order.failover.iter().any(|k| k == "console-team-key"),
+            "console must be omitted from failover while live SuperGrok has included headroom: {:?}",
+            order.failover
+        );
 
         clear_all_including_durable();
         clear_included_billing_cache();
@@ -773,8 +976,8 @@ mod tests {
         );
         assert_ne!(order.primary.as_deref(), Some("console-k"));
         assert!(
-            order.failover.iter().any(|k| k == "console-k"),
-            "console still in failover: {:?}",
+            !order.failover.iter().any(|k| k == "console-k"),
+            "console omitted while SuperGrok included headroom remains: {:?}",
             order.failover
         );
     }

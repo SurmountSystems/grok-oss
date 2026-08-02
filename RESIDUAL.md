@@ -14,12 +14,14 @@ or code — not only here. Closed campaign history:
   invent freeform "reply approve / options 1–5" (product chrome does not;
   process law = product CTAs only). Process: `bug:exit-plan-mode-false-approve`.
 
-- **Stuck Retrying / stream headers (shipped → FORK; soft dogfood only):**
-  product truth in [`FORK.md`](FORK.md) (StreamResumed clear, 120s headers
-  timeout, cancel-aware cooldown, short transport labels). Soft not shipped:
-  phase-timer "since retry"; remaining-seconds on non-429 shared-wait.
-  **Dogfood** after `just install` if the stable binary lags the tree. Join:
-  `/tmp/grok-join-impl-stuck-retry-fix-2026-07-30.md`.
+- **Stuck Retrying / network-switch graceful (shipped → FORK; dogfood rebuild):**
+  product truth in [`FORK.md`](FORK.md) (StreamResumed soft-reconnect, not
+  zombie Waiting for response; 120s headers timeout; cancel-aware cooldown;
+  `timed out` / `connection interrupted` + `· next try in Ns`). Soft not
+  shipped: phase-timer "since retry"; live countdown ticks. **Dogfood** after
+  rebuild if the stable binary lags (`Credits used:` in screenshots was
+  already percent-only in source). Join:
+  `/tmp/grok-join-impl-retry-network-graceful.md`.
 
 0. **Structured todos: fib leaves + progress + no casual reset (shipped product)**
    **Shipped:** first-class optional `size` (1|2 only; reject 0/3/5/8…);
@@ -140,6 +142,18 @@ or code — not only here. Closed campaign history:
    remaining personal SuperGrok dollar credits / included weekly allowance;
    then plan mode or a dedicated plan pass. Also pin: parent must not keep
    multi-file doc edits in main chat.
+
+2i. **Multi-track / also guard (OPEN — product honesty; process pins not enough)**
+   Operator call-out (2026-08-01): parent demoted in-flight limits work to
+   pending when a second ask (console drain screenshots) arrived — abandoned
+   the first track without needing kill. Process law alone failed again.
+   **Wanted product (plain):** session board binds in-flight subagents to
+   todos; parent cannot demote a live track without explicit cancel; optional
+   sticky "N agents running" (or equivalent) when a new user message arrives
+   while agents are live. Process dual-pin already stricter (host
+   `~/.grok/AGENTS.md` § *Multi-track: prose is not enough*; project
+   `AGENTS.md` bullet). **Do not claim mechanical guard shipped.** Board:
+   `feat:multi-track-also-guard`. Rank: open product honesty, not closed.
 
 2g. **Live rule feedback into the completion stream (OPEN — track only)**
    Operator intent (2026-07-27): when standing rules are **violated in the
@@ -341,7 +355,10 @@ or code — not only here. Closed campaign history:
    - **Token / spend series UI** not wired (documented Management
      `POST …/billing/teams/{team_id}/usage` with `analyticsRequest`; no invent
      GET; ship after dogfood if needed). No charts without real series data.
-   - **Dogfood** with live management key + real team_id (operator).
+   - **Live prepaid dogfood done (2026-08-02):** management key + real
+     team_id path works; product **$340** matches prepaid `total.val`
+     (see field map below). Dashboard ~$1317 is a different surface
+     (defaultCredits / composite), not a second prepaid field to merge.
    - **Soft polish (known UX):** console team prepaid refresh is ≤60s process
      cache TTL + last-good on fetch miss/error (poll does not bust cache; app
      does not clear cents on `None`). Dollars can lag real balance drop until
@@ -355,11 +372,52 @@ or code — not only here. Closed campaign history:
    SuperGrok OAuth principal (Business SuperGrok session is not console team
    prepaid).
 
-   **Highest-value next (re-rank after meter + `/usage` honesty + copy wave):**
-   **1 operator dogfood prepaid meter live** (management key + real team_id).
-   **2 series charts** only if dogfood needs them. Plan freeform polish behind
-   those. One-click copy chrome (§13 / `feat:copy-text-one-click`) **shipped**.
+   **SuperGrok $ extras field map (dogfood 2026-08-01; do not invent $):**
+   - SuperGrok Extra Usage Credits from session path only:
+     `GET {cli-chat-proxy}/billing?format=credits` →
+     `config.prepaidBalance.val` (USD cents). Product label: SuperGrok dollar
+     extras. Live dogfood: personal **and** business OIDC both returned
+     `prepaidBalance=10029` ($100.29) with `isUnifiedBillingUser=true` (one
+     shared consumer Extra Usage Credits pool, not two stacks).
+   - Also on that response (not SuperGrok $ balance): `creditUsagePercent`,
+     `currentPeriod`, `onDemandCap`/`onDemandUsed` (0 when unified),
+     `productUsage` (included % by product), `topUpMethod`. Auto-topup rule
+     is a separate `GET …/auto-topup-rule` (amounts, not wallet total).
+   - **Not** in GetGrokCreditsConfig: any larger SuperGrok wallet than
+     `prepaidBalance`. If grok.com Settings → Usage shows a different Extra
+     Usage Credits figure, that gap is **website-only** until xAI exposes
+     another field we call — do not invent dollars.
+   - **Console team prepaid** is a **different** meter:
+     Management `GET …/billing/teams/{team_id}/prepaid/balance` (needs
+     management key + `management_team_id`). Only balance field is
+     `total.val` (USD cents string, often negative remaining). Product
+     maps abs → cents → `$N` as **console team prepaid** only.
+   - **Live dogfood 2026-08-02 (team 61fab250…):** prepaid wire
+     `total.val="-34000"` → product **$340** (correct parse; not a
+     double-divide bug). No second balance on that endpoint. Live
+     postpaid invoice preview (not wired into the prepaid meter):
+     `defaultCredits` **$1500**; period spend-ish **~$207**; soft
+     spending limit **$0**. Dashboard ~**$1317** is best read as
+     **default credits remainder / composite** (e.g. $1500 − ~$183),
+     **not** pure prepaid wallet and not a field product drops. Keep
+     TUI on **prepaid ledger only**; optional later **separate** meter
+     for defaultCredits if wanted. Joins:
+     `/tmp/grok-join-deep-prepaid-340-vs-1317.md`,
+     `/tmp/grok-join-live-prepaid-wire-capture.md`,
+     `/tmp/grok-join-impl-limits-credits-observability.md`.
+   - Product fix (same wave): dual `/limits` under unified pool **shares**
+     observed Extra Usage Credits across personal/business rows (no more
+     half "no data yet"); sibling poll **remembers** `prepaidBalance` per
+     identity. Still not a sum of two pools when unified.
+
+   **Highest-value next (re-rank after meter + live prepaid dogfood):**
+   **1** series charts only if dogfood needs them; optional separate
+   **defaultCredits** meter only if operator wants that composite surface
+   (do **not** fold it into prepaid $N). Plan freeform polish behind those.
+   One-click copy chrome (§13 / `feat:copy-text-one-click`) **shipped**.
    Do not invent series UI without data. Do not re-open §13 as unshipped.
+   Live prepaid parse dogfood (**$340**) is **done**; do not re-litigate
+   "why not $1317" as a product parse bug.
 
    Plan (still valid for remaining slices):
    [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md).
@@ -462,7 +520,8 @@ gaps when unknown: `no management key` | `no management team id` |
 `loading team prepaid...` | `team prepaid unavailable` | else `$N` (soft
 `no $ meter yet` and mushy `key/team id` line retired).
 `just check` green at least once after this meter wave. Remaining Half B =
-**operator dogfood** (rank 1) + optional series UI (behind dogfood). Half A
+optional series UI (and optional separate defaultCredits surface only if
+wanted). Live prepaid dogfood **done** ($340 wire; ~$1317 ≠ prepaid). Half A
 alone was never full limits done; core prepaid closes the main meter gap, not
 full charts. Series still open and optional.
 
@@ -500,9 +559,9 @@ Do not parallel two writers on the same dual-auth hop / resolve files.
 
 | Rank | Work | Why |
 |------|------|-----|
-| 1 | **Operator dogfood prepaid meter live** (management key + real `team_id`) | Half B **core prepaid shipped** (store, team_id, GET balance, footer + `/limits`). Soft `/usage` console-live honesty **shipped**. Remaining billing gap is live proof with real management credentials. No HTML scrape. |
-| 2 | **Series UI only if dogfood needs charts** (`POST …/billing/teams/{team_id}/usage`) | Documented analytics surface; no invent GET; no charts without real series data. **Behind** dogfood; optional. |
-| 3 | Plan freeform `plan.md` menus (process/skills) only if dogfood still jars | Product chrome green; agent ceremony = process/skills. **Behind** dogfood / series. |
+| 1 | **Series UI only if dogfood needs charts** (`POST …/billing/teams/{team_id}/usage`) | Live prepaid dogfood **done** (2026-08-02: `total.val` → **$340**; dashboard ~$1317 = defaultCredits/composite, not prepaid parse bug). Documented analytics surface; no invent GET; no charts without real series data. Optional. |
+| 2 | Optional **separate defaultCredits** meter only if operator wants that composite | Do **not** fold into console team prepaid `$N`. Prepaid ledger stays prepaid-only. |
+| 3 | Plan freeform `plan.md` menus (process/skills) only if dogfood still jars | Product chrome green; agent ceremony = process/skills. **Behind** series / operator ask. |
 
 **Not "parked forever":** Half B core prepaid is **shipped**. Soft `/usage`
 console-live honesty is **shipped**. Soft `"no $ meter yet"` is **retired**;
@@ -567,9 +626,9 @@ need the cargo blocks below or `just check`. Full historical closed block:
    `cargo test -p xai-grok-pager-render --lib -- tui_screenshot`
    `cargo test -p xai-grok-pager --lib -- screenshot:: capture_tui_screenshot try_attach_tui_screenshot`
 5c. **Stuck Retrying chrome + stream headers timeout + transport footer (shipped):**
-   `cargo test -p xai-grok-pager --lib -- retry_chrome_clears clip_retry_reason retrying_activity_label`
+   `cargo test -p xai-grok-pager --lib -- retry_chrome_soft_reconnect stream_resumed_without_prior_retry clip_retry_reason retrying_activity_label retrying_label_shows_timeout`
    `cargo test -p xai-grok-shell --lib -- stream_started_emits_retry_state_stream_resumed`
-   `cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason stream_headers_timeout_defaults`
+   `cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason retry_footer_backoff stream_headers_timeout_defaults`
    `cargo test -p xai-grok-sampler --test stream_headers_timeout`
    `cargo test -p xai-grok-pager --lib -- shell_collision`  # includes clear-completed-todos SHELL_RESERVED
 

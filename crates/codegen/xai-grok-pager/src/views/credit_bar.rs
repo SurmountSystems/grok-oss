@@ -18,6 +18,9 @@ pub struct CreditBalance {
     /// Billing period end as a formatted local wall-clock string (no zone
     /// label), e.g. "Mar 31, 12:00".
     pub period_end_display: Option<String>,
+    /// Absolute period end (UTC) when billing provided an RFC 3339 end.
+    /// Used by `/limits` live countdown; display string stays local format.
+    pub period_end_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether pay-as-you-go (on-demand) billing is enabled.
     pub pay_as_you_go: bool,
     /// On-demand spending cap in USD cents (e.g. 500 = $5.00).
@@ -33,6 +36,10 @@ pub struct CreditBalance {
     /// `Some(true)` = unified pool / buy-credits UX; `Some(false)` = legacy
     /// on-demand / PAYG UX.
     pub is_unified_billing_user: Option<bool>,
+    /// Grok Build product usage % from wire `productUsage` when present.
+    /// Distinct from top-level included `usage_pct`. `None` when not on wire
+    /// or not observed (sibling process-cache-only path).
+    pub grok_build_usage_pct: Option<f64>,
 }
 
 /// OpenRouter account credits remaining (USD cents), from `GET /api/v1/credits`.
@@ -104,30 +111,33 @@ impl ConsoleTeamPrepaidGap {
         }
     }
 
-    /// From whether Management key and team id are each present.
+    /// From whether Management key and team id are each present (pre-fetch).
     ///
     /// | key | team | gap |
     /// |-----|------|-----|
     /// | no  | *    | [`Self::MissingManagementKey`] (key is the first blocker) |
-    /// | yes | no   | [`Self::MissingTeamId`] |
+    /// | yes | no   | [`Self::Loading`] (key validation may discover team id) |
     /// | yes | yes  | [`Self::Loading`] (cold / fetch may be in flight) |
     ///
     /// There is no process-wide "last fetch failed" bit yet, so surfaces that
     /// just finished a billing fetch and still have no cents should pass
-    /// [`Self::Unavailable`] explicitly (see [`Self::after_billing_fetch`]).
+    /// [`Self::after_billing_fetch`] (key without discoverable team →
+    /// [`Self::MissingTeamId`]; key+team fetch miss → [`Self::Unavailable`]).
     pub fn from_management_config(has_management_key: bool, has_management_team_id: bool) -> Self {
         match (has_management_key, has_management_team_id) {
             (false, _) => Self::MissingManagementKey,
-            (true, false) => Self::MissingTeamId,
-            (true, true) => Self::Loading,
+            // Key alone is enough to attempt discovery + prepaid fetch.
+            (true, _) => Self::Loading,
         }
     }
 
     /// Gap after a completed billing fetch when cents are still unknown.
     ///
-    /// Configured → [`Self::Unavailable`] (fetch ran; still no balance).
-    /// Missing key / team → same distinct unconfigured variants as
-    /// [`Self::from_management_config`].
+    /// | key | team (after discovery) | gap |
+    /// |-----|------------------------|-----|
+    /// | no  | * | [`Self::MissingManagementKey`] |
+    /// | yes | no | [`Self::MissingTeamId`] (validation / pin still needed) |
+    /// | yes | yes | [`Self::Unavailable`] (fetch ran; still no balance) |
     pub fn after_billing_fetch(has_management_key: bool, has_management_team_id: bool) -> Self {
         match (has_management_key, has_management_team_id) {
             (false, _) => Self::MissingManagementKey,
@@ -663,7 +673,8 @@ pub fn usage_warning_for_session_with_identity_principal_and_gap(
 
 /// Build the credit balance indicator as a `Line<'static>`.
 ///
-/// Shows `Credits used: XX%` in the status bar.
+/// Shows just `XX%` in the status bar (weekly included usage). No "Credits used"
+/// label — percent alone is enough; click opens Limits for detail.
 ///
 /// Gateway light-frontend (`kind: "chat"`) sessions must not show Build coding
 /// credits — use [`credit_bar_line_for_session`] with `gateway_chat = true`
@@ -694,10 +705,26 @@ pub fn credit_bar_line_for_session(
         theme.accent_success
     };
 
-    let text = format!("Credits used: {pct:.0}%");
+    // Compact: percent only (implicit weekly included). Never "Credits used:".
+    let text = format!("{pct:.0}%");
 
     let style = Style::default().fg(color).bg(theme.bg_base);
     Some(Line::from(Span::styled(text, style)))
+}
+
+/// Status-bar placeholder when SuperGrok limits are in play but billing has
+/// not warmed yet. Always visible and clickable (`ShowLimits`); never blank
+/// until the first successful fetch.
+///
+/// ASCII `...` only (no unicode ellipsis). Dim so warm percent still reads as
+/// the primary signal once data arrives.
+pub fn credit_bar_loading_line(hovered: bool, theme: &Theme) -> Line<'static> {
+    let text = "...%";
+    let mut style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+    if hovered {
+        style = style.add_modifier(ratatui::style::Modifier::BOLD);
+    }
+    Line::from(Span::styled(text, style))
 }
 
 #[cfg(test)]
@@ -709,12 +736,14 @@ mod tests {
             usage_pct: pct,
             effective_usage_pct: pct,
             period_end_display: None,
+            period_end_at: None,
             pay_as_you_go: false,
             on_demand_cap_cents: None,
             on_demand_used_cents: None,
             prepaid_balance_cents: None,
             period_type: None,
             is_unified_billing_user: None,
+            grok_build_usage_pct: None,
         }
     }
 
@@ -1223,9 +1252,10 @@ mod tests {
             ConsoleTeamPrepaidGap::from_management_config(false, true),
             ConsoleTeamPrepaidGap::MissingManagementKey
         );
+        // Key alone → Loading (team id may be discovered via key validation).
         assert_eq!(
             ConsoleTeamPrepaidGap::from_management_config(true, false),
-            ConsoleTeamPrepaidGap::MissingTeamId
+            ConsoleTeamPrepaidGap::Loading
         );
         // Configured + cents unknown (cold) → Loading, not unavailable.
         assert_eq!(
@@ -1291,8 +1321,11 @@ mod tests {
 
     #[test]
     fn footer_console_live_missing_team_id_distinct_from_missing_key() {
-        // Named contract: key present, team_id absent → plain "no management team id".
-        let gap = ConsoleTeamPrepaidGap::from_management_config(true, false);
+        // Cold: key present, team not pinned → Loading (discovery may fill team).
+        let cold = ConsoleTeamPrepaidGap::from_management_config(true, false);
+        assert_eq!(cold, ConsoleTeamPrepaidGap::Loading);
+        // Post-fetch miss after discovery failed → explicit MissingTeamId.
+        let gap = ConsoleTeamPrepaidGap::after_billing_fetch(true, false);
         assert_eq!(gap, ConsoleTeamPrepaidGap::MissingTeamId);
         let w = usage_warning_for_session_with_identity_principal_and_gap(
             None,
@@ -1835,7 +1868,9 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(24.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Credits used: 24%");
+        // Compact status: percent only — no "Credits used" prefix.
+        assert_eq!(text, "24%");
+        assert!(!text.contains("Credits"));
     }
 
     #[test]
@@ -1857,7 +1892,7 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(0.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Credits used: 0%");
+        assert_eq!(text, "0%");
         assert_eq!(line.spans[0].style.fg, Some(theme.accent_success));
     }
 
@@ -1890,7 +1925,7 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(150.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Credits used: 150%");
+        assert_eq!(text, "150%");
         assert_eq!(line.spans[0].style.fg, Some(theme.accent_error));
     }
 
@@ -1899,7 +1934,7 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(33.7), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Credits used: 34%");
+        assert_eq!(text, "34%");
     }
 
     #[test]
@@ -1916,7 +1951,7 @@ mod tests {
         // The credit bar uses usage_pct (not effective_usage_pct).
         let line = credit_bar_line(&balance, false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Credits used: 50%");
+        assert_eq!(text, "50%");
     }
 
     #[test]
@@ -1927,5 +1962,17 @@ mod tests {
         assert!(usage_warning_for_session(&b, None, true, true).is_none());
         // Build path still renders.
         assert!(credit_bar_line_for_session(&b, false, &theme, false).is_some());
+    }
+
+    #[test]
+    fn credit_bar_loading_line_is_honest_placeholder() {
+        let theme = Theme::default();
+        let line = credit_bar_loading_line(false, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "...%");
+        assert!(!text.contains("Credits"));
+        assert_eq!(line.spans[0].style.fg, Some(theme.gray_dim));
+        // No unicode ellipsis.
+        assert!(!text.contains('\u{2026}'));
     }
 }

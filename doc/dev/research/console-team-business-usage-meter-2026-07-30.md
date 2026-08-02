@@ -107,15 +107,21 @@ Third-party notes (e.g. CodexBar docs) also read prepaid balance from the Manage
 | `POST …/billing/teams/{team_id}/usage` series | **Not wired** (documented; ship only if dogfood needs charts) |
 | Soft `/usage` under console live | **Shipped** — names console team prepaid / honest gap; does not sell SuperGrok session billing as live console spend (join `/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`) |
 | Prepaid cache freshness | Known UX: ≤60s process TTL + last-good on fetch miss/error (poll does not bust cache) |
-| Live dogfood | **Operator** — real management key + real `team_id` |
+| Live dogfood | **Operator** — real management key (+ team id pin or auto-discovery) |
+| `XAI_MANAGEMENT_API_KEY` / `XAI_MANAGEMENT_TEAM_ID` env | **Shipped** (resolve after config, before store / for team pin) |
+| Auto team id via `GET /auth/management-keys/validation` | **Shipped** when key present and team id unset |
+| `grok login --management-key` | **Shipped** — secret store + optional validation print of team id |
+| Setup notes on `grok limits` when gap | **Shipped** — points at Management Keys + login/config, not SuperGrok extras |
 
 Joins (ship evidence):
 `/tmp/grok-join-impl-mgmt-key-team-fetch-2026-07-30.md`,
 `/tmp/grok-join-impl-console-meter-tui-2026-07-30.md`,
-`/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`.
+`/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`,
+`/tmp/grok-join-impl-console-business-balance.md`.
 User-guide: `02-authentication`, `04-slash-commands` `/limits`.
 
 Do **not** re-claim load-only stub / no HTTP / no keyring for management prepaid.
+Do **not** claim inference `XAI_API_KEY` can return console.x.ai business remaining.
 
 ## `team_id` sources (do not assume equality)
 

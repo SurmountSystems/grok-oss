@@ -474,16 +474,27 @@ surface is visible. Alias: `/cost`.
 
 ### `/limits`
 
-Detail view of spend meters from cached billing (not session tokens). Keeps
-each meter distinct:
+Opens a **dismissible popup** (Esc to close) with spend meters from cached
+billing (not session tokens). Does not dump a static block into the chat.
+While the popup is open, **Resets in: Xd Yh Zm Ws** ticks live; when the
+countdown hits zero, billing re-fetches so meters continue after period reset.
+Keeps each meter distinct:
 
-- SuperGrok **included** weekly/monthly allowance (used % · remaining % · next reset)
+- SuperGrok **included** weekly/monthly allowance (used % · remaining % · next reset · live countdown)
 - SuperGrok **dollar extras** (prepaid session balance; separate from included)
-- **Console team prepaid** (Management API balance when a management key and
-  `management_team_id` are configured; otherwise distinct honest gaps:
+- **Console API key** — `Requests: console` when the console chat key is
+  handling requests, `Requests: SuperGrok` when that key is on file but
+  SuperGrok is handling requests, or `no key` when no console chat/API key
+  exists. Key presence is implicit when a request path is shown; a key on file
+  never looks missing just because SuperGrok is live.
+- **Console team prepaid** (Management API balance when a **management** key and
+  `management_team_id` / `XAI_MANAGEMENT_TEAM_ID` are set, or team id is
+  discovered from the management key). Otherwise distinct honest gaps:
   `no management key`, `no management team id`, `loading team prepaid...`, or
-  `team prepaid unavailable`). This is **not** SuperGrok extras and **not** a
-  Business SuperGrok OIDC login.
+  `team prepaid unavailable`). Store the key with `grok login --management-key`
+  (or `XAI_MANAGEMENT_API_KEY`). The management key is **not** the same as the
+  console inference API key and is **not** part of the Key line above. This is
+  **not** SuperGrok extras and **not** a Business SuperGrok OIDC login.
   Setup: [Authentication → Console team prepaid](02-authentication.md#console-team-prepaid-management-api).
 
 When **two SuperGrok principals** are stored (personal + Business), `/limits`
@@ -493,16 +504,35 @@ console key) is active when known. The non-active sibling may show **no data
 yet** until its billing pool has been polled. Personal included, Business
 included, SuperGrok dollar extras, and console team prepaid stay separate lines.
 
-The **status bar** shows a compact always-on meter when billing data is known
-(`Credits used: N%` on SuperGrok, or `console · $N` / honest gap on a console
-key). Click that meter to open this same `/limits` detail. The prompt footer
-stays a one-line warning summary when usage is high (console live shows
-`Console key · team prepaid: $N` when known, else the honest gap strings above).
-Billing refresh (session start, turn end, `/usage`) fills SuperGrok cache and,
-when configured, Management team prepaid.
+The **status bar** (top row, right side next to context tokens) always shows a
+compact meter in Build sessions — including team dual-auth SuperGrok and
+console-live sampling, not only personal consumer billing. SuperGrok: just `N%`
+when known (weekly included usage), or `...%` while billing is still loading.
+Console key: `console · $N` or the honest gap strings. Gateway/chat sessions
+hide the coding-credits meter. Click that meter to open this same `/limits`
+popup. The prompt footer stays a one-line warning summary when usage is high
+(console live shows `Console key · team prepaid: $N` when known, else the
+honest gap strings above). Billing refresh (session start, turn end, `/usage`)
+fills SuperGrok cache and, when configured, Management team prepaid.
 
 ```
 /limits
+/limits --json
+```
+
+**`/limits --json`** skips the popup and prints the same machine-readable
+JSON as CLI `grok limits --json` into the **conversation transcript** (pretty
+JSON in a fenced code block). Both you and the agent can see it in session
+history. Fields include `schemaVersion`, `liveSampling`, SuperGrok principal
+meters, and console team prepaid (no secrets).
+
+Outside the TUI, agents and scripts can query the same meters (live sampling
+principal + SuperGrok included % / dollar extras + console team prepaid when
+configured) without pasting a screenshot:
+
+```bash
+grok limits           # human multi-line report
+grok limits --json    # machine-readable JSON (schemaVersion 1; no secrets)
 ```
 
 ### `/privacy`

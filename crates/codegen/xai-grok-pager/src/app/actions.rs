@@ -721,8 +721,11 @@ pub enum Action {
     /// `/usage` — session token/cost, plus consumer credits when visible.
     ShowUsage,
     /// `/limits` — SuperGrok included / dollar extras / console path detail
-    /// from cached billing (not session token ledger).
+    /// from cached billing (not session token ledger). Opens dismissible modal.
     ShowLimits,
+    /// `/limits --json` — same meters as [`ShowLimits`] / `grok limits --json`,
+    /// printed as pretty JSON into conversation scrollback (no modal).
+    ShowLimitsJson,
     /// `/usage manage` — open consumer billing (no-op if surface hidden).
     ManageBilling,
     /// Commit a read-only list of the queued prompts as a system block

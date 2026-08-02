@@ -96,11 +96,10 @@ impl AgentView {
         };
         if viewer.fullscreen {
             viewer.fullscreen = false;
-            // Restore side panel for plan approval; file previews fall back
-            // to the centered popup (`side_panel` already false).
-            if viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
-                && self.plan_approval_view.is_some()
-            {
+            // Restore side panel for any plan preview (casual `/view-plan` and
+            // approval). File previews fall back to the centered popup
+            // (`side_panel` already false).
+            if viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview {
                 viewer.side_panel = true;
             }
         } else {

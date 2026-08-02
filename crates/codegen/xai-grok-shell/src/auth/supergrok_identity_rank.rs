@@ -39,10 +39,11 @@ impl SupergrokIdentityHeadroom {
     }
 }
 
-/// Billing fields for one SuperGrok principal's **included** allowance.
+/// Billing fields for one SuperGrok principal from credits poll.
 ///
-/// Pure input for ranking enrichment. Meters stay distinct: this is only
-/// included weekly/monthly %, not SuperGrok dollar extras or console $.
+/// Ranking uses **included** only (`usage_pct` / `reset_at`). `prepaid_balance_cents`
+/// is SuperGrok **Extra Usage Credits** (`GetGrokCreditsConfig.prepaidBalance`) for
+/// `/limits` sibling rows — never console team prepaid. Ranking ignores prepaid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncludedBillingFields {
     /// Included usage percent (0.0–100.0+). `None` = billing did not provide it.
@@ -53,6 +54,10 @@ pub struct IncludedBillingFields {
     /// Used by `/limits` sibling rows so copy can say "weekly" / "monthly"
     /// instead of a bare "Included allowance". Ranking ignores this field.
     pub period_type: Option<String>,
+    /// SuperGrok session Extra Usage Credits remaining (USD cents) when the
+    /// credits poll returned `prepaidBalance`. `None` = not observed on this
+    /// principal (honest absence for dollar extras). Ranking ignores this.
+    pub prepaid_balance_cents: Option<i64>,
 }
 
 /// Map included usage % to ranking headroom units.
@@ -278,7 +283,10 @@ pub struct AutoSupergrokOrder {
 
 /// Primary + failover for `auto_use_included_limits`.
 ///
-/// SuperGrok identities with included headroom always precede console keys.
+/// SuperGrok identities with included headroom are the only sampling chain while
+/// any live SuperGrok still has included remaining: **console keys are omitted**
+/// from primary and failover so a silent 429/credit hop cannot burn console
+/// Grok Build $ while included weekly headroom remains.
 /// When all SuperGrok included pools are exhausted, console becomes primary
 /// (existing dual-auth). Exhausted SuperGrok tokens are omitted so sampling
 /// does not silently burn SuperGrok dollar extras while another SuperGrok still
@@ -347,7 +355,8 @@ pub fn order_live_supergrok_for_auto(
 
 /// Build primary/failover for `auto_use_included_limits`.
 ///
-/// Order: ranked SuperGrok with included headroom, then console keys (deduped).
+/// Order while any SuperGrok has included headroom: ranked SuperGrok only
+/// (console keys **omitted** from the chain — limits-before-credits).
 /// If every SuperGrok included pool is exhausted, console keys lead.
 pub fn order_credentials_for_preferred_auto(
     sessions: &[SupergrokSessionCandidate],
@@ -366,8 +375,10 @@ pub fn order_credentials_for_preferred_auto(
         let mut live = ranked.live_tokens;
         let primary = live.remove(0);
         let session_key = primary.clone();
-        let mut failover = live;
-        failover.extend(console);
+        // Limits-before-credits: do not queue console while included headroom
+        // remains. Silent failover (rate-limit / mid-turn hop) must not burn
+        // console Grok Build $ until ExhaustedAll re-orders console primary.
+        let failover = live;
         return AutoCredentialOrder {
             primary: Some(primary),
             failover,
@@ -698,8 +709,12 @@ mod tests {
         assert!(order.primary_is_supergrok_included);
         assert_eq!(
             order.failover,
-            vec!["tok-personal".to_string(), "console-key-1".to_string()],
-            "other SuperGrok before console; not Business-only stick"
+            vec!["tok-personal".to_string()],
+            "other SuperGrok only; console omitted while included headroom remains"
+        );
+        assert!(
+            !order.failover.iter().any(|k| k == "console-key-1"),
+            "console must not sit in failover while SuperGrok included has room"
         );
         assert_eq!(order.session_identity_key.as_deref(), Some("tok-business"));
         assert!(!order.exhausted_all_supergrok_included);
@@ -754,8 +769,13 @@ mod tests {
             "other SuperGrok with headroom before console $"
         );
         assert!(order.primary_is_supergrok_included);
-        assert_eq!(order.failover, vec!["console-a".to_string()]);
+        assert!(
+            order.failover.is_empty(),
+            "console omitted while sibling SuperGrok still has included headroom: {:?}",
+            order.failover
+        );
         assert!(!order.failover.iter().any(|k| k == "tok-p"));
+        assert!(!order.failover.iter().any(|k| k == "console-a"));
     }
 
     #[test]
@@ -792,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_single_session_headroom_then_console() {
+    fn auto_single_session_headroom_omits_console_from_chain() {
         let only = cand(
             "solo",
             SupergrokAccountRole::Personal,
@@ -802,7 +822,58 @@ mod tests {
         );
         let order = order_credentials_for_preferred_auto(&[only], &["ck".into()]);
         assert_eq!(order.primary.as_deref(), Some("tok-solo"));
-        assert_eq!(order.failover, vec!["ck".to_string()]);
+        assert!(
+            order.failover.is_empty(),
+            "limits-before-credits: console not in failover while included headroom remains"
+        );
+        assert!(!order.failover.iter().any(|k| k == "ck"));
+        assert!(order.primary_is_supergrok_included);
+        assert!(!order.exhausted_all_supergrok_included);
+    }
+
+    /// Named contract (Design A): while any live SuperGrok principal still has
+    /// included remaining, the auto credential chain must not include console
+    /// API keys as primary or silent failover.
+    #[test]
+    fn auto_order_omits_console_while_any_supergrok_included_headroom() {
+        let live = cand(
+            "team-live",
+            SupergrokAccountRole::Business,
+            35, // usage ~65% → remaining 35
+            Some(1_000),
+            "tok-team-live",
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[live],
+            &["console-env-key".into(), "console-store-key".into()],
+        );
+        assert_eq!(order.primary.as_deref(), Some("tok-team-live"));
+        assert!(order.primary_is_supergrok_included);
+        assert_ne!(order.primary.as_deref(), Some("console-env-key"));
+        assert_ne!(order.primary.as_deref(), Some("console-store-key"));
+        assert!(
+            !order
+                .failover
+                .iter()
+                .any(|k| k == "console-env-key" || k == "console-store-key"),
+            "console keys must not be in failover while included headroom: {:?}",
+            order.failover
+        );
+        // ExhaustedAll flips console primary (still covered by sibling tests).
+        let exhausted = cand(
+            "team-live",
+            SupergrokAccountRole::Business,
+            0,
+            Some(1_000),
+            "tok-team-live",
+        );
+        let after = order_credentials_for_preferred_auto(
+            &[exhausted],
+            &["console-env-key".into(), "console-store-key".into()],
+        );
+        assert_eq!(after.primary.as_deref(), Some("console-env-key"));
+        assert!(after.exhausted_all_supergrok_included);
+        assert!(!after.primary_is_supergrok_included);
     }
 
     #[test]
@@ -893,9 +964,10 @@ mod tests {
             &["console-k".into()],
         );
         assert_eq!(order.primary.as_deref(), Some("tok-b"));
-        assert_eq!(
-            order.failover,
-            vec!["tok-p".to_string(), "console-k".to_string()]
+        assert_eq!(order.failover, vec!["tok-p".to_string()]);
+        assert!(
+            !order.failover.iter().any(|k| k == "console-k"),
+            "console omitted while dual SuperGrok still have included headroom"
         );
         assert!(order.primary_is_supergrok_included);
     }
@@ -915,6 +987,7 @@ mod tests {
                 usage_pct: Some(40.0),
                 reset_at: Some(ts(5_000)),
                 period_type: None,
+                prepaid_balance_cents: None,
             },
         );
         fields.insert(
@@ -923,6 +996,7 @@ mod tests {
                 usage_pct: Some(10.0),
                 reset_at: Some(ts(1_000)),
                 period_type: None,
+                prepaid_balance_cents: None,
             },
         );
         enrich_candidates_with_included_billing(&mut candidates, &fields, |_| false);
@@ -958,6 +1032,7 @@ mod tests {
                 usage_pct: Some(100.0),
                 reset_at: Some(ts(9_999)),
                 period_type: None,
+                prepaid_balance_cents: None,
             },
         );
         enrich_candidates_with_included_billing(&mut candidates, &fields, |_| false);
@@ -973,6 +1048,7 @@ mod tests {
                 usage_pct: Some(10.0),
                 reset_at: None,
                 period_type: None,
+                prepaid_balance_cents: None,
             },
         );
         candidates[0].headroom.included_remaining = 1;
