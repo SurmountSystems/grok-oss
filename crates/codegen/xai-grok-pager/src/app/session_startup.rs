@@ -352,7 +352,10 @@ pub fn chat_mode_refuses_local_build_load(
 #[derive(Debug, Clone)]
 pub enum MaterializedStartup {
     /// Create a new session with an agent-chosen ID (or defer to welcome).
-    NewAuto,
+    NewAuto {
+        /// Soft yellow welcome notice: this workspace has no prior conversations.
+        new_folder_notice: bool,
+    },
     /// Create a new session with this ID (`session/new` meta.sessionId).
     NewWithId { session_id: String },
     /// Strict load of an existing session.
@@ -364,6 +367,9 @@ pub enum MaterializedStartup {
         /// the worktree resume handler; worktree failure messages append the
         /// no-match hint only for this outcome (never inferred from shape).
         deferred_local_miss: bool,
+        /// When auto-opening the latest conversation and a next-oldest exists,
+        /// plain relative age for the toast (e.g. `"2 hours ago"`).
+        other_conversation_relative: Option<String>,
     },
     /// Fork from a resolved parent, then load the child.
     Fork {
@@ -372,6 +378,107 @@ pub enum MaterializedStartup {
         parent_title: Option<String>,
         new_session_id: Option<String>,
     },
+}
+
+/// Lightweight session row for default startup pick (newest first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupSessionRef {
+    pub id: String,
+    pub title: Option<String>,
+    pub last_active: chrono::DateTime<chrono::Utc>,
+}
+
+/// Pure result of picking the default conversation for a workspace open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultStartupPick {
+    /// No prior conversations for this workspace.
+    NewFolder,
+    /// Resume the most recent only (no sibling toast).
+    ResumeLatest { session: StartupSessionRef },
+    /// Resume most recent; toast mentions the next-oldest.
+    ResumeLatestWithOther {
+        session: StartupSessionRef,
+        other: StartupSessionRef,
+    },
+}
+
+/// Pick default startup session from chronological rows (newest first).
+///
+/// Empty → new folder. One row → resume only. Two or more → resume newest and
+/// surface the second-most-recent for the sibling toast.
+pub fn pick_default_startup_session(sessions: &[StartupSessionRef]) -> DefaultStartupPick {
+    match sessions {
+        [] => DefaultStartupPick::NewFolder,
+        [first] => DefaultStartupPick::ResumeLatest {
+            session: first.clone(),
+        },
+        [first, second, ..] => DefaultStartupPick::ResumeLatestWithOther {
+            session: first.clone(),
+            other: second.clone(),
+        },
+    }
+}
+
+/// Plain relative age for startup toasts (`"2 hours ago"`, not `"2h ago"`).
+pub fn format_plain_relative_ago(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        return "less than a minute ago".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return if mins == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{mins} minutes ago")
+        };
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{hours} hours ago")
+        };
+    }
+    let days = hours / 24;
+    if days == 1 {
+        "1 day ago".to_string()
+    } else {
+        format!("{days} days ago")
+    }
+}
+
+/// Toast when the default open resumes the latest conversation and others exist.
+pub fn format_other_conversations_toast(other_relative: &str) -> String {
+    format!("Other conversations exist in this folder. Next most recent was {other_relative}.")
+}
+
+/// Soft yellow welcome copy for a workspace with no prior conversations.
+pub fn new_folder_startup_message() -> &'static str {
+    "This is a new folder with no prior conversations yet."
+}
+
+/// Map sorted session summaries (newest first) into startup refs for pure pick.
+pub fn startup_session_refs_from_summaries(
+    summaries: &[xai_grok_shell::session::persistence::Summary],
+) -> Vec<StartupSessionRef> {
+    summaries
+        .iter()
+        .map(|s| StartupSessionRef {
+            id: s.info.id.to_string(),
+            title: s.display_title_opt(),
+            last_active: s.last_active_at.unwrap_or(s.updated_at),
+        })
+        .collect()
+}
+
+fn plain_relative_from_utc(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let elapsed = chrono::Utc::now()
+        .signed_duration_since(dt)
+        .to_std()
+        .unwrap_or_default();
+    format_plain_relative_ago(elapsed)
 }
 /// Whether materialization may resolve a non-id resume arg by title locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +507,9 @@ pub struct MaterializeCtx {
     pub chat_mode: bool,
     /// See [`TitleResolution`]; carried from the pre-sandbox pin outcome.
     pub title_resolution: TitleResolution,
+    /// Interactive TUI: bare `grok` / open folder loads the last conversation
+    /// for this workspace when one exists. Headless stays fresh (`false`).
+    pub auto_resume_last_for_cwd: bool,
 }
 impl MaterializeCtx {
     /// `--resume` miss bails fast.
@@ -416,6 +526,8 @@ impl MaterializeCtx {
             } else {
                 TitleResolution::Allowed
             },
+            // Worktree create is a fresh tree; do not auto-resume into it.
+            auto_resume_last_for_cwd: args.worktree.is_none() && !args.chat(),
         }
     }
 }
@@ -490,7 +602,62 @@ pub async fn materialize_startup_for_cwd(
         anyhow::bail!("{CHAT_MODE_FORK_CONFLICT}");
     }
     match intent {
-        SessionStartupIntent::NewAuto => Ok(MaterializedStartup::NewAuto),
+        SessionStartupIntent::NewAuto => {
+            if !ctx.auto_resume_last_for_cwd {
+                return Ok(MaterializedStartup::NewAuto {
+                    new_folder_notice: false,
+                });
+            }
+            let summaries = match xai_grok_shell::session::persistence::list_summaries(Some(cwd))
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "startup default: list sessions failed; welcome without new-folder notice"
+                    );
+                    return Ok(MaterializedStartup::NewAuto {
+                        new_folder_notice: false,
+                    });
+                }
+            };
+            let refs = startup_session_refs_from_summaries(&summaries);
+            match pick_default_startup_session(&refs) {
+                DefaultStartupPick::NewFolder => Ok(MaterializedStartup::NewAuto {
+                    new_folder_notice: true,
+                }),
+                DefaultStartupPick::ResumeLatest { session } => {
+                    tracing::info!(
+                        session_id = %session.id,
+                        "startup.default.resume_latest"
+                    );
+                    Ok(MaterializedStartup::Resume {
+                        session_id: session.id,
+                        original_cwd: None,
+                        title: session.title,
+                        deferred_local_miss: false,
+                        other_conversation_relative: None,
+                    })
+                }
+                DefaultStartupPick::ResumeLatestWithOther { session, other } => {
+                    tracing::info!(
+                        session_id = %session.id,
+                        other_id = %other.id,
+                        "startup.default.resume_latest_with_other"
+                    );
+                    Ok(MaterializedStartup::Resume {
+                        session_id: session.id,
+                        original_cwd: None,
+                        title: session.title,
+                        deferred_local_miss: false,
+                        other_conversation_relative: Some(plain_relative_from_utc(
+                            other.last_active,
+                        )),
+                    })
+                }
+            }
+        }
         SessionStartupIntent::NewWithId { session_id } => {
             if !ctx.has_worktree {
                 ensure_session_id_available(&session_id, cwd)?;
@@ -518,6 +685,7 @@ pub async fn materialize_startup_for_cwd(
                 original_cwd: None,
                 title,
                 deferred_local_miss: false,
+                other_conversation_relative: None,
             })
         }
         SessionStartupIntent::ForkFrom {
@@ -549,6 +717,7 @@ pub async fn materialize_startup_for_cwd(
                     original_cwd: None,
                     title: None,
                     deferred_local_miss: false,
+                    other_conversation_relative: None,
                 });
             }
             let r = resolve_existing_session(ctx, &session_id, cwd).await?;
@@ -557,6 +726,7 @@ pub async fn materialize_startup_for_cwd(
                 original_cwd: r.original_cwd,
                 title: r.title,
                 deferred_local_miss: r.deferred_local_miss,
+                other_conversation_relative: None,
             })
         }
         SessionStartupIntent::ForkFrom {
@@ -812,6 +982,105 @@ mod tests {
             SessionStartupIntent::NewAuto
         );
     }
+
+    #[test]
+    fn pick_default_startup_empty_is_new_folder() {
+        assert_eq!(
+            pick_default_startup_session(&[]),
+            DefaultStartupPick::NewFolder
+        );
+    }
+
+    #[test]
+    fn pick_default_startup_one_is_resume_only() {
+        let a = StartupSessionRef {
+            id: "a".into(),
+            title: Some("First".into()),
+            last_active: chrono::Utc::now(),
+        };
+        match pick_default_startup_session(std::slice::from_ref(&a)) {
+            DefaultStartupPick::ResumeLatest { session } => {
+                assert_eq!(session.id, "a");
+                assert_eq!(session.title.as_deref(), Some("First"));
+            }
+            other => panic!("expected ResumeLatest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pick_default_startup_two_surfaces_second_most_recent() {
+        let now = chrono::Utc::now();
+        let newer = StartupSessionRef {
+            id: "new".into(),
+            title: Some("Latest".into()),
+            last_active: now,
+        };
+        let older = StartupSessionRef {
+            id: "old".into(),
+            title: Some("Previous".into()),
+            last_active: now - chrono::Duration::hours(3),
+        };
+        match pick_default_startup_session(&[newer, older]) {
+            DefaultStartupPick::ResumeLatestWithOther { session, other } => {
+                assert_eq!(session.id, "new");
+                assert_eq!(other.id, "old");
+            }
+            other => panic!("expected ResumeLatestWithOther, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_conversations_toast_names_relative_age() {
+        let msg = format_other_conversations_toast("3 hours ago");
+        assert!(msg.contains("Other conversations"));
+        assert!(msg.contains("3 hours ago"));
+        assert!(!msg.contains("error"));
+    }
+
+    #[test]
+    fn new_folder_message_is_informational_not_error() {
+        let msg = new_folder_startup_message();
+        assert!(msg.to_ascii_lowercase().contains("new folder"));
+        assert!(msg.to_ascii_lowercase().contains("no prior"));
+        assert!(!msg.to_ascii_lowercase().contains("error"));
+        assert!(!msg.to_ascii_lowercase().contains("failed"));
+    }
+
+    #[test]
+    fn plain_relative_ago_uses_full_words() {
+        assert_eq!(
+            format_plain_relative_ago(std::time::Duration::from_secs(30)),
+            "less than a minute ago"
+        );
+        assert_eq!(
+            format_plain_relative_ago(std::time::Duration::from_secs(120)),
+            "2 minutes ago"
+        );
+        assert_eq!(
+            format_plain_relative_ago(std::time::Duration::from_secs(3600)),
+            "1 hour ago"
+        );
+        assert_eq!(
+            format_plain_relative_ago(std::time::Duration::from_secs(3 * 3600)),
+            "3 hours ago"
+        );
+        assert_eq!(
+            format_plain_relative_ago(std::time::Duration::from_secs(2 * 86400)),
+            "2 days ago"
+        );
+    }
+
+    #[test]
+    fn pager_args_default_enables_auto_resume_last() {
+        let ctx = MaterializeCtx::from_pager_args(&parse(&["grok"]));
+        assert!(ctx.auto_resume_last_for_cwd);
+    }
+
+    #[test]
+    fn pager_args_worktree_disables_auto_resume_last() {
+        let ctx = MaterializeCtx::from_pager_args(&parse(&["grok", "--worktree"]));
+        assert!(!ctx.auto_resume_last_for_cwd);
+    }
     #[test]
     fn intent_resume_id() {
         assert_eq!(
@@ -987,6 +1256,7 @@ mod tests {
             allow_remote_restore: true,
             chat_mode: true,
             title_resolution: TitleResolution::Allowed,
+            auto_resume_last_for_cwd: false,
         }
     }
     #[test]
@@ -1096,6 +1366,7 @@ mod tests {
             allow_remote_restore: false,
             chat_mode: false,
             title_resolution: TitleResolution::Allowed,
+            auto_resume_last_for_cwd: false,
         };
         let err = materialize_startup_for_cwd(
             ctx,
@@ -1186,6 +1457,7 @@ mod tests {
                 allow_remote_restore: false,
                 chat_mode: false,
                 title_resolution: TitleResolution::Allowed,
+                auto_resume_last_for_cwd: false,
             }
         }
         async fn resume(arg: &str, cwd: &str) -> anyhow::Result<MaterializedStartup> {

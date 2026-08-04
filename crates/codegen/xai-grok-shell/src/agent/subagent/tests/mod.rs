@@ -2198,4 +2198,288 @@ fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHa
         token,
     )
 }
+/// Pure flags: config missing + SuperGrok session live → auto rank on (fail closed).
+#[test]
+fn subagent_override_auth_rank_flags_fail_closed_when_config_missing_and_session_live() {
+    use crate::auth::PreferredAuthMethod;
+
+    assert_eq!(
+        super::subagent_override_auth_rank_flags(None, None, true, false),
+        (None, true),
+        "fail closed: live SuperGrok session must enable auto rank when flags missing"
+    );
+    assert_eq!(
+        super::subagent_override_auth_rank_flags(None, None, false, false),
+        (None, false),
+        "no session and no flags → auto_use stays off"
+    );
+    assert_eq!(
+        super::subagent_override_auth_rank_flags(None, None, false, true),
+        (None, true),
+        "parent SuperGrok-session-only inherits auto rank when flags missing"
+    );
+    // Disk auto_use off but parent SuperGrok-only → still auto rank (do not re-queue console).
+    assert_eq!(
+        super::subagent_override_auth_rank_flags(
+            None,
+            Some((None, false)),
+            true,
+            true
+        ),
+        (None, true),
+    );
+    // Explicit agent_config auto_use false wins (not overridden by parent-only hint).
+    let mut cfg = crate::agent::config::Config::default();
+    cfg.grok_com_config.auto_use_included_limits = false;
+    cfg.grok_com_config.preferred_method = Some(PreferredAuthMethod::ApiKey);
+    assert_eq!(
+        super::subagent_override_auth_rank_flags(Some(&cfg), None, true, true),
+        (Some(PreferredAuthMethod::ApiKey), false),
+        "agent_config is authoritative when present"
+    );
+}
+
+/// Named contract: subagent model override uses parent agent_config auto_use
+/// rank (omit console while SuperGrok included has headroom). Must not fall
+/// back to bare resolve when agent_config is present.
+#[test]
+#[serial_test::serial]
+fn resolve_model_override_agent_config_auto_use_omits_console() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::agent::config::{Config, ModelEntry, ModelInfo};
+    use crate::auth::{AuthMode, GrokAuth, GrokComConfig};
+    use chrono::{Duration, Utc};
+    use std::collections::BTreeMap;
+    use xai_grok_sampler::clear_all_including_durable;
+    use xai_grok_test_support::EnvGuard;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-subagent-override");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let live = "tok-subagent-override-live";
+    let base = "https://auth.x.ai::subagent-override-rank";
+    let now = Utc::now();
+    let mut map: BTreeMap<String, GrokAuth> = BTreeMap::new();
+    map.insert(
+        base.to_owned(),
+        GrokAuth {
+            key: live.into(),
+            auth_mode: AuthMode::Oidc,
+            user_id: "user-sub".into(),
+            create_time: now,
+            expires_at: Some(now + Duration::hours(6)),
+            ..Default::default()
+        },
+    );
+    std::fs::write(
+        home.path().join("auth.json"),
+        serde_json::to_vec_pretty(&map).unwrap(),
+    )
+    .unwrap();
+
+    let mut agent_cfg = Config::default();
+    agent_cfg.grok_com_config = GrokComConfig {
+        auto_use_included_limits: true,
+        ..GrokComConfig::default()
+    };
+
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let mut entry = ModelEntry {
+        info: ModelInfo::fallback("override-model"),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    };
+    entry.info.base_url = proxy.to_string();
+
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.agent_config = Some(agent_cfg);
+    ctx.auth = Some(GrokAuth {
+        key: live.into(),
+        auth_mode: AuthMode::Oidc,
+        user_id: "user-sub".into(),
+        create_time: now,
+        expires_at: Some(now + Duration::hours(6)),
+        ..Default::default()
+    });
+    ctx.auth_method_id = agent_client_protocol::AuthMethodId::new("xai.oauth");
+    ctx.available_models
+        .insert("override-model".to_string(), entry);
+
+    let (sc, mid) = super::resolve_model_override_to_config("override-model", &ctx)
+        .expect("override model must resolve");
+    assert_eq!(mid.0.as_ref(), "override-model");
+    // Host GROK_HOME OnceLock may rank a real SuperGrok JWT; contract is
+    // SuperGrok primary + console omitted under auto_use.
+    assert_ne!(
+        sc.api_key.as_deref(),
+        Some("console-subagent-override"),
+        "subagent override primary must be SuperGrok under auto_use + headroom"
+    );
+    assert!(sc.api_key.is_some());
+    assert!(
+        !sc.failover_api_keys
+            .iter()
+            .any(|k| k == "console-subagent-override"),
+        "subagent override must omit console while SuperGrok included has headroom; failover={:?}",
+        sc.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// Config/agent_config missing, parent sampling SuperGrok-session-only, session
+/// live + console env key → override must not re-queue console.
+#[test]
+#[serial_test::serial]
+fn resolve_model_override_config_missing_parent_supergrok_only_omits_console() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::agent::config::{ModelEntry, ModelInfo};
+    use crate::auth::{AuthMode, GrokAuth};
+    use chrono::{Duration, Utc};
+    use std::collections::BTreeMap;
+    use xai_grok_sampler::clear_all_including_durable;
+    use xai_grok_test_support::EnvGuard;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-not-requeue");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let live = "tok-parent-supergrok-only";
+    let now = Utc::now();
+    let mut map: BTreeMap<String, GrokAuth> = BTreeMap::new();
+    map.insert(
+        "https://auth.x.ai::parent-sg-only".to_owned(),
+        GrokAuth {
+            key: live.into(),
+            auth_mode: AuthMode::Oidc,
+            user_id: "user-pso".into(),
+            create_time: now,
+            expires_at: Some(now + Duration::hours(6)),
+            ..Default::default()
+        },
+    );
+    std::fs::write(
+        home.path().join("auth.json"),
+        serde_json::to_vec_pretty(&map).unwrap(),
+    )
+    .unwrap();
+
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let mut entry = ModelEntry {
+        info: ModelInfo::fallback("override-model"),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    };
+    entry.info.base_url = proxy.to_string();
+
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    // No agent_config: flags come from disk (default auto_use false) or fail-closed.
+    ctx.agent_config = None;
+    ctx.auth = Some(GrokAuth {
+        key: live.into(),
+        auth_mode: AuthMode::Oidc,
+        user_id: "user-pso".into(),
+        create_time: now,
+        expires_at: Some(now + Duration::hours(6)),
+        ..Default::default()
+    });
+    // Parent already on SuperGrok-only chain (empty failover).
+    ctx.sampling_config.api_key = Some(live.into());
+    ctx.sampling_config.failover_api_keys.clear();
+    ctx.sampling_config.base_url = proxy.to_string();
+    ctx.auth_method_id = agent_client_protocol::AuthMethodId::new("xai.oauth");
+    ctx.available_models
+        .insert("override-model".to_string(), entry);
+
+    let (sc, _) = super::resolve_model_override_to_config("override-model", &ctx)
+        .expect("override model must resolve");
+    assert_ne!(
+        sc.api_key.as_deref(),
+        Some("console-must-not-requeue"),
+        "primary must stay SuperGrok session, not console"
+    );
+    assert!(sc.api_key.is_some());
+    assert!(
+        !sc.failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-not-requeue"),
+        "must not re-queue console when parent SuperGrok-session-only and config missing/auto_use off: failover={:?}",
+        sc.failover_api_keys
+    );
+    let _ = live;
+    clear_all_including_durable();
+}
+
+/// preferred_method=api_key pin on agent_config: console primary on model override.
+#[test]
+#[serial_test::serial]
+fn resolve_model_override_api_key_pin_keeps_console_primary() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::agent::config::{Config, ModelEntry, ModelInfo};
+    use crate::auth::{AuthMode, GrokAuth, GrokComConfig, PreferredAuthMethod};
+    use chrono::{Duration, Utc};
+    use xai_grok_sampler::clear_all_including_durable;
+    use xai_grok_test_support::EnvGuard;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-pin-primary");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let live = "tok-session-under-pin";
+    let now = Utc::now();
+    let mut agent_cfg = Config::default();
+    agent_cfg.grok_com_config = GrokComConfig {
+        preferred_method: Some(PreferredAuthMethod::ApiKey),
+        auto_use_included_limits: true, // must not override pin
+        ..GrokComConfig::default()
+    };
+
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let mut entry = ModelEntry {
+        info: ModelInfo::fallback("override-model"),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    };
+    entry.info.base_url = proxy.to_string();
+
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.agent_config = Some(agent_cfg);
+    ctx.auth = Some(GrokAuth {
+        key: live.into(),
+        auth_mode: AuthMode::Oidc,
+        user_id: "user-pin".into(),
+        create_time: now,
+        expires_at: Some(now + Duration::hours(6)),
+        ..Default::default()
+    });
+    ctx.auth_method_id = agent_client_protocol::AuthMethodId::new("xai.api_key");
+    ctx.available_models
+        .insert("override-model".to_string(), entry);
+
+    let (sc, _) = super::resolve_model_override_to_config("override-model", &ctx)
+        .expect("override model must resolve");
+    assert_eq!(
+        sc.api_key.as_deref(),
+        Some("console-pin-primary"),
+        "api_key pin: console primary despite auto_use and session; got {:?}",
+        sc.api_key
+    );
+    clear_all_including_durable();
+}
+
 mod rest;

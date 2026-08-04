@@ -19,6 +19,7 @@ mod ctx;
 mod dashboard;
 mod dashboard_telemetry;
 pub(crate) mod external_editor;
+mod global_pause;
 mod import_claude;
 mod interject;
 mod jump;

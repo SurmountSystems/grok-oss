@@ -365,7 +365,7 @@ The parent session’s context is expensive. Filling it with logs, greps, and lo
 
 ### Parent coordinates; children do the heavy work
 
-- **Parent keeps:** goals, spawn/wait, short on-disk join notes, status to you.
+- **Parent keeps:** goals, spawn/wait, short on-disk reports, status to you.
 - **Children own:** multi-file search, CI log fetch, root-cause reads, implementation, and review loops.
 - Prefer **tight prompts** (goal, paths, acceptance, where to write a short summary). Prefer **short returns** (verdict, paths, residuals) over pasting whole transcripts into the parent.
 
@@ -381,7 +381,7 @@ On a **CI failure**, **regression**, or **multi-file diagnosis**, the parent’s
 
 **Failure mode to avoid:** parent greps docs + fetches logs + finds the test file, *then* spawns. That already burned the parent context. Spawn first; children own fetch/read/fix.
 
-### Join on disk
+### Write a short report on disk
 
 Children write short summary or review files. The parent reads those only — not full child transcripts and not whole hot modules after a summary already named the set. After compaction, reseed from on-disk artifacts rather than re-exploring from zero.
 
@@ -395,7 +395,7 @@ Treat the parent as a **coordinator budget**, not a place to hoard tool output. 
 
 ### Parallelism without waste
 
-Spawn for **independent**, **disjoint** scopes when the join is cheap. Do not fan out many identical explores over the same files, or spawn for pure status checks with no real work. Cap concurrent children when scopes would otherwise overlap.
+Spawn for **independent**, **disjoint** scopes when combining results is cheap. Do not fan out many identical explores over the same files, or spawn for pure status checks with no real work. Cap concurrent children when scopes would otherwise overlap.
 
 Skills and project agent rules (for example `AGENTS.md` in a repo, or your host agent config) may pin a stricter “hard stop” for operators — this section is the product-facing summary those rules link to.
 

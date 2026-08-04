@@ -17,6 +17,7 @@ pub mod app_view;
 pub mod auto_implement;
 pub mod bundle;
 pub mod cli;
+pub mod global_work_pause;
 pub use crate::link_opener;
 /// Off-thread full-file syntax highlight upgrade for edit diffs.
 pub mod edit_highlight_worker;

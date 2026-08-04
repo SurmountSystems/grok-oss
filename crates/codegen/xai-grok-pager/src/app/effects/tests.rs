@@ -413,7 +413,32 @@ fn credit_balance_prefers_credit_usage_percent_over_limit_used() {
         used: Some(Cent { val: 9_000 }),
         ..empty_billing_config()
     };
-    assert_eq!(credit_balance_from_config(c).usage_pct, 42.0);
+    let bal = credit_balance_from_config(c);
+    assert_eq!(bal.usage_pct, 42.0);
+    assert!(bal.included_usage_known);
+}
+
+/// Named contract: empty billing config is honest absence, not a silent 0%.
+#[test]
+fn credit_balance_empty_config_marks_included_unknown() {
+    let bal = credit_balance_from_config(empty_billing_config());
+    assert!(
+        !bal.included_usage_known,
+        "no percent and no limit/used pair must not claim a known 0%"
+    );
+    assert_eq!(bal.usage_pct, 0.0, "placeholder only when unknown");
+}
+
+/// Named contract: explicit 0% on the wire is a true zero (known reading).
+#[test]
+fn credit_balance_explicit_zero_percent_is_known() {
+    let c = BillingConfig {
+        credit_usage_percent: Some(0.0),
+        ..empty_billing_config()
+    };
+    let bal = credit_balance_from_config(c);
+    assert!(bal.included_usage_known);
+    assert_eq!(bal.usage_pct, 0.0);
 }
 #[test]
 fn credit_balance_forwards_grok_build_usage_pct_from_product_usage() {

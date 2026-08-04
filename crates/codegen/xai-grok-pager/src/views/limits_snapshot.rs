@@ -7,8 +7,10 @@
 //! - SuperGrok **included** weekly/monthly allowance (percent)
 //! - SuperGrok **dollar extras** (prepaid session balance)
 //! - **Console team prepaid** (Management API balance when configured; else
-//!   honest not-configured / loading / unavailable copy — never a soft
+//!   honest not-configured / loading / unavailable copy, never a soft
 //!   "feature unfinished" placeholder)
+//! - **Console team postpaid** OAuth vs API class (invoice preview; distinct
+//!   from prepaid remaining and SuperGrok $ extras)
 //!
 //! Footer / credit bar stays one-line; `/limits` is the multi-line detail.
 //! Dual SuperGrok principals use [`LimitsSnapshot::extra_principals`] (stacked
@@ -85,8 +87,148 @@ pub enum AutoTopupLine {
     },
 }
 
-/// Console / Business API key path.
+/// Console team postpaid invoice preview aggregates (Management API M3).
+///
+/// Distinct from [`ConsoleMeter::balance_cents`] (prepaid remaining) and from
+/// SuperGrok $ extras. Amounts are non-negative USD cents for the current
+/// invoice period.
+///
+/// [`Self::default_credits_cents`] is the dashboard-class **team default credits**
+/// allotment (often ~$1500 on the wire). It is **not** the prepaid wallet,
+/// **not** free SuperGrok period allowance, and **not** SuperGrok top-up dollars.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleTeamPostpaidMeter {
+    pub period_total_cents: i64,
+    pub oauth_class_cents: i64,
+    pub api_class_cents: i64,
+    pub other_class_cents: i64,
+    /// Team default credits (dashboard allotment) in USD cents when present.
+    pub default_credits_cents: Option<i64>,
+}
+
+impl ConsoleTeamPostpaidMeter {
+    /// True when OAuth class spend is strictly greater than API class and &gt; 0.
+    pub fn oauth_class_dominates(&self) -> bool {
+        self.oauth_class_cents > 0 && self.oauth_class_cents > self.api_class_cents
+    }
+
+    /// Build from a shell Management postpaid preview meter.
+    pub fn from_preview(p: &xai_grok_shell::auth::ConsoleTeamPostpaidPreview) -> Self {
+        Self {
+            period_total_cents: p.period_total_cents,
+            oauth_class_cents: p.oauth_class_cents,
+            api_class_cents: p.api_class_cents,
+            other_class_cents: p.other_class_cents,
+            default_credits_cents: p.default_credits_cents,
+        }
+    }
+}
+
+/// One description row on the Management usage series (spend over a day window).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsoleTeamUsageSeriesRow {
+    pub label: String,
+    /// Plain class label: `oauth_grok_build`, `api_key`, or `other`.
+    pub class_wire: &'static str,
+    pub total_usd: f64,
+}
+
+/// Management POST usage analytics summary for `/limits` (not prepaid, not SuperGrok).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsoleTeamUsageSeriesSummary {
+    pub start_time: String,
+    pub end_time: String,
+    pub timezone: String,
+    pub oauth_class_usd: f64,
+    pub api_class_usd: f64,
+    pub other_class_usd: f64,
+    /// Top description rows by total (already sorted descending in shell).
+    pub top_rows: Vec<ConsoleTeamUsageSeriesRow>,
+    pub limit_reached: bool,
+}
+
+impl ConsoleTeamUsageSeriesSummary {
+    /// Build from a shell Management usage series meter (keeps top 5 rows).
+    pub fn from_series(s: &xai_grok_shell::auth::ConsoleTeamUsageSeries) -> Self {
+        let top_rows = s
+            .rows
+            .iter()
+            .take(5)
+            .map(|r| ConsoleTeamUsageSeriesRow {
+                label: r.label.clone(),
+                class_wire: match r.class {
+                    xai_grok_shell::auth::PostpaidLineClass::Oauth => "oauth_grok_build",
+                    xai_grok_shell::auth::PostpaidLineClass::Api => "api_key",
+                    xai_grok_shell::auth::PostpaidLineClass::Other => "other",
+                },
+                total_usd: r.total_usd,
+            })
+            .collect();
+        Self {
+            start_time: s.start_time.clone(),
+            end_time: s.end_time.clone(),
+            timezone: s.timezone.clone(),
+            oauth_class_usd: s.oauth_class_usd,
+            api_class_usd: s.api_class_usd,
+            other_class_usd: s.other_class_usd,
+            top_rows,
+            limit_reached: s.limit_reached,
+        }
+    }
+
+    pub fn period_total_usd(&self) -> f64 {
+        self.oauth_class_usd + self.api_class_usd + self.other_class_usd
+    }
+}
+
+/// Why team postpaid dollars are absent (honest gap; never invent $).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsoleTeamPostpaidGap {
+    /// No Management API key configured.
+    #[default]
+    MissingManagementKey,
+    /// Key present but team id unknown.
+    MissingTeamId,
+    /// Key+team known but fetch failed / empty body.
+    Unavailable,
+}
+
+impl ConsoleTeamPostpaidGap {
+    /// Stable wire value for `limits --json`.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::MissingManagementKey => "no_management_key",
+            Self::MissingTeamId => "no_management_team_id",
+            Self::Unavailable => "team_postpaid_unavailable",
+        }
+    }
+
+    /// Short human gap (console section).
+    pub fn as_display_str(self) -> &'static str {
+        match self {
+            Self::MissingManagementKey => "needs management key",
+            Self::MissingTeamId => "needs team id",
+            Self::Unavailable => "team postpaid unavailable",
+        }
+    }
+
+    /// Gap after a billing attempt when cents are still unknown.
+    pub fn after_billing_fetch(has_mgmt_key: bool, has_mgmt_team: bool) -> Self {
+        if !has_mgmt_key {
+            Self::MissingManagementKey
+        } else if !has_mgmt_team {
+            Self::MissingTeamId
+        } else {
+            Self::Unavailable
+        }
+    }
+}
+
+/// Console / Business API key path.
+///
+/// `PartialEq` only: [`Self::usage_series`] carries USD floats (docs series
+/// values), so `Eq` would be dishonest.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConsoleMeter {
     /// True when live sampling is on a console key.
     pub is_live: bool,
@@ -100,6 +242,14 @@ pub struct ConsoleMeter {
     pub balance_cents: Option<i64>,
     /// Why dollars are absent when [`Self::balance_cents`] is `None`.
     pub prepaid_gap: ConsoleTeamPrepaidGap,
+    /// Team postpaid invoice preview (OAuth vs API class). Distinct from
+    /// prepaid remaining. `None` + [`Self::postpaid_gap`] when unknown.
+    pub postpaid: Option<ConsoleTeamPostpaidMeter>,
+    /// Why postpaid is absent when [`Self::postpaid`] is `None`.
+    pub postpaid_gap: ConsoleTeamPostpaidGap,
+    /// Optional Management usage spend series (POST analytics) for a day window.
+    /// Distinct from period postpaid totals and from prepaid remaining.
+    pub usage_series: Option<ConsoleTeamUsageSeriesSummary>,
 }
 
 impl ConsoleMeter {
@@ -143,10 +293,16 @@ pub struct LimitsSnapshot {
     /// other — credentials are polled per slot; the credits API returns one
     /// pool. Also not console.x.ai Grok Business license seat/message usage.
     pub shared_unified_supergrok_pool: bool,
-    /// When true, emit the optional flat-poll honesty note (included % and
-    /// SuperGrok $ extras stayed flat across recent polls; included debit
+    /// When true, emit the optional flat-poll honesty note (included debit
     /// unproven). Caller supplies evidence — do not invent inference counters.
     pub flat_poll_unproven_debit: bool,
+    /// True when the flat window observed Grok Build product % (name it in the
+    /// note only when true). Ignored when [`Self::flat_poll_unproven_debit`] is
+    /// false.
+    pub flat_poll_observed_build: bool,
+    /// True when the flat window observed SuperGrok $ extras. Ignored when
+    /// [`Self::flat_poll_unproven_debit`] is false.
+    pub flat_poll_observed_extras: bool,
 }
 
 /// One SuperGrok principal input for multi-principal `/limits` build.
@@ -207,19 +363,40 @@ impl LimitsSnapshot {
                 // wire real gap via [`Self::with_console_prepaid_gap`].
                 balance_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
+                postpaid: None,
+                postpaid_gap: ConsoleTeamPostpaidGap::MissingManagementKey,
+                usage_series: None,
             },
             // Single SuperGrok section: no dual-login shared-pool note.
             shared_unified_supergrok_pool: false,
             flat_poll_unproven_debit: false,
+            flat_poll_observed_build: false,
+            flat_poll_observed_extras: false,
         }
     }
 
     /// Mark optional flat-poll honesty (included debit unproven under load).
     ///
-    /// Only set when product has poll evidence of flat included % and SuperGrok
-    /// $ extras. Default false (no invented inference counters).
+    /// Only set when product has poll evidence. Default false (no invented
+    /// inference counters). Does **not** invent Build/extras observed flags;
+    /// use [`Self::with_flat_poll_observed_meters`] when history saw those
+    /// fields.
     pub fn with_flat_poll_unproven_debit(mut self, flat: bool) -> Self {
         self.flat_poll_unproven_debit = flat;
+        if !flat {
+            self.flat_poll_observed_build = false;
+            self.flat_poll_observed_extras = false;
+        }
+        self
+    }
+
+    /// Which optional meters were observed flat in the poll window (Issue 1).
+    ///
+    /// Only names Build / SuperGrok $ extras in honesty copy when the matching
+    /// flag is true. Safe default for both is false.
+    pub fn with_flat_poll_observed_meters(mut self, build: bool, extras: bool) -> Self {
+        self.flat_poll_observed_build = build;
+        self.flat_poll_observed_extras = extras;
         self
     }
 
@@ -244,6 +421,32 @@ impl LimitsSnapshot {
     /// env). Live sampling still uses [`ConsoleMeter::is_live`].
     pub fn with_console_key_available(mut self, available: bool) -> Self {
         self.console.key_available = available || self.console.is_live;
+        self
+    }
+
+    /// Attach console team postpaid invoice preview (Management API M3).
+    ///
+    /// `None` keeps the current [`ConsoleMeter::postpaid_gap`]. Does not touch
+    /// prepaid remaining or SuperGrok meters.
+    pub fn with_console_postpaid(mut self, postpaid: Option<ConsoleTeamPostpaidMeter>) -> Self {
+        self.console.postpaid = postpaid;
+        self
+    }
+
+    /// Set honest postpaid gap when preview is unknown.
+    pub fn with_console_postpaid_gap(mut self, gap: ConsoleTeamPostpaidGap) -> Self {
+        self.console.postpaid_gap = gap;
+        self
+    }
+
+    /// Attach Management usage spend series (POST analytics window summary).
+    ///
+    /// Does not touch prepaid remaining, postpaid period totals, or SuperGrok.
+    pub fn with_console_usage_series(
+        mut self,
+        series: Option<ConsoleTeamUsageSeriesSummary>,
+    ) -> Self {
+        self.console.usage_series = series;
         self
     }
 
@@ -325,9 +528,14 @@ impl LimitsSnapshot {
                 key_available: live_identity.is_console(),
                 balance_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
+                postpaid: None,
+                postpaid_gap: ConsoleTeamPostpaidGap::MissingManagementKey,
+                usage_series: None,
             },
             shared_unified_supergrok_pool,
             flat_poll_unproven_debit: false,
+            flat_poll_observed_build: false,
+            flat_poll_observed_extras: false,
         }
     }
 
@@ -594,33 +802,131 @@ Extra Usage Credits (not console team prepaid)."
     }
     lines.push(String::new());
 
-    format_principal(&mut lines, &snap.primary);
+    let console_live = snap.live_identity.is_console();
+    format_principal(&mut lines, &snap.primary, console_live);
 
     for extra in &snap.extra_principals {
         lines.push(String::new());
-        format_principal(&mut lines, extra);
+        format_principal(&mut lines, extra, console_live);
     }
 
     lines.push(String::new());
     format_console(&mut lines, &snap.console);
 
+    // Double-entry spend summary (local vs Management); full view is /spend.
+    lines.push(String::new());
+    lines.push(format_limits_double_entry_section(snap));
+
     lines.join("\n")
 }
 
+/// Compact double-entry block for `/limits` (local book + remote honesty).
+fn format_limits_double_entry_section(snap: &LimitsSnapshot) -> String {
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    let mut remote = xai_grok_shell::token_economy::RemoteBookSummary::default();
+    let has_mgmt = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
+    if !has_mgmt || !cfg.reconcile_management_usage {
+        remote.remote_unavailable = true;
+        if !has_mgmt {
+            remote.remote_setup_note =
+                Some("No management key on file for console team remote book.".into());
+        }
+    } else {
+        // Snapshot meters (prepaid / postpaid) + latest series sample in grok_oss.db.
+        if let Some(cents) = snap.console.balance_cents {
+            remote.prepaid_remaining_cents = Some(cents);
+        }
+        if let Some(pp) = &snap.console.postpaid {
+            remote.postpaid_api_class_cents = Some(pp.api_class_cents);
+            remote.postpaid_oauth_class_cents = Some(pp.oauth_class_cents);
+        }
+        if let Some(store) = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)
+            && let Ok(Some(sample)) = xai_grok_shell::token_economy::latest_remote_sample(
+                &store,
+                "management_usage_series",
+            )
+        {
+            remote.api_class_usd = sample.payload.get("api_class_usd").and_then(|v| v.as_f64());
+            remote.oauth_class_usd = sample
+                .payload
+                .get("oauth_class_usd")
+                .and_then(|v| v.as_f64());
+            if let (Some(s), Some(e)) = (sample.window_start, sample.window_end) {
+                remote.window_label = Some(format!("{s} → {e}"));
+            }
+        }
+    }
+
+    let mut supergrok = xai_grok_shell::token_economy::SuperGrokPeriodContext::default();
+    if let Some(inc) = &snap.primary.included {
+        supergrok.usage_pct = Some(inc.used_pct);
+        supergrok.period_label = Some(inc.period_label.to_lowercase());
+        supergrok.pacing_sentence = format_principal_pacing(inc, snap.live_identity.is_console());
+    }
+
+    let report = xai_grok_shell::token_economy::build_double_entry_report(&cfg, remote, supergrok);
+    xai_grok_shell::token_economy::format_limits_spend_section(&report)
+}
+
 /// Honesty notes for a snapshot (limits modal / human `grok limits` body).
-pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<&'static str> {
+pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
     use super::limits_honesty::{LimitsHonestyInput, honesty_notes_for_limits};
 
     let has_included = snap.primary.included.is_some()
         || snap.extra_principals.iter().any(|p| p.included.is_some());
+    let oauth_postpaid_dominates = snap
+        .console
+        .postpaid
+        .as_ref()
+        .is_some_and(|p| p.oauth_class_dominates());
+    let has_team_default_credits = snap
+        .console
+        .postpaid
+        .as_ref()
+        .and_then(|p| p.default_credits_cents)
+        .is_some();
     honesty_notes_for_limits(LimitsHonestyInput {
         live: snap.live_identity,
         has_included_reading: has_included,
         flat_poll_unproven_debit: snap.flat_poll_unproven_debit,
+        flat_poll_observed_build: snap.flat_poll_observed_build,
+        flat_poll_observed_extras: snap.flat_poll_observed_extras,
+        oauth_postpaid_dominates,
+        has_console_team_prepaid_reading: snap.console.balance_cents.is_some(),
+        has_team_default_credits_reading: has_team_default_credits,
     })
 }
 
-fn format_principal(lines: &mut Vec<String>, p: &PrincipalLimitsSlot) {
+/// Free SuperGrok period linear-burn sentence for a principal included meter.
+///
+/// Uses next reset as period end and period_label for weekly/monthly start
+/// derivation. Omit when bounds or config say so. Never dollars.
+fn format_principal_pacing(inc: &IncludedAllowanceMeter, console_live: bool) -> Option<String> {
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    if !cfg.show_period_pacing {
+        return None;
+    }
+    let end = inc.next_reset_at?;
+    let period_type = match inc.period_label {
+        "Weekly" => Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        "Monthly" => Some("USAGE_PERIOD_TYPE_MONTHLY"),
+        _ => None,
+    };
+    let start = xai_grok_shell::token_economy::resolve_period_start(None, Some(end), period_type)?;
+    let p = xai_grok_shell::token_economy::compute_period_pacing(
+        inc.used_pct,
+        start,
+        end,
+        chrono::Utc::now(),
+    )?;
+    Some(if console_live {
+        p.full_sentence_console_live()
+    } else {
+        p.full_sentence()
+    })
+}
+
+fn format_principal(lines: &mut Vec<String>, p: &PrincipalLimitsSlot, console_live: bool) {
     lines.push(format!("{}:", p.label));
     match &p.included {
         Some(inc) => {
@@ -641,11 +947,25 @@ fn format_principal(lines: &mut Vec<String>, p: &PrincipalLimitsSlot) {
                 Some(reset) => lines.push(format!("  Next reset: {reset}")),
                 None => lines.push("  Next reset: not known yet".to_string()),
             }
+            // Free SuperGrok period linear-burn pacing (omit when bounds missing).
+            if let Some(pacing) = format_principal_pacing(inc, console_live) {
+                lines.push(format!("  {pacing}"));
+            }
         }
         None => {
             lines.push("  Included allowance: no data yet".to_string());
             lines.push("  Next reset: not known yet".to_string());
         }
+    }
+
+    // Branch 2b: always surface Grok Build productUsage % when wire has it.
+    // Distinct from top-level included allowance %; never invent when None.
+    // Shared phrase with `/usage` (Issue 5).
+    if let Some(build_pct) = p.grok_build_usage_pct {
+        lines.push(format!(
+            "  {}",
+            super::limits_honesty::format_grok_build_product_usage_line(build_pct)
+        ));
     }
 
     match &p.dollar_extras {
@@ -694,6 +1014,93 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
             lines.push(format!("  Balance: {}", c.prepaid_gap.as_display_str()));
         }
     }
+    // Postpaid OAuth vs API class (distinct from prepaid Balance line).
+    match &c.postpaid {
+        Some(p) => {
+            lines.push(format!(
+                "  Team postpaid (period): {}",
+                fmt_dollars(p.period_total_cents)
+            ));
+            lines.push(format!(
+                "  Team postpaid OAuth class: {}",
+                fmt_dollars(p.oauth_class_cents)
+            ));
+            lines.push(format!(
+                "  Team postpaid API class: {}",
+                fmt_dollars(p.api_class_cents)
+            ));
+            // Team default credits: dashboard allotment, own line (not prepaid).
+            if let Some(dc) = p.default_credits_cents {
+                lines.push(format!(
+                    "  Team default credits (dashboard allotment; not the prepaid wallet): {}",
+                    fmt_dollars(dc)
+                ));
+            }
+        }
+        None => {
+            lines.push(format!(
+                "  Team postpaid: {}",
+                c.postpaid_gap.as_display_str()
+            ));
+        }
+    }
+    // Optional Management usage series (POST analytics; spend over a day window).
+    if let Some(series) = &c.usage_series {
+        lines.push(format!(
+            "  Team usage series ({} .. {}, {}):",
+            series.start_time, series.end_time, series.timezone
+        ));
+        lines.push(format!(
+            "    OAuth / Grok Build class: {}",
+            fmt_usd_float(series.oauth_class_usd)
+        ));
+        lines.push(format!(
+            "    API-key class: {}",
+            fmt_usd_float(series.api_class_usd)
+        ));
+        if series.other_class_usd.abs() > f64::EPSILON {
+            lines.push(format!(
+                "    Other class: {}",
+                fmt_usd_float(series.other_class_usd)
+            ));
+        }
+        for row in series.top_rows.iter().take(3) {
+            lines.push(format!(
+                "    · {}: {}",
+                truncate_series_label(&row.label, 48),
+                fmt_usd_float(row.total_usd)
+            ));
+        }
+        if series.limit_reached {
+            lines.push(
+                "    (Management reported limitReached: only a subset of groups returned)"
+                    .to_string(),
+            );
+        }
+    }
+}
+
+/// Format a USD float for series lines (`$N` or `$N.NN`).
+fn fmt_usd_float(usd: f64) -> String {
+    let a = usd.abs();
+    if (a - a.round()).abs() < 1e-9 {
+        format!("${:.0}", usd)
+    } else {
+        format!("${usd:.2}")
+    }
+}
+
+fn truncate_series_label(label: &str, max: usize) -> String {
+    let t = label.trim();
+    if t.chars().count() <= max {
+        t.to_owned()
+    } else {
+        // ASCII three-dot ellipsis (product prose: no unicode ellipsis).
+        let keep = max.saturating_sub(3);
+        let mut s: String = t.chars().take(keep).collect();
+        s.push_str("...");
+        s
+    }
 }
 
 #[cfg(test)]
@@ -714,6 +1121,7 @@ mod tests {
             period_type: None,
             is_unified_billing_user: None,
             grok_build_usage_pct: None,
+            included_usage_known: true,
         }
     }
 
@@ -971,6 +1379,24 @@ mod tests {
         );
         assert!(!out_d.contains("no management key"), "{out_d}");
         assert!(!out_d.contains("no management team id"), "{out_d}");
+        // Soft polish: when prepaid $ is shown, name process-cache lag,
+        // app last-good that can outlive TTL, + force path.
+        assert!(
+            out_d.contains("console team prepaid process cache may lag"),
+            "prepaid lag honesty when dollars shown: {out_d}"
+        );
+        assert!(
+            out_d.to_ascii_lowercase().contains("last successful"),
+            "must name app last-good: {out_d}"
+        );
+        assert!(
+            out_d.contains("grok limits"),
+            "must name CLI force-refresh path: {out_d}"
+        );
+        assert!(
+            out_d.contains("/limits"),
+            "must name TUI force-refresh path: {out_d}"
+        );
     }
 
     #[test]
@@ -1365,11 +1791,16 @@ mod tests {
                 key_available: false,
                 balance_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
+                postpaid: None,
+                postpaid_gap: ConsoleTeamPostpaidGap::MissingManagementKey,
+                usage_series: None,
             },
             // This fixture exercises double-"included" copy only; shared-pool
             // note is covered by dedicated dual-unified tests.
             shared_unified_supergrok_pool: false,
             flat_poll_unproven_debit: false,
+            flat_poll_observed_build: false,
+            flat_poll_observed_extras: false,
         };
         let out = format_limits_detail(&snap);
         assert!(
@@ -1771,20 +2202,94 @@ mod tests {
     /// Named contract (Slice 3): optional flat-poll note when evidence flag set.
     #[test]
     fn format_flat_poll_note_when_snapshot_flags_unproven_debit() {
-        use super::super::limits_honesty::NOTE_FLAT_POLL_UNPROVEN_DEBIT;
+        use super::super::limits_honesty::flat_poll_unproven_debit_note;
 
         let bal = weekly(65.0, "Aug 4, 12:00", Some(10029));
+        // Explicit observed extras (prepaid on fixture) so note can name them.
         let snap =
             LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
-                .with_flat_poll_unproven_debit(true);
+                .with_flat_poll_unproven_debit(true)
+                .with_flat_poll_observed_meters(false, true);
         let out = format_limits_detail(&snap);
+        let expected = flat_poll_unproven_debit_note(false, true);
         assert!(
-            out.contains(NOTE_FLAT_POLL_UNPROVEN_DEBIT),
+            out.contains(&expected),
             "flat-poll honesty note required when flag set: {out}"
         );
         assert!(
             out.contains("included debit is unproven"),
             "must say debit unproven: {out}"
+        );
+        assert!(
+            !out.contains("Grok Build product % stayed")
+                && !out.contains("Grok Build product %, and"),
+            "must not claim Build flat without observed flag: {out}"
+        );
+    }
+
+    /// Named contract (branch 2b): Grok Build productUsage % surfaces in human
+    /// `/limits` when present on the principal (never invent when None).
+    #[test]
+    fn format_surfaces_grok_build_product_usage_when_on_wire() {
+        let mut bal = weekly(65.0, "Aug 4, 12:00", Some(10029));
+        bal.grok_build_usage_pct = Some(54.0);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("Grok Build product usage: 54% used"),
+            "human limits must surface Build productUsage when wire has it: {out}"
+        );
+        // Cold path: no invent when absent.
+        let cold = LimitsSnapshot::from_billing(
+            Some(&weekly(65.0, "Aug 4, 12:00", Some(10029))),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+        );
+        let cold_out = format_limits_detail(&cold);
+        assert!(
+            !cold_out.contains("Grok Build product usage:"),
+            "must not invent Build % when wire has none: {cold_out}"
+        );
+    }
+
+    /// Named contract (Issue 4): dual principal human format shows sibling
+    /// Build % when that principal's balance carries it (sibling process cache
+    /// path sets CreditBalance.grok_build_usage_pct from IncludedBillingFields).
+    #[test]
+    fn format_dual_principal_surfaces_sibling_grok_build_usage() {
+        let mut active = weekly(65.0, "August 4, 12:00", Some(10029));
+        active.grok_build_usage_pct = Some(54.0);
+        let mut sibling = weekly(65.0, "August 4, 12:00", Some(10029));
+        sibling.grok_build_usage_pct = Some(61.0);
+        let snap = LimitsSnapshot::from_principals(
+            &[
+                PrincipalLimitsInput {
+                    label: "SuperGrok (business)".into(),
+                    role_label: Some("business".into()),
+                    balance: Some(active),
+                    autotopup: None,
+                    included_billing_only: false,
+                },
+                PrincipalLimitsInput {
+                    label: "SuperGrok (personal)".into(),
+                    role_label: Some("personal".into()),
+                    balance: Some(sibling),
+                    autotopup: None,
+                    included_billing_only: false,
+                },
+            ],
+            SamplingIdentityKind::SuperGrokSession,
+            Some("business"),
+        );
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("Grok Build product usage: 54% used"),
+            "active Build %: {out}"
+        );
+        assert!(
+            out.contains("Grok Build product usage: 61% used"),
+            "sibling Build % from process cache must surface: {out}"
         );
     }
 
@@ -1812,19 +2317,21 @@ mod tests {
     #[test]
     fn format_console_live_with_flat_flag_skips_all_supergrok_honesty() {
         use super::super::limits_honesty::{
-            NOTE_FLAT_POLL_UNPROVEN_DEBIT, NOTE_INCLUDED_PCT_IS_BILLING_POLL,
+            NOTE_INCLUDED_PCT_IS_BILLING_POLL, flat_poll_unproven_debit_note,
         };
 
         let bal = weekly(65.0, "Aug 4, 12:00", Some(10029));
         let snap = LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::ConsoleKey)
-            .with_flat_poll_unproven_debit(true);
+            .with_flat_poll_unproven_debit(true)
+            .with_flat_poll_observed_meters(true, true);
         let out = format_limits_detail(&snap);
         assert!(
             !out.contains(NOTE_INCLUDED_PCT_IS_BILLING_POLL),
             "console + flat: no base honesty: {out}"
         );
+        let flat = flat_poll_unproven_debit_note(true, true);
         assert!(
-            !out.contains(NOTE_FLAT_POLL_UNPROVEN_DEBIT),
+            !out.contains(&flat),
             "console + flat: no flat-poll honesty: {out}"
         );
         assert!(

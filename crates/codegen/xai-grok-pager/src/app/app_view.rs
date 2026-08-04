@@ -632,6 +632,8 @@ pub struct AppView {
     pub auth_return_view: Option<ActiveView>,
     /// Per-agent views (keyed by AgentId).
     pub agents: IndexMap<AgentId, AgentView>,
+    /// Fearless global pause: holds all in-process sessions until resume.
+    pub global_work_pause: crate::app::global_work_pause::GlobalWorkPause,
     /// Monotonically increasing counter for agent ID allocation.
     /// Never reuse IDs after `shift_remove` to avoid collisions.
     pub next_agent_id: usize,
@@ -1431,6 +1433,7 @@ impl AppView {
             active_view: ActiveView::Welcome,
             auth_return_view: None,
             agents: IndexMap::new(),
+            global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
             next_agent_id: 0,
             models,
             registry: ActionRegistry::defaults(),
@@ -3018,6 +3021,7 @@ impl AppView {
                 }
                 Action::VoiceToggle
             }
+            ActionId::ToggleGlobalPause => Action::ToggleGlobalPause,
             _ => return InputOutcome::Unchanged,
         };
         if def.requires_confirmation {
@@ -5109,6 +5113,16 @@ impl AppView {
         let mut needs_redraw = false;
         needs_redraw |= self.minimal_state.transcript.is_some();
         needs_redraw |= self.poll_clipboard_focus_tip();
+        // Keep global-pause duration/count visible while held.
+        if self.global_work_pause.is_active() {
+            if let Some(label) = self
+                .global_work_pause
+                .status_label(std::time::Instant::now())
+            {
+                self.show_toast(&label);
+                needs_redraw = true;
+            }
+        }
         if matches!(self.active_view, ActiveView::Welcome) {
             self.welcome_tick = self.welcome_tick.wrapping_add(1);
             if let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at) {
@@ -5847,6 +5861,7 @@ pub(crate) mod tests {
             active_view: ActiveView::Welcome,
             auth_return_view: None,
             agents: indexmap::IndexMap::new(),
+            global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
             next_agent_id: 0,
             models: ModelState::default(),
             registry: ActionRegistry::defaults(),

@@ -120,10 +120,12 @@ impl AgentView {
                         !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
                     if has_content {
                         use crate::views::plan_approval_view::PlanPromptIntent;
+                        // Phase P: Enter hint must name rewrite vs answer-only so
+                        // operators do not confuse Revise with Clarify.
                         let enter_label = match pav.prompt_intent {
                             PlanPromptIntent::ApproveNotes => "approve w/ comment",
-                            PlanPromptIntent::Questions => "clarify",
-                            PlanPromptIntent::Revise => "revise",
+                            PlanPromptIntent::Questions => "clarify (no rewrite)",
+                            PlanPromptIntent::Revise => "revise (rewrites plan)",
                         };
                         return vec![
                             HintItem::new(key!(Enter), enter_label),
@@ -141,8 +143,8 @@ impl AgentView {
                     use crate::views::plan_approval_view::PlanPromptIntent;
                     let enter_label = match pav.prompt_intent {
                         PlanPromptIntent::ApproveNotes => "approve w/ comment",
-                        PlanPromptIntent::Questions => "clarify",
-                        PlanPromptIntent::Revise => "revise",
+                        PlanPromptIntent::Questions => "clarify (no rewrite)",
+                        PlanPromptIntent::Revise => "revise (rewrites plan)",
                     };
                     vec![
                         HintItem::new(key!(Enter), enter_label),
@@ -5039,6 +5041,7 @@ mod clear_done_and_limits_chrome_tests {
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
             is_unified_billing_user: None,
             grok_build_usage_pct: None,
+            included_usage_known: true,
         }
     }
 

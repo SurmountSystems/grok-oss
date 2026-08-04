@@ -4,8 +4,14 @@
 //! [`GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS`] (200K; catalog context remains
 //! 500K). When economic mode is on, the session treats the model as a 200K-window
 //! model for compaction, the context bar, and related budgets so turns stay on
-//! the cheap tier. Auto-queued `/implement` loops also clamp `--effort` to 1
-//! (pager-side) so multi-reviewer fan-out does not burn the cheaper window.
+//! the cheap tier.
+//!
+//! **Implement-loop effort** (skill 1–5 reviewer fan-out, not model reasoning
+//! effort) is a separate Token Economy policy under `[token_economy]`: optional
+//! lock and min floor always apply when set; when economic mode is on and
+//! `cap_implement_effort_when_economic` is true, the product also applies a hard
+//! ceiling (default 3) and desired inject when missing (default 2). See
+//! [`crate::token_economy`].
 //!
 //! Default: **on** (`None` in `[ui].economic_mode`). Override globally via
 //! settings / `config.toml`, or per conversation with `/economic-mode`.

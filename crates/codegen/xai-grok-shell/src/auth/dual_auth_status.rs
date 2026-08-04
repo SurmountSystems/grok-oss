@@ -130,7 +130,11 @@ impl DualAuthStatus {
         }
         if self.auto_use_included_limits {
             out.push_str(
-                "  Auto-use included limits: yes (prefer included SuperGrok weekly before $ extras / console; hop on exhaust; sooner reset ranks among included pools)\n",
+                "  Prefer free SuperGrok period allowance: yes (default for new installs; free SuperGrok period allowance before SuperGrok top-up dollars and the console API key; when free period is full, SuperGrok top-up dollars before console; set [auth] auto_use_included_limits = false for classic dual-auth without free-period-first ranking)\n",
+            );
+        } else {
+            out.push_str(
+                "  Prefer free SuperGrok period allowance: no ([auth] auto_use_included_limits = false; classic dual-auth order; omit that line or set true to prefer free SuperGrok period allowance first)\n",
             );
         }
 
@@ -243,8 +247,10 @@ fn preferred_method_label() -> Option<&'static str> {
 }
 
 fn auto_use_included_limits_from_config() -> bool {
+    // Missing config or missing key → same default as GrokComConfig (true for
+    // new/empty homes). Explicit false in config.toml stays false.
     let Ok(value) = crate::config::load_effective_config_disk_only() else {
-        return false;
+        return super::default_auto_use_included_limits();
     };
     let table_bool = |section: &str, key: &str| -> Option<bool> {
         value
@@ -257,7 +263,7 @@ fn auto_use_included_limits_from_config() -> bool {
         // One-release dogfood alias.
         .or_else(|| table_bool("auth", "prefer_sooner_reset"))
         .or_else(|| table_bool("grok_com_config", "prefer_sooner_reset"))
-        .unwrap_or(false)
+        .unwrap_or_else(super::default_auto_use_included_limits)
 }
 
 #[cfg(test)]
@@ -393,6 +399,58 @@ mod tests {
         assert!(!text.contains("raw-secret"));
         assert!(!text.contains("xyz"));
         assert!(text.contains(&st.stored_fingerprints[0]));
+    }
+
+    /// Named contract: doctor dual-auth names free SuperGrok period allowance
+    /// first, then SuperGrok top-up dollars before console when free period full;
+    /// off path says how to set false / classic dual-auth.
+    #[test]
+    fn format_human_auto_use_names_extras_before_console_after_included_full() {
+        let st = DualAuthStatus {
+            session_present: true,
+            session_mode: Some("oidc"),
+            supergrok_principals: Vec::new(),
+            stored_console_key_count: 1,
+            stored_fingerprints: vec![fingerprint_console_key("console-only-fp")],
+            env_key_count: 0,
+            env_var_present: false,
+            env_wins: false,
+            preferred_method: None,
+            auto_use_included_limits: true,
+        };
+        let text = st.format_human();
+        assert!(
+            text.contains("Prefer free SuperGrok period allowance: yes"),
+            "must surface free-period-first when on: {text}"
+        );
+        assert!(
+            text.contains("SuperGrok top-up dollars before console")
+                || text.contains("when free period is full"),
+            "doctor dual-auth must name top-ups-before-console after free period full: {text}"
+        );
+        assert!(
+            text.contains("auto_use_included_limits = false"),
+            "must tell operators how to turn free-period-first off: {text}"
+        );
+        // Must not claim always-console-after-included-full (pre-Slice-4 lie).
+        assert!(
+            !text.contains("always console after included"),
+            "must not claim console always after included full: {text}"
+        );
+        // Off path: complete sentence saying no, not a silent omit.
+        let off = DualAuthStatus {
+            auto_use_included_limits: false,
+            ..st
+        };
+        let off_text = off.format_human();
+        assert!(
+            off_text.contains("Prefer free SuperGrok period allowance: no"),
+            "auto-use off must say no in complete English: {off_text}"
+        );
+        assert!(
+            !off_text.contains("Prefer free SuperGrok period allowance: yes"),
+            "auto-use off must not claim yes: {off_text}"
+        );
     }
 
     /// Multi SuperGrok: doctor/list shows two fingerprints, never raw tokens.

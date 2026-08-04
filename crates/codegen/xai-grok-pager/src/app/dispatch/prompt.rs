@@ -412,6 +412,28 @@ pub(super) fn input_can_trigger_project_picker(text: &str) -> bool {
         && !matches!(t, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!")
 }
 
+/// Token Economy: rewrite implement-loop effort on human submit paths.
+///
+/// Toasts once when effort is clamped or desired is injected. Non-implement
+/// text is unchanged. Shared with auto-run via
+/// [`crate::app::auto_implement::apply_implement_effort_for_product`].
+fn apply_implement_effort_on_submit(
+    agent: &mut crate::app::agent_view::AgentView,
+    text: String,
+) -> String {
+    if !crate::app::auto_implement::is_implement_command_sentence(&text)
+        && !xai_grok_shell::token_economy::is_implement_command(&text)
+    {
+        return text;
+    }
+    let economic = crate::appearance::cache::load_economic_mode();
+    let rewrite = crate::app::auto_implement::apply_implement_effort_for_product(&text, economic);
+    if let Some(toast) = rewrite.toast.as_deref() {
+        agent.show_toast(toast);
+    }
+    rewrite.command
+}
+
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume
 /// the prompt textarea after the command is processed.
 ///
@@ -695,6 +717,8 @@ pub(super) fn dispatch_send_prompt_inner(
                 // Enqueue with display text for scrollback but wire_blocks
                 // for the actual prompt sent to the model. Leading skill
                 // invocation: display_as_skill owns styling (no ranges).
+                // Token Economy: clamp implement-loop effort on display text.
+                let display_text = apply_implement_effort_on_submit(agent, display_text);
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
                 agent
@@ -732,6 +756,8 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
+                // Token Economy: clamp implement-loop effort on human /implement.
+                let pass_text = apply_implement_effort_on_submit(agent, pass_text);
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt

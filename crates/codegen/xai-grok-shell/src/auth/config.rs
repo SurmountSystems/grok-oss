@@ -122,21 +122,33 @@ pub struct GrokComConfig {
     /// Not for SuperGrok multi-identity ranking — use [`Self::auto_use_included_limits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_method: Option<PreferredAuthMethod>,
-    /// Prefer **included** SuperGrok limits (personal and/or Business) before
-    /// SuperGrok dollar extras / console API $. When multi-identity exists,
-    /// see both pools' headroom and rank among included pools (sooner reset
-    /// is a ranking heuristic, not the feature name). Exhausted included
-    /// pool fails over to another with included headroom, then console.
+    /// Prefer the free SuperGrok allowance for the current billing period
+    /// (personal and/or Business) before SuperGrok dollar top-ups and the
+    /// console API key. When multi-identity exists, rank SuperGrok logins by
+    /// free-period headroom (sooner reset is a ranking heuristic, not the
+    /// feature name). Exhausted free period on one login fails over to another
+    /// with free period left, then SuperGrok top-up dollars, then console.
     /// Independent of [`Self::preferred_method`] so ordinary `oauth` /
     /// `api_key` pins stay compatible with stock grok. Config.toml only
-    /// (`[auth] auto_use_included_limits`). Default false.
+    /// (`[auth] auto_use_included_limits`). **Default true** for new/empty
+    /// config (missing key). Explicit `false` in an existing file is preserved.
     /// Serde alias `prefer_sooner_reset` accepted for one-release dogfood.
     #[serde(
-        default,
+        default = "default_auto_use_included_limits",
         alias = "prefer_sooner_reset",
-        skip_serializing_if = "std::ops::Not::not"
+        skip_serializing_if = "auto_use_included_limits_is_default_true"
     )]
     pub auto_use_included_limits: bool,
+}
+
+/// Default for [`GrokComConfig::auto_use_included_limits`]: prefer free SuperGrok
+/// period allowance before the console API key on new/empty config.
+pub const fn default_auto_use_included_limits() -> bool {
+    true
+}
+
+fn auto_use_included_limits_is_default_true(value: &bool) -> bool {
+    *value
 }
 /// Team login restriction. TOML string or array; an empty array fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,7 +359,7 @@ impl Default for GrokComConfig {
                 .map(|v| env_flag_enabled(&v)),
             force_login_team_uuid: None,
             preferred_method: None,
-            auto_use_included_limits: false,
+            auto_use_included_limits: default_auto_use_included_limits(),
         }
     }
 }
@@ -525,12 +537,83 @@ mod tests {
         .expect("parse");
         assert_eq!(cfg.preferred_method, Some(PreferredAuthMethod::Oidc));
         assert!(cfg.auto_use_included_limits);
+        // New/empty config: prefer free SuperGrok period allowance by default.
         let cfg: GrokComConfig = toml::from_str("").expect("empty");
-        assert!(!cfg.auto_use_included_limits);
+        assert!(
+            cfg.auto_use_included_limits,
+            "empty/new config defaults auto_use_included_limits to true"
+        );
         let cfg: GrokComConfig =
             toml::from_str("auto_use_included_limits = true").expect("flag only");
         assert!(cfg.auto_use_included_limits);
         assert_eq!(cfg.preferred_method, None);
+        // Explicit false in an existing file must stay false.
+        let cfg: GrokComConfig =
+            toml::from_str("auto_use_included_limits = false").expect("flag false");
+        assert!(
+            !cfg.auto_use_included_limits,
+            "explicit false must be preserved"
+        );
+    }
+
+    /// Named contract (Item 1): new empty home prefers free SuperGrok period
+    /// allowance; explicit false stays off; api_key pin still forces console
+    /// ranking off regardless of the flag default.
+    #[test]
+    fn auto_use_included_limits_new_install_default_true_preserves_false() {
+        assert!(
+            default_auto_use_included_limits(),
+            "const default must be true for new installs"
+        );
+        assert!(
+            GrokComConfig::default().auto_use_included_limits,
+            "Default::default() must prefer free SuperGrok period allowance"
+        );
+        let empty: GrokComConfig = toml::from_str("").expect("empty");
+        assert!(empty.auto_use_included_limits);
+        let off: GrokComConfig = toml::from_str("auto_use_included_limits = false").expect("false");
+        assert!(!off.auto_use_included_limits);
+        // preferred_method=api_key still blocks auto rank even when flag is on.
+        assert!(
+            !crate::auth::preferred_uses_supergrok_auto_rank(
+                true,
+                Some(PreferredAuthMethod::ApiKey)
+            ),
+            "api_key pin forces console even when auto_use_included_limits is true"
+        );
+        assert!(
+            crate::auth::preferred_uses_supergrok_auto_rank(true, None),
+            "default (no preferred_method) + flag on uses SuperGrok free-period rank"
+        );
+        assert!(
+            !crate::auth::preferred_uses_supergrok_auto_rank(false, None),
+            "explicit false turns off free-period-first ranking"
+        );
+    }
+
+    #[test]
+    fn auto_use_included_limits_serializes_false_omits_default_true() {
+        let on = GrokComConfig {
+            auto_use_included_limits: true,
+            ..GrokComConfig::default()
+        };
+        let on_toml = toml::to_string(&on).expect("ser on");
+        assert!(
+            !on_toml.contains("auto_use_included_limits"),
+            "default true should omit the key on serialize so re-load stays true: {on_toml}"
+        );
+        let off = GrokComConfig {
+            auto_use_included_limits: false,
+            ..GrokComConfig::default()
+        };
+        let off_toml = toml::to_string(&off).expect("ser off");
+        assert!(
+            off_toml.contains("auto_use_included_limits = false")
+                || off_toml.contains("auto_use_included_limits=false"),
+            "explicit false must round-trip in file so old homes stay off: {off_toml}"
+        );
+        let reloaded: GrokComConfig = toml::from_str(&off_toml).expect("reload false");
+        assert!(!reloaded.auto_use_included_limits);
     }
 
     #[test]

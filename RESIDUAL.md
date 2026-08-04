@@ -20,7 +20,7 @@ or code — not only here. Closed campaign history:
   `timed out` / `connection interrupted` + `· next try in Ns`). Soft not
   shipped: phase-timer "since retry"; live countdown ticks. **Dogfood** after
   rebuild if the stable binary lags (`Credits used:` in screenshots was
-  already percent-only in source). Join:
+  already percent-only in source). Report:
   `/tmp/grok-join-impl-retry-network-graceful.md`.
 
 0. **Structured todos: fib leaves + progress + no casual reset (shipped product)**
@@ -115,10 +115,10 @@ or code — not only here. Closed campaign history:
    allowance** ≠ console API spend ≠ second SuperGrok OAuth identity.
    When billing or limits come up, name which meter.
 
-   Plain English in chat, residual, plans, user-guide, toasts, joins, board
+   Plain English in chat, residual, plans, user-guide, toasts, reports, board
    titles. File/dir names, variables, tests: meaning-first. No em dash; ASCII
    `...` not `…`; voice not formula macros. Skip routine apologies; do not
-   persist operator profanity into residual/joins/commits/product copy.
+   persist operator profanity into residual/reports/commits/product copy.
 
    Product follow-through (park unless free with another edit; no new product
    steers invented here):
@@ -132,7 +132,7 @@ or code — not only here. Closed campaign history:
    Operator intent (2026-07-27): stop loose main-thread marathons (parent edits,
    long status essays, unstructured back-and-forth). Want a **deliberate
    conversation structure** so work stays token-efficient: clear roles
-   (parent = coordinator only; subagents own research/edits), short joins on
+   (parent = coordinator only; subagents own research/edits), short reports on
    disk, board + residual for memory, when to plan vs implement, how status
    reports stay short in plain English. Complements existing HITL / subagent
    token strategy (host D3 `subagent-token-strategy.md`) but needs a **product
@@ -253,21 +253,31 @@ or code — not only here. Closed campaign history:
    Board: `feat:doge-gray-alpha-scrub` (close when rename optional accepted or
    declined).
 
-4. **OAuth SuperGrok ↔ console API key failover (limits residual = two halves;
-   Half A shipped; Half B core prepaid shipped 2026-07-30; series / dogfood open)**
-   **Operator pin (2026-07-30, second clarification) — both halves intended:**
-   Limits residual is **not** either SuperGrok **or** console. Hunter wanted
-   **both**:
-   1. SuperGrok / session-style meters in the TUI (included weekly + SuperGrok
-      $ extras, dual SuperGrok principals, `/limits`)
-   2. **And** console.x.ai Grok Business Usage class data in the TUI (team
-      Surmount: tokens, spend, charts class)
+4. **OAuth SuperGrok ↔ console API key failover (limits residual = two halves
+   + limits-first campaign; core product largely shipped 2026-08-02)**
+   **Operator pins:**
+   - **Limits before credits** (always). Design A: while SuperGrok included
+     weekly has headroom, omit console ApiKey from the chain. Do not hop to
+     console to "fix" team Usage $.
+   - **Both halves intended** (2026-07-30): not either SuperGrok **or**
+     console. Hunter wanted **both**:
+     1. SuperGrok / session-style meters in the TUI (included weekly + SuperGrok
+        $ extras, dual SuperGrok principals, `/limits`)
+     2. **And** console.x.ai team Usage class data in the TUI (team Surmount:
+        prepaid, spend class, optional charts)
 
-   Status is **core meters largely shipped; series + live dogfood still open**,
-   not "wrong-target waste." SuperGrok work was correct and remains wanted.
-   Agents previously shipped only Half A and treated Half B as "not our
-   product" / either-or — that dismissal was wrong. Do **not** claim full
-   Business Usage charts done; core prepaid balance meter is shipped.
+   Status is **core meters + limits-first Slices 1/3/4 shipped; Slice 2 dogfood
+   + residual-edges wave (soft honesty + bare-resolve audit) shipped 2026-08-02;
+   operator-edges residual wave same day: C4 ticket evidence package ready,
+   prepaid TTL polish shipped, F1b soft product close-out done; live multi-poll
+   still blocked; C4 still FAIL (branch 2b, server-side); product client invent
+   for limits-first largely exhausted**, not "wrong-target waste." SuperGrok
+   work was correct and remains wanted. Do **not** invent SuperGrok included
+   debit (C4) as proven: product honesty holds; server debit under load is still
+   not a clean pass (weak log 65→66, Build still flat 54; multi-poll attempt
+   auth-failed / cold process, `flat_poll` absent). Do **not** claim full
+   Business Usage charts done; core prepaid + postpaid OAuth/API class meters
+   are shipped.
 
    ### Half A — SuperGrok session billing meters (**shipped**, keep)
    Dual principals, sibling poll, `/limits` dual rows, footer credit-bar
@@ -275,34 +285,40 @@ or code — not only here. Closed campaign history:
    relative to the **full** two-half ask. Detail under shipped bullets below.
    Do **not** discard or reframe Half A as pure waste.
 
-   ### Half B — console team Grok Business Usage class meter (**core prepaid shipped; series open**)
-   TUI picture of team prepaid / tokens / spend / usage charts class data
-   (console product, Team Surmount), via xAI **Management API** + `team_id`.
-   **Do not invent scrape of console.x.ai HTML** or fake endpoints. Not "web
-   only / different surface / not our work."
+   ### Half B — console team Usage class meters (**core prepaid + M3 postpaid
+   shipped; series charts still optional**)
+   TUI picture of team prepaid / postpaid OAuth vs API class / optional token
+   spend charts (console product, Team Surmount), via xAI **Management API** +
+   `team_id`. **Do not invent scrape of console.x.ai HTML** or fake endpoints.
+   Not "web only / different surface / not our work."
 
    **Shipped (core dual-auth):** first-party resolve merge (session primary +
    console failover; `preferred_method=api_key` reverses); hop on credit /
    Heavy limit / plain 429 + **API host switch** (proxy ↔ `api.x.ai`);
    exhausted-fingerprint memo (1h; process + `$GROK_HOME/exhausted_credits/`;
    console success clears, session success does not); billing `usage_pct ≥ 100%`
-   preemptive mark + prefer console; rate-limit shared cooldown; kill-switch;
+   preemptive mark (Slice 4: do not mark / clear mark while SuperGrok $ extras
+   known positive under auto_use); rate-limit shared cooldown; kill-switch;
    multi-add console keys; live re-bind without prior stash. User-guide
    `02-authentication` + `11-custom-models` (+ dual-principal polish 2026-07-29).
-   **Also shipped (2026-07-29 joins):**
+   **Also shipped (2026-07-29 joins; order refined 2026-08-02 Slice 4):**
    - **`[auth] auto_use_included_limits = true`** (separate from
      `preferred_method`; `auto` is **not** a method value so ordinary grok
      configs stay compatible; serde alias `prefer_sooner_reset` for one release)
      + pure SuperGrok ranking (prefer included before $ extras; earlier
      `reset_at` + headroom among included pools; not Business-first)
-     + resolve/hop order wire (`order_credentials_for_preferred_auto`, post-exhaust
-     reorder; ExhaustedAll → console; oauth/api_key pins still honored).
+     + resolve/hop order wire (`order_credentials_for_preferred_auto`):
+     included headroom → SuperGrok only (Design A, console omitted);
+     included full + SuperGrok $ extras > 0 → SuperGrok primary, console
+     failover (after-burner); included full + extras 0/unknown → console
+     primary; `preferred_method=api_key` still pins console first.
    - **Meter honesty sticky console:** silent prefer-console / console auth
      primary no longer sells SuperGrok dollar extras as live spend
      (`meter_sampling_identity`, allowance Cleared keeps ConsoleKey).
    Joins: `/tmp/grok-join-impl-dual-supergrok-auto-failover-2026-07-29.md`,
    `/tmp/grok-join-impl-auto-wire-hop-2026-07-29.md`,
-   `/tmp/grok-join-impl-billing-meter-honesty-2026-07-29.md`.
+   `/tmp/grok-join-impl-billing-meter-honesty-2026-07-29.md`,
+   `.agents/joins/impl-slice4-extras-before-console-2026-08-02.md`.
    **Also shipped (Half A — multi SuperGrok + `/limits` SuperGrok surface):**
    - **Multi SuperGrok login store** — two OIDC principals; second login does
      not wipe the first; doctor / `grok login --list-api-keys` list both with
@@ -325,8 +341,54 @@ or code — not only here. Closed campaign history:
    memoized out of allowance, `auto_use_included_limits` ranking and doctor
    listings prefer the **live/fresher** token (not blind multi-slot). Stops
    silent stick on console Business API while SuperGrok Heavy session is
-   usable. Enrichment write keeps multi-slot in lockstep with base. Join:
+   usable. Enrichment write keeps multi-slot in lockstep with base. Report:
    `/tmp/grok-join-impl-business-supergrok-heavy-routing.md`.
+   **Also shipped (limits-first campaign — 2026-08-02):**
+   - **Slice 1 — poll history / flat honesty:** process ring of S1 credits
+     samples per SuperGrok identity; pure flat detector
+     (`included_debit_unproven`); wires
+     `LimitsSnapshot.flat_poll_unproven_debit` on `/limits` and
+     `limits --json` from real history (not test-only setter). Optional
+     `billing: poll_delta` log when included % / Build % / extras cents step.
+     Report: `.agents/joins/impl-slice1-poll-history-2026-08-02.md`.
+   - **Slice 3 — M3 postpaid invoice preview:** Management
+     `GET …/billing/teams/{team_id}/postpaid/invoice/preview`; aggregate
+     OAuth vs API class cents; surface under console meter family in
+     `limits --json` (`teamPostpaid*Usd` / `teamPostpaidGap`); C6 honesty
+     when SuperGrok live and OAuth postpaid dominates (session can still
+     move team Usage dollars without console key live). Does **not** change
+     Design A or invent dollars without Management response. Prepaid $ and
+     SuperGrok extras stay distinct. Report:
+     `.agents/joins/impl-slice3-m3-postpaid-2026-08-02.md`.
+   - **Slice 4 — SuperGrok $ extras before console (C5 after-burner):** when
+     `auto_use_included_limits` is on and included is full, positive SuperGrok
+     $ extras keep SuperGrok session primary (console failover only); extras
+     0/unknown → console primary as before. Memo does not mark SuperGrok out
+     of allowance while known positive extras remain. Report:
+     `.agents/joins/impl-slice4-extras-before-console-2026-08-02.md`.
+   - **Residual-edges wave — branch 2b soft honesty polish (2026-08-02):**
+     dynamic flat-poll note (names SuperGrok included % always; Build /
+     SuperGrok $ extras only when those meters were observed flat on the
+     window); **Grok Build product usage: N% used** on `/limits` and non-silent
+     `/usage` when the principal has wire %; C6 copy allows Team Usage $ to
+     move without proving included weekly moved (console not live); doctor
+     dual-auth line pins extras-before-console after-burner; sibling Build
+     plumbing for dual principals. Does **not** invent C4 debit or flip
+     default `auto_use`. Report:
+     `.agents/joins/impl-branch-2b-honesty-2026-08-02.md`.
+   - **Residual-edges wave — bare resolve / console-edge audit (2026-08-02):**
+     `ModelsManager::sampling_config`, subagent model override (fail-closed
+     when config missing and SuperGrok session live), and
+     `resolve_model_to_sampling_config` all use
+     `resolve_credentials_preferring_with_rank` with live preferred +
+     `auto_use_included_limits`. Closes bare-`resolve_credentials` landmines
+     that could queue console while SuperGrok included still had headroom.
+     Public Imagine/STT hosts, BYOK/own-credentials, OpenRouter, and
+     `preferred_method=api_key` remain **credential / host path** exceptions
+     (not SuperGrok-first resolve); that is **not** an intentional rate-limit
+     skip (see Phase R under Highest-value next). Did **not** flip default
+     `auto_use` in that join (default later shipped 2026-08-03). Report:
+     `.agents/joins/impl-bare-resolve-console-edge-audit-2026-08-02.md`.
 
    **Shipped (Half B core prepaid — 2026-07-30):**
    - Management key store (keyring URL `https://management-api.x.ai`, not
@@ -349,28 +411,125 @@ or code — not only here. Closed campaign history:
    When console is the live sampling principal, non-silent `/usage` names
    **console team prepaid** (or honest gap family above) and does **not** sell
    SuperGrok session billing / SuperGrok $ extras as live console spend.
-   Join: `/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`.
+   Report: `/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`.
 
-   **Still open (Half B remaining — do not claim full Business Usage charts done):**
-   - **Token / spend series UI** not wired (documented Management
-     `POST …/billing/teams/{team_id}/usage` with `analyticsRequest`; no invent
-     GET; ship after dogfood if needed). No charts without real series data.
+   **Also shipped (Token Economy full product — 2026-08-03):** implement-effort
+   policy under economic mode (ceiling 3 / desired 2 / all implement entry
+   paths / clamp+toast); free SuperGrok period linear-burn pacing on
+   credit/status + `/limits` + `/usage`; double-entry local vs Management on
+   `/spend` and `/limits` section; durable **`$GROK_HOME/grok_oss.db`**. Report:
+   [`.agents/joins/impl-token-economy-full-2026-08-03.md`](.agents/joins/impl-token-economy-full-2026-08-03.md).
+   Lasting bullet: [`FORK.md`](FORK.md). **Operator dogfood only** (rebuild +
+   management key for remote book) — not open code residual.
+
+   **Still open (limits-first + Half B remaining — do not invent C4 debit):**
+   - **C4 SuperGrok included debit still FAIL / branch 2b (server-side;
+     product honesty held, not "fixed" debit; ticket evidence package ready):**
+     joins
+     [`.agents/joins/slice2-dogfood-g4-2026-08-02.md`](.agents/joins/slice2-dogfood-g4-2026-08-02.md),
+     [`.agents/joins/live-limits-recheck-2026-08-02.md`](.agents/joins/live-limits-recheck-2026-08-02.md),
+     [`.agents/joins/impl-branch-2b-honesty-2026-08-02.md`](.agents/joins/impl-branch-2b-honesty-2026-08-02.md),
+     [`.agents/joins/c4-supergrok-debit-evidence-package-2026-08-02.md`](.agents/joins/c4-supergrok-debit-evidence-package-2026-08-02.md)
+     (server ticket brief: identity + timestamps + flat series; **no invent
+     debit**). Morning dogfood under heavy SuperGrok session traffic: included
+     **65%**, Grok Build `productUsage` **54%**, SuperGrok $ extras **$100.29**
+     flat. **C1 / C3 pass** for this product path (`liveSampling` SuperGrok,
+     `console.isLive=false`). Later same-day log multi-sample: included
+     **65→66** and GrokChat **11→12** once; **Build stayed 54**; extras still
+     **$100.29**. Treat as weak / laggy / coarse-% evidence, **not** a clean
+     C4 close. Shell tip recheck sparse (billing timeouts). Residual **2b**:
+     server lag / coarse % / no proven controlled debit of this principal's
+     included pool (Build especially). Keep Design A honesty; do **not** hop
+     to console to "fix" included. Soft honesty surfaces (dynamic flat note,
+     Build %, C6) are **shipped**; they do not invent a server debit. **C5**
+     Slice 4 is **code-only** (not live-proved; included never hit ≥ 100%).
+     Filing the ticket is **human / xAI**, not more client invent. **Do not
+     invent SuperGrok debit.**
+   - ~~**Default `auto_use_included_limits=true` for new installs**~~
+     **shipped 2026-08-03** (operator approved; empty/new config defaults true;
+     explicit false preserved; doctor + user-guide). Report:
+     [`.agents/joins/impl-item1-default-prefer-free-allowance-2026-08-03.md`](.agents/joins/impl-item1-default-prefer-free-allowance-2026-08-03.md).
+   - **Optional live multi-poll flat note** when SuperGrok **session billing is
+     healthy** and the process is **long-lived** enough for multi-sample
+     history. Soft product path is shipped. Live attempt
+     [`.agents/joins/live-multipoll-flat-note-2026-08-02.md`](.agents/joins/live-multipoll-flat-note-2026-08-02.md):
+     two spaced `limits --json` polls, byte-identical; SuperGrok included
+     **66%** / extras **$100.29** / prepaid **$340** / `console.isLive=false`;
+     billing auth failed (`Invalid or expired credentials`); `flat_poll*` and
+     Build % **absent**. Cold / auth-fail process ≠ debit proof and ≠ flat-note
+     live surface. Retry only when session billing poll succeeds.
+   - ~~**Token / spend series + team default credits (Item 5 / former M6)**~~
+     **shipped 2026-08-03** (see bullet above). Optional richer series **charts**
+     only if dogfood still wants more than the shipped block; do **not** fold
+     default credits into prepaid `$N`.
+   - **TUI force-refresh parity with CLI shipped (2026-08-02):** explicit TUI
+     `/limits` open (and `/limits --json`) force-busts Management
+     prepaid+postpaid process caches then silent-FetchBilling (same class as
+     CLI `grok limits`). Background FetchBilling still honors ≤60s TTL +
+     last-good. Report:
+     `.agents/joins/impl-tui-limits-force-refresh-2026-08-02.md`.
+   - **Bare resolve dual-auth path (soft remaining only):** primary
+     landmines **closed** with TDD (join above). Some surfaces still use
+     public Imagine / STT hosts, BYOK / own-credentials, OpenRouter, or an
+     explicit `preferred_method=api_key` pin and therefore do **not** go
+     through SuperGrok-first credential resolve. That is a **credential /
+     host path** fact, **not** permission to skip shared rate-limit cooldowns.
+     **Phase R (open):** rate limits by API type must cover Imagine, voice,
+     and BYOK paths; they are **not** an intentional rate-limit skip. Prior
+     audit note: `.agents/joins/console-bypass-paths-code-audit-2026-08-02.md`.
+   - **Multiproc SuperGrok billing + Management shared cooldowns (shipped
+     2026-08-03):** SuperGrok session billing and Management API HTTP paths
+     wait on / observe the flock JSON shared rate-limit store under
+     `$GROK_HOME/rate_limits/`. Report:
+     [`.agents/joins/impl-shared-rate-limit-billing-management-2026-08-03.md`](.agents/joins/impl-shared-rate-limit-billing-management-2026-08-03.md).
+     **Not** claimed: full Phase R coverage of Imagine / voice / BYOK /
+     inference by API type (still open).
+   - **Durable multi-process SuperGrok included poll history (shipped
+     2026-08-03):** ring under `$GROK_HOME/included_poll_history/` so flat-poll
+     series survives process restart. Report:
+     [`.agents/joins/impl-durable-included-poll-history-2026-08-03.md`](.agents/joins/impl-durable-included-poll-history-2026-08-03.md).
+   - ~~**Item 5 — spend series + team default credits line**~~ **shipped
+     2026-08-03:** Management usage series (documented POST) on explicit
+     `grok limits` / limits surface; team default credits as its **own** line
+     (never folded into console team prepaid `$N`). Report:
+     [`.agents/joins/impl-item5-spend-series-default-credits-2026-08-03.md`](.agents/joins/impl-item5-spend-series-default-credits-2026-08-03.md).
+   - **F1b attribution soft residual (product honesty complete — close-out):**
+     browser team API Usage **$547.87** while SuperGrok ~65% / flat extras was
+     explained as team **postpaid OAuth / Grok Build** class (not SuperGrok
+     included debit; not secret console-key primary). M3 + C6 shipped;
+     doctor/limits/usage no longer sell OAuth Usage $ as included weekly.
+     Close-out join (green unit evidence, no code this wave):
+     [`.agents/joins/impl-f1b-attribution-soft-2026-08-02.md`](.agents/joins/impl-f1b-attribution-soft-2026-08-02.md).
+     Soft leftover only: browser $547 vs M3 ~$208 class totals (window /
+     composite); optional live re-fetch. Does **not** re-open product honesty
+     or rank policy. Evidence joins:
+     `.agents/joins/console-api-usage-547-evidence-2026-08-02.md`,
+     `.agents/joins/console-burn-one-turn-investigation-2026-08-02.md`.
    - **Live prepaid dogfood done (2026-08-02):** management key + real
      team_id path works; product **$340** matches prepaid `total.val`
      (see field map below). Dashboard ~$1317 is a different surface
      (defaultCredits / composite), not a second prepaid field to merge.
-   - **Soft polish (known UX):** console team prepaid refresh is ≤60s process
-     cache TTL + last-good on fetch miss/error (poll does not bust cache; app
-     does not clear cents on `None`). Dollars can lag real balance drop until
-     TTL expiry or restart. Documented honesty, not a force-refresh product
-     this wave.
-   - Failover intent remains: prefer included before SuperGrok $ extras /
-     console $; hop on exhaust; honor oauth/api_key pins.
+   - **Soft prepaid TTL / force-refresh polish shipped (2026-08-02):** process
+     cache still ≤60s (`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`; prepaid
+     alias kept) for TUI background polls; app still keeps last-good cents on
+     fetch `None`. **Force path:** explicit `grok limits` collect **and** TUI
+     `/limits` open bust prepaid+postpaid process caches via
+     `clear_console_team_billing_meter_caches` before Management fetch
+     (background FetchBilling honors TTL). **Honesty:** when prepaid $ is
+     shown on `/limits`, note names process-cache lag + app last-good that can
+     outlive TTL + that `grok limits` or opening `/limits` forces a fresh
+     fetch. Joins:
+     `.agents/joins/impl-prepaid-cache-ttl-polish-2026-08-02.md`,
+     `.agents/joins/impl-tui-limits-force-refresh-2026-08-02.md`.
+   - **TUI live postpaid shipped (with force-refresh wave):** `FetchBilling`
+     live-calls Management postpaid preview into process cache (TTL honored
+     unless explicit open/collect cleared). Modal rebuild still reads cache;
+     explicit open clears first so postpaid is live like CLI.
 
    Meters stay distinct: personal SuperGrok **included weekly** ≠ SuperGrok
-   **dollar extras** ≠ **console team prepaid / Business Usage** ≠ second
-   SuperGrok OAuth principal (Business SuperGrok session is not console team
-   prepaid).
+   **dollar extras** ≠ **console team prepaid** ≠ **console team postpaid
+   OAuth/API class (Usage $)** ≠ second SuperGrok OAuth principal (Business
+   SuperGrok session is not console team prepaid).
 
    **SuperGrok $ extras field map (dogfood 2026-08-01; do not invent $):**
    - SuperGrok Extra Usage Credits from session path only:
@@ -395,13 +554,14 @@ or code — not only here. Closed campaign history:
    - **Live dogfood 2026-08-02 (team 61fab250…):** prepaid wire
      `total.val="-34000"` → product **$340** (correct parse; not a
      double-divide bug). No second balance on that endpoint. Live
-     postpaid invoice preview (not wired into the prepaid meter):
+     postpaid invoice preview (Slice 3 M3 now product-wired for OAuth vs
+     API class on limits; still **not** folded into prepaid `$N`):
      `defaultCredits` **$1500**; period spend-ish **~$207**; soft
      spending limit **$0**. Dashboard ~**$1317** is best read as
      **default credits remainder / composite** (e.g. $1500 − ~$183),
      **not** pure prepaid wallet and not a field product drops. Keep
-     TUI on **prepaid ledger only**; optional later **separate** meter
-     for defaultCredits if wanted. Joins:
+     prepaid ledger distinct; optional later **separate** meter for
+     defaultCredits if wanted. Joins:
      `/tmp/grok-join-deep-prepaid-340-vs-1317.md`,
      `/tmp/grok-join-live-prepaid-wire-capture.md`,
      `/tmp/grok-join-impl-limits-credits-observability.md`.
@@ -410,18 +570,31 @@ or code — not only here. Closed campaign history:
      half "no data yet"); sibling poll **remembers** `prepaidBalance` per
      identity. Still not a sum of two pools when unified.
 
-   **Highest-value next (re-rank after meter + live prepaid dogfood):**
-   **1** series charts only if dogfood needs them; optional separate
-   **defaultCredits** meter only if operator wants that composite surface
-   (do **not** fold it into prepaid $N). Plan freeform polish behind those.
-   One-click copy chrome (§13 / `feat:copy-text-one-click`) **shipped**.
-   Do not invent series UI without data. Do not re-open §13 as unshipped.
-   Live prepaid parse dogfood (**$340**) is **done**; do not re-litigate
-   "why not $1317" as a product parse bug.
+   **Highest-value next (re-rank 2026-08-03 after multiproc + Item 5 + process
+   pins):** Soft honesty + bare-resolve dual-auth landmines + prepaid TTL +
+   TUI force-refresh + F1b soft product close-out + default
+   `auto_use_included_limits` + multiproc SuperGrok billing/Management shared
+   cooldowns + durable included poll history + Item 5 spend series and team
+   default-credits line are **shipped**. C4 **ticket evidence package** is on
+   disk (human/xAI files the ticket; free SuperGrok period debit still **not**
+   proven). What unblocks further product work:
+   **rebuild and dogfood** the shipped limits stack on a live binary;
+   **Item 2** free SuperGrok period debit ticket (server-side; no invent debit);
+   **Item 3** live extras-after-full (C5 code exists; never live-proved at
+   included ≥ 100%); optional Management process-cache polish only if dogfood
+   still wants it; **Phase R** rate limits by API type (Imagine, voice, and
+   BYOK are **not** intentional rate-limit skips). Plan **Revise** workflow is
+   process-pinned (host + project AGENTS); re-open only if product CTAs still
+   misbehave. One-click copy (§13) **shipped**. Do **not** invent C4 SuperGrok
+   debit. Live prepaid parse (**$340**) is **done**; do not re-litigate "why
+   not $1317" as a parse bug.
 
-   Plan (still valid for remaining slices):
-   [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md).
-   Older: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md),
+   Plans (limits-first living):
+   [`.agents/plans/limits-first-ideal-2026-08-02.md`](.agents/plans/limits-first-ideal-2026-08-02.md),
+   [`.agents/plans/limits-first-api-fix-section-2026-08-02.md`](.agents/plans/limits-first-api-fix-section-2026-08-02.md).
+   Older dual-auth:
+   [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md),
+   [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md),
    [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md).
 
 5. **btw panel UX + free-text “plan” ≠ plan mode (shipped B1–B3 + user-guide)**
@@ -508,22 +681,53 @@ default theme**; always-on bubble `⧉`; **Clear finished** todos (open board
 `[−]` + finished rows / optional focused `X` / slash); status-bar
 limits meter (click → `/limits`); edgeless = host docs only.
 
-**Limits residual = two halves (both intended; pin 2026-07-30):**
+**Limits residual = two halves + limits-first (both halves intended; pin
+2026-07-30; **Limits before credits** always):**
 **Half A shipped** (SuperGrok session meters: dual principals, sibling poll,
 `/limits` dual rows, footer honesty for included weekly + SuperGrok $ extras).
 Not wrong-target waste; keep it. **Half B core prepaid shipped (2026-07-30):**
 management key store, `management_team_id`, GET prepaid/balance, footer +
 `/limits` console team prepaid labels (see §4). **Soft `/usage` console-live
-honesty also shipped** (join
-`/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`). Honest **distinct**
-gaps when unknown: `no management key` | `no management team id` |
-`loading team prepaid...` | `team prepaid unavailable` | else `$N` (soft
-`no $ meter yet` and mushy `key/team id` line retired).
-`just check` green at least once after this meter wave. Remaining Half B =
-optional series UI (and optional separate defaultCredits surface only if
-wanted). Live prepaid dogfood **done** ($340 wire; ~$1317 ≠ prepaid). Half A
-alone was never full limits done; core prepaid closes the main meter gap, not
-full charts. Series still open and optional.
+honesty also shipped.** Honest **distinct** gaps when unknown:
+`no management key` | `no management team id` | `loading team prepaid...` |
+`team prepaid unavailable` | else `$N`.
+**Limits-first product slices shipped 2026-08-02:** Slice 1 poll history /
+flat honesty; Slice 3 M3 postpaid OAuth vs API class + C6 note; Slice 4
+SuperGrok $ extras before console after included full (C5 code). Joins under
+`.agents/joins/impl-slice{1,3,4}-*-2026-08-02.md`.
+**Slice 2 dogfood + residual-edges wave (same day):** dogfood join
+[`.agents/joins/slice2-dogfood-g4-2026-08-02.md`](.agents/joins/slice2-dogfood-g4-2026-08-02.md);
+soft honesty polish
+[`.agents/joins/impl-branch-2b-honesty-2026-08-02.md`](.agents/joins/impl-branch-2b-honesty-2026-08-02.md);
+bare-resolve audit
+[`.agents/joins/impl-bare-resolve-console-edge-audit-2026-08-02.md`](.agents/joins/impl-bare-resolve-console-edge-audit-2026-08-02.md);
+live recheck
+[`.agents/joins/live-limits-recheck-2026-08-02.md`](.agents/joins/live-limits-recheck-2026-08-02.md).
+**Operator-edges residual wave (same day):** C4 ticket evidence package
+[`.agents/joins/c4-supergrok-debit-evidence-package-2026-08-02.md`](.agents/joins/c4-supergrok-debit-evidence-package-2026-08-02.md);
+prepaid TTL polish
+[`.agents/joins/impl-prepaid-cache-ttl-polish-2026-08-02.md`](.agents/joins/impl-prepaid-cache-ttl-polish-2026-08-02.md);
+F1b soft close-out
+[`.agents/joins/impl-f1b-attribution-soft-2026-08-02.md`](.agents/joins/impl-f1b-attribution-soft-2026-08-02.md);
+live multi-poll attempt still blocked
+[`.agents/joins/live-multipoll-flat-note-2026-08-02.md`](.agents/joins/live-multipoll-flat-note-2026-08-02.md).
+**C4 still FAIL** (server-side; honesty held, not fixed free SuperGrok period
+debit; evidence package ready for human/xAI ticket). Morning flat 65% / Build
+54% / $100.29; later log weak **65→66** (Build still 54); earlier multi-poll
+auth-fail window. **C1/C3 pass** on dumps. C5 code-only not live-proved. Do
+**not** invent SuperGrok debit.
+**Shipped 2026-08-03 (same wave family):** new/empty home defaults prefer free
+SuperGrok period allowance (`auto_use_included_limits=true`; explicit false
+preserved); multiproc SuperGrok billing + Management shared rate-limit
+cooldowns; durable multi-process included poll history; Item 5 spend series +
+team default-credits line; TUI force-refresh (2026-08-02) + soft prepaid TTL +
+F1b soft product honesty. Live prepaid dogfood **done** ($340 wire; ~$1317 ≠
+prepaid).
+**Still open:** rebuild and dogfood the shipped limits stack; **Item 2** free
+SuperGrok period debit ticket (human/xAI; no invent debit); **Item 3** live
+extras-after-full proof; optional Management process-cache polish; **Phase R**
+rate limits by API type (**Imagine, voice, and BYOK are not intentional
+rate-limit skips**; dual-auth public-host paths are a credential fact only).
 
 **Also open (not billing):** none for one-click copy — §13 /
 `feat:copy-text-one-click` **shipped** (selection default-on `⧉`, plan top-bar
@@ -548,33 +752,59 @@ locations aligned (docs lag fixed; no second skill system). Host L1/L2/L3 pins
 live under `~/.agents/skills` and win over same-named `~/.grok/skills` on this
 branch. **Soft:** installed stable `grok` binary may lag the branch until
 rebuild/install — dogfood with workspace product when verifying path winners.
-Join: `/tmp/grok-join-impl-skills-discoverability-6a125de7.md`.
+Report: `/tmp/grok-join-impl-skills-discoverability-6a125de7.md`.
 
 **Compaction honesty:** session `plan.md` is soft. Durable residual is this
-file + join notes + `AGENTS.md` / `FORK.md`. Implement via main-thread (L1)
-coordinator → subagents (L2) → specialists (L3 max); short joins on disk.
+file + short reports + `AGENTS.md` / `FORK.md`. Implement via main-thread (L1)
+coordinator → subagents (L2) → specialists (L3 max); short reports on disk under
+`.agents/reports/` (legacy notes may still live under `.agents/joins/`).
 
-**What unblocks parallelization next:** fan out only on non-overlapping paths.
-Do not parallel two writers on the same dual-auth hop / resolve files.
+**What unblocks parallelization next:** Soft honesty + bare-resolve dual-auth
+landmines + prepaid TTL + TUI force-refresh + F1b soft product honesty +
+**new-install free-period-first default** + multiproc billing/Management
+cooldowns + durable included poll history + Item 5 series/default-credits are
+**done**. Remaining high-value items: **rebuild/dogfood**, **server-side free
+SuperGrok period debit ticket (Item 2 / C4)**, **live extras-after-full
+(Item 3)**, optional Management cache polish, and **Phase R rate limits by API
+type** (Imagine / voice / BYOK included). Do **not** invent SuperGrok debit in
+parallel "fixes."
 
 | Rank | Work | Why |
 |------|------|-----|
-| 1 | **Series UI only if dogfood needs charts** (`POST …/billing/teams/{team_id}/usage`) | Live prepaid dogfood **done** (2026-08-02: `total.val` → **$340**; dashboard ~$1317 = defaultCredits/composite, not prepaid parse bug). Documented analytics surface; no invent GET; no charts without real series data. Optional. |
-| 2 | Optional **separate defaultCredits** meter only if operator wants that composite | Do **not** fold into console team prepaid `$N`. Prepaid ledger stays prepaid-only. |
-| 3 | Plan freeform `plan.md` menus (process/skills) only if dogfood still jars | Product chrome green; agent ceremony = process/skills. **Behind** series / operator ask. |
+| 1 | ~~**Default prefer free SuperGrok period allowance for new installs**~~ **shipped 2026-08-03** | Empty/new config → `auto_use_included_limits=true`; explicit false preserved; doctor + user-guide. Report: `impl-item1-default-prefer-free-allowance-2026-08-03`. |
+| 2 | ~~**TUI force-refresh parity with CLI**~~ **shipped 2026-08-02** | Explicit TUI `/limits` open force-busts Management caches like CLI `grok limits`. Report: `impl-tui-limits-force-refresh-2026-08-02`. |
+| 3 | ~~**Multiproc SuperGrok billing + Management shared cooldowns**~~ **shipped 2026-08-03** | Flock JSON store on billing + Management HTTP. Report: `impl-shared-rate-limit-billing-management-2026-08-03`. |
+| 4 | ~~**Durable multi-process included poll history**~~ **shipped 2026-08-03** | `$GROK_HOME/included_poll_history/` ring. Report: `impl-durable-included-poll-history-2026-08-03`. |
+| 5 | ~~**Item 5 spend series + team default credits**~~ **shipped 2026-08-03** | Documented Management POST series; default credits own line (not prepaid `$N`). Report: `impl-item5-spend-series-default-credits-2026-08-03`. |
+| 6 | **Rebuild and dogfood** the shipped limits stack on a live binary | Code joins are green; operator still needs a rebuild + live window to trust multiproc, durable history, series, and force-refresh together. |
+| 7 | **Item 2 / server-side C4** free SuperGrok period debit ticket (evidence ready; human/xAI; no invent debit) | Product honesty held. Dogfood flat 65/54/$100.29; log weak 65→66; Build still 54. Ticket brief: `c4-supergrok-debit-evidence-package-2026-08-02`. Debit still **not** proven. |
+| 8 | **Item 3 live extras-after-full** (C5 code exists; not live-proved at included ≥ 100%) | Needs a live window where free SuperGrok period allowance is full and SuperGrok dollar extras stay positive. |
+| 9 | **Optional Management process-cache polish** only if dogfood still wants it | Soft; force-refresh and TTL already shipped. |
+| 10 | **Phase R rate limits by API type** (Imagine / voice / BYOK **not** intentional skips) | Billing + Management multiproc cooldowns shipped; other API types still open. Cite public docs with accessed date. |
+| 11 | ~~Soft prepaid cache TTL / force-refresh polish~~ **shipped** | Lag note + force-bust; shared TTL const. Report: `impl-prepaid-cache-ttl-polish-2026-08-02`. |
+| 12 | ~~F1b attribution soft residual~~ **product honesty complete** | M3 + C6 + close-out green. Soft leftover: browser $547 vs M3 window only. Report: `impl-f1b-attribution-soft-2026-08-02`. |
+| 13 | Plan freeform `plan.md` menus (process/skills) only if dogfood still jars | Product chrome green; **Revise** workflow process-pinned 2026-08-03. **Behind** operator ask. |
 
-**Not "parked forever":** Half B core prepaid is **shipped**. Soft `/usage`
-console-live honesty is **shipped**. Soft `"no $ meter yet"` is **retired**;
-mushy `"no management key/team id"` is **retired** in favor of distinct
-`no management key` | `no management team id` | `loading team prepaid...` |
-`team prepaid unavailable` | `$N`. With config + successful fetch, surfaces show
-console team prepaid `$N`. One-click copy chrome (§13) is **shipped**. Main
-leftover independent of credentials is optional series UI after dogfood
-(see §4). Do **not** re-claim management key unwired or "needs store + team_id."
-Do **not** re-dismiss console meters as website-only work. Do **not** treat
-Half A SuperGrok work as discarded. Do **not** re-open §13 as missing default
-copy chrome (selection/plan/prompt `⧉` landed). Do **not** claim full Business
-Usage charts done.
+**Not "parked forever":** Half B core prepaid is **shipped**. M3 postpaid
+OAuth/API class is **shipped**. Slice 1 flat-poll history (process, then
+durable multi-process) is **shipped**. Slice 4 extras-before-console (C5 code)
+is **shipped** (not live-proved at included ≥ 100%). Soft `/usage` console-live
+honesty is **shipped**. Soft `"no $ meter yet"` is **retired**. Residual-edges
+soft honesty polish + bare-resolve rank wire-up are **shipped**. Prepaid TTL +
+TUI force-refresh are **shipped**. F1b soft product honesty is **complete**.
+Default prefer free SuperGrok period allowance is **shipped**. Multiproc
+billing/Management shared cooldowns are **shipped**. Item 5 spend series +
+team default-credits line are **shipped**. C4 evidence package is **assembled**
+(ticket is human/xAI; free SuperGrok period debit not closed). One-click copy
+chrome (§13) is **shipped**. Main open gaps: **rebuild/dogfood**, **server-side
+C4/2b free SuperGrok period debit** (no clean controlled debit; Build especially
+flat), **live extras-after-full**, optional Management cache polish, and
+**Phase R rate limits by API type** (public Imagine / voice / BYOK paths must
+share rate-limit policy; dual-auth host choice is separate). Do **not** re-claim
+management key unwired. Do **not** re-dismiss console meters as website-only.
+Do **not** treat Half A SuperGrok work as discarded. Do **not** invent SuperGrok
+included debit. Do **not** claim full Business Usage charts done. Do **not**
+treat Imagine / voice / BYOK as intentional **rate-limit** skips.
 
 **Not ranked here:** operator git land; onto join/PR; import ledger; formal xAI
 import — separate tracks (`#6`–`#10`). Parked design: live rule stream (§2g),
@@ -612,6 +842,48 @@ need the cargo blocks below or `just check`. Full historical closed block:
    `cargo test -p xai-grok-pager --lib -- format_dual_principals live_console_omits extra_principals_hook show_limits format_supergrok_session footer_names_live_principal`
 2c. **SuperGrok Heavy fresher-slot load (shipped):**
    `cargo test -p xai-grok-shell --lib -- load_candidates_prefers_live resolve_auto_uses_live_supergrok`
+2d. **Limits-first Slice 1 poll history / flat honesty (shipped):**
+   `cargo test -p xai-grok-shell --lib included_poll_history`
+   `cargo test -p xai-grok-pager --lib flat_poll`
+   `cargo test -p xai-grok-shell --lib extensions::billing::`
+2e. **Limits-first Slice 3 M3 postpaid (shipped):**
+   `cargo test -p xai-grok-shell --lib xai_management`
+   `cargo test -p xai-grok-pager --lib limits_cmd`
+   `cargo test -p xai-grok-pager --lib limits_honesty`
+   `cargo test -p xai-grok-pager --lib limits_snapshot`
+2f. **Limits-first Slice 4 extras-before-console / C5 (shipped):**
+   `cargo test -p xai-grok-shell --lib -- auto_order_keeps_supergrok auto_after_included_and_extras auto_with_included_headroom auto_order_omits_console auto_both_included_exhausted resolve_auto_after_included_exhausted resolve_enforced_auto_use_included_limits resolve_auto_both_supergrok_exhausted`
+   `cargo test -p xai-grok-shell --lib -- allowance_exhaust_from_billing`
+2h. **Residual-edges soft honesty polish (shipped):**
+   `cargo test -p xai-grok-shell --lib -- flat_evidence remember_build included_poll_history remember_dollar`
+   `cargo test -p xai-grok-pager --lib -- limits_honesty flat_poll format_surfaces format_dual_principal format_flat_poll usage_summary limits_cmd:: limits_snapshot::`
+2i. **Bare resolve / console-edge rank wire-up (shipped):**
+   `cargo test -p xai-grok-shell --lib -- subagent_override_auth_rank_flags_fail_closed resolve_model_override_config_missing_parent_supergrok_only resolve_model_override_api_key_pin resolve_model_override_agent_config_auto_use sampling_config_auto_use_omits_console sampling_config_api_key_pin resolve_model_to_sampling_config_auto_use`
+2j. **Prepaid TTL / force-refresh polish (shipped):**
+   `cargo test -p xai-grok-shell --lib -- console_team_billing_meter_cache management_meter_cache clear_console_team`
+   `cargo test -p xai-grok-pager --lib -- limits_honesty prepaid lag force_refresh limits_snapshot`
+2k. **F1b attribution soft honesty (product complete):**
+   `cargo test -p xai-grok-pager --lib -- limits_honesty c6_team_usage usage_summary_supergrok_live limits_json_surfaces_postpaid limits_json_postpaid console_key_on_file_requests_supergrok format_console_live_skips format_console_section human_output_names_console`
+   `cargo test -p xai-grok-shell --lib -- format_human_auto_use classify_postpaid fetch_postpaid_preview_hermetic`
+2g. **Live dogfood (operator / rebuilt binary; not cargo):**
+   Baseline + recheck + multi-poll attempt + C4 evidence package:
+   [`.agents/joins/slice2-dogfood-g4-2026-08-02.md`](.agents/joins/slice2-dogfood-g4-2026-08-02.md)
+   (C4 fail / branch 2b; flat 65% / Build 54% / $100.29);
+   [`.agents/joins/live-limits-recheck-2026-08-02.md`](.agents/joins/live-limits-recheck-2026-08-02.md)
+   (log weak 65→66, Build still 54; tip CLI sparse timeouts; C4 not closed;
+   C5 not live);
+   [`.agents/joins/live-multipoll-flat-note-2026-08-02.md`](.agents/joins/live-multipoll-flat-note-2026-08-02.md)
+   (two spaced polls; auth fail; `flat_poll` absent; included 66% / extras
+   $100.29 / prepaid $340 / `console.isLive=false`);
+   [`.agents/joins/c4-supergrok-debit-evidence-package-2026-08-02.md`](.agents/joins/c4-supergrok-debit-evidence-package-2026-08-02.md)
+   (ticket brief ready; debit not proven). Optional further recheck when
+   **session billing is healthy** on a **long-lived** process:
+   `grok-oss limits --json` (or installed `grok limits --json`); confirm
+   `liveSampling`, included %, `grokBuildUsagePct` / Build product when present,
+   SuperGrok extras cents, dynamic flat note (only meters observed flat), Build
+   % on `/limits`/`/usage`, console `teamPostpaid*` when management key warm,
+   `console.isLive=false` under headroom. Do **not** invent C4 pass without a
+   controlled meter step.
 3. **DOGE default / hide_header / window titles / title items (shipped regression):**
    `cargo test -p xai-grok-shared --lib -- hide_header stale_hide_title`
    `cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config theme doge`

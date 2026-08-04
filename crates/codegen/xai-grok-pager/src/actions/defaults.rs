@@ -519,6 +519,23 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::ToggleGlobalPause,
+            label: "pause all",
+            description: "Pause or resume all sessions",
+            // Ctrl+Shift+Space: spacebar chord that never steals bare Space
+            // (prompt focus / typing). Distinct from voice Ctrl+Space.
+            default_key: key!(' ', CONTROL | SHIFT),
+            alt_keys: vec![],
+            category: Category::GettingStarted,
+            context: When::Always,
+            hint_priority: None,
+            hint_key_display: Some("Ctrl+Shift+Space"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Fearless global pause: stops work and in-flight requests across every open session in this process (not only the focused one).\nWhile paused, the status toast tracks how long you have been paused and how many sessions had incomplete work.\nPress again to resume: only interrupted mid-turn prompts and already-queued work continue; finished agents are not re-spawned and nothing pending is invented.\nDefault chord is Ctrl+Shift+Space so bare Space still focuses the prompt and types spaces, and so it does not collide with voice Ctrl+Space.",
+            ),
+        },
+        ActionDef {
             id: ActionId::CycleMode,
             label: "mode",
             description: "Cycle mode (Normal / Plan / Always-approve)",

@@ -143,6 +143,24 @@ pub fn grok_build_usage_percent(config: &BillingConfig) -> Option<f64> {
     })
 }
 
+/// Append one process poll-history sample from a successful S1 credits config.
+///
+/// Requires top-level included usage % (no invent). Build product % and
+/// SuperGrok $ extras are optional fields on the sample. Used so
+/// `flat_poll_unproven_debit` can come from real S1 history, not only tests.
+pub fn record_included_poll_history_from_config(identity_id: &str, config: &BillingConfig) {
+    let (usage_pct, _) = included_usage_and_period_end(config);
+    let Some(pct) = usage_pct else {
+        return;
+    };
+    crate::auth::record_included_poll_now(
+        identity_id,
+        pct,
+        grok_build_usage_percent(config),
+        config.prepaid_balance.as_ref().map(|c| c.val),
+    );
+}
+
 /// Top-level response (primarily from `GET /rest/grok/credits` + auto-topup-rule).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingConfigResponse {
@@ -228,6 +246,9 @@ pub fn included_usage_and_period_end(config: &BillingConfig) -> (Option<f64>, Op
 /// Same CLI proxy path as the active `x.ai/billing` handler:
 /// `GET {proxy}/billing?format=credits`. Does not burn SuperGrok dollar extras
 /// (not an inference call). Used for non-active dual-principal polls.
+///
+/// Honors multi-process shared cooldowns ([`crate::shared_http_rate_limit`]) so
+/// concurrent `limits` / TUI polls do not stampede the proxy after a 429.
 pub async fn fetch_credits_config_with_session(
     proxy_base: &str,
     access_token: &str,
@@ -239,6 +260,8 @@ pub async fn fetch_credits_config_with_session(
     }
     let base = proxy_base.trim_end_matches('/');
     let credits_url = format!("{base}/billing?format=credits");
+    let rate_key = crate::shared_http_rate_limit::billing_provider_key(base, token);
+    crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
     let credits_resp = crate::http::shared_client()
         .get(&credits_url)
         .header("Authorization", format!("Bearer {token}"))
@@ -259,6 +282,13 @@ pub async fn fetch_credits_config_with_session(
 
     if !credits_resp.status().is_success() {
         let status = credits_resp.status().as_u16();
+        let headers = credits_resp.headers().clone();
+        crate::shared_http_rate_limit::observe_http_rate_limit(
+            &rate_key,
+            status,
+            &headers,
+            "SuperGrok billing credits rate limit",
+        );
         let body = credits_resp.text().await.unwrap_or_default();
         let detail = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
@@ -320,6 +350,10 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
                     period_end.as_deref(),
                     period_type,
                 );
+                if let Some(build_pct) = grok_build_usage_percent(config) {
+                    crate::auth::remember_supergrok_build_usage(&target.identity_id, build_pct);
+                }
+                record_included_poll_history_from_config(&target.identity_id, config);
                 tracing::debug!(
                     identity_id = %target.identity_id,
                     usage_pct = pct,
@@ -466,6 +500,9 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
 
     // Feed active principal into process included-billing cache (ranking + dual
     // /limits). Pager still remembers too; idempotent same values.
+    // Also sync credit-exhaust memo: period reset (used percent drops below 100)
+    // must clear so prefer_live and resolve put SuperGrok back — shell path
+    // used to remember % only and left a stale memo → stuck on console.
     let grok_home = crate::util::grok_home::grok_home();
     if let Some(ref config) = billing.config {
         let (usage_pct, period_end) = included_usage_and_period_end(config);
@@ -480,15 +517,26 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
                 period_end.as_deref(),
                 period_type,
             );
+            // Mark / clear out-of-allowance memo from live free SuperGrok period %.
+            let _ = crate::auth::apply_billing_usage_to_session_exhaust_with_period(
+                pct,
+                &grok_home,
+                period_end.as_deref(),
+            );
         }
         // Active principal Extra Usage Credits into process cache (sibling
         // dual-/limits fill + ranking path share one remember map). Prefer the
         // credential that just polled when disk active id is missing.
+        let poll_id = crate::auth::active_supergrok_identity_id(&grok_home)
+            .unwrap_or_else(|| billing_log_identity_from_auth(&auth).0);
         if let Some(prepaid) = config.prepaid_balance.as_ref() {
-            let id = crate::auth::active_supergrok_identity_id(&grok_home)
-                .unwrap_or_else(|| billing_log_identity_from_auth(&auth).0);
-            crate::auth::remember_supergrok_dollar_extras(&id, prepaid.val);
+            crate::auth::remember_supergrok_dollar_extras(&poll_id, prepaid.val);
         }
+        if let Some(build_pct) = grok_build_usage_percent(config) {
+            crate::auth::remember_supergrok_build_usage(&poll_id, build_pct);
+        }
+        // Process poll history for flat-poll honesty (C4 / F2).
+        record_included_poll_history_from_config(&poll_id, config);
     }
     // Dual SuperGrok: also poll non-active principal(s) on the same
     // included-safe credits endpoint so sibling /limits rows fill honestly.
@@ -526,8 +574,10 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
     let base = proxy_base.trim_end_matches('/');
 
     // Auto top-up rule via the CLI proxy, which forwards to the backend
-    // `GetAutoTopupRule`.
+    // `GetAutoTopupRule`. Same shared cooldown key family as credits polls.
     let url = format!("{}/auto-topup-rule", base);
+    let rate_key = crate::shared_http_rate_limit::billing_provider_key(base, &auth.key);
+    crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
     let response = crate::http::shared_client()
         .get(&url)
         .header("Authorization", format!("Bearer {}", &auth.key))
@@ -551,6 +601,13 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
 
     if !response.status().is_success() {
         let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        crate::shared_http_rate_limit::observe_http_rate_limit(
+            &rate_key,
+            status,
+            &headers,
+            "SuperGrok auto-topup rate limit",
+        );
         let body = response.text().await.unwrap_or_default();
         tracing::warn!(status, url = %url, "auto-topup: upstream error");
 

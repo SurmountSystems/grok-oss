@@ -109,8 +109,8 @@ The action bar shows these shortcuts:
 | -------- | ---------------------------------------------------------------------------------------------------- |
 | `a`      | **Approve** — leave plan mode and start building immediately (no notes required). Pending line notes, if any, still ride along. |
 | `A`      | **Approve w/ comment** — focus the prompt for overall notes; `Enter` with text approves and attaches those notes. |
-| `?`      | **Clarify** — ask about the plan without rewriting it. Focus moves to the prompt; type your question and press `Enter`. Plan mode stays active; the agent answers read-only and should call `exit_plan_mode` again so approval reappears. |
-| `s`      | **Revise** — ask the agent to rewrite the plan. Focus moves to the prompt; type revision notes and press `Enter`. Plan mode stays active while the agent revises. |
+| `?`      | **Clarify** — answers without rewriting the plan. Focus moves to the prompt; type your question and press `Enter`. Plan mode stays active; the agent answers read-only and should call `exit_plan_mode` again so approval reappears. |
+| `s`      | **Revise** — rewrites the plan from your notes. Focus moves to the prompt; type revision notes and press `Enter`. Plan mode stays active while the agent revises. Do not use Clarify when you want the plan file changed. |
 | `q`      | **Quit** — abandon the plan without approving and turn plan mode off. |
 
 There is **no primary Comment button**. You can still attach line-level notes with `Enter` on a selected line (or double-click); those notes go with Approve / Clarify / Revise when you submit.

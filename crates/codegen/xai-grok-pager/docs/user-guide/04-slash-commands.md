@@ -37,8 +37,15 @@ Percent thresholds apply to the *effective* window — with **Economic mode** on
 ### `/economic-mode`
 
 Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing.
-Default **on** for new sessions (`[ui] economic_mode`). Soft-caps context only;
-does not rewrite explicit `/implement --effort`.
+Default **on** for new sessions (`[ui] economic_mode`). Soft-caps the context
+window for compaction and the context bar.
+
+Token Economy may rewrite **implement-loop effort** (skill reviewer fan-out
+1–5, not model reasoning effort) on `/implement`: optional **lock** and
+**min floor** always apply when set; economic mode + cap master still own the
+hard ceiling (default **3**) and desired inject when missing (default **2**).
+Toasts fire when the product rewrites effort. See
+[Configuration → Token Economy](05-configuration.md#token-economy).
 
 ```
 /economic-mode              # toggle this conversation
@@ -388,7 +395,7 @@ Leave a **mid-session operator note** that is **not** a pending main-turn prompt
 ```
 
 - Stores the note on the **current session only** (id, time, text, optional trailing `#tags`).
-- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for on-disk join notes that agents write for other agents.
+- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for short on-disk reports that agents write for other agents.
 - Bare `/note` (or alias `/notes`) lists notes as a system block. `/tasks` also shows a count when notes exist.
 - Full TUI confirms a save with a toast; minimal mode writes a short system line.
 
@@ -467,9 +474,29 @@ Log out and return to the login screen.
 View **session** token/cost totals, then SuperGrok billing when the consumer
 surface is visible. Alias: `/cost`.
 
+When free SuperGrok **billing period** bounds are known, also shows **linear-burn
+pacing**: whether free SuperGrok period used % is ahead of or behind linear burn
+for the period (never as dollars). When live sampling is a console key, SuperGrok
+pacing is labeled as not the live principal. Full double-entry books are on
+`/spend` and a section of `/limits`.
+
 ```
 /usage
 /usage manage
+```
+
+### `/spend`
+
+**Token Economy double-entry:** local calculated spend (from session `usage.jsonl`
+ingested into `$GROK_HOME/grok_oss.db`) side by side with remote Management
+samples (team prepaid / postpaid / usage series when a management key is
+available). Shows gap honesty when local cost ticks are missing so USD gap is
+not comparable. Meters stay distinct (free SuperGrok period % ≠ SuperGrok top-up
+$ ≠ console team prepaid ≠ API vs OAuth class). Aliases: `/double-entry`,
+`/ledger`.
+
+```
+/spend
 ```
 
 ### `/limits`
@@ -481,6 +508,8 @@ countdown hits zero, billing re-fetches so meters continue after period reset.
 Keeps each meter distinct:
 
 - SuperGrok **included** weekly/monthly allowance (used % · remaining % · next reset · live countdown)
+- Free SuperGrok period **linear-burn pacing** when period bounds exist
+  (ahead/behind linear burn; omit when bounds missing; console-live honesty)
 - SuperGrok **dollar extras** (prepaid session balance; separate from included)
 - **Console API key** — `Requests: console` when the console chat key is
   handling requests, `Requests: SuperGrok` when that key is on file but
@@ -496,6 +525,8 @@ Keeps each meter distinct:
   console inference API key and is **not** part of the Key line above. This is
   **not** SuperGrok extras and **not** a Business SuperGrok OIDC login.
   Setup: [Authentication → Console team prepaid](02-authentication.md#console-team-prepaid-management-api).
+- A short **double-entry spend** section (local book vs remote); full view is
+  `/spend`.
 
 When **two SuperGrok principals** are stored (personal + Business), `/limits`
 stacks a section per principal (for example `SuperGrok (personal)` and
@@ -505,15 +536,26 @@ yet** until its billing pool has been polled. Personal included, Business
 included, SuperGrok dollar extras, and console team prepaid stay separate lines.
 
 The **status bar** (top row, right side next to context tokens) always shows a
-compact meter in Build sessions — including team dual-auth SuperGrok and
-console-live sampling, not only personal consumer billing. SuperGrok: just `N%`
-when known (weekly included usage), or `...%` while billing is still loading.
-Console key: `console · $N` or the honest gap strings. Gateway/chat sessions
-hide the coding-credits meter. Click that meter to open this same `/limits`
-popup. The prompt footer stays a one-line warning summary when usage is high
-(console live shows `Console key · team prepaid: $N` when known, else the
-honest gap strings above). Billing refresh (session start, turn end, `/usage`)
-fills SuperGrok cache and, when configured, Management team prepaid.
+compact meter that matches the **live sampling principal** in Build sessions —
+including team dual-auth SuperGrok and console-live sampling, not only personal
+consumer billing. Meters stay distinct:
+
+- **SuperGrok live:** just `N%` when included weekly usage is known (true `0%`
+  is allowed), optionally with a short linear-burn chip when period bounds
+  exist. While billing has not returned a real included reading, chrome shows
+  `...%` (not a silent `0%` lie). Background poll keeps refreshing until the
+  included meter is known, near exhaust, or when OpenRouter / console prepaid
+  is active.
+- **Console key live:** `console · $N` (team prepaid) or the honest gap strings
+  (`no management key`, `no management team id`, `loading team prepaid...`,
+  `team prepaid unavailable`). Never SuperGrok included % as the live spend.
+
+Gateway/chat sessions hide the coding-credits meter. Click that meter to open
+this same `/limits` popup. The prompt footer stays a one-line warning summary
+when usage is high (console live shows `Console key · team prepaid: $N` when
+known, else the honest gap strings above). Billing refresh (session start, turn
+end, `/usage`, force-refresh on `/limits`) fills SuperGrok cache and, when
+configured, Management team prepaid.
 
 ```
 /limits

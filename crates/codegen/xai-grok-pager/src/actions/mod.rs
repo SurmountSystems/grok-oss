@@ -72,6 +72,8 @@ pub enum ActionId {
     // Agent
     NextModel,
     CancelTurn,
+    /// Pause or resume all in-process agent work (Ctrl+Shift+Space).
+    ToggleGlobalPause,
     ToggleYolo,
     ToggleMultiline,
 
@@ -896,6 +898,37 @@ mod tests {
     fn exit_session_is_command_only() {
         let registry = ActionRegistry::defaults();
         assert!(registry.find(ActionId::ExitSession).is_none());
+    }
+
+    /// Named contract: Ctrl+Shift+Space is fearless global pause (all sessions).
+    /// Distinct from voice Ctrl+Space and bare Space (prompt focus).
+    #[test]
+    fn global_pause_bound_to_ctrl_shift_space_always() {
+        let registry = ActionRegistry::defaults();
+        let def = registry
+            .find(ActionId::ToggleGlobalPause)
+            .expect("ToggleGlobalPause must be registered");
+        assert_eq!(def.label, "pause all");
+        assert_eq!(def.context, When::Always);
+        assert!(!def.requires_confirmation);
+        assert_eq!(def.hint_key_display, Some("Ctrl+Shift+Space"));
+
+        let chord = KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            registry.lookup(&chord, When::Always),
+            Some(ActionId::ToggleGlobalPause)
+        );
+        // Exact AgentScreen lookup misses; bubbling uses Always.
+        assert_eq!(registry.lookup(&chord, When::AgentScreen), None);
+        // Voice stays on bare Ctrl+Space (no Shift).
+        let voice = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert_eq!(
+            registry.lookup(&voice, When::Always),
+            Some(ActionId::VoiceToggle)
+        );
     }
 
     /// Named contract: F9 is the free global chord for TUI self-screenshot

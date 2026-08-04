@@ -164,10 +164,11 @@ pub struct UiConfig {
     /// Soft-cap effective model context at 200K tokens so Grok 4.5 requests
     /// stay on the lower pricing tier (prices double above 200K). Catalog
     /// windows remain larger (e.g. 500K); compaction and the context bar use
-    /// the capped size when this is on. `None` = on (client default). Does
-    /// not rewrite auto-queued `/implement --effort N`. Written by the
-    /// pager's settings modal; overridable per conversation via
-    /// `/economic-mode` when that command is available.
+    /// the capped size when this is on. `None` = on (client default).
+    /// Implement-loop effort caps live under `[token_economy]` when this is
+    /// on (hard ceiling default 3; not identity). Written by the pager's
+    /// settings modal; overridable per conversation via `/economic-mode`
+    /// when that command is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub economic_mode: Option<bool>,
     /// Startup cursor style: `None` (default) inherits the terminal's own

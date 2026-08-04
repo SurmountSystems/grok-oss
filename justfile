@@ -421,6 +421,95 @@ install-nix: build
     strip --strip-unneeded "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" --version
 
+# ---------------------------------------------------------------------------
+# Limits-first path certainty (Slice E2)
+#
+# Never claim "limits-first path certain" without runnable proof.
+# Hermetic suite = rank / bare resolve / memo + JSON path checker unit tests.
+# Live recipe = rebuilt binary `limits --json` + same pure checker (ignored test).
+#
+# Spend order when auto_use_included_limits=true and preferred ≠ api_key:
+#   1. included weekly used < 100% → SuperGrok session only (console omitted)
+#   2. included full + SuperGrok dollar extras > 0 → SuperGrok primary, console failover
+#   3. included full + extras 0/unknown → console primary
+#
+# Dogfood field template: .agents/joins/template-limits-dogfood-window.md
+# ---------------------------------------------------------------------------
+
+# Hermetic path suite: spend-order rank, bare resolve, memo, flat-poll, prepaid
+# lag, Management ForceRefresh policy, and the pure limits --json C1/C3 checker.
+# One command. Run before claiming limits-first path certain.
+check-limits-first-path:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "==> check-limits-first-path (hermetic)"
+    echo "==> xai-grok-shell: spend order + bare resolve + memo"
+    just cargo-ci cargo test -p xai-grok-shell --lib --locked -- \
+      auto_order_keeps_supergrok auto_with_included_headroom auto_after_included \
+      auto_afterburner resolve_auto_after_included resolve_enforced_auto_use \
+      resolve_api_key_pin sampling_config_auto_use resolve_model_override \
+      afterburner_skips_allowance_mark apply_billing_100_pct_with_positive_extras
+    echo "==> xai-grok-pager: flat_poll + prepaid lag + ForceRefresh policy + path checker"
+    # Filters: flat_poll / prepaid_lag match honesty tests; management_meter_cache
+    # + should_clear_management cover ForceRefresh; check_limits_first is E2 SoT.
+    just cargo-ci cargo test -p xai-grok-pager --lib --locked -- \
+      flat_poll prepaid_lag \
+      management_meter_cache_policy should_clear_management_meter \
+      check_limits_first
+    echo "check-limits-first-path passed (hermetic)"
+
+# Live C1/C3 after rebuild: SuperGrok primary while included weekly used < 100%,
+# console not live. Requires auto_use_included_limits=true and preferred ≠ api_key
+# on the home under test. Uses the same pure checker as unit tests.
+#
+# Env:
+#   GROK_OSS_BIN — binary (default: ./target/release/grok-oss, else grok-oss on PATH)
+#   LIMITS_FIRST_AUTO_USE — default 1
+#   LIMITS_FIRST_PREFERRED_API_KEY — default 0 (set 1 only when preferred=api_key)
+#   LIMITS_JSON_TIMEOUT_SECS — default 90
+check-limits-first-live:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    bin="${GROK_OSS_BIN:-}"
+    if [[ -z "${bin}" ]]; then
+      if [[ -x "${root}/target/release/grok-oss" ]]; then
+        bin="${root}/target/release/grok-oss"
+      elif command -v grok-oss >/dev/null 2>&1; then
+        bin="$(command -v grok-oss)"
+      else
+        echo "check-limits-first-live: no grok-oss binary (build release or set GROK_OSS_BIN)" >&2
+        exit 2
+      fi
+    fi
+    timeout_secs="${LIMITS_JSON_TIMEOUT_SECS:-90}"
+    tmp="$(mktemp "${TMPDIR:-/tmp}/limits-first-XXXXXX.json")"
+    cleanup() { rm -f "${tmp}"; }
+    trap cleanup EXIT
+    echo "==> check-limits-first-live: ${bin} limits --json (timeout ${timeout_secs}s)"
+    set +e
+    timeout "${timeout_secs}" "${bin}" limits --json >"${tmp}" 2>/tmp/limits-first-live.err
+    status=$?
+    set -e
+    if [[ "${status}" -ne 0 ]]; then
+      echo "check-limits-first-live: limits --json failed (exit ${status})" >&2
+      cat /tmp/limits-first-live.err >&2 || true
+      exit "${status}"
+    fi
+    echo "==> liveSampling / console.isLive / includedUsedPct (preview):"
+    if command -v jq >/dev/null 2>&1; then
+      jq '{liveSampling, livePrincipalRole, consoleIsLive: .console.isLive, keyAvailable: .console.keyAvailable, principals: [.supergrok.principals[]? | {label, includedUsedPct, dollarExtrasUsd}]}' "${tmp}" || cat "${tmp}"
+    else
+      head -c 2000 "${tmp}"; echo
+    fi
+    export LIMITS_FIRST_JSON="${tmp}"
+    export LIMITS_FIRST_AUTO_USE="${LIMITS_FIRST_AUTO_USE:-1}"
+    export LIMITS_FIRST_PREFERRED_API_KEY="${LIMITS_FIRST_PREFERRED_API_KEY:-0}"
+    echo "==> pure checker (live_check_limits_first_from_env_json)"
+    just cargo-ci cargo test -p xai-grok-pager --lib --locked \
+      live_check_limits_first_from_env_json -- --ignored --nocapture
+    echo "check-limits-first-live passed"
+
 # Upstream monorepo export helpers (see docs/upstream-history.md).
 upstream-detect:
     ./scripts/detect-upstream-export.sh

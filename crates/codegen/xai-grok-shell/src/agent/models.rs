@@ -9,7 +9,9 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use indexmap::IndexMap;
 
-use crate::agent::config::{self, ModelEntry, resolve_credentials, sampling_config_for_model};
+use crate::agent::config::{
+    self, ModelEntry, resolve_credentials_preferring_with_rank, sampling_config_for_model,
+};
 use crate::auth::{AuthManager, GrokAuth, GrokComConfig};
 use crate::remote::{FetchModelsResult, fetch_models_blocking};
 use crate::sampling::SamplerConfig as SamplingConfig;
@@ -947,8 +949,15 @@ impl ModelsManager {
         };
 
         let session_auth = auth_manager.current_or_expired();
-        let credentials =
-            resolve_credentials(current_model, session_auth.as_ref().map(|a| a.key.as_str()));
+        // Same dual-auth rank as main chat prepare: preferred_method +
+        // auto_use_included_limits so startup / ModelsManager consumers do not
+        // re-queue console keys while SuperGrok included still has headroom.
+        let credentials = resolve_credentials_preferring_with_rank(
+            current_model,
+            session_auth.as_ref().map(|a| a.key.as_str()),
+            config.grok_com_config.preferred_method,
+            config.grok_com_config.auto_use_included_limits,
+        );
 
         sampling_config_for_model(
             current_model,
@@ -1467,8 +1476,9 @@ fn prefetch_models_blocking_gated(
     match fetch_models_blocking(endpoints, auth, fetch_auth) {
         Ok(FetchModelsResult { models, etag }) if !models.is_empty() => {
             // Session and ApiKey catalogs both need api_base_url for dual-auth
-            // hop (console key must leave cli-chat-proxy). Deployment / custom
-            // endpoints keep model-supplied URLs only.
+            // host split (console key must use public api.x.ai, not
+            // cli-chat-proxy). Deployment / custom endpoints keep model-supplied
+            // URLs only.
             let api_base_url_override = match fetch_auth {
                 ModelFetchAuth::ApiKey | ModelFetchAuth::Session => {
                     Some(endpoints.xai_api_base_url.clone())
@@ -3412,7 +3422,7 @@ mod tests {
     }
 
     /// Session catalog must stamp api_base_url (console host) even when the
-    /// remote model JSON omits it — dual-auth hop depends on split hosts.
+    /// remote model JSON omits it — dual-auth host split depends on both hosts.
     #[test]
     fn build_prefetched_map_session_override_fills_api_base_url() {
         let mut entry = make_entry_config_with_id(Some("grok-4.5"), "grok-4.5", None);
@@ -3630,5 +3640,146 @@ mod tests {
                 (id.clone(), acp::ModelInfo::new(id, (*k).to_string()))
             })
             .collect()
+    }
+
+    /// Named contract: ModelsManager::sampling_config must honor
+    /// auto_use_included_limits (omit console keys while SuperGrok included
+    /// has headroom). Bare resolve would always put console in the failover list.
+    #[test]
+    #[serial]
+    fn sampling_config_auto_use_omits_console_while_supergrok_included_headroom() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::{AuthMode, GrokAuth};
+        use chrono::{Duration, Utc};
+        use std::collections::BTreeMap;
+        use xai_grok_sampler::clear_all_including_durable;
+
+        clear_all_including_durable();
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-bare-mm-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let live = "tok-live-models-mgr-sampling";
+        // Scope must match GrokComConfig::default() auth_scope so AuthManager
+        // surfaces the session as session_key for rank (synthetic candidate path).
+        let base = GrokComConfig::default().auth_scope();
+        let now = Utc::now();
+        let mut map: BTreeMap<String, GrokAuth> = BTreeMap::new();
+        map.insert(
+            base,
+            GrokAuth {
+                key: live.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-mm".into(),
+                create_time: now,
+                expires_at: Some(now + Duration::hours(6)),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).unwrap(),
+        )
+        .unwrap();
+
+        let mut grok_com = GrokComConfig::default();
+        grok_com.auto_use_included_limits = true;
+        let auth_manager = Arc::new(AuthManager::new(home.path(), grok_com.clone()));
+        let mut cfg = config::Config::default();
+        cfg.grok_com_config = grok_com;
+
+        let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+        let mut entry = make_model_entry("grok-4");
+        entry.info.base_url = proxy.to_string();
+        let mut models = IndexMap::new();
+        models.insert("grok-4".to_string(), entry);
+        let mgr = ModelsManager::new(None, models, acp::ModelId::new("grok-4"), auth_manager, cfg);
+
+        let sc = mgr.sampling_config();
+        // Host GROK_HOME OnceLock may surface a real SuperGrok JWT; contract is
+        // SuperGrok session primary and no console in the failover list.
+        assert_ne!(
+            sc.api_key.as_deref(),
+            Some("console-bare-mm-key"),
+            "primary must be SuperGrok session under auto_use + headroom, not console; got prefix {:?}",
+            sc.api_key.as_ref().map(|k| &k[..k.len().min(12)])
+        );
+        assert!(
+            sc.api_key.is_some(),
+            "expected SuperGrok session primary (fixture or host auth.json)"
+        );
+        assert!(
+            !sc.failover_api_keys
+                .iter()
+                .any(|k| k == "console-bare-mm-key"),
+            "limits-before-credits: ModelsManager::sampling_config must omit console while SuperGrok included has headroom; failover={:?}",
+            sc.failover_api_keys
+        );
+        let _ = live; // fixture token when host OnceLock has not cached another home
+    }
+
+    /// preferred_method=api_key pin: ModelsManager sampling keeps console primary
+    /// even when auto_use_included_limits is on and a SuperGrok session is live.
+    #[test]
+    #[serial]
+    fn sampling_config_api_key_pin_keeps_console_primary() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::{AuthMode, GrokAuth, PreferredAuthMethod};
+        use chrono::{Duration, Utc};
+        use std::collections::BTreeMap;
+        use xai_grok_sampler::clear_all_including_durable;
+
+        clear_all_including_durable();
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-mm-pin-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let live = "tok-session-mm-pin";
+        let base = GrokComConfig::default().auth_scope();
+        let now = Utc::now();
+        let mut map: BTreeMap<String, GrokAuth> = BTreeMap::new();
+        map.insert(
+            base,
+            GrokAuth {
+                key: live.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-mm-pin".into(),
+                create_time: now,
+                expires_at: Some(now + Duration::hours(6)),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).unwrap(),
+        )
+        .unwrap();
+
+        let mut grok_com = GrokComConfig::default();
+        grok_com.preferred_method = Some(PreferredAuthMethod::ApiKey);
+        grok_com.auto_use_included_limits = true;
+        let auth_manager = Arc::new(AuthManager::new(home.path(), grok_com.clone()));
+        let mut cfg = config::Config::default();
+        cfg.grok_com_config = grok_com;
+
+        let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+        let mut entry = make_model_entry("grok-4");
+        entry.info.base_url = proxy.to_string();
+        let mut models = IndexMap::new();
+        models.insert("grok-4".to_string(), entry);
+        let mgr = ModelsManager::new(None, models, acp::ModelId::new("grok-4"), auth_manager, cfg);
+
+        let sc = mgr.sampling_config();
+        assert_eq!(
+            sc.api_key.as_deref(),
+            Some("console-mm-pin-key"),
+            "api_key pin must keep console primary on ModelsManager::sampling_config; got {:?}",
+            sc.api_key
+        );
+        clear_all_including_durable();
     }
 }

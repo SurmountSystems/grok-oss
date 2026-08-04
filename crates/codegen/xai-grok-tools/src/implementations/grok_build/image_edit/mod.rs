@@ -375,7 +375,16 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             payload["aspect_ratio"] = serde_json::json!(input.aspect_ratio);
         }
 
+        // Shared multi-process cooldowns (same Imagine bucket as image_gen).
+        // Docs: https://docs.x.ai/developers/rate-limits (accessed: 2026-08-03)
         let sent_bearer = client.current_bearer().await;
+        let rate_bearer = client.rate_limit_bearer().await;
+        let rate_key = crate::shared_http_rate_limit::imagine_provider_key(
+            client.base_url(),
+            rate_bearer.as_deref(),
+        );
+        crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
+
         let mut req = client.http().post(&url).json(&payload);
         if let Some(ref key) = sent_bearer {
             req = req.header(AUTHORIZATION, format!("Bearer {key}"));
@@ -392,9 +401,20 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             client.record_401_attribution(ToolConsumer::ImageGen, sent_bearer.as_deref());
         }
         if !status.is_success() {
+            crate::shared_http_rate_limit::observe_http_rate_limit(
+                &rate_key,
+                status.as_u16(),
+                response.headers(),
+                "Imagine image edit rate limit",
+            );
             let body = response.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(200).collect();
             tracing::warn!(http_status = %status, "Imagine edit API error: {truncated}");
+            if status.as_u16() == 429 {
+                return Err(xai_tool_runtime::ToolError::rate_limited(format!(
+                    "Image edit rate limited (HTTP {status}): {truncated}"
+                )));
+            }
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
                 format!("Image edit failed with HTTP {status}: {truncated}"),

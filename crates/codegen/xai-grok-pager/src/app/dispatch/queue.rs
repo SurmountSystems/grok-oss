@@ -1013,6 +1013,10 @@ pub(crate) fn note_peek_page_flip(
 
 /// Drain the next queued prompt and, when that page-flips under a lease, note it.
 pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    // Fearless global pause: hold every session's queue until resume.
+    if app.global_work_pause.is_active() {
+        return vec![];
+    }
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
@@ -1028,6 +1032,9 @@ pub(crate) fn force_drain_queue_past_background_and_note_peek(
     app: &mut AppView,
     agent_id: AgentId,
 ) -> Vec<Effect> {
+    if app.global_work_pause.is_active() {
+        return vec![];
+    }
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
@@ -1041,6 +1048,9 @@ pub(crate) fn force_drain_queue_past_background_and_note_peek(
 /// Try to drain the next queued prompt (triggered after editing completes).
 pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
     if app.reconnect_pending {
+        return vec![];
+    }
+    if app.global_work_pause.is_active() {
         return vec![];
     }
     let ActiveView::Agent(id) = app.active_view else {

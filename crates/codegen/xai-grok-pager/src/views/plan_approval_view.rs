@@ -22,7 +22,8 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 
 The agent exited plan mode without writing a plan.
 
-Use the footer buttons below to approve, revise, or quit.
+Use the footer buttons below. Approve starts building. Revise rewrites the \
+plan. Clarify answers without rewriting. Quit abandons.
 ";
 
 /// Toast shown when `exit_plan_mode` parks approval and auto-opens the
@@ -43,7 +44,11 @@ pub const PLAN_CARD_HEADER_EMPTY: &str = "No plan written yet";
 ///
 /// Real clickable CTAs live only on soft-park footer chrome (`paint_soft_park_cta_buttons`).
 /// This string must not look like dead clickable buttons or an AI-Dungeon option list.
-pub const PLAN_CARD_CTAS: &str = "Use the footer buttons below to approve, revise, or quit.";
+/// Names revise vs clarify in plain English so operators do not confuse rewrite
+/// with answer-only.
+pub const PLAN_CARD_CTAS: &str = "\
+Footer buttons: Approve starts building. Revise rewrites the plan. \
+Clarify answers without rewriting. Quit abandons.";
 
 /// Max body lines embedded in the soft-park transcript card before ellipsis.
 pub const PLAN_CARD_PREVIEW_LINES: usize = 12;
@@ -805,6 +810,27 @@ mod tests {
             !empty.contains("Approve ·") && !empty.contains("a/A/?/s/q"),
             "empty card must not fake button chrome; got {empty:?}"
         );
+    }
+
+    /// Phase P: operator-facing card/placeholder copy must distinguish revise
+    /// (rewrites the plan) from clarify (answers without rewriting).
+    #[test]
+    fn plan_card_copy_distinguishes_revise_from_clarify() {
+        assert!(
+            PLAN_CARD_CTAS.contains("rewrites the plan"),
+            "card pointer must say revise rewrites the plan; got {PLAN_CARD_CTAS:?}"
+        );
+        assert!(
+            PLAN_CARD_CTAS.contains("without rewriting"),
+            "card pointer must say clarify answers without rewriting; got {PLAN_CARD_CTAS:?}"
+        );
+        assert!(
+            EMPTY_PLAN_PLACEHOLDER.contains("rewrites the")
+                && EMPTY_PLAN_PLACEHOLDER.contains("without rewriting"),
+            "empty-plan body must name rewrite vs answer-only; got {EMPTY_PLAN_PLACEHOLDER:?}"
+        );
+        let card = format_parked_plan_card(Some("# Title"));
+        assert!(card.contains("rewrites the plan") && card.contains("without rewriting"));
     }
 
     #[test]

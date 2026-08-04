@@ -5031,7 +5031,9 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
 /// - `auto_use_included_limits = true` (and not api_key pin) → prefer included
 ///   SuperGrok limits; rank multi-identity by headroom (sooner reset heuristic);
 ///   omit console keys from primary/failover while any SuperGrok still has
-///   included remaining (limits-before-credits); after ExhaustedAll, console leads
+///   included remaining (limits-before-credits); after all included pools are
+///   exhausted, SuperGrok $ extras (when known positive) stay primary with
+///   console as failover; when extras are 0 or unknown, console leads
 ///
 /// OpenRouter never receives an xAI session. Enterprise
 /// [`enforce_disable_api_key_auth`] clears console-key failover.
@@ -5072,6 +5074,8 @@ pub fn resolve_credentials_preferring_with_rank(
                     reset_at: None,
                 },
                 access_token: sess.to_owned(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             });
         }
         if !candidates.is_empty() {
@@ -5091,8 +5095,9 @@ pub fn resolve_credentials_preferring_with_rank(
 /// Uses pure ranking: SuperGrok with included headroom first (sooner reset
 /// heuristic among included pools). While any SuperGrok still has included
 /// headroom, console keys are **omitted** from the sampling chain (limits
-/// before credits). When all SuperGrok included pools are exhausted, console
-/// leads. When ranking is off, falls through to
+/// before credits). When all SuperGrok included pools are exhausted, SuperGrok
+/// $ extras (when known positive) keep the session primary with console as
+/// failover; otherwise console leads. When ranking is off, falls through to
 /// [`resolve_credentials_preferring_inner`] with the first candidate token.
 pub fn resolve_credentials_preferring_with_supergrok_sessions(
     model: &ModelEntry,
@@ -5931,6 +5936,11 @@ pub fn inject_url_derived_headers(
     }
     let _ = (alpha_test_key, base_url);
 }
+/// Resolve a catalog model id to a [`SamplerConfig`] with dual-auth rank.
+///
+/// Pass live `[auth] preferred_method` and `auto_use_included_limits` so this
+/// helper cannot re-introduce console keys while SuperGrok included still has
+/// headroom (same chain as main prepare / ModelsManager).
 pub fn resolve_model_to_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
@@ -5938,11 +5948,18 @@ pub fn resolve_model_to_sampling_config(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     fallback_entry: Option<ModelEntry>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
 ) -> Option<SamplerConfig> {
     let entry = find_model_by_id(models, model_id)
         .cloned()
         .or(fallback_entry)?;
-    let credentials = resolve_credentials(&entry, session_key);
+    let credentials = resolve_credentials_preferring_with_rank(
+        &entry,
+        session_key,
+        preferred,
+        auto_use_included_limits,
+    );
     Some(sampling_config_for_model(
         &entry,
         credentials,
@@ -7785,6 +7802,8 @@ reasoning_effort = "low"
                     reset_at: Some(ts(2_000)),
                 },
                 access_token: "tok-personal".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             },
             SupergrokSessionCandidate {
                 headroom: SupergrokIdentityHeadroom {
@@ -7794,6 +7813,8 @@ reasoning_effort = "low"
                     reset_at: Some(ts(1_000)),
                 },
                 access_token: "tok-business".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             },
         ];
         let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
@@ -7819,10 +7840,11 @@ reasoning_effort = "low"
 
     /// Graceful failover on the **enforced** (aux / web-search) path:
     /// `[auth] auto_use_included_limits = true` + SuperGrok included exhausted
-    /// → console primary (do not burn SuperGrok $ extras as silent primary).
+    /// **and extras gone/unknown** → console primary.
     ///
     /// Named contract: aux resolve must honor the same flag as main sampling
-    /// (`prepare_sampling_config_for_model`), not hardcode rank off.
+    /// (`prepare_sampling_config_for_model`), not hardcode rank off. When SuperGrok
+    /// $ extras remain, after-burner keeps SuperGrok (separate tests).
     #[test]
     #[serial_test::serial]
     fn resolve_enforced_auto_use_included_limits_prefers_console_when_supergrok_included_exhausted()
@@ -7842,13 +7864,14 @@ reasoning_effort = "low"
         let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-live-key");
         let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
         clear_all_including_durable();
+        crate::auth::clear_included_billing_cache();
 
         let session = "session-jwt-included-exhausted";
         let action = sync_allowance_exhaust_from_usage(100.0, Some(session), true);
         assert_eq!(
             action,
             AllowanceExhaustAction::Marked,
-            "dual-auth ready + 100% included must mark SuperGrok out of allowance"
+            "dual-auth ready + 100% included + no extras reading must mark SuperGrok out of allowance"
         );
         assert!(
             is_credential_exhausted(session),
@@ -7866,7 +7889,7 @@ reasoning_effort = "low"
         assert_eq!(
             creds.api_key.as_deref(),
             Some("console-live-key"),
-            "auto_use_included_limits on enforced path must prefer console when              SuperGrok included is exhausted (not SuperGrok $ extras primary);              got primary={:?} type={:?} failover={:?}",
+            "auto_use_included_limits on enforced path must prefer console when SuperGrok included is exhausted and extras are gone/unknown; got primary={:?} type={:?} failover={:?}",
             creds.api_key,
             creds.auth_type,
             creds.failover_api_keys
@@ -7874,10 +7897,11 @@ reasoning_effort = "low"
         assert_eq!(creds.auth_type, AuthType::ApiKey);
         assert!(
             !creds.failover_api_keys.iter().any(|k| k == session),
-            "exhausted SuperGrok must not stay as silent $ extras hop: {:?}",
+            "exhausted SuperGrok without positive extras must not stay as silent hop: {:?}",
             creds.failover_api_keys
         );
         clear_all_including_durable();
+        crate::auth::clear_included_billing_cache();
     }
 
     /// auto_use_included_limits hop: one SuperGrok included exhausted → other SuperGrok before console.
@@ -7907,6 +7931,8 @@ reasoning_effort = "low"
                     reset_at: None,
                 },
                 access_token: "tok-personal".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             },
             SupergrokSessionCandidate {
                 headroom: SupergrokIdentityHeadroom {
@@ -7916,6 +7942,8 @@ reasoning_effort = "low"
                     reset_at: None,
                 },
                 access_token: "tok-business".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             },
         ];
         // Pure hop order matches resolve path.
@@ -7940,7 +7968,7 @@ reasoning_effort = "low"
         );
     }
 
-    /// auto_use_included_limits + both SuperGrok included exhausted → console primary (no SuperGrok $ lead).
+    /// auto_use_included_limits + both SuperGrok included exhausted + no extras → console primary.
     #[test]
     #[serial_test::serial]
     fn resolve_auto_both_supergrok_exhausted_console_primary() {
@@ -7967,6 +7995,8 @@ reasoning_effort = "low"
                     reset_at: None,
                 },
                 access_token: "tok-p".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             },
             SupergrokSessionCandidate {
                 headroom: SupergrokIdentityHeadroom {
@@ -7976,6 +8006,8 @@ reasoning_effort = "low"
                     reset_at: None,
                 },
                 access_token: "tok-b".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             },
         ];
         let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
@@ -7988,8 +8020,151 @@ reasoning_effort = "low"
                 .failover_api_keys
                 .iter()
                 .any(|k| k.starts_with("tok-")),
-            "exhausted SuperGrok must not queue as silent $ extras hop: {:?}",
+            "exhausted SuperGrok without positive extras must not queue as silent hop: {:?}",
             creds.failover_api_keys
+        );
+    }
+
+    /// Included full but SuperGrok $ extras remain → SuperGrok primary, console failover.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_auto_after_included_exhausted_keeps_session_while_extras_positive() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::{
+            PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+            SupergrokSessionCandidate,
+        };
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-live");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let sessions = vec![SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-live".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 0,
+                reset_at: None,
+            },
+            access_token: "tok-extras-afterburner".into(),
+            prepaid_balance_cents: Some(10_029),
+            hard_expired: false,
+        }];
+        let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        let creds = resolve_credentials_preferring_with_supergrok_sessions(
+            &model,
+            &sessions,
+            Some(PreferredAuthMethod::Oidc),
+            true,
+        );
+        assert_eq!(creds.auth_type, AuthType::SessionToken);
+        assert_eq!(creds.api_key.as_deref(), Some("tok-extras-afterburner"));
+        assert!(
+            creds.failover_api_keys.iter().any(|k| k == "console-live"),
+            "console must be failover while SuperGrok $ extras remain: {:?}",
+            creds.failover_api_keys
+        );
+    }
+
+    /// Named contract: preferred_method=api_key still pins console first even when
+    /// auto_use is on and SuperGrok $ extras remain (after-burner must not override pin).
+    #[test]
+    #[serial_test::serial]
+    fn resolve_api_key_pin_stays_console_primary_despite_extras_and_auto_use() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::{
+            PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+            SupergrokSessionCandidate,
+        };
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-pinned-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let sessions = vec![SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-live".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 0,
+                reset_at: None,
+            },
+            access_token: "tok-extras-must-not-override-pin".into(),
+            prepaid_balance_cents: Some(10_029),
+            hard_expired: false,
+        }];
+        let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        let creds = resolve_credentials_preferring_with_supergrok_sessions(
+            &model,
+            &sessions,
+            Some(PreferredAuthMethod::ApiKey),
+            true, // auto_use on — still must not override api_key pin
+        );
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        assert_eq!(
+            creds.api_key.as_deref(),
+            Some("console-pinned-key"),
+            "api_key pin stays console primary despite SuperGrok $ extras: primary={:?} failover={:?}",
+            creds.api_key,
+            creds.failover_api_keys
+        );
+        assert_ne!(
+            creds.api_key.as_deref(),
+            Some("tok-extras-must-not-override-pin")
+        );
+    }
+
+    /// Named contract: resolve_model_to_sampling_config honors auto_use rank
+    /// (omit console while SuperGrok included has headroom).
+    #[test]
+    #[serial_test::serial]
+    fn resolve_model_to_sampling_config_auto_use_omits_console_while_included_headroom() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use crate::auth::PreferredAuthMethod;
+        use xai_grok_test_support::EnvGuard;
+
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-landmine-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+        let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+        let model = test_model_entry("m", proxy, None, None, None);
+        let mut models = IndexMap::new();
+        models.insert("m".to_string(), model);
+        let sc = resolve_model_to_sampling_config(
+            "m",
+            &models,
+            Some("tok-session-headroom"),
+            None,
+            None,
+            None,
+            Some(PreferredAuthMethod::Oidc),
+            true,
+        )
+        .expect("model resolves");
+        // Host GROK_HOME OnceLock may rank a real SuperGrok JWT over the fixture
+        // session_key; contract is SuperGrok primary + console omitted.
+        assert_ne!(
+            sc.api_key.as_deref(),
+            Some("console-landmine-key"),
+            "primary must not be console under auto_use + headroom"
+        );
+        assert!(sc.api_key.is_some());
+        assert!(
+            !sc.failover_api_keys
+                .iter()
+                .any(|k| k == "console-landmine-key"),
+            "resolve_model_to_sampling_config must omit console under auto_use + headroom: {:?}",
+            sc.failover_api_keys
         );
     }
 
@@ -8146,6 +8321,8 @@ reasoning_effort = "low"
                 reset_at: None,
             },
             access_token: "tok-supergrok-live".into(),
+            prepaid_balance_cents: None,
+            hard_expired: false,
         }];
         let model = test_model_entry(
             "m",
@@ -8181,6 +8358,8 @@ reasoning_effort = "low"
                 reset_at: None,
             },
             access_token: "tok-supergrok-live".into(),
+            prepaid_balance_cents: None,
+            hard_expired: false,
         }];
         let after = resolve_credentials_preferring_with_supergrok_sessions(
             &model,
@@ -8221,6 +8400,8 @@ reasoning_effort = "low"
                     reset_at: Some(ts(2_000)),
                 },
                 access_token: "tok-personal".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             },
             SupergrokSessionCandidate {
                 headroom: SupergrokIdentityHeadroom {
@@ -8230,6 +8411,8 @@ reasoning_effort = "low"
                     reset_at: Some(ts(1_000)),
                 },
                 access_token: "tok-business".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             },
         ];
         let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
