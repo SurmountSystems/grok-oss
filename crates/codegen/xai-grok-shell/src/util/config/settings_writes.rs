@@ -242,6 +242,96 @@ pub async fn set_economic_mode(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.economic_mode = Some(value)).await
 }
 
+/// Persist `[ui].resume_canceled_turn_on_restart` via `update_config`.
+///
+/// Default ON when unset: re-queue an explicitly canceled turn once when the
+/// same session is opened again.
+pub async fn set_resume_canceled_turn_on_restart(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.resume_canceled_turn_on_restart = Some(value)).await
+}
+
+/// Persist one boolean under `[token_economy]` without splatting unrelated keys.
+pub async fn set_token_economy_bool(field: &str, value: bool) -> Result<()> {
+    use toml::Value as TomlValue;
+    update_token_economy_key(field, TomlValue::Boolean(value)).await
+}
+
+/// Persist one integer under `[token_economy]` (effort knobs 0–5; 0 lock = unlocked).
+pub async fn set_token_economy_int(field: &str, value: i64) -> Result<()> {
+    use toml::Value as TomlValue;
+    update_token_economy_key(field, TomlValue::Integer(value)).await
+}
+
+async fn update_token_economy_key(field: &str, value: toml::Value) -> Result<()> {
+    use super::mcp::user_config_path;
+    use super::persist::lock_config_writes;
+    use toml::Value as TomlValue;
+    use toml::map::Map as TomlMap;
+    let _guard = lock_config_writes().await;
+    let path = user_config_path();
+    let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => match toml::from_str::<TomlValue>(&s) {
+            Ok(v) => v,
+            Err(parse_err) => {
+                return Err(anyhow::anyhow!(
+                    "refusing to overwrite unparseable {}: {}; save a backup \
+                         and fix the syntax error before retrying",
+                    path.display(),
+                    parse_err,
+                ));
+            }
+        },
+        Err(_) => TomlValue::Table(TomlMap::new()),
+    };
+    if !matches!(root, TomlValue::Table(_)) {
+        root = TomlValue::Table(TomlMap::new());
+    }
+    let table = root.as_table_mut().expect("root must be a table");
+    let te = table
+        .entry("token_economy".to_string())
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    if let TomlValue::Table(te_tbl) = te {
+        te_tbl.insert(field.to_string(), value);
+    } else {
+        let mut te_tbl = TomlMap::new();
+        te_tbl.insert(field.to_string(), value);
+        *te = TomlValue::Table(te_tbl);
+    }
+    // Validate the resulting table so Settings cannot write an invalid policy.
+    crate::token_economy::token_economy_from_toml(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let toml_str = toml::to_string_pretty(&root)?;
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    #[cfg(unix)]
+    let prior_mode: Option<u32> = match tokio::fs::metadata(&path).await {
+        Ok(m) => {
+            use std::os::unix::fs::PermissionsExt;
+            Some(m.permissions().mode())
+        }
+        Err(_) => None,
+    };
+    #[cfg(not(unix))]
+    let prior_mode: Option<u32> = None;
+    let suffix = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("toml.tmp.{}.{}", std::process::id(), nanos)
+    };
+    let tmp = path.with_extension(suffix);
+    tokio::fs::write(&tmp, toml_str).await?;
+    #[cfg(unix)]
+    if let Some(mode) = prior_mode {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await;
+    }
+    let _ = prior_mode;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
 /// Persist `[toolset.ask_user_question].timeout_enabled` via `update_config`
 /// (the user tier of the shell's tiered resolver; the effective value is
 /// re-resolved at agent build).

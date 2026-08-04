@@ -1140,6 +1140,117 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "resume_canceled_turn_on_restart" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "resume_canceled_turn_on_restart",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_resume_canceled_turn_on_restart(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.cap_implement_effort_when_economic" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.cap_implement_effort_when_economic",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool(
+                "cap_implement_effort_when_economic",
+                b,
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+        "token_economy.show_period_pacing" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.show_period_pacing",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("show_period_pacing", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.local_spend_ledger" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.local_spend_ledger",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("local_spend_ledger", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.reconcile_management_usage" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.reconcile_management_usage",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("reconcile_management_usage", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.max_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.max_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("max_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.min_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.min_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("min_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.desired_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.desired_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("desired_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.lock_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.lock_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("lock_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "keep_text_selection" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("keep_text_selection", "Enum", &value));

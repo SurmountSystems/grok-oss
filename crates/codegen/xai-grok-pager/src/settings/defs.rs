@@ -1569,6 +1569,172 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        // Token Economy: implement-effort policy when economic mode is on.
+        SettingMeta {
+            key: "token_economy.cap_implement_effort_when_economic",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Cap implement effort when economic mode is on",
+            description: "When Economic mode is on, apply the implement-loop effort ceiling and \
+                          desired inject for missing --effort. Min floor and lock always apply. \
+                          Default on. See config.toml [token_economy].",
+            keywords: &["token", "economy", "implement", "effort", "cap", "economic"],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.max_implement_effort",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Maximum implement-loop effort",
+            description: "Hard ceiling (1–5) for implement-loop effort when economic caps are \
+                          active. Default 3. Does not change model reasoning effort (/effort).",
+            keywords: &["token", "economy", "implement", "effort", "max", "ceiling"],
+            kind: SettingKind::Int {
+                default: 3,
+                min: 1,
+                max: 5,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.min_implement_effort",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Minimum implement-loop effort",
+            description: "Floor (1–5) for implement-loop effort. Default 1 (no extra floor). \
+                          Always applied, not only when economic mode is on. Set 2 to always \
+                          include a reviewer.",
+            keywords: &["token", "economy", "implement", "effort", "min", "floor"],
+            kind: SettingKind::Int {
+                default: 1,
+                min: 1,
+                max: 5,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.desired_implement_effort",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Desired implement-loop effort",
+            description: "Injected when --effort is missing under economic caps (1–5). Default 2. \
+                          Must be less than or equal to the maximum.",
+            keywords: &[
+                "token",
+                "economy",
+                "implement",
+                "effort",
+                "desired",
+                "default",
+            ],
+            kind: SettingKind::Int {
+                default: 2,
+                min: 1,
+                max: 5,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.lock_implement_effort",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Lock implement-loop effort",
+            description: "When non-zero (1–5), always force this implement-loop effort (ignores \
+                          prompt and desired). 0 means unlocked (default). Must sit between min \
+                          and max.",
+            keywords: &["token", "economy", "implement", "effort", "lock", "force"],
+            kind: SettingKind::Int {
+                default: 0,
+                min: 0,
+                max: 5,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.show_period_pacing",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Show free SuperGrok period pacing",
+            description: "Show ahead/behind linear-burn pacing for the free SuperGrok allowance \
+                          for the current billing period in credit chrome and /limits. Default on. \
+                          Omitted when period bounds are missing. Never dollar-izes period percent.",
+            keywords: &[
+                "token",
+                "economy",
+                "pacing",
+                "period",
+                "supergrok",
+                "allowance",
+                "burn",
+            ],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.local_spend_ledger",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Local spend ledger",
+            description: "Write local spend ledger rows into the durable grok_oss.db store under \
+                          your Grok home. Default on. Used by /spend double-entry books.",
+            keywords: &["token", "economy", "ledger", "spend", "local", "book"],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.reconcile_management_usage",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Reconcile Management usage",
+            description: "Store Management API samples and show the remote book on /spend and \
+                          /limits reconcile. Default on when Management credentials exist.",
+            keywords: &[
+                "token",
+                "economy",
+                "reconcile",
+                "management",
+                "remote",
+                "spend",
+            ],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // Resume canceled turn on session restart (default on).
+        SettingMeta {
+            key: "resume_canceled_turn_on_restart",
+            category: SettingCategory::Session,
+            owner: SettingOwner::Shell,
+            label: "Resume canceled turn on restart",
+            description: "When you reopen a session whose last top-level turn was explicitly \
+                          canceled (Esc/stop), automatically re-queue that work once with a toast \
+                          (\"Resuming canceled turn...\"). Default on. Finished or never-canceled \
+                          sessions are never invented. Soft stop and fearless pause are separate.",
+            keywords: &[
+                "resume",
+                "cancel",
+                "canceled",
+                "cancelled",
+                "restart",
+                "session",
+                "soft",
+                "stop",
+                "queue",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.resume_canceled_turn_on_restart.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned: auto return-from-away recap (`[ui.notifications] session_recap`).
         // Live-applied to NotificationService; does not gate manual `/recap`.
         SettingMeta {

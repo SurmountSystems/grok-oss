@@ -204,6 +204,41 @@ pub(super) fn do_cancel_turn_for(
     if !agent.session.state.is_turn_running() {
         return vec![];
     }
+    // Explicit interactive user cancel (not fearless pause): persist prompt
+    // identity for auto-resume on restart. Pause path sets allow_local_rewind
+    // false and owns its own in-process resume stash.
+    if allow_local_rewind {
+        let prompt_text = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .map(|p| p.text.as_str())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+        if let Some(text) = prompt_text {
+            let prompt_id = agent.session.current_prompt_id.clone();
+            let cwd = agent.session.cwd.to_string_lossy().into_owned();
+            let sid = agent.session.session_id.as_ref().map(|s| s.0.to_string());
+            if let Some(sid) = sid {
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Some(marker) =
+                    xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+                        &text,
+                        prompt_id.as_deref(),
+                        now,
+                    )
+                {
+                    if let Err(e) =
+                        xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+                            &cwd, &sid, &marker,
+                        )
+                    {
+                        tracing::debug!(error = %e, "canceled_turn_resume: write failed");
+                    }
+                }
+            }
+        }
+    }
     // If the server hasn't emitted any activity yet AND there are no other
     // queued prompts, "rewind" the prompt back into the input box and remove
     // its scrollback block. The cancel notification still flies to the
@@ -458,10 +493,28 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
             && agent.session.current_prompt_id.is_none();
         if clean_success {
             crate::app::auto_implement::on_successful_turn_end(agent);
+            if let (Some(sid), cwd) = (
+                agent.session.session_id.as_ref().map(|s| s.0.to_string()),
+                agent.session.cwd.to_string_lossy().into_owned(),
+            ) {
+                let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+                    &cwd, &sid,
+                );
+            }
         }
-        let drain = maybe_drain_queue(agent);
+        let soft_stop_toast = app.soft_stop.on_top_level_turn_finished();
+        let block_drain = app.soft_stop.blocks_drain() || app.global_work_pause.is_active();
+        let drain = if block_drain {
+            super::queue::QueueDrain::blocked()
+        } else {
+            maybe_drain_queue(agent)
+        };
         effects.extend(drain.effects);
         drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
+        if let Some(toast) = soft_stop_toast {
+            // Prefer agent toast so we do not reborrow AppView while agent is live.
+            agent.show_toast(&toast);
+        }
     }
     for (id, page_flip_entry) in drained_ids {
         note_peek_page_flip(app, id, page_flip_entry);

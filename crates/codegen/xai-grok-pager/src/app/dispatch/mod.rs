@@ -32,6 +32,7 @@ mod rewind;
 mod router;
 mod session;
 mod settings;
+mod soft_stop;
 mod status;
 mod task_result;
 mod transcript;

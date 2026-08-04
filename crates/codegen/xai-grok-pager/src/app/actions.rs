@@ -418,6 +418,8 @@ pub enum Action {
     CancelTurn,
     /// Pause or resume all in-process agent work (Ctrl+Shift+Space).
     ToggleGlobalPause,
+    /// Soft stop: finish current turn then hold the queue (Ctrl+Shift+S).
+    ToggleSoftStop,
     /// User confirmed a cancel-turn choice from the panel.
     CancelTurnChoice(crate::views::modal::CancelTurnChoice),
     /// Kill a background task by task_id.
@@ -522,6 +524,19 @@ pub enum Action {
     /// process-wide cache + `[ui].economic_mode`. New sessions seed from this;
     /// use `/economic-mode` for the current conversation.
     SetEconomicMode(bool),
+    /// Resume an explicitly canceled turn once when reopening the session.
+    /// SHELL-owned: `[ui].resume_canceled_turn_on_restart` (default on).
+    SetResumeCanceledTurnOnRestart(bool),
+    /// Token Economy bool under `[token_economy]` (field name is the TOML key).
+    SetTokenEconomyBool {
+        field: &'static str,
+        value: bool,
+    },
+    /// Token Economy integer under `[token_economy]` (effort 0–5; lock 0 = unlocked).
+    SetTokenEconomyInt {
+        field: &'static str,
+        value: i64,
+    },
     /// Set `[scrollback.scroll].respect_manual_folds`. PAGER-owned:
     /// live-applied via `AppView::set_appearance` and persisted to
     /// pager.toml via `Effect::PersistSetting`.

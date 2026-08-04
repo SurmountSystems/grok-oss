@@ -962,9 +962,40 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         if let Some(directive) = agent.pending_first_prompt.take() {
             agent.session.enqueue_prompt_front(directive);
         }
+        // Auto-resume an explicitly canceled turn on session open (default on).
+        // Only when not already adopting a live running prompt from the leader.
+        let mut resume_toast: Option<String> = None;
+        if !adopting {
+            let resume_enabled = app.current_ui.resume_canceled_turn_on_restart_enabled();
+            let cwd = agent.session.cwd.to_string_lossy().into_owned();
+            let sid = hydrate_sid.to_string();
+            if let Ok(Some(marker)) =
+                xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd, &sid)
+            {
+                if xai_grok_shell::session::canceled_turn_resume::should_auto_resume_on_restart(
+                    resume_enabled,
+                    Some(&marker),
+                ) {
+                    agent
+                        .session
+                        .enqueue_prompt_front(marker.prompt_text.clone());
+                    let _ =
+                        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+                            &cwd, &sid,
+                        );
+                    resume_toast = Some(
+                        xai_grok_shell::session::canceled_turn_resume::auto_resume_toast()
+                            .to_string(),
+                    );
+                }
+            }
+        }
         let drain = maybe_drain_queue(agent);
         let page_flip_entry = drain.page_flip_entry;
         effects.extend(drain.effects);
+        if let Some(toast) = resume_toast {
+            agent.show_toast(&toast);
+        }
         let cwd = agent.session.cwd.clone();
         effects.push(Effect::HydrateSessionTitleFromDisk {
             agent_id,

@@ -71,12 +71,18 @@ economic_mode = true                   # soft-cap effective context at 200k (Gro
                                        # When on, also enables Token Economy implement-effort
                                        # caps unless [token_economy] turns them off (see below).
                                        # Override one conversation with /economic-mode
+resume_canceled_turn_on_restart = true # when reopening a session whose last top-level turn was
+                                       # explicitly canceled (Esc/stop), re-queue that work once
+                                       # with a toast ("Resuming canceled turn..."). Default on.
+                                       # Finished or never-canceled sessions are never invented.
+                                       # Settings → Session. Distinct from soft stop and pause.
 hide_header = false                    # hide in-app status / welcome / dashboard headers only
                                        # (default: false). Not the desktop/terminal window title.
                                        # Window titles: [ui.notifications.title] enabled (default true).
 
 # Token Economy (implement effort, period pacing, double-entry spend books).
 # Durable books live in $GROK_HOME/grok_oss.db (uniquely grok-oss; not session trees).
+# All of these knobs are also in Settings → Agent & Approval (alongside Economic mode).
 [token_economy]
 cap_implement_effort_when_economic = true  # with [ui] economic_mode: ceiling + desired inject
 max_implement_effort = 3                   # hard ceiling 1–5 when economic caps are active (default 3)
@@ -128,8 +134,9 @@ Token Economy is the Surmount product surface for **spend brakes and books**:
 
 | Knob | Default | Role |
 |------|---------|------|
-| `[ui] economic_mode` | true | Soft-cap effective context at 200k (price cliff). Also gates implement-effort **ceiling** and **desired inject** when the cap master below is true. |
-| `cap_implement_effort_when_economic` | true | Master for economic ceiling + desired inject on implement-loop effort. |
+| `[ui] economic_mode` | true | Soft-cap effective context at 200k (price cliff). Also gates implement-effort **ceiling** and **desired inject** when the cap master below is true. Live in **Settings**. |
+| `[ui] resume_canceled_turn_on_restart` | true | Re-queue an explicitly canceled turn once when reopening the same session. Live in **Settings → Session**. |
+| `cap_implement_effort_when_economic` | true | Master for economic ceiling + desired inject on implement-loop effort. Live in **Settings**. |
 | `max_implement_effort` | 3 | Hard ceiling (1–5) when economic caps are active. |
 | `min_implement_effort` | 1 | Floor (1–5). **Always** applied (not economic-only). Raise if the prompt is below this. Default 1 keeps current behavior; set **2** so every implement run has at least one reviewer. |
 | `lock_implement_effort` | unset / 0 | When **1–5**, always force that exact effort (ignores prompt and desired). `0` or omit = unlocked. Config validation requires `min ≤ lock ≤ max`. |

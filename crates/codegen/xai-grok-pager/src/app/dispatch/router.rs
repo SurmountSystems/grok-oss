@@ -86,10 +86,11 @@ use super::settings::setters::{
     set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
     set_notifications_session_recap, set_notifications_session_recap_threshold_secs,
     set_page_flip_on_send, set_plan_approval_park, set_prompt_suggestions,
-    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
-    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_scrub_ascii_punct,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
+    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds,
+    set_resume_canceled_turn_on_restart, set_screen_mode, set_scroll_lines, set_scroll_mode,
+    set_scroll_speed, set_scrub_ascii_punct, set_show_thinking_blocks, set_show_tips,
+    set_simple_mode, set_theme, set_timeline, set_timestamps, set_token_economy_bool,
+    set_token_economy_int, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
     set_voice_stt_language,
 };
 use super::settings::ui::{
@@ -935,6 +936,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::CancelTurn => dispatch_cancel_turn(app),
         Action::ToggleGlobalPause => super::global_pause::dispatch_toggle_global_pause(app),
+        Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
         Action::KillSubagent(subagent_id) => dispatch_kill_subagent(app, subagent_id),
@@ -996,6 +998,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetPromptSuggestions(v) => set_prompt_suggestions(app, v),
         Action::SetAutoRunImplement(v) => set_auto_run_implement(app, v),
         Action::SetEconomicMode(v) => set_economic_mode(app, v),
+        Action::SetResumeCanceledTurnOnRestart(v) => set_resume_canceled_turn_on_restart(app, v),
+        Action::SetTokenEconomyBool { field, value } => set_token_economy_bool(app, field, value),
+        Action::SetTokenEconomyInt { field, value } => set_token_economy_int(app, field, value),
         Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
         Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
         Action::SetCancelSubagentsOnTurnCancel(s) => set_cancel_subagents_on_turn_cancel(app, s),

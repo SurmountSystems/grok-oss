@@ -1102,6 +1102,13 @@ fn retry_footer_reason(err: &SamplingError) -> String {
         SamplingError::Http(e) if e.is_timeout() => "timed out".into(),
         SamplingError::Http(e) if e.is_connect() => "connection failed".into(),
         SamplingError::Http(_) => "connection interrupted".into(),
+        // Cloudflare 52x / gateway outages: short chrome, not full Display.
+        SamplingError::Api { status, .. }
+            if xai_grok_sampling_types::is_edge_outage_status(status.as_u16())
+                || matches!(status.as_u16(), 502..=504) =>
+        {
+            format!("xAI unavailable (HTTP {})", status.as_u16())
+        }
         other => other.to_string(),
     }
 }
@@ -2037,6 +2044,27 @@ mod tests {
             // Session memo untouched by console success clear.
             assert!(crate::exhausted_identity::is_exhausted(&session_fp));
         });
+    }
+
+    /// Network/outage (HTTP 521) must not look like credit exhaust — hop path
+    /// in `apply_retry_decision` only runs for `is_credit_exhausted` / 429.
+    #[test]
+    fn http_521_is_not_credit_or_rate_limit_hop() {
+        let err = SamplingError::Api {
+            status: reqwest::StatusCode::from_u16(521).unwrap(),
+            message: xai_grok_sampling_types::status_user_message(
+                reqwest::StatusCode::from_u16(521).unwrap(),
+            ),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_retryable(), "521 soft-retries same identity");
+        assert!(
+            !err.is_credit_exhausted(),
+            "outage ≠ allowance full / credits"
+        );
+        assert!(!err.is_rate_limited(), "521 is not plain 429 throttle");
     }
 
     /// Rate-limit switch reuses rotate mechanics but does **not** memoize the

@@ -877,7 +877,19 @@ impl SessionActor {
                 return Ok(SamplerFailureRecovery::CompactAndResubmit);
             }
         }
-        let detailed_message = error.message.clone();
+        // Edge / gateway outages: plain English for RetryFailed + ACP data,
+        // not raw "API error (status 521 <unknown status code>)" Internal JSON.
+        let detailed_message = match error.status_code {
+            Some(code)
+                if xai_grok_sampling_types::is_edge_outage_status(code)
+                    || matches!(code, 502..=504) =>
+            {
+                let status =
+                    reqwest::StatusCode::from_u16(code).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+                xai_grok_sampling_types::outage_exhausted_user_message(status, 1)
+            }
+            _ => error.message.clone(),
+        };
         if matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
             && error.message.contains("encrypted_content")

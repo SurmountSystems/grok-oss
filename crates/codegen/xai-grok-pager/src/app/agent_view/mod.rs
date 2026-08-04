@@ -2306,6 +2306,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::CycleMode => Action::CycleMode,
         ActionId::CancelTurn
         | ActionId::ToggleGlobalPause
+        | ActionId::ToggleSoftStop
         | ActionId::Quit
         | ActionId::ExitSession
         | ActionId::NewSession

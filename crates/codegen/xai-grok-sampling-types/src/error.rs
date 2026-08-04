@@ -91,7 +91,9 @@ pub enum SamplingError {
     Http(reqwest::Error),
     #[error("{prefix}{0}", prefix = SERIALIZATION_DISPLAY_PREFIX)]
     Serialization(serde_json::Error),
-    #[error("API error (status {status}): {message}")]
+    /// `status` is formatted via [`format_http_status`] so Cloudflare edge
+    /// codes (521, …) never render as `<unknown status code>`.
+    #[error("API error (status {}): {message}", format_http_status(*status))]
     Api {
         status: StatusCode,
         message: String,
@@ -245,9 +247,7 @@ impl SamplingError {
             SamplingError::InvalidConfiguration(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
-            SamplingError::Api { status, .. } => {
-                matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520)
-            }
+            SamplingError::Api { status, .. } => is_transient_api_status(status.as_u16()),
             SamplingError::EventStreamError(_) => true,
             SamplingError::StreamError { .. } => true,
             SamplingError::IdleTimeout { .. } => false,
@@ -366,6 +366,69 @@ fn try_parse_error(data: &str) -> Option<(String, String)> {
 /// Max chars of a structured (JSON) error message shown to users.
 pub const MAX_USER_ERROR_BODY_CHARS: usize = 280;
 
+/// Known status phrases for non-IANA / Cloudflare edge codes that
+/// [`StatusCode::canonical_reason`] does not know. Used so Display never
+/// prints `<unknown status code>` for these outages.
+///
+/// See [Cloudflare HTTP status codes](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/)
+/// (accessed: 2026-08-04).
+pub fn http_status_label(code: u16) -> Option<&'static str> {
+    match code {
+        520 => Some("Web Server Returned an Unknown Error"),
+        521 => Some("Web Server Is Down"),
+        522 => Some("Connection Timed Out"),
+        523 => Some("Origin Is Unreachable"),
+        524 => Some("A Timeout Occurred"),
+        525 => Some("SSL Handshake Failed"),
+        526 => Some("Invalid SSL Certificate"),
+        527 => Some("Railgun Error"),
+        530 => Some("Origin DNS Error"),
+        _ => None,
+    }
+}
+
+/// Format an HTTP status for user-facing Display.
+///
+/// Prefers the IANA reason phrase, then our Cloudflare edge map, then the
+/// bare code. Never emits `<unknown status code>`.
+pub fn format_http_status(status: StatusCode) -> String {
+    let code = status.as_u16();
+    if let Some(reason) = status.canonical_reason() {
+        format!("{code} {reason}")
+    } else if let Some(label) = http_status_label(code) {
+        format!("{code} {label}")
+    } else {
+        format!("{code}")
+    }
+}
+
+/// Transient API / gateway statuses worth retrying with backoff.
+///
+/// Includes 429, common 5xx gateways, and Cloudflare edge 52x outage codes
+/// (origin down, connect fail, timeout, …). Not every 5xx: 501 Not Implemented
+/// stays non-retryable.
+pub fn is_transient_api_status(code: u16) -> bool {
+    matches!(code, 429 | 500 | 502..=504 | 520..=527 | 530)
+}
+
+/// True when the status is a Cloudflare-style origin/edge outage (52x), not
+/// a normal app 5xx. Used for operator messaging.
+pub fn is_edge_outage_status(code: u16) -> bool {
+    matches!(code, 520..=527 | 530)
+}
+
+/// Plain-English terminal copy when retries on a connection/outage status
+/// are exhausted (or the failure is surfaced after soft retries).
+///
+/// Prefer this over raw `API error (status …)` / Internal error JSON for
+/// operator-facing toasts and RetryFailed chrome.
+pub fn outage_exhausted_user_message(status: StatusCode, attempts: u32) -> String {
+    let code = status.as_u16();
+    let tries = attempts.max(1);
+    let try_word = if tries == 1 { "try" } else { "tries" };
+    format!("xAI connection failed after {tries} {try_word} (HTTP {code}). Try again shortly.")
+}
+
 /// Short status-based copy when the body is not a structured JSON error.
 ///
 /// Edge proxies (Cloudflare 52x, 502/503/504) return HTML pages; we never
@@ -375,8 +438,12 @@ pub fn status_user_message(status: StatusCode) -> String {
         code @ 502..=504 => {
             format!("Grok is temporarily unavailable. Please try again in a moment. (HTTP {code}).")
         }
-        // Cloudflare edge codes (origin down / connect fail / timeout / …).
-        code @ 520..=524 => {
+        // Cloudflare edge: origin down (521), connect fail, timeout, …
+        521 => {
+            "xAI is temporarily unreachable (origin down). Please try again shortly. (HTTP 521)."
+                .to_string()
+        }
+        code @ 520..=527 | code @ 530 => {
             format!(
                 "Connection to Grok timed out or was interrupted. Please try again. (HTTP {code})."
             )
@@ -1049,5 +1116,95 @@ mod tests {
             !err.is_retryable(),
             "direct 400 must not be retryable by is_retryable()"
         );
+    }
+
+    fn api_status(code: u16, message: &str) -> SamplingError {
+        SamplingError::Api {
+            status: StatusCode::from_u16(code).expect("valid status"),
+            message: message.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        }
+    }
+
+    /// Cloudflare 521 (origin down) and sibling edge outages must soft-retry
+    /// with backoff — not Fatal on first sight as "unknown status".
+    #[test]
+    fn cloudflare_edge_outage_statuses_are_retryable() {
+        for code in [520u16, 521, 522, 523, 524, 525, 526, 527, 530] {
+            assert!(
+                is_transient_api_status(code),
+                "status {code} must be transient"
+            );
+            let err = api_status(code, "edge outage");
+            assert!(
+                err.is_retryable(),
+                "HTTP {code} must be retryable (was only 520 historically)"
+            );
+            assert!(
+                !err.is_credit_exhausted(),
+                "HTTP {code} is network/outage, not credit exhaust"
+            );
+            assert!(!err.is_rate_limited(), "HTTP {code} is not a 429 throttle");
+        }
+    }
+
+    #[test]
+    fn http_521_display_uses_known_label_not_unknown_status() {
+        let body = status_user_message(StatusCode::from_u16(521).unwrap());
+        let err = api_status(521, &body);
+        let s = err.to_string();
+        assert!(
+            !s.contains("unknown status"),
+            "must not print unknown status code: {s}"
+        );
+        assert!(
+            s.contains("521") && s.contains("Web Server Is Down"),
+            "expected known 521 label in Display: {s}"
+        );
+        assert_eq!(
+            http_status_label(521),
+            Some("Web Server Is Down"),
+            "status map entry for 521"
+        );
+        assert_eq!(
+            format_http_status(StatusCode::from_u16(521).unwrap()),
+            "521 Web Server Is Down"
+        );
+    }
+
+    #[test]
+    fn outage_exhausted_message_is_plain_english() {
+        let msg = outage_exhausted_user_message(StatusCode::from_u16(521).unwrap(), 4);
+        assert_eq!(
+            msg,
+            "xAI connection failed after 4 tries (HTTP 521). Try again shortly."
+        );
+        // attempts=0 still reads as one try (surface never claims zero tries).
+        let once = outage_exhausted_user_message(StatusCode::from_u16(521).unwrap(), 0);
+        assert_eq!(
+            once,
+            "xAI connection failed after 1 try (HTTP 521). Try again shortly."
+        );
+    }
+
+    #[test]
+    fn format_http_status_keeps_iana_reason_for_standard_codes() {
+        assert_eq!(
+            format_http_status(StatusCode::TOO_MANY_REQUESTS),
+            "429 Too Many Requests"
+        );
+        assert_eq!(
+            format_http_status(StatusCode::BAD_GATEWAY),
+            "502 Bad Gateway"
+        );
+    }
+
+    #[test]
+    fn non_transient_5xx_like_501_not_retryable() {
+        let err = api_status(501, "not implemented");
+        assert!(!is_transient_api_status(501));
+        assert!(!err.is_retryable());
     }
 }

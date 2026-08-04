@@ -536,6 +536,23 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::ToggleSoftStop,
+            label: "soft stop",
+            description: "Finish current turn then hold the queue",
+            // Ctrl+Shift+S: soft stop (not mid-turn cancel). Distinct from
+            // fearless pause Ctrl+Shift+Space.
+            default_key: key!('s', CONTROL | SHIFT),
+            alt_keys: vec![],
+            category: Category::GettingStarted,
+            context: When::Always,
+            hint_priority: None,
+            hint_key_display: Some("Ctrl+Shift+S"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Soft stop: arm so that after the current top-level turn finishes (success or terminal fail), further queued work does not start. Does not cancel mid-flight the way fearless pause does.\nStatus chrome shows armed vs queue held. Press again before the turn ends to disarm, or after hold to release the queue.\nDefault chord is Ctrl+Shift+S so it does not steal Ctrl+Shift+Space (global pause).",
+            ),
+        },
+        ActionDef {
             id: ActionId::CycleMode,
             label: "mode",
             description: "Cycle mode (Normal / Plan / Always-approve)",

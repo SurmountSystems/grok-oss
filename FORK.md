@@ -290,6 +290,20 @@ list when you ship fork work.
   re-queues interrupted mid-turn prompts **once** and drains true pending work
   only; finished agents are never re-spawned; empty resume is a no-op. Bare
   Space and voice `Ctrl+Space` unchanged. User-guide `03-keyboard-shortcuts`.
+- [x] **Soft stop** — `Ctrl+Shift+S` arms: after the current top-level turn
+  finishes (success or terminal fail), automatic queue drain stops; subagents
+  for that turn may finish with it. Does **not** cancel mid-flight (unlike
+  pause). Toast + status chrome for armed vs queue held; toggle again to disarm
+  or release. User-guide `03-keyboard-shortcuts`.
+- [x] **Resume canceled turn on restart** — explicit user cancel persists a
+  session marker (`canceled_turn_resume.json`); reopening the session re-queues
+  once when `[ui] resume_canceled_turn_on_restart` is on (default true). Toast
+  “Resuming canceled turn...”. Never invents finished work. Settings + config.
+  User-guide `17-sessions`, `05-configuration`.
+- [x] **Token Economy + resume in Settings GUI** — Settings modal covers
+  economic mode, implement-effort caps (max/min/desired/lock), period pacing,
+  local ledger / reconcile toggles, and resume-canceled-on-restart. Persist via
+  config.toml. User-guide `05-configuration`.
 - [x] **Plan mode selection + screenshots** — revise/clarify feedback carries
   `@plan.md:N` (or `N-M`) + quoted line text for single- and multi-line
   highlight; **Ctrl/Cmd+V** clipboard images and file-path paste attach on the

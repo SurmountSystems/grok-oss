@@ -634,6 +634,8 @@ pub struct AppView {
     pub agents: IndexMap<AgentId, AgentView>,
     /// Fearless global pause: holds all in-process sessions until resume.
     pub global_work_pause: crate::app::global_work_pause::GlobalWorkPause,
+    /// Soft stop: finish current turn then hold queue drain (not mid-turn cancel).
+    pub soft_stop: crate::app::soft_stop::SoftStop,
     /// Monotonically increasing counter for agent ID allocation.
     /// Never reuse IDs after `shift_remove` to avoid collisions.
     pub next_agent_id: usize,
@@ -1434,6 +1436,7 @@ impl AppView {
             auth_return_view: None,
             agents: IndexMap::new(),
             global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
+            soft_stop: crate::app::soft_stop::SoftStop::new(),
             next_agent_id: 0,
             models,
             registry: ActionRegistry::defaults(),
@@ -3022,6 +3025,7 @@ impl AppView {
                 Action::VoiceToggle
             }
             ActionId::ToggleGlobalPause => Action::ToggleGlobalPause,
+            ActionId::ToggleSoftStop => Action::ToggleSoftStop,
             _ => return InputOutcome::Unchanged,
         };
         if def.requires_confirmation {
@@ -5122,6 +5126,10 @@ impl AppView {
                 self.show_toast(&label);
                 needs_redraw = true;
             }
+        } else if let Some(label) = self.soft_stop.status_label() {
+            // Soft-stop chrome (armed vs queue held) when pause is not active.
+            self.show_toast(label);
+            needs_redraw = true;
         }
         if matches!(self.active_view, ActiveView::Welcome) {
             self.welcome_tick = self.welcome_tick.wrapping_add(1);
@@ -5862,6 +5870,7 @@ pub(crate) mod tests {
             auth_return_view: None,
             agents: indexmap::IndexMap::new(),
             global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
+            soft_stop: crate::app::soft_stop::SoftStop::new(),
             next_agent_id: 0,
             models: ModelState::default(),
             registry: ActionRegistry::defaults(),

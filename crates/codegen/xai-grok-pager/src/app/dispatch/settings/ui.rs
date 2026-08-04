@@ -829,6 +829,57 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("prompt_suggestions", SettingValue::Bool(b)) => Some(Action::SetPromptSuggestions(*b)),
         ("auto_run_implement", SettingValue::Bool(b)) => Some(Action::SetAutoRunImplement(*b)),
         ("economic_mode", SettingValue::Bool(b)) => Some(Action::SetEconomicMode(*b)),
+        ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
+            Some(Action::SetResumeCanceledTurnOnRestart(*b))
+        }
+        ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(b)) => {
+            Some(Action::SetTokenEconomyBool {
+                field: "cap_implement_effort_when_economic",
+                value: *b,
+            })
+        }
+        ("token_economy.show_period_pacing", SettingValue::Bool(b)) => {
+            Some(Action::SetTokenEconomyBool {
+                field: "show_period_pacing",
+                value: *b,
+            })
+        }
+        ("token_economy.local_spend_ledger", SettingValue::Bool(b)) => {
+            Some(Action::SetTokenEconomyBool {
+                field: "local_spend_ledger",
+                value: *b,
+            })
+        }
+        ("token_economy.reconcile_management_usage", SettingValue::Bool(b)) => {
+            Some(Action::SetTokenEconomyBool {
+                field: "reconcile_management_usage",
+                value: *b,
+            })
+        }
+        ("token_economy.max_implement_effort", SettingValue::Int(i)) => {
+            Some(Action::SetTokenEconomyInt {
+                field: "max_implement_effort",
+                value: *i,
+            })
+        }
+        ("token_economy.min_implement_effort", SettingValue::Int(i)) => {
+            Some(Action::SetTokenEconomyInt {
+                field: "min_implement_effort",
+                value: *i,
+            })
+        }
+        ("token_economy.desired_implement_effort", SettingValue::Int(i)) => {
+            Some(Action::SetTokenEconomyInt {
+                field: "desired_implement_effort",
+                value: *i,
+            })
+        }
+        ("token_economy.lock_implement_effort", SettingValue::Int(i)) => {
+            Some(Action::SetTokenEconomyInt {
+                field: "lock_implement_effort",
+                value: *i,
+            })
+        }
         ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
         ("bubble_copy_buttons", SettingValue::Bool(b)) => Some(Action::SetBubbleCopyButtons(*b)),
         ("cancel_subagents_on_turn_cancel", SettingValue::Enum(s)) => {
@@ -1202,6 +1253,18 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
         ("auto_run_implement", SettingValue::Bool(b)) => set_auto_run_implement_inner(app, *b),
         ("economic_mode", SettingValue::Bool(b)) => set_economic_mode_inner(app, *b),
+        ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
+            super::setters::set_resume_canceled_turn_on_restart_inner(app, *b)
+        }
+        // Token Economy lives on disk; live re-read — no in-memory rollback mirror.
+        ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(_))
+        | ("token_economy.show_period_pacing", SettingValue::Bool(_))
+        | ("token_economy.local_spend_ledger", SettingValue::Bool(_))
+        | ("token_economy.reconcile_management_usage", SettingValue::Bool(_))
+        | ("token_economy.max_implement_effort", SettingValue::Int(_))
+        | ("token_economy.min_implement_effort", SettingValue::Int(_))
+        | ("token_economy.desired_implement_effort", SettingValue::Int(_))
+        | ("token_economy.lock_implement_effort", SettingValue::Int(_)) => {}
         // keep_text_selection: restore the cache mirror to the canonical value.
         ("keep_text_selection", SettingValue::Enum(s)) => {
             if let Some(kind) = crate::appearance::TextSelection::from_canonical(s) {

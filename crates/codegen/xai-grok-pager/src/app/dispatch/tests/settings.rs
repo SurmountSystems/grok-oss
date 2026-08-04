@@ -346,6 +346,68 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
     );
     assert!(!app.agents[&id].session.model_switch_pending);
 }
+/// Resume-canceled-on-restart: default on, flip off emits PersistSetting
+/// with correct key/value/rollback, and live UiConfig updates immediately.
+#[test]
+fn set_resume_canceled_turn_on_restart_persists_and_updates_ui() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    assert!(
+        app.current_ui.resume_canceled_turn_on_restart_enabled(),
+        "default must be on"
+    );
+    let effects = dispatch(Action::SetResumeCanceledTurnOnRestart(false), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "resume_canceled_turn_on_restart");
+            assert_eq!(value, &SettingValue::Bool(false));
+            assert_eq!(rollback_value, &SettingValue::Bool(true));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert!(!app.current_ui.resume_canceled_turn_on_restart_enabled());
+    // Idempotent when already off.
+    let again = dispatch(Action::SetResumeCanceledTurnOnRestart(false), &mut app);
+    assert!(again.is_empty());
+    // Restore on.
+    let on = dispatch(Action::SetResumeCanceledTurnOnRestart(true), &mut app);
+    assert_eq!(on.len(), 1);
+    assert!(app.current_ui.resume_canceled_turn_on_restart_enabled());
+}
+
+/// Token Economy bool from Settings emits PersistSetting under the dotted key.
+#[test]
+fn set_token_economy_bool_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SetTokenEconomyBool {
+            field: "show_period_pacing",
+            value: false,
+        },
+        &mut app,
+    );
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "token_economy.show_period_pacing");
+            assert_eq!(value, &SettingValue::Bool(false));
+            // Rollback is the prior disk value (defaults true when unset).
+            assert_eq!(rollback_value, &SettingValue::Bool(true));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+}
+
 /// `set_compact_mode(app, new)` emits exactly one
 /// `Effect::PersistSetting` with the correct payload — `value`
 /// matches `new`, `rollback_value` matches the prior cache value.
@@ -1573,6 +1635,81 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "economic_mode" => {
             let _ = dispatch(Action::SetEconomicMode(false), app);
+        }
+        "resume_canceled_turn_on_restart" => {
+            let _ = dispatch(Action::SetResumeCanceledTurnOnRestart(false), app);
+        }
+        "token_economy.cap_implement_effort_when_economic" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "cap_implement_effort_when_economic",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.show_period_pacing" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "show_period_pacing",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.local_spend_ledger" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "local_spend_ledger",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.reconcile_management_usage" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "reconcile_management_usage",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.max_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "max_implement_effort",
+                    value: 5,
+                },
+                app,
+            );
+        }
+        "token_economy.min_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "min_implement_effort",
+                    value: 2,
+                },
+                app,
+            );
+        }
+        "token_economy.desired_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "desired_implement_effort",
+                    value: 3,
+                },
+                app,
+            );
+        }
+        "token_economy.lock_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "lock_implement_effort",
+                    value: 2,
+                },
+                app,
+            );
         }
         "respect_manual_folds" => {
             let _ = dispatch(

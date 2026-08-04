@@ -6,8 +6,9 @@ use super::ctx::with_active_agent;
 use super::interject;
 use super::permissions::drain_permission_queue;
 use super::queue::{
-    apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
-    maybe_drain_queue, note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
+    QueueDrain, apply_turn_start_shim, drain_prompt_state_to_last_queued,
+    immediate_server_send_eligible, maybe_drain_queue, note_peek_page_flip, push_server_queue_echo,
+    retire_optimistic_echo,
 };
 use super::router::dispatch;
 use super::session::fork::open_project_question;
@@ -1623,9 +1624,27 @@ pub(super) fn handle_prompt_response(
             && agent.session.current_prompt_id.is_none()
         {
             crate::app::auto_implement::on_successful_turn_end(agent);
+            // Successful finish: drop any durable cancel-resume marker so
+            // restart does not invent canceled work that already completed.
+            if let (Some(sid), Some(cwd)) = (
+                agent.session.session_id.as_ref().map(|s| s.0.to_string()),
+                Some(agent.session.cwd.to_string_lossy().into_owned()),
+            ) {
+                let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+                    &cwd, &sid,
+                );
+            }
         }
 
-        let drain = maybe_drain_queue(agent);
+        // Soft stop: take effect after this top-level turn finishes; hold drain.
+        // Collect toast before releasing the agent borrow.
+        let soft_stop_toast = app.soft_stop.on_top_level_turn_finished();
+        let block_drain = app.soft_stop.blocks_drain() || app.global_work_pause.is_active();
+        let drain = if block_drain {
+            QueueDrain::blocked()
+        } else {
+            maybe_drain_queue(agent)
+        };
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
         let mut effects = drain.effects;
 
@@ -1660,6 +1679,9 @@ pub(super) fn handle_prompt_response(
             agent_id,
             silent: true,
         });
+        if let Some(toast) = soft_stop_toast {
+            agent.show_toast(&toast);
+        }
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
     }
