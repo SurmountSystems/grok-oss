@@ -29,10 +29,23 @@ poll reading, not proof of included-limit burn.";
 /// Ideal C6 / branch 2b. Shown when live sampling is SuperGrok session and
 /// Management postpaid preview shows OAuth class strictly above API class
 /// (and &gt; 0). Distinct from console ApiKey live, from prepaid ledger
-/// remaining, and from SuperGrok included weekly debit proof.
+/// remaining, and from SuperGrok included weekly debit proof. Does **not**
+/// mean SuperGrok dollar extras are the live driver or that free SuperGrok
+/// period moved.
 pub const NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS: &str = "Note: SuperGrok session can still \
 move team Usage dollars (OAuth / Grok Build class on the team invoice) without proving \
-SuperGrok included weekly moved, even when the console API key is not live.";
+SuperGrok included weekly moved, even when the console API key is not live. That settlement \
+rise is not free SuperGrok period burn proof and not SuperGrok dollar extras as the live driver.";
+
+/// Flat free SuperGrok period + rising team OAuth / Grok Build settlement.
+///
+/// Shown when SuperGrok is live, flat-poll evidence is set, and OAuth postpaid
+/// dominates. Strengthens C6: names that team Grok Build class can climb while
+/// free period stays flat, without calling that class SuperGrok extras.
+pub const NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS: &str = "Note: free SuperGrok period \
+can stay flat across recent polls while team Grok Build / OAuth settlement dollars rise under \
+SuperGrok session; product does not invent free-period debit and does not treat team settlement \
+as SuperGrok dollar extras.";
 
 /// Console team prepaid lag honesty (when dollars are shown).
 ///
@@ -60,12 +73,71 @@ pub const NOTE_TEAM_DEFAULT_CREDITS_ARE_DASHBOARD_ALLOTMENT: &str = "Note: team 
 are the console dashboard allotment (postpaid preview defaultCredits), not the team prepaid \
 wallet, not free SuperGrok period allowance, and not SuperGrok prepaid top-up dollars.";
 
+/// Platforms → Grok Business → licenses Usage (messages / conversations) is
+/// not dogfood proof for this CLI.
+///
+/// Zeros on that license page are **expected** for CLI SuperGrok (this client
+/// does not drive seat message/conversation counters). Real burn shows as
+/// **team Usage** dollars (browser team Usage / spend / Grok Build) and on
+/// SuperGrok included % / extras plus team prepaid / postpaid OAuth / usage
+/// series when a management key is set.
+pub const NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER: &str = "Note: the console Platforms → Grok \
+Business licenses page (messages / conversations) is not dogfood proof for this product. \
+CLI SuperGrok does not drive seat message/conversation counters; zeros there are expected. \
+Real burn shows as team Usage dollars (browser team Usage / spend / Grok Build) and on \
+SuperGrok included % / extras plus team prepaid / postpaid OAuth / usage series when a \
+management key is set.";
+
+/// Doctor human block: wrong browser page vs right dogfood proof surfaces.
+///
+/// Counts/fingerprints stay in dual-auth status; this block is plain meter map
+/// only (no secrets). Always ends with a trailing newline for doctor append.
+pub fn dogfood_burn_proof_doctor_block() -> String {
+    "Dogfood burn proof (meters stay distinct)\n\
+  Proof: grok-oss limits / TUI /limits team postpaid OAuth (Grok Build class) \
+and usage series when a management key is set; browser team Usage \
+(console.x.ai team .../usage spend charts).\n\
+  Not proof: Platforms → Grok Business → licenses Usage (messages / \
+conversations / active users). CLI SuperGrok does not drive those seat \
+counters; zeros there are expected.\n"
+        .to_string()
+}
+
 /// Shared Grok Build productUsage line (human `/limits` and `/usage`).
 ///
 /// Floors like included %. Always ends with `% used` so surfaces match.
 /// Distinct from top-level included allowance %. Never invent when absent.
 pub fn format_grok_build_product_usage_line(pct: f64) -> String {
     format!("Grok Build product usage: {}% used", pct.floor() as i64)
+}
+
+/// Dual SuperGrok: one principal's JWT failed billing; free-period % on the
+/// empty row may be shared-pool fill (not a successful poll of that login).
+///
+/// `failed_role` is `personal` / `business`. Names re-login path.
+pub fn note_dual_principal_billing_failed(failed_role: &str) -> String {
+    let role = failed_role.trim();
+    let role = if role.is_empty() { "unknown" } else { role };
+    format!(
+        "Note: SuperGrok ({role}) billing poll failed this run. Re-login that \
+SuperGrok account with: grok login"
+    )
+}
+
+/// Dual SuperGrok: free-period % (and Extra Usage Credits when filled) on a
+/// row came from the shared SuperGrok pool, not a successful poll of that JWT.
+pub fn note_shared_pool_fill_not_live_poll(filled_role: &str) -> String {
+    let role = filled_role.trim();
+    let role = if role.is_empty() {
+        "a SuperGrok login"
+    } else {
+        role
+    };
+    format!(
+        "Note: SuperGrok ({role}) free-period % (and Extra Usage Credits when \
+shown) comes from the shared SuperGrok pool, not a successful billing poll of \
+that login this run."
+    )
 }
 
 /// Phrases that must never appear as consumption claims from flat % alone.
@@ -131,6 +203,8 @@ pub struct LimitsHonestyInput {
 
 /// Build honesty notes for limits modal / human `grok limits` (ordered).
 ///
+/// - Always: license page ≠ SuperGrok / team Management (no invented license
+///   message/conversation counts).
 /// - Prepaid lag note when console team prepaid dollars are shown (any live
 ///   identity). Names process-cache lag + `grok limits` / `/limits` force-refresh.
 /// - Base note when SuperGrok session is live and included % is shown.
@@ -140,9 +214,11 @@ pub struct LimitsHonestyInput {
 /// - C6 team Usage note when SuperGrok session is live **and**
 ///   [`LimitsHonestyInput::oauth_postpaid_dominates`].
 /// - Console-live: no SuperGrok burn / flat-poll / C6 honesty notes (prepaid
-///   lag note still allowed when dollars are shown).
+///   lag note still allowed when dollars are shown; license note still present).
 pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     let mut notes = Vec::new();
+    // Always: license seat page is not a product meter (plain dogfood honesty).
+    notes.push(NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER.to_string());
     if input.has_console_team_prepaid_reading {
         notes.push(note_console_team_prepaid_may_lag());
     }
@@ -163,6 +239,11 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     }
     if input.oauth_postpaid_dominates {
         notes.push(NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS.to_string());
+    }
+    // Flat free period + settlement rise: strengthen honesty so operators do
+    // not read team Grok Build $ climb as SuperGrok extras or free-period move.
+    if input.flat_poll_unproven_debit && input.oauth_postpaid_dominates {
+        notes.push(NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS.to_string());
     }
     notes
 }
@@ -228,34 +309,166 @@ mod tests {
     #[test]
     fn base_note_when_supergrok_live_with_included_reading() {
         let notes = honesty_notes_for_limits(input_base());
-        assert_eq!(notes, vec![NOTE_INCLUDED_PCT_IS_BILLING_POLL.to_string()]);
         assert!(
-            notes[0].contains("billing poll reading"),
-            "must name poll reading: {}",
-            notes[0]
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER),
+            "license page honesty always present: {notes:?}"
         );
         assert!(
-            notes[0].contains("not proof of included-limit burn"),
-            "must deny burn proof: {}",
-            notes[0]
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_INCLUDED_PCT_IS_BILLING_POLL),
+            "included poll honesty: {notes:?}"
+        );
+        let included = notes
+            .iter()
+            .find(|n| n.as_str() == NOTE_INCLUDED_PCT_IS_BILLING_POLL)
+            .expect("included note");
+        assert!(
+            included.contains("billing poll reading"),
+            "must name poll reading: {included}"
         );
         assert!(
-            !contains_forbidden_included_burn_claim(&notes[0]),
-            "honesty note must not overclaim: {}",
-            notes[0]
+            included.contains("not proof of included-limit burn"),
+            "must deny burn proof: {included}"
+        );
+        assert!(
+            !contains_forbidden_included_burn_claim(included),
+            "honesty note must not overclaim: {included}"
         );
     }
 
     #[test]
-    fn no_base_note_when_console_live() {
+    fn no_supergrok_burn_notes_when_console_live() {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
             live: SamplingIdentityKind::ConsoleKey,
             has_included_reading: true,
             ..Default::default()
         });
         assert!(
-            notes.is_empty(),
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER),
+            "license page honesty still present on console live: {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_INCLUDED_PCT_IS_BILLING_POLL),
             "console live must not sell SuperGrok burn notes: {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.contains("included debit is unproven")),
+            "console live must not sell flat-poll SuperGrok notes: {notes:?}"
+        );
+    }
+
+    /// Named contract: license page (messages/conversations) is not a product
+    /// meter; note names SuperGrok and team Management as the real surfaces.
+    #[test]
+    fn license_page_note_never_claims_messages_conversations_as_product_meter() {
+        let note = NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER;
+        let lower = note.to_ascii_lowercase();
+        assert!(lower.contains("license"), "must name license page: {note}");
+        assert!(
+            lower.contains("messages") || lower.contains("conversations"),
+            "must name the license chart metrics it is not: {note}"
+        );
+        assert!(
+            lower.contains("not")
+                && (lower.contains("dogfood")
+                    || lower.contains("supergrok")
+                    || lower.contains("management")),
+            "must say license page is not dogfood proof / product meter: {note}"
+        );
+        // Product does not invent license message counts as a live meter claim.
+        assert!(
+            !lower.contains("license messages used")
+                && !lower.contains("seat messages:")
+                && !lower.contains("% of license"),
+            "must not claim license consumption as product meter: {note}"
+        );
+        let notes = honesty_notes_for_limits(input_base());
+        assert!(
+            notes.iter().any(|n| n.as_str() == note),
+            "license note on SuperGrok live stack: {notes:?}"
+        );
+    }
+
+    /// Named contract (P0): license honesty names team Usage / Grok Build as
+    /// the real settlement proof, not only "not a SuperGrok meter."
+    #[test]
+    fn license_honesty_names_team_usage_and_zeros_expected() {
+        let note = NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER;
+        let lower = note.to_ascii_lowercase();
+        assert!(
+            lower.contains("team usage"),
+            "must name team Usage as settlement surface: {note}"
+        );
+        assert!(
+            lower.contains("grok build") || lower.contains("postpaid"),
+            "must name Grok Build class or postpaid: {note}"
+        );
+        assert!(
+            lower.contains("zeros") && lower.contains("expected"),
+            "must say license zeros are expected for CLI SuperGrok: {note}"
+        );
+        assert!(
+            lower.contains("dogfood proof") || lower.contains("not dogfood"),
+            "must deny license page as dogfood proof: {note}"
+        );
+        assert!(
+            !note.contains('\u{2014}') && !note.contains('—') && !note.contains('\u{2026}'),
+            "no em dash / unicode ellipsis: {note}"
+        );
+        let notes = honesty_notes_for_limits(input_base());
+        assert!(
+            notes.iter().any(|n| n.as_str() == note),
+            "sharper license note on stack: {notes:?}"
+        );
+    }
+
+    /// Named contract (P0): doctor dogfood block names licenses not proof AND
+    /// team Usage / Grok Build class as settlement proof.
+    #[test]
+    fn doctor_dogfood_block_names_wrong_page_and_right_proof() {
+        let block = dogfood_burn_proof_doctor_block();
+        let lower = block.to_ascii_lowercase();
+        assert!(
+            lower.contains("not proof") || lower.contains("not dogfood"),
+            "must label wrong page: {block}"
+        );
+        assert!(
+            lower.contains("license")
+                && (lower.contains("messages") || lower.contains("conversations")),
+            "must name licenses page metrics: {block}"
+        );
+        assert!(
+            lower.contains("zeros") && lower.contains("expected"),
+            "must say zeros expected: {block}"
+        );
+        assert!(
+            lower.contains("team usage") || lower.contains("team postpaid"),
+            "must name team Usage / postpaid proof: {block}"
+        );
+        assert!(
+            lower.contains("grok build"),
+            "must name Grok Build class: {block}"
+        );
+        assert!(
+            lower.contains("/limits") || lower.contains("limits"),
+            "must name product limits path: {block}"
+        );
+        assert!(
+            !block.contains("xai-") && !block.contains("sk-"),
+            "must not dump secrets: {block}"
+        );
+        assert!(
+            !block.contains('\u{2014}') && !block.contains('—') && !block.contains('\u{2026}'),
+            "no em dash / unicode ellipsis: {block}"
         );
     }
 
@@ -298,7 +511,16 @@ mod tests {
             has_console_team_prepaid_reading: true,
             ..Default::default()
         });
-        assert_eq!(session, vec![expected.clone()]);
+        assert!(
+            session
+                .iter()
+                .any(|n| n.as_str() == NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER),
+            "license note first: {session:?}"
+        );
+        assert!(
+            session.iter().any(|n| n == &expected),
+            "prepaid lag on SuperGrok live: {session:?}"
+        );
 
         let console = honesty_notes_for_limits(LimitsHonestyInput {
             live: SamplingIdentityKind::ConsoleKey,
@@ -308,10 +530,17 @@ mod tests {
             has_console_team_prepaid_reading: true,
             ..Default::default()
         });
-        assert_eq!(
-            console,
-            vec![expected],
-            "console live keeps prepaid lag note only (no SuperGrok burn notes)"
+        assert!(
+            console.iter().any(|n| n == &expected),
+            "console live keeps prepaid lag note: {console:?}"
+        );
+        assert!(
+            !console
+                .iter()
+                .any(|n| n.as_str() == NOTE_INCLUDED_PCT_IS_BILLING_POLL
+                    || n.contains("included debit is unproven")
+                    || n.as_str() == NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS),
+            "console live: no SuperGrok burn notes: {console:?}"
         );
     }
 
@@ -328,7 +557,8 @@ mod tests {
     }
 
     /// Named contract: console live + flat flag still yields zero SuperGrok
-    /// honesty notes (flat note says "session path can still be live").
+    /// burn honesty notes (flat note says "session path can still be live").
+    /// License-page meter honesty may still appear (not a SuperGrok burn claim).
     #[test]
     fn console_live_with_flat_flag_emits_no_supergrok_honesty() {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
@@ -342,8 +572,18 @@ mod tests {
             has_team_default_credits_reading: false,
         });
         assert!(
-            notes.is_empty(),
+            !notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_INCLUDED_PCT_IS_BILLING_POLL
+                    || n.contains("included debit is unproven")
+                    || n.as_str() == NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS),
             "console live + flat flag must not emit SuperGrok honesty: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER),
+            "license page honesty still allowed: {notes:?}"
         );
     }
 
@@ -355,8 +595,16 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            notes.is_empty(),
+            !notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_INCLUDED_PCT_IS_BILLING_POLL),
             "no included meter → no poll note: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER),
+            "license note still present without included: {notes:?}"
         );
     }
 
@@ -367,27 +615,33 @@ mod tests {
             flat_poll_observed_extras: true,
             ..input_base()
         });
-        assert_eq!(notes.len(), 2);
-        assert_eq!(notes[0], NOTE_INCLUDED_PCT_IS_BILLING_POLL);
         assert!(
-            notes[1].contains("stayed flat"),
-            "flat note must say meters stayed flat: {}",
-            notes[1]
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER),
+            "license note present: {notes:?}"
         );
         assert!(
-            notes[1].contains("included debit is unproven"),
-            "flat note must say debit unproven: {}",
-            notes[1]
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_INCLUDED_PCT_IS_BILLING_POLL),
+            "included poll note: {notes:?}"
+        );
+        let flat = notes
+            .iter()
+            .find(|n| n.contains("stayed flat"))
+            .expect("flat note");
+        assert!(
+            flat.contains("included debit is unproven"),
+            "flat note must say debit unproven: {flat}"
         );
         assert!(
-            notes[1].contains("session path can still be live"),
-            "flat note keeps session path honest: {}",
-            notes[1]
+            flat.contains("session path can still be live"),
+            "flat note keeps session path honest: {flat}"
         );
         assert!(
-            notes[1].contains("SuperGrok $ extras"),
-            "extras observed flat must be named: {}",
-            notes[1]
+            flat.contains("SuperGrok $ extras"),
+            "extras observed flat must be named: {flat}"
         );
         assert!(
             !contains_forbidden_included_burn_claim(&notes.join("\n")),
@@ -408,7 +662,17 @@ mod tests {
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
         });
-        assert_eq!(notes, vec![flat_poll_unproven_debit_note(false, false)]);
+        let expected_flat = flat_poll_unproven_debit_note(false, false);
+        assert!(
+            notes.iter().any(|n| n == &expected_flat),
+            "flat-poll note when evidence set: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER),
+            "license note still present: {notes:?}"
+        );
     }
 
     /// Named contract (Issue 1): flat with Build never on wire must not claim
@@ -508,6 +772,15 @@ mod tests {
             "branch 2b: OAuth Usage $ must not be sold as SuperGrok included debit: {c6}"
         );
         assert!(
+            c6.contains("not SuperGrok dollar extras")
+                || c6.contains("not SuperGrok dollar extras as the live driver"),
+            "C6 must not sell settlement as SuperGrok extras: {c6}"
+        );
+        assert!(
+            c6.contains("not free SuperGrok period burn proof"),
+            "C6 must not sell settlement as free-period burn: {c6}"
+        );
+        assert!(
             !c6.contains('\u{2014}') && !c6.contains(" -- "),
             "no em dash in honesty copy: {c6}"
         );
@@ -515,9 +788,16 @@ mod tests {
             !contains_forbidden_included_burn_claim(c6),
             "C6 must not overclaim included burn"
         );
+        // Without flat-poll evidence, settlement-rise strengthen note is off.
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n == NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS),
+            "flat+settlement note needs flat evidence: {notes:?}"
+        );
     }
 
-    /// SuperGrok live + flat (all meters) + C6: three honesty notes, ordered.
+    /// SuperGrok live + flat (all meters) + C6: honesty notes ordered (license first).
     #[test]
     fn branch_2b_stack_base_flat_and_c6_when_evidence() {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
@@ -530,14 +810,32 @@ mod tests {
         assert_eq!(
             notes,
             vec![
+                NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER.to_string(),
                 NOTE_INCLUDED_PCT_IS_BILLING_POLL.to_string(),
                 flat_poll_unproven_debit_note(true, true),
                 NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS.to_string(),
+                NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS.to_string(),
             ]
         );
         assert!(
             !contains_forbidden_included_burn_claim(&notes.join("\n")),
             "2b stack must not invent SuperGrok included burn"
+        );
+        let settle = NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS;
+        assert!(
+            settle.contains("team Grok Build")
+                && (settle.contains("SuperGrok dollar extras")
+                    || settle.contains("as SuperGrok dollar extras")),
+            "settlement rise must name team class and reject SuperGrok extras label: {settle}"
+        );
+        assert!(
+            settle.contains("does not treat team settlement as SuperGrok dollar extras")
+                || settle.contains("does not treat team settlement"),
+            "must not call team settlement SuperGrok extras: {settle}"
+        );
+        assert!(
+            settle.contains("does not invent free-period debit"),
+            "must keep C4 honesty (no invent debit): {settle}"
         );
     }
 

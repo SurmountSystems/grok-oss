@@ -118,6 +118,13 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             // explanation visible to the user without triggering the client's
             // re-auth flow on -32000.
             StatusCode::FORBIDDEN => {
+                // Team credits / monthly spending limit: plain English body,
+                // not Internal error JSON envelope. Bare 403 (policy/ZDR) stays
+                // on the internal_error path with the proxy message.
+                if xai_grok_sampling_types::is_credit_exhausted_message(&message) {
+                    let plain = xai_grok_sampling_types::credit_exhausted_user_message(&message);
+                    return acp::Error::internal_error().data(plain);
+                }
                 let message = if message.contains("requires a Grok subscription")
                     && crate::agent::auth_method::has_xai_api_key_env()
                 {
@@ -503,6 +510,54 @@ mod tests {
         assert_eq!(
             acp_err.data,
             Some(serde_json::Value::String("Rate limit exceeded".into()))
+        );
+    }
+
+    /// Named contract: console team credit 403 is plain English data, not a
+    /// nested Internal error JSON envelope with only status-prefixed body.
+    #[test]
+    fn terminal_credit_exhausted_403_is_plain_english_not_internal_error_json() {
+        let team_body = "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either \
+            used all available credits or reached its monthly spending limit.";
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: team_body.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_credit_exhausted());
+        let acp_err = map_sampling_err_to_acp(err);
+        // Still internal_error code (not re-auth); data is plain string.
+        assert_eq!(acp_err.code, acp::Error::internal_error().code);
+        let data = acp_err.data.expect("credit 403 must carry operator copy");
+        match data {
+            serde_json::Value::String(s) => {
+                assert!(
+                    s.contains("used all available credits")
+                        || s.contains("monthly spending limit"),
+                    "plain team sentence: {s}"
+                );
+                assert!(!s.contains("API error (status"), "{s}");
+            }
+            other => panic!("credit 403 data must be plain string, got {other}"),
+        }
+
+        // Bare 403 policy still maps; not credit plain path requirements.
+        let bare = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        let bare_acp = map_sampling_err_to_acp(bare);
+        assert_eq!(bare_acp.code, acp::Error::internal_error().code);
+        assert_eq!(
+            bare_acp.data,
+            Some(serde_json::Value::String(
+                "Content violates usage guidelines.".into()
+            ))
         );
     }
 

@@ -5153,13 +5153,13 @@ pub fn resolve_credentials_preferring_with_supergrok_sessions(
         console_host.clone()
     };
 
+    // ExhaustedAll now sets session_identity_key to the SuperGrok recovery
+    // JWT so console team credit 403 can hop back to free SuperGrok period.
+    // Fallback: any session still with included headroom (should be rare here).
     let session_identity = order.session_identity_key.clone().or_else(|| {
-        // Keep a SuperGrok token for hop-back detection when console is
-        // primary only if some session still has included headroom (should
-        // not happen when ExhaustedAll). Prefer first live-ranked token.
         sessions
             .iter()
-            .find(|s| s.headroom.has_included_headroom())
+            .find(|s| !s.hard_expired)
             .map(|s| s.access_token.clone())
     });
 
@@ -7895,10 +7895,18 @@ reasoning_effort = "low"
             creds.failover_api_keys
         );
         assert_eq!(creds.auth_type, AuthType::ApiKey);
+        // SuperGrok recovery tail so console team credit 403 can hop back.
         assert!(
-            !creds.failover_api_keys.iter().any(|k| k == session),
-            "exhausted SuperGrok without positive extras must not stay as silent hop: {:?}",
-            creds.failover_api_keys
+            creds.failover_api_keys.iter().any(|k| k == session)
+                || creds.session_identity_key.as_deref() == Some(session),
+            "SuperGrok recovery identity required under ExhaustedAll: failover={:?} session_key={:?}",
+            creds.failover_api_keys,
+            creds.session_identity_key
+        );
+        assert_ne!(
+            creds.api_key.as_deref(),
+            Some(session),
+            "SuperGrok must not be primary when included exhausted and extras gone"
         );
         clear_all_including_durable();
         crate::auth::clear_included_billing_cache();
@@ -7968,7 +7976,8 @@ reasoning_effort = "low"
         );
     }
 
-    /// auto_use_included_limits + both SuperGrok included exhausted + no extras → console primary.
+    /// auto_use_included_limits + both SuperGrok included exhausted + no extras →
+    /// console primary with SuperGrok recovery failover (console-dead hop).
     #[test]
     #[serial_test::serial]
     fn resolve_auto_both_supergrok_exhausted_console_primary() {
@@ -8015,13 +8024,24 @@ reasoning_effort = "low"
             resolve_credentials_preferring_with_supergrok_sessions(&model, &sessions, None, true);
         assert_eq!(creds.auth_type, AuthType::ApiKey);
         assert_eq!(creds.api_key.as_deref(), Some("console-live"));
+        // SuperGrok is recovery only — not primary; still queued for console-dead hop.
+        assert_ne!(creds.api_key.as_deref(), Some("tok-p"));
+        assert_ne!(creds.api_key.as_deref(), Some("tok-b"));
         assert!(
-            !creds
+            creds
                 .failover_api_keys
                 .iter()
                 .any(|k| k.starts_with("tok-")),
-            "exhausted SuperGrok without positive extras must not queue as silent hop: {:?}",
+            "live SuperGrok recovery required under ExhaustedAll: {:?}",
             creds.failover_api_keys
+        );
+        assert!(
+            creds
+                .session_identity_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("tok-")),
+            "session identity enables console→SuperGrok host hop: {:?}",
+            creds.session_identity_key
         );
     }
 

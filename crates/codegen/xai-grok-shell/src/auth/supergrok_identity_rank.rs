@@ -10,7 +10,10 @@
 //! JWT, keep that SuperGrok session primary and put console keys only as
 //! failover (after-burner / SuperGrok $ extras before console). Hard-expired
 //! JWTs are never after-burner primary. When extras are 0 or unknown (`None`),
-//! console leads as before.
+//! console leads as primary and **live** SuperGrok JWTs stay a **recovery**
+//! failover tail (plus `session_identity_key`) so console team credit/spend
+//! 403 can hop back to free SuperGrok period. Hard-expired SuperGrok is never
+//! recovery.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -352,8 +355,10 @@ pub struct AutoSupergrokOrder {
 ///   and not hard-expired): keep that SuperGrok session primary and queue console
 ///   keys as failover only (after-burner / SuperGrok $ extras before console).
 /// - If extras are 0 or unknown, or every extras session is hard-expired: console
-///   becomes primary; SuperGrok tokens are omitted (do not invent an after-burner
-///   without a positive prepaid reading on a live JWT).
+///   becomes primary; **non-hard-expired** SuperGrok JWTs are queued as a
+///   **recovery** failover tail (not primary) so console team credit/spend 403
+///   can hop back to free SuperGrok period. Do not invent after-burner primary
+///   without a positive prepaid reading on a live JWT.
 ///
 /// `primary_is_supergrok_included` is true whenever primary is a SuperGrok session
 /// JWT (included headroom **or** $ extras after-burner) so auth type / host stay
@@ -367,12 +372,18 @@ pub struct AutoCredentialOrder {
     /// True when primary is a SuperGrok session JWT (included **or** after-burner).
     pub primary_is_supergrok_included: bool,
     pub exhausted_all_supergrok_included: bool,
-    /// Session JWT used for hop/session-host detection (first live SuperGrok,
-    /// or `None` when only console remains).
+    /// Session JWT for hop/session-host detection: first live SuperGrok with
+    /// headroom, after-burner primary, or ExhaustedAll **recovery** SuperGrok.
+    /// `None` only when no non-hard-expired SuperGrok JWT exists.
     pub session_identity_key: Option<String>,
 }
 
 /// Rank SuperGrok candidates with included headroom (sooner reset first).
+///
+/// Bounded dual SuperGrok poll hygiene: identities whose last billing poll was
+/// **auth-failed** are not treated as free-period primary. Prefer a poll-OK
+/// SuperGrok JWT (same unified pool is fine to serve via the healthy principal).
+/// Hard-expired still zero via candidate load. Does not delete `auth.json`.
 pub fn order_live_supergrok_for_auto(
     candidates: &[SupergrokSessionCandidate],
 ) -> AutoSupergrokOrder {
@@ -384,43 +395,86 @@ pub fn order_live_supergrok_for_auto(
         };
     }
 
-    let headrooms: Vec<SupergrokIdentityHeadroom> =
-        candidates.iter().map(|c| c.headroom.clone()).collect();
-    match pick_supergrok_identity_for_auto(&headrooms) {
-        PickSupergrokForAuto::NoIdentities => AutoSupergrokOrder {
-            live_tokens: Vec::new(),
-            live_identity_ids: Vec::new(),
-            exhausted_all_included: false,
-        },
-        PickSupergrokForAuto::ExhaustedAll => AutoSupergrokOrder {
-            live_tokens: Vec::new(),
-            live_identity_ids: Vec::new(),
-            exhausted_all_included: true,
-        },
-        PickSupergrokForAuto::Use { .. } => {
-            let mut live: Vec<&SupergrokSessionCandidate> = candidates
-                .iter()
-                .filter(|c| c.headroom.has_included_headroom())
-                .collect();
-            live.sort_by(|a, b| {
-                match (a.headroom.reset_at, b.headroom.reset_at) {
-                    (Some(ra), Some(rb)) => ra.cmp(&rb),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                }
-                .then_with(|| a.headroom.identity_id.cmp(&b.headroom.identity_id))
+    let auth_failed = |id: &str| super::supergrok_identity_last_poll_auth_failed(id);
+
+    // Prefer principals with free-period headroom that did **not** last auth-fail.
+    let mut live: Vec<&SupergrokSessionCandidate> = candidates
+        .iter()
+        .filter(|c| c.headroom.has_included_headroom() && !auth_failed(&c.headroom.identity_id))
+        .collect();
+
+    if live.is_empty() {
+        // Only auth-failed still "look" like headroom (stale memo / default), or
+        // nobody has headroom. Do not primary a known-dead JWT; ExhaustedAll when
+        // any candidate exists so console / recovery can run.
+        let only_auth_failed_headroom = candidates
+            .iter()
+            .any(|c| c.headroom.has_included_headroom() && auth_failed(&c.headroom.identity_id))
+            && candidates.iter().all(|c| {
+                !c.headroom.has_included_headroom() || auth_failed(&c.headroom.identity_id)
             });
-            AutoSupergrokOrder {
-                live_tokens: live.iter().map(|c| c.access_token.clone()).collect(),
-                live_identity_ids: live
-                    .iter()
-                    .map(|c| c.headroom.identity_id.clone())
-                    .collect(),
-                exhausted_all_included: false,
-            }
+        if only_auth_failed_headroom {
+            return AutoSupergrokOrder {
+                live_tokens: Vec::new(),
+                live_identity_ids: Vec::new(),
+                exhausted_all_included: true,
+            };
         }
+        // No poll outcomes / no headroom: pure pick (existing ExhaustedAll path).
+        let headrooms: Vec<SupergrokIdentityHeadroom> =
+            candidates.iter().map(|c| c.headroom.clone()).collect();
+        return match pick_supergrok_identity_for_auto(&headrooms) {
+            PickSupergrokForAuto::NoIdentities => AutoSupergrokOrder {
+                live_tokens: Vec::new(),
+                live_identity_ids: Vec::new(),
+                exhausted_all_included: false,
+            },
+            PickSupergrokForAuto::ExhaustedAll => AutoSupergrokOrder {
+                live_tokens: Vec::new(),
+                live_identity_ids: Vec::new(),
+                exhausted_all_included: true,
+            },
+            PickSupergrokForAuto::Use { .. } => {
+                // Unreachable when live was empty from headroom filter without
+                // auth-failed, but keep sort for safety if pick disagrees.
+                let mut fallback: Vec<&SupergrokSessionCandidate> = candidates
+                    .iter()
+                    .filter(|c| c.headroom.has_included_headroom())
+                    .collect();
+                sort_live_supergrok_by_reset(&mut fallback);
+                AutoSupergrokOrder {
+                    live_tokens: fallback.iter().map(|c| c.access_token.clone()).collect(),
+                    live_identity_ids: fallback
+                        .iter()
+                        .map(|c| c.headroom.identity_id.clone())
+                        .collect(),
+                    exhausted_all_included: false,
+                }
+            }
+        };
     }
+
+    sort_live_supergrok_by_reset(&mut live);
+    AutoSupergrokOrder {
+        live_tokens: live.iter().map(|c| c.access_token.clone()).collect(),
+        live_identity_ids: live
+            .iter()
+            .map(|c| c.headroom.identity_id.clone())
+            .collect(),
+        exhausted_all_included: false,
+    }
+}
+
+fn sort_live_supergrok_by_reset(live: &mut [&SupergrokSessionCandidate]) {
+    live.sort_by(|a, b| {
+        match (a.headroom.reset_at, b.headroom.reset_at) {
+            (Some(ra), Some(rb)) => ra.cmp(&rb),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| a.headroom.identity_id.cmp(&b.headroom.identity_id))
+    });
 }
 
 /// Build primary/failover for `auto_use_included_limits`.
@@ -501,19 +555,46 @@ pub fn order_credentials_for_preferred_auto(
         }
     }
 
-    // Included full and extras 0/None → console primary.
+    // Included full and extras 0/None → console primary; live SuperGrok JWT as
+    // recovery failover tail so console team credit/spend 403 can hop back to
+    // free SuperGrok period. Hard-expired SuperGrok is never recovery.
+    let recovery: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for c in sessions {
+            if c.hard_expired {
+                continue;
+            }
+            let t = c.access_token.trim();
+            if t.is_empty() || console.iter().any(|k| k == t) {
+                continue;
+            }
+            if seen.insert(t.to_owned()) {
+                out.push(t.to_owned());
+            }
+        }
+        out
+    };
+    let session_identity_key = recovery.first().cloned();
+
     let mut keys = console;
     let primary = if keys.is_empty() {
         None
     } else {
         Some(keys.remove(0))
     };
+    let mut failover = keys;
+    for t in &recovery {
+        if primary.as_ref() != Some(t) && !failover.iter().any(|k| k == t) {
+            failover.push(t.clone());
+        }
+    }
     AutoCredentialOrder {
         primary,
-        failover: keys,
+        failover,
         primary_is_supergrok_included: false,
         exhausted_all_supergrok_included: exhausted_all,
-        session_identity_key: None,
+        session_identity_key,
     }
 }
 
@@ -923,6 +1004,85 @@ mod tests {
         assert!(!order.failover.iter().any(|k| k == "console-a"));
     }
 
+    /// Named contract (console-dead recovery): when free SuperGrok period is full
+    /// and SuperGrok $ extras are not known positive, console is primary but
+    /// live SuperGrok JWTs stay a recovery failover tail + session identity so
+    /// console team credit 403 can hop back to free SuperGrok period.
+    #[test]
+    fn auto_exhausted_all_console_primary_keeps_supergrok_recovery_in_failover() {
+        let personal = cand(
+            "personal-1",
+            SupergrokAccountRole::Personal,
+            0,
+            Some(100),
+            "tok-p",
+        );
+        let business = cand(
+            "business-1",
+            SupergrokAccountRole::Business,
+            0,
+            Some(200),
+            "tok-b",
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[personal, business],
+            &["console-1".into(), "console-2".into()],
+        );
+        assert_eq!(order.primary.as_deref(), Some("console-1"));
+        assert!(!order.primary_is_supergrok_included);
+        assert!(order.exhausted_all_supergrok_included);
+        // Remaining console first, then SuperGrok recovery tail.
+        assert_eq!(
+            order.failover.first().map(String::as_str),
+            Some("console-2")
+        );
+        assert!(
+            order.failover.iter().any(|k| k == "tok-p"),
+            "SuperGrok recovery must stay in failover: {:?}",
+            order.failover
+        );
+        assert!(
+            order.failover.iter().any(|k| k == "tok-b"),
+            "sibling SuperGrok recovery must stay in failover: {:?}",
+            order.failover
+        );
+        assert_eq!(
+            order.session_identity_key.as_deref(),
+            Some("tok-p"),
+            "session identity key enables console→SuperGrok host/bearer hop"
+        );
+        // Exhausted SuperGrok tokens without positive extras must not lead.
+        assert_ne!(order.primary.as_deref(), Some("tok-p"));
+        assert_ne!(order.primary.as_deref(), Some("tok-b"));
+    }
+
+    /// Hard-expired SuperGrok JWT must not be recovery under ExhaustedAll.
+    #[test]
+    fn auto_exhausted_all_hard_expired_supergrok_not_recovery() {
+        let dead = cand_full(
+            "team-dead",
+            SupergrokAccountRole::Business,
+            0,
+            Some(1_000),
+            "tok-hard-expired",
+            None,
+            true,
+        );
+        let order = order_credentials_for_preferred_auto(&[dead], &["console-live-key".into()]);
+        assert_eq!(order.primary.as_deref(), Some("console-live-key"));
+        assert!(!order.primary_is_supergrok_included);
+        assert!(
+            !order.failover.iter().any(|k| k == "tok-hard-expired"),
+            "hard-expired SuperGrok must not be recovery: {:?}",
+            order.failover
+        );
+        assert!(
+            order.session_identity_key.is_none(),
+            "no session identity when only hard-expired SuperGrok exists"
+        );
+    }
+
+    /// Legacy name: Design A still keeps SuperGrok off primary under ExhaustedAll.
     #[test]
     fn auto_both_included_exhausted_console_primary_no_supergrok_primary() {
         let personal = cand(
@@ -946,14 +1106,10 @@ mod tests {
         assert_eq!(order.primary.as_deref(), Some("console-1"));
         assert!(!order.primary_is_supergrok_included);
         assert!(order.exhausted_all_supergrok_included);
-        assert_eq!(order.failover, vec!["console-2".to_string()]);
-        assert!(
-            order.session_identity_key.is_none(),
-            "do not keep SuperGrok session as hop identity when both included exhausted"
-        );
-        // Exhausted SuperGrok tokens without positive extras must not lead.
+        // SuperGrok is recovery only — never primary under ExhaustedAll.
         assert_ne!(order.primary.as_deref(), Some("tok-p"));
         assert_ne!(order.primary.as_deref(), Some("tok-b"));
+        assert!(order.session_identity_key.is_some());
     }
 
     #[test]
@@ -1148,7 +1304,8 @@ mod tests {
         assert!(order.failover.iter().any(|k| k == "console-k"));
     }
 
-    /// Included full and extras 0 or unknown → console primary.
+    /// Included full and extras 0 or unknown → console primary (not SuperGrok
+    /// after-burner primary). Live SuperGrok stays recovery-only in failover.
     #[test]
     fn auto_after_included_and_extras_gone_console_primary() {
         let zero_extras = cand_with_extras(
@@ -1164,10 +1321,19 @@ mod tests {
         assert_eq!(order_zero.primary.as_deref(), Some("console-key"));
         assert!(!order_zero.primary_is_supergrok_included);
         assert!(order_zero.exhausted_all_supergrok_included);
+        assert_ne!(
+            order_zero.primary.as_deref(),
+            Some("tok-supergrok"),
+            "prepaid 0 must not invent SuperGrok after-burner primary"
+        );
         assert!(
-            !order_zero.failover.iter().any(|k| k == "tok-supergrok"),
-            "no SuperGrok silent extras hop when prepaid is 0: {:?}",
+            order_zero.failover.iter().any(|k| k == "tok-supergrok"),
+            "SuperGrok recovery tail required for console-dead hop: {:?}",
             order_zero.failover
+        );
+        assert_eq!(
+            order_zero.session_identity_key.as_deref(),
+            Some("tok-supergrok")
         );
 
         let unknown_extras = cand(
@@ -1186,6 +1352,15 @@ mod tests {
             "honest absence of extras → console primary (do not invent after-burner)"
         );
         assert!(!order_none.primary_is_supergrok_included);
+        assert!(
+            order_none.failover.iter().any(|k| k == "tok-supergrok"),
+            "unknown extras still keep SuperGrok as recovery: {:?}",
+            order_none.failover
+        );
+        assert_eq!(
+            order_none.session_identity_key.as_deref(),
+            Some("tok-supergrok")
+        );
     }
 
     #[test]
@@ -1375,6 +1550,56 @@ mod tests {
             clear.is_empty(),
             "no clear list without live free-period headroom"
         );
+    }
+
+    /// Named contract: free-period-first rank prefers poll-OK SuperGrok over
+    /// auth-failed identity that still shows default/stale headroom.
+    #[test]
+    #[serial_test::serial]
+    fn order_live_prefers_poll_ok_supergrok_over_auth_failed() {
+        use crate::auth::{
+            clear_included_billing_cache, remember_supergrok_billing_poll_failed,
+            remember_supergrok_billing_poll_ok,
+        };
+
+        clear_included_billing_cache();
+        // Personal JWT dead; business polled OK (same unified pool OK via business).
+        remember_supergrok_billing_poll_failed(
+            "user-personal-dead",
+            "Billing service error: no auth context",
+        );
+        remember_supergrok_billing_poll_ok("team-business-live");
+
+        let candidates = vec![
+            cand(
+                "user-personal-dead",
+                SupergrokAccountRole::Personal,
+                94, // stale-looking headroom (must not win primary)
+                Some(1_000),
+                "tok-personal-dead",
+            ),
+            cand(
+                "team-business-live",
+                SupergrokAccountRole::Business,
+                90,
+                Some(5_000), // later reset — would lose pure reset sort
+                "tok-business-live",
+            ),
+        ];
+        let order = order_live_supergrok_for_auto(&candidates);
+        assert_eq!(
+            order.live_identity_ids.first().map(String::as_str),
+            Some("team-business-live"),
+            "poll-OK business must primary over auth-failed personal; got {order:?}"
+        );
+        assert!(
+            !order
+                .live_identity_ids
+                .iter()
+                .any(|id| id == "user-personal-dead"),
+            "auth-failed personal must not be in free-period live list: {order:?}"
+        );
+        clear_included_billing_cache();
     }
 
     /// Named contract (period reset): prior exhaust memo + live free SuperGrok

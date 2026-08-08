@@ -660,7 +660,8 @@ pub(in crate::app::dispatch) fn set_resume_canceled_turn_on_restart(
     }]
 }
 
-/// Persist a Token Economy boolean; live code re-reads from disk.
+/// Persist a Token Economy boolean; updates the process live cache immediately
+/// (optimistic) and emits [`Effect::PersistSetting`] for disk.
 pub(in crate::app::dispatch) fn set_token_economy_bool(
     app: &mut AppView,
     field: &'static str,
@@ -671,6 +672,7 @@ pub(in crate::app::dispatch) fn set_token_economy_bool(
     if prev == new {
         return vec![];
     }
+    xai_grok_shell::token_economy::set_token_economy_live_bool(field, new);
     refresh_open_settings_modals(app);
     app.show_toast(&save_success_toast(&token_economy_label(field), new));
     vec![Effect::PersistSetting {
@@ -680,7 +682,8 @@ pub(in crate::app::dispatch) fn set_token_economy_bool(
     }]
 }
 
-/// Persist a Token Economy integer effort knob; live code re-reads from disk.
+/// Persist a Token Economy integer effort knob; updates the process live cache
+/// immediately (optimistic) and emits [`Effect::PersistSetting`] for disk.
 pub(in crate::app::dispatch) fn set_token_economy_int(
     app: &mut AppView,
     field: &'static str,
@@ -691,6 +694,7 @@ pub(in crate::app::dispatch) fn set_token_economy_int(
     if prev == new {
         return vec![];
     }
+    xai_grok_shell::token_economy::set_token_economy_live_int(field, new);
     refresh_open_settings_modals(app);
     app.show_toast(&format!("\u{2713} {}: {new}", token_economy_label(field)));
     vec![Effect::PersistSetting {

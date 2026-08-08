@@ -224,6 +224,41 @@ impl AgentView {
             }
         }
     }
+
+    /// Soft-park auto-opens the plan side panel and freezes its body in the
+    /// line viewer. While FileBacked approval stays parked, rewrites to session
+    /// `plan.md` must rebuild that open panel (not only on `/view-plan` reopen).
+    ///
+    /// No-op when approval is not FileBacked, the plan viewer is closed, or
+    /// disk is missing/unreadable (snapshot fallback stays).
+    fn refresh_open_file_backed_plan_panel_if_stale(&mut self) {
+        let is_file_backed = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| p.source == PlanReviewSource::FileBacked);
+        if !is_file_backed || !self.is_plan_viewer() {
+            return;
+        }
+        let Some(disk) = self.read_plan_file_body() else {
+            return;
+        };
+        // Production path: use public feedback accessor (test-only helper is cfg(test)).
+        let viewer_matches = self
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_feedback())
+            .is_some_and(|body| body == disk);
+        if viewer_matches {
+            // Body already current; still sync plan_content for comment anchors.
+            self.refresh_file_backed_plan_from_disk();
+            return;
+        }
+        // Rebuild from live disk (also refreshes plan_content via show path).
+        self.show_plan_preview();
+        if let Some(ref mut viewer) = self.line_viewer {
+            viewer.plan_mut().feedback_active = true;
+        }
+    }
     /// Open the plan preview when content exists, or when plan approval is
     /// parked with an empty body (so the decision surface always pops).
     pub(crate) fn show_plan_preview_if_available(&mut self) {
@@ -296,7 +331,11 @@ impl AgentView {
     /// flags while `plan_approval_view` is still live (or the reverse). Call
     /// this every draw before painting so Approve/Notes/Clarify/Revise/Quit
     /// never silently degrade to casual `c comment` while approval is pending.
+    ///
+    /// Also re-reads FileBacked session `plan.md` into an already-open panel
+    /// when disk diverged after soft-park (park-time snapshot freeze).
     pub(crate) fn sync_plan_viewer_approval_chrome(&mut self) {
+        self.refresh_open_file_backed_plan_panel_if_stale();
         let approval = self.plan_approval_view.is_some();
         let Some(viewer) = self.line_viewer.as_mut() else {
             return;
@@ -357,6 +396,9 @@ impl AgentView {
         self.casual_commenting_range = Some(0..1);
     }
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
+        // FileBacked SoT: re-read plan.md before formatting review comments so
+        // approve Interject quotes the live disk body, not park-time freeze.
+        self.refresh_file_backed_plan_from_disk();
         // Flush composer drafts before taking the view so mouse/`a` approve
         // does not swallow an unsaved line comment or freeform note.
         // Mirrors question-view submit_question_answers → swap_question_freeform.
@@ -554,6 +596,8 @@ impl AgentView {
     }
 
     pub(crate) fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
+        // FileBacked SoT: re-read plan.md so revise line anchors match disk.
+        self.refresh_file_backed_plan_from_disk();
         let selection = self.plan_selection_for_feedback();
         // Drain screenshots before restore so they ride with revise (P3).
         let images = self.prompt.drain_images();
@@ -605,6 +649,8 @@ impl AgentView {
 
     /// Submit a clarifying question (ACP `"questions"`) — not a plan rewrite.
     pub(crate) fn send_plan_questions(&mut self, feedback: Option<String>) -> InputOutcome {
+        // FileBacked SoT: re-read plan.md so clarify line anchors match disk.
+        self.refresh_file_backed_plan_from_disk();
         let selection = self.plan_selection_for_feedback();
         // Drain screenshots before restore so they ride with clarify (P3).
         let images = self.prompt.drain_images();
@@ -1968,6 +2014,152 @@ mod approve_plan_flush_tests {
             refreshed.contains("Plan B"),
             "open must refresh plan_content from disk for comment anchors; got {refreshed:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&session_dir);
+    }
+
+    /// Named contract: soft-park auto-opens the plan panel with park-time body.
+    /// While approval stays parked, a disk rewrite must update the **already
+    /// open** panel on paint sync (`sync_plan_viewer_approval_chrome`), not
+    /// only after a manual `/view-plan` reopen.
+    #[test]
+    fn file_backed_open_panel_live_refreshes_on_paint_after_disk_rewrite() {
+        let mut agent = make_agent();
+        let session_id = format!(
+            "plan-sot-open-panel-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let cwd = "/tmp";
+        agent.session.session_id = Some(agent_client_protocol::SessionId::new(session_id.clone()));
+        agent.session.cwd = std::path::PathBuf::from(cwd);
+
+        let plan_path = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(urlencoding::encode(cwd).as_ref())
+            .join(&session_id)
+            .join("plan.md");
+        let session_dir = plan_path
+            .parent()
+            .expect("plan.md has a parent")
+            .to_path_buf();
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let content_a = "# Plan A open freeze\n\nold_token_economy_marker\n";
+        let content_b = "# Plan B open live\n\nsurmount_team_usage_first\n";
+        std::fs::write(&plan_path, content_a).expect("seed A");
+
+        let _rx = install_plan_approval(&mut agent, content_a);
+        agent.plan_approval_view.as_mut().unwrap().source = PlanReviewSource::FileBacked;
+        agent.show_plan_preview();
+        let shown_a = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .expect("panel open with A")
+            .to_owned();
+        assert!(
+            shown_a.contains("old_token_economy_marker"),
+            "precondition: open panel shows park body A; got {shown_a:?}"
+        );
+
+        std::fs::write(&plan_path, content_b).expect("rewrite B while panel stays open");
+
+        // Paint path only (no reopen / show_plan_preview).
+        agent.sync_plan_viewer_approval_chrome();
+        let shown_b = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .expect("panel still open after paint sync");
+        assert!(
+            shown_b.contains("surmount_team_usage_first") && shown_b.contains("Plan B open live"),
+            "open panel must live-refresh to disk B on paint; got {shown_b:?}"
+        );
+        assert!(
+            !shown_b.contains("old_token_economy_marker"),
+            "open panel must drop frozen A; got {shown_b:?}"
+        );
+        let refreshed = agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|p| p.plan_content.as_deref())
+            .expect("plan_content present");
+        assert!(
+            refreshed.contains("surmount_team_usage_first"),
+            "paint sync must refresh plan_content for anchors; got {refreshed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&session_dir);
+    }
+
+    /// Named contract: approve Interject line quotes use live disk plan.md for
+    /// FileBacked approval, not the reverse-request snapshot frozen at park.
+    #[test]
+    fn file_backed_approve_interject_quotes_disk_body_after_rewrite() {
+        let mut agent = make_agent();
+        let session_id = format!(
+            "plan-sot-approve-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let cwd = "/tmp";
+        agent.session.session_id = Some(agent_client_protocol::SessionId::new(session_id.clone()));
+        agent.session.cwd = std::path::PathBuf::from(cwd);
+
+        let plan_path = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(urlencoding::encode(cwd).as_ref())
+            .join(&session_id)
+            .join("plan.md");
+        let session_dir = plan_path
+            .parent()
+            .expect("plan.md has a parent")
+            .to_path_buf();
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let content_a = "# Plan A freeze\nold_token_economy_marker\n";
+        let content_b = "# Plan B live\nsurmount_team_usage_first\n";
+        std::fs::write(&plan_path, content_a).expect("seed A");
+
+        let rx = install_plan_approval(&mut agent, content_a);
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.source = PlanReviewSource::FileBacked;
+            pav.comments.push(PlanComment {
+                id: 0,
+                line_range: 2..3,
+                text: "prefer the exclusive priority title".into(),
+            });
+            pav.next_comment_id = 1;
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+
+        std::fs::write(&plan_path, content_b).expect("rewrite B before approve");
+
+        let outcome = agent.approve_plan();
+        assert_outcome_approved(rx);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains("surmount_team_usage_first"),
+                    "approve Interject must quote live disk line B; got {text:?}"
+                );
+                assert!(
+                    !text.contains("old_token_economy_marker"),
+                    "approve Interject must not quote frozen park snapshot A; got {text:?}"
+                );
+                assert!(
+                    text.contains("prefer the exclusive priority title"),
+                    "approve Interject must keep the user comment; got {text:?}"
+                );
+            }
+            other => panic!("expected Interject with disk-backed quotes, got {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&session_dir);
     }

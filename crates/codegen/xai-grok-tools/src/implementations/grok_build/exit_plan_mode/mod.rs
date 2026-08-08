@@ -166,7 +166,15 @@ impl xai_tool_runtime::Tool for ExitPlanModeTool {
                     "Exiting plan mode with plan content"
                 );
 
-                let message = "Your plan has been approved. You can now start coding.".to_owned();
+                // Body is always re-read from disk in this tool run (after the
+                // user approves). Tell the model to prefer this body over older
+                // draft titles that may still appear earlier in the conversation.
+                let message = format!(
+                    "Your plan has been approved. You can now start coding. \
+                     Implement the plan file at {plan_file_path}. The plan body \
+                     below was re-read from disk at approval time; use it rather \
+                     than earlier draft plan titles in this conversation."
+                );
 
                 Ok(ExitPlanModeOutput::PlanReady {
                     message,
@@ -258,13 +266,80 @@ mod tests {
             } => {
                 assert!(message.contains("plan has been approved"));
                 assert!(message.contains("start coding"));
+                assert!(
+                    message.contains("re-read from disk at approval time"),
+                    "agent handoff must name disk re-read; got {message:?}"
+                );
                 assert!(plan_content.contains("Do thing A"));
                 assert!(plan_content.contains("Do thing B"));
                 // Cwd fallback now displays the resolved absolute path (shared resolver).
                 assert!(plan_file_path.ends_with(".grok/plan.md"));
+                assert!(
+                    message.contains(plan_file_path.as_str()) || message.contains(".grok/plan.md"),
+                    "message must point at plan file path; got {message:?}"
+                );
             }
             other => panic!("Expected PlanReady, got {:?}", other),
         }
+    }
+
+    /// Named contract: tool body is read at run time (post-approve). A rewrite
+    /// of plan.md between an earlier park snapshot and tool execution must
+    /// surface the new body in the model-facing result, not a frozen A.
+    #[tokio::test]
+    async fn exit_plan_mode_reads_current_disk_not_earlier_draft() {
+        let tmp = TempDir::new().unwrap();
+        let plan_dir = tmp.path().join(".grok");
+        std::fs::create_dir_all(&plan_dir).unwrap();
+        let plan_path = plan_dir.join("plan.md");
+        std::fs::write(&plan_path, "# Plan A\nold_token_economy_marker\n").unwrap();
+
+        // Simulate rewrite while approval was parked (before tool runs).
+        std::fs::write(&plan_path, "# Plan B\nsurmount_team_usage_first\n").unwrap();
+
+        let resources = resources_with_cwd(tmp.path());
+        let shared = resources.into_shared();
+        let tool = ExitPlanModeTool;
+
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx_with_call_id(shared, "test-call"),
+            ExitPlanModeInput {},
+        )
+        .await
+        .unwrap();
+
+        match &result {
+            ExitPlanModeOutput::PlanReady {
+                plan_content,
+                message,
+                ..
+            } => {
+                assert!(
+                    plan_content.contains("surmount_team_usage_first"),
+                    "tool must re-read disk B at run time; got {plan_content:?}"
+                );
+                assert!(
+                    !plan_content.contains("old_token_economy_marker"),
+                    "tool must not return frozen draft A; got {plan_content:?}"
+                );
+                assert!(
+                    message.contains("re-read from disk at approval time"),
+                    "model must be told body is post-approve disk; got {message:?}"
+                );
+            }
+            other => panic!("Expected PlanReady, got {other:?}"),
+        }
+        let prompt: ToolOutput = result.into();
+        let text = prompt.to_prompt_format();
+        assert!(
+            text.contains("surmount_team_usage_first"),
+            "model prompt must embed current disk plan; got {text:?}"
+        );
+        assert!(
+            !text.contains("old_token_economy_marker"),
+            "model prompt must not embed frozen draft A; got {text:?}"
+        );
     }
 
     #[tokio::test]
@@ -396,6 +471,7 @@ mod tests {
         let prompt = output.to_prompt_format();
         assert!(prompt.contains("plan has been approved"));
         assert!(prompt.contains("saved at:"));
+        assert!(prompt.contains("re-read from disk at approval time"));
         assert!(prompt.contains("Step 1"));
         assert!(prompt.contains("Step 2"));
         assert!(prompt.contains(".grok/plan.md"));

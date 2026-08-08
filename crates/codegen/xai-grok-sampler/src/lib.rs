@@ -56,6 +56,7 @@ pub use exhausted_identity::{
 pub use handle::SamplerHandle;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use prefer_live_primary::{
+    ensure_supergrok_recovery_after_console_credit_exhaust,
     prefer_live_identity_after_credit_exhaust, primary_is_memoized_credit_exhausted,
     prune_exhausted_failover_candidates,
 };

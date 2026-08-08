@@ -100,6 +100,12 @@ fn write_report(
         let home = xai_grok_shell::util::grok_home::grok_home();
         let status = xai_grok_shell::auth::collect_dual_auth_status(&home);
         write!(writer, "\n{}", status.format_human())?;
+        // Wrong browser page vs right dogfood proof (license zeros expected).
+        write!(
+            writer,
+            "\n{}",
+            crate::views::limits_honesty::dogfood_burn_proof_doctor_block()
+        )?;
         Ok(())
     }
 }

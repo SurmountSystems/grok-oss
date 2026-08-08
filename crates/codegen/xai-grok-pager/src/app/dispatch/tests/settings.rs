@@ -384,6 +384,7 @@ fn set_resume_canceled_turn_on_restart_persists_and_updates_ui() {
 #[test]
 fn set_token_economy_bool_emits_persist_setting() {
     use crate::settings::SettingValue;
+    xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
     let mut app = test_app_with_agent();
     let effects = dispatch(
         Action::SetTokenEconomyBool {
@@ -1007,6 +1008,10 @@ fn dispatch_open_reset_confirm_no_op_in_release_when_no_settings_modal() {
 fn every_setting_has_action_for_reset_arm() {
     use crate::settings::current_value_for;
     with_theme_test_env(|| {
+        // Pin Token Economy live cache to product defaults so a developer
+        // `$GROK_HOME` (e.g. min_implement_effort = 2) cannot poison the
+        // move-away → reset round-trip.
+        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
         let reg = crate::settings::SettingsRegistry::defaults();
         for meta in reg.all() {
             if matches!(meta.kind, crate::settings::SettingKind::Group { .. }) {

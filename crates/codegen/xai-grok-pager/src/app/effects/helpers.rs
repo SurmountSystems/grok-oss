@@ -1739,6 +1739,26 @@ pub(super) async fn fetch_console_team_postpaid_into_process_cache() {
     }
     let _ = xai_grok_shell::auth::fetch_console_team_postpaid_preview_default().await;
 }
+
+/// Live-call Management team usage series (POST analytics) into process cache.
+///
+/// No return value: `/limits` rebuilds from
+/// [`xai_grok_shell::auth::cached_console_team_usage_series_default`]. Process
+/// TTL is honored unless explicit limits open/collect cleared caches first.
+/// No-op when management key is absent (pure gate
+/// [`crate::limits_cmd::should_live_fetch_console_team_usage_series_with_billing`]).
+/// Same practical path as prepaid/postpaid on background `FetchBilling`.
+pub(super) async fn fetch_console_team_usage_series_into_process_cache() {
+    if !crate::limits_cmd::should_live_fetch_console_team_usage_series_with_billing(
+        xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
+    ) {
+        return;
+    }
+    let _ = xai_grok_shell::auth::fetch_console_team_usage_series_default(
+        xai_grok_shell::auth::USAGE_SERIES_DEFAULT_DAY_WINDOW,
+    )
+    .await;
+}
 /// Fetch the user's auto top-up rule via the `x.ai/auto-topup-rule` extension.
 /// A transport failure yields [`AutoTopupFetch::Unchanged`] so the caller keeps
 /// any cached rule rather than treating the blip as "no auto top-up".

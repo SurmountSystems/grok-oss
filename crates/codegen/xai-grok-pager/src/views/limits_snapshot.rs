@@ -20,6 +20,35 @@ use super::credit_bar::{
     AutoTopupInfo, ConsoleTeamPrepaidGap, CreditBalance, SamplingIdentityKind,
 };
 
+/// Where a SuperGrok free-period included % reading came from.
+///
+/// Keeps dual unified fill honest: a filled row is not a successful poll of
+/// that principal's JWT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IncludedSource {
+    /// Not known (cold single-login / no reading).
+    #[default]
+    Unknown,
+    /// Credits poll succeeded for this principal this run / active cache.
+    LivePoll,
+    /// Process included-billing cache (sibling remember), not a fill copy.
+    ProcessCache,
+    /// Copied from sibling under unified SuperGrok pool fill.
+    SharedPoolFill,
+}
+
+impl IncludedSource {
+    /// Wire value for `limits --json` (`includedSource`).
+    pub fn as_wire(self) -> Option<&'static str> {
+        match self {
+            Self::Unknown => None,
+            Self::LivePoll => Some("live_poll"),
+            Self::ProcessCache => Some("process_cache"),
+            Self::SharedPoolFill => Some("shared_pool_fill"),
+        }
+    }
+}
+
 /// One SuperGrok principal's meters (personal and/or business).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrincipalLimitsSlot {
@@ -35,6 +64,14 @@ pub struct PrincipalLimitsSlot {
     /// Grok Build `productUsage` % when observed on a credits poll for this
     /// principal. `None` when not on wire / sibling cache-only.
     pub grok_build_usage_pct: Option<f64>,
+    /// True when this principal's JWT polled credits successfully this run
+    /// (or active path known OK). False when poll failed or slot was only
+    /// filled from the shared pool / cold.
+    pub poll_succeeded: bool,
+    /// Provenance for the free SuperGrok period included % on this row.
+    pub included_source: IncludedSource,
+    /// Short poll fail class when known (`auth`, `network`, `other`).
+    pub poll_error_class: Option<&'static str>,
 }
 
 /// SuperGrok included allowance (not dollar extras, not console).
@@ -306,7 +343,7 @@ pub struct LimitsSnapshot {
 }
 
 /// One SuperGrok principal input for multi-principal `/limits` build.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PrincipalLimitsInput {
     /// Section title, e.g. `"SuperGrok (personal)"`.
     pub label: String,
@@ -320,6 +357,11 @@ pub struct PrincipalLimitsInput {
     /// included-billing cache (sibling poll). Prepaid / on-demand extras were
     /// not observed — do not render "none on file".
     pub included_billing_only: bool,
+    /// Live credits poll succeeded for this principal this collect. `None` =
+    /// unknown (legacy callers); `Some(false)` = failed; `Some(true)` = OK.
+    pub poll_succeeded: Option<bool>,
+    /// Short fail class when poll failed (`auth`, `network`, `other`).
+    pub poll_error_class: Option<&'static str>,
 }
 
 impl LimitsSnapshot {
@@ -341,6 +383,11 @@ impl LimitsSnapshot {
             ),
             None => (None, None),
         };
+        let included_source = if included.is_some() {
+            IncludedSource::LivePoll
+        } else {
+            IncludedSource::Unknown
+        };
         Self {
             live_identity,
             live_principal_label: None,
@@ -351,6 +398,9 @@ impl LimitsSnapshot {
                 // Single-login path: full billing cache or cold "none on file".
                 dollar_extras_observed: true,
                 grok_build_usage_pct: balance.and_then(|b| b.grok_build_usage_pct),
+                poll_succeeded: balance.is_some(),
+                included_source,
+                poll_error_class: None,
             },
             extra_principals: Vec::new(),
             console: ConsoleMeter {
@@ -467,30 +517,48 @@ impl LimitsSnapshot {
         let mut slots: Vec<PrincipalLimitsSlot> = principals
             .iter()
             .map(|p| {
-                let (included, dollar_extras, dollar_extras_observed) = match p.balance.as_ref() {
+                let (included, dollar_extras, dollar_extras_observed, included_source) = match p
+                    .balance
+                    .as_ref()
+                {
                     Some(bal) if p.included_billing_only => {
                         // Sibling process-cache path: included from remember.
                         // Dollar extras only when prepaidBalance was observed
                         // on this principal's credits poll (not invented).
                         let extras = dollar_extras_from_balance(bal, p.autotopup.as_ref());
                         let extras_observed = bal.prepaid_balance_cents.is_some();
-                        (Some(included_from_balance(bal)), extras, extras_observed)
+                        (
+                            Some(included_from_balance(bal)),
+                            extras,
+                            extras_observed,
+                            IncludedSource::ProcessCache,
+                        )
                     }
                     Some(bal) => (
                         Some(included_from_balance(bal)),
                         dollar_extras_from_balance(bal, p.autotopup.as_ref()),
                         true,
+                        IncludedSource::LivePoll,
                     ),
                     // included_billing_only with no % yet still means extras unobserved.
-                    None if p.included_billing_only => (None, None, false),
-                    None => (None, None, true),
+                    None if p.included_billing_only => (None, None, false, IncludedSource::Unknown),
+                    None => (None, None, true, IncludedSource::Unknown),
                 };
+                let poll_succeeded = p.poll_succeeded.unwrap_or_else(|| {
+                    // Legacy callers: balance present and not process-cache-only
+                    // implies live poll; included_billing_only without explicit
+                    // flag stays false (cache path).
+                    p.balance.is_some() && !p.included_billing_only
+                });
                 PrincipalLimitsSlot {
                     label: p.label.clone(),
                     included,
                     dollar_extras,
                     dollar_extras_observed,
                     grok_build_usage_pct: p.balance.as_ref().and_then(|b| b.grok_build_usage_pct),
+                    poll_succeeded,
+                    included_source,
+                    poll_error_class: p.poll_error_class,
                 }
             })
             .collect();
@@ -504,11 +572,16 @@ impl LimitsSnapshot {
                 .map(str::to_owned)
                 .or_else(|| principals.first().and_then(|p| p.role_label.clone()))
         };
+        // Shared pool: wire unified flag and/or matching live_poll successes.
+        // Do not invent "shared pool" solely from fill onto a failed principal
+        // without any successful live reading (dual_principals helper already
+        // requires known balances or wire flag).
         let shared_unified_supergrok_pool =
             principals.len() >= 2 && dual_principals_share_unified_supergrok_pool(principals);
         // Unified pool + sibling never polled: show the same included reading
         // (honest same pool), not forever-empty personal/business rows. Dollar
         // extras stay unobserved until that principal's full billing is seen.
+        // Filled slots get included_source = SharedPoolFill (not live_poll).
         let (primary, slots) = if shared_unified_supergrok_pool {
             let (primary, slots) = fill_unified_included_on_empty_slots(primary, slots);
             // Same Extra Usage Credits pool under unified billing: when any
@@ -551,6 +624,31 @@ impl LimitsSnapshot {
             (SamplingIdentityKind::ConsoleKey, _) => "Live sampling: console key".into(),
         }
     }
+}
+
+/// **Active:** line for human `/limits` (same Design A driver as status chrome).
+///
+/// Names free SuperGrok period, SuperGrok extras after-burner, or console key.
+/// Does not name team Grok Build settlement or console team prepaid as the
+/// active driver (those stay distinct meters below).
+pub fn active_driver_line_for_snapshot(snap: &LimitsSnapshot) -> String {
+    use super::credit_bar::active_spend_driver;
+
+    let included_known = snap.primary.included.is_some();
+    let included_pct = snap
+        .primary
+        .included
+        .as_ref()
+        .map(|i| i.used_pct)
+        .unwrap_or(0.0);
+    let extras_cents = snap.primary.dollar_extras.as_ref().map(|d| d.balance_cents);
+    let driver = active_spend_driver(
+        snap.live_identity,
+        included_known,
+        included_pct,
+        extras_cents,
+    );
+    format!("Active: {}", driver.as_human())
 }
 
 fn included_from_balance(bal: &CreditBalance) -> IncludedAllowanceMeter {
@@ -706,6 +804,9 @@ fn fill_unified_included_on_empty_slots(
     };
     if primary.included.is_none() {
         primary.included = Some(inc.clone());
+        primary.included_source = IncludedSource::SharedPoolFill;
+        // Fill is not a successful poll of this JWT.
+        primary.poll_succeeded = false;
         // Included fill alone does not observe dollar extras.
         if primary.dollar_extras.is_none() {
             primary.dollar_extras_observed = false;
@@ -714,6 +815,8 @@ fn fill_unified_included_on_empty_slots(
     for slot in &mut extras {
         if slot.included.is_none() {
             slot.included = Some(inc.clone());
+            slot.included_source = IncludedSource::SharedPoolFill;
+            slot.poll_succeeded = false;
             if slot.dollar_extras.is_none() {
                 slot.dollar_extras_observed = false;
             }
@@ -780,11 +883,13 @@ fn fill_unified_dollar_extras_on_empty_slots(
 /// Multi-line `/limits` body. Pure; hermetic fixtures only.
 ///
 /// No body title: modal chrome already shows **Limits** (double title was a
-/// dogfood pain). First line is live sampling.
+/// dogfood pain). First line is live sampling; second is **Active:** driver
+/// (free SuperGrok period | SuperGrok extras | console key).
 pub fn format_limits_detail(snap: &LimitsSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     lines.push(snap.live_sampling_line());
+    lines.push(active_driver_line_for_snapshot(snap));
     if snap.shared_unified_supergrok_pool {
         // Dogfood: dual rows both at e.g. 62% looked like a client mirror bug.
         // One short line only — no lecture wall. Extra Usage Credits (dollar
@@ -795,10 +900,11 @@ Extra Usage Credits (not console team prepaid)."
                 .to_string(),
         );
     }
-    // Slice 3 honesty: included % is poll reading, not proven burn; optional
-    // flat-poll note when caller set evidence on the snapshot.
-    for note in honesty_notes_for_snapshot(snap) {
-        lines.push(note.to_string());
+    // Dual poll honesty: name which principal failed and which rows are
+    // shared-pool fill (not live_poll). Keep near the top so operators see
+    // trust caveats on the meters they are about to read. Not debug-only.
+    for note in dual_poll_honesty_notes(snap) {
+        lines.push(note);
     }
     lines.push(String::new());
 
@@ -812,6 +918,15 @@ Extra Usage Credits (not console team prepaid)."
 
     lines.push(String::new());
     format_console(&mut lines, &snap.console);
+
+    // Longer honesty notes after meters (not before). Always-on license-page
+    // and poll-reading notes wrap to many TUI rows; putting them first buried
+    // SuperGrok included % + remaining bar under the fold on typical heights.
+    // CLI `grok limits` keeps the same order: meters first, caveats second.
+    for note in honesty_notes_for_snapshot(snap) {
+        lines.push(String::new());
+        lines.push(note.to_string());
+    }
 
     // Double-entry spend summary (local vs Management); full view is /spend.
     lines.push(String::new());
@@ -895,6 +1010,47 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         has_console_team_prepaid_reading: snap.console.balance_cents.is_some(),
         has_team_default_credits_reading: has_team_default_credits,
     })
+}
+
+/// Dual SuperGrok poll-fail + shared-pool fill notes (human `/limits` body
+/// and `limits --json` notes).
+///
+/// Role primary. Not debug-only. Fail note only when a poll error class is
+/// known; fill note when included % is shared-pool fill.
+pub fn dual_poll_honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
+    dual_poll_honesty_notes(snap)
+}
+
+fn dual_poll_honesty_notes(snap: &LimitsSnapshot) -> Vec<String> {
+    use super::limits_honesty::{
+        note_dual_principal_billing_failed, note_shared_pool_fill_not_live_poll,
+    };
+
+    let mut notes = Vec::new();
+    let mut seen_fail = std::collections::BTreeSet::new();
+    let mut seen_fill = std::collections::BTreeSet::new();
+    for slot in std::iter::once(&snap.primary).chain(snap.extra_principals.iter()) {
+        let role = role_from_principal_label(&slot.label);
+        if !slot.poll_succeeded
+            && slot.poll_error_class.is_some()
+            && seen_fail.insert(role.to_owned())
+        {
+            notes.push(note_dual_principal_billing_failed(role));
+        }
+        if slot.included_source == IncludedSource::SharedPoolFill
+            && seen_fill.insert(role.to_owned())
+        {
+            notes.push(note_shared_pool_fill_not_live_poll(role));
+        }
+    }
+    notes
+}
+
+fn role_from_principal_label(label: &str) -> &str {
+    label
+        .strip_prefix("SuperGrok (")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(label)
 }
 
 /// Free SuperGrok period linear-burn sentence for a principal included meter.
@@ -1005,6 +1161,16 @@ fn format_principal(lines: &mut Vec<String>, p: &PrincipalLimitsSlot, console_li
 fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
     lines.push("Console API:".to_string());
     lines.push(format!("  {}", c.key_status_line()));
+    // P1 prominence: team postpaid OAuth / Grok Build class near top of Console
+    // when known and positive (dogfood settlement proof; distinct from prepaid).
+    if let Some(p) = &c.postpaid
+        && p.oauth_class_cents > 0
+    {
+        lines.push(format!(
+            "  Team postpaid OAuth / Grok Build class: {}",
+            fmt_dollars(p.oauth_class_cents)
+        ));
+    }
     match c.balance_cents {
         // Short Balance line — dollars are console team prepaid (never SuperGrok extras).
         Some(cents) => lines.push(format!("  Balance: {}", fmt_dollars(cents))),
@@ -1014,17 +1180,20 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
             lines.push(format!("  Balance: {}", c.prepaid_gap.as_display_str()));
         }
     }
-    // Postpaid OAuth vs API class (distinct from prepaid Balance line).
+    // Postpaid period + API class (OAuth / Grok Build already above when > 0).
     match &c.postpaid {
         Some(p) => {
             lines.push(format!(
                 "  Team postpaid (period): {}",
                 fmt_dollars(p.period_total_cents)
             ));
-            lines.push(format!(
-                "  Team postpaid OAuth class: {}",
-                fmt_dollars(p.oauth_class_cents)
-            ));
+            // Zero OAuth class still listed here so operators see the split.
+            if p.oauth_class_cents <= 0 {
+                lines.push(format!(
+                    "  Team postpaid OAuth / Grok Build class: {}",
+                    fmt_dollars(p.oauth_class_cents)
+                ));
+            }
             lines.push(format!(
                 "  Team postpaid API class: {}",
                 fmt_dollars(p.api_class_cents)
@@ -1180,6 +1349,10 @@ mod tests {
         assert!(
             out.contains("Live sampling: SuperGrok session"),
             "live identity: {out}"
+        );
+        assert!(
+            out.contains("Active: free SuperGrok period"),
+            "active driver with free-period headroom: {out}"
         );
         assert!(
             out.contains("Included weekly allowance: 24% used · 76% remaining"),
@@ -1399,6 +1572,217 @@ mod tests {
         );
     }
 
+    /// Named contract: SuperGrok live (`console.isLive=false`) + Management
+    /// prepaid fixture → Console API team block still shows Balance $N.
+    #[test]
+    fn format_supergrok_live_with_management_prepaid_shows_team_balance() {
+        let bal = weekly(65.0, "Aug 4, 12:00", Some(10029));
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_key_available(true)
+                .with_console_balance_cents(Some(12_500))
+                .with_console_prepaid_gap(ConsoleTeamPrepaidGap::Loading);
+        assert!(!snap.console.is_live, "fixture: SuperGrok live");
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("Live sampling: SuperGrok session"),
+            "live: {out}"
+        );
+        assert!(
+            out.contains("Requests: SuperGrok"),
+            "console key on file but SuperGrok serving: {out}"
+        );
+        assert!(
+            out.contains("Balance: $125"),
+            "team prepaid must show even when console.isLive=false: {out}"
+        );
+        assert!(
+            out.contains("Console API:"),
+            "team Management section must not be omitted: {out}"
+        );
+        assert!(
+            !out.contains("no management key"),
+            "must not claim missing key when cents present: {out}"
+        );
+        // SuperGrok meters stay SuperGrok-labeled; team $ is not SuperGrok extras.
+        assert!(
+            out.contains("Included weekly allowance: 65% used"),
+            "SuperGrok included still shown: {out}"
+        );
+        assert!(
+            !out.contains("SuperGrok dollar extras: $125"),
+            "must not mash team prepaid into SuperGrok extras: {out}"
+        );
+    }
+
+    /// Named contract: SuperGrok live + no management key → Console team block
+    /// still present with honest Balance gap (not silent omit of whole team section).
+    #[test]
+    fn format_supergrok_live_without_mgmt_key_keeps_honest_team_block() {
+        let bal = weekly(65.0, "Aug 4, 12:00", None);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_key_available(true);
+        assert!(!snap.console.is_live);
+        let out = format_limits_detail(&snap);
+        assert!(out.contains("Console API:"), "team section present: {out}");
+        assert!(
+            out.contains("Balance: no management key"),
+            "honest team gap, not silent omit: {out}"
+        );
+        assert!(
+            !out.contains("no management key/team id"),
+            "mushy combined retired: {out}"
+        );
+        assert!(!out.contains("no $ meter yet"), "{out}");
+    }
+
+    /// Named contract: /limits honesty must not claim Grok Business license
+    /// messages/conversations as a product meter; one plain note that the
+    /// license page is not SuperGrok or team Management.
+    #[test]
+    fn format_limits_honesty_distinguishes_license_page_from_product_meters() {
+        let bal = weekly(65.0, "Aug 4, 12:00", Some(10029));
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_balance_cents(Some(12_500));
+        let out = format_limits_detail(&snap);
+        let lower = out.to_ascii_lowercase();
+        // Must not present license seat message/conversation counts as product meters.
+        assert!(
+            !lower.contains("license messages")
+                && !lower.contains("license conversations")
+                && !lower.contains("seat message usage"),
+            "must not claim license messages/conversations as product meter: {out}"
+        );
+        // One plain note: Platforms → Grok Business licenses page ≠ SuperGrok / team Management.
+        assert!(
+            lower.contains("license")
+                && (lower.contains("not") || lower.contains("≠") || lower.contains("different")),
+            "must note license page is not SuperGrok/team Management: {out}"
+        );
+        assert!(
+            lower.contains("management")
+                || lower.contains("team prepaid")
+                || lower.contains("supergrok")
+                || lower.contains("team usage"),
+            "license note must name product meters it is not: {out}"
+        );
+        // P0 sharper: team Usage / zeros expected.
+        assert!(
+            lower.contains("team usage") || lower.contains("grok build"),
+            "must name team Usage / Grok Build settlement: {out}"
+        );
+        assert!(
+            lower.contains("zeros") && lower.contains("expected"),
+            "must say license zeros are expected: {out}"
+        );
+    }
+
+    /// Named contract (P2): when usage series is known (process cache / collect),
+    /// Console format surfaces OAuth / Grok Build class USD and does **not**
+    /// mash it into team prepaid Balance or free SuperGrok period %.
+    #[test]
+    fn format_console_surfaces_usage_series_oauth_class_when_known() {
+        let bal = weekly(6.0, "Aug 7, 12:00", None);
+        let series = ConsoleTeamUsageSeriesSummary {
+            start_time: "2026-08-01 00:00:00".into(),
+            end_time: "2026-08-08 00:00:00".into(),
+            timezone: "Etc/GMT".into(),
+            oauth_class_usd: 823.71,
+            api_class_usd: 1.0,
+            other_class_usd: 0.0,
+            top_rows: vec![ConsoleTeamUsageSeriesRow {
+                label: "Grok Build OAuth grok-4.5-build".into(),
+                class_wire: "oauth_grok_build",
+                total_usd: 823.71,
+            }],
+            limit_reached: false,
+        };
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_key_available(true)
+                .with_console_balance_cents(Some(34_000))
+                .with_console_usage_series(Some(series));
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("Team usage series"),
+            "must name usage series when known: {out}"
+        );
+        assert!(
+            out.contains("OAuth / Grok Build class: $823.71")
+                || out.contains("OAuth / Grok Build class: $823"),
+            "series OAuth / Grok Build class must appear: {out}"
+        );
+        assert!(
+            out.contains("Balance: $340"),
+            "team prepaid Balance stays its own meter: {out}"
+        );
+        assert!(
+            out.contains("6%") || out.contains("6.0"),
+            "free SuperGrok period % stays on SuperGrok rows: {out}"
+        );
+        // No mash: prepaid Balance must not show series window dollars.
+        assert!(
+            !out.contains("Balance: $823") && !out.contains("Balance: $823.71"),
+            "must not fold series into prepaid Balance: {out}"
+        );
+        // Free SuperGrok period line is percent, not series USD.
+        let free_period_line = out
+            .lines()
+            .find(|l| {
+                l.contains("included") || l.contains("free SuperGrok") || l.contains("% used")
+            })
+            .unwrap_or("");
+        assert!(
+            !free_period_line.contains("823"),
+            "must not mash series USD into free SuperGrok period line: {free_period_line}"
+        );
+    }
+
+    /// Named contract (P1): when postpaid OAuth / Grok Build class is known,
+    /// Console block shows it prominently (before Balance / early in section),
+    /// labeled distinctly from team prepaid Balance.
+    #[test]
+    fn format_console_surfaces_grok_build_class_prominently() {
+        let bal = weekly(65.0, "Aug 4, 12:00", None);
+        let postpaid = ConsoleTeamPostpaidMeter {
+            period_total_cents: 82_500,
+            oauth_class_cents: 82_371,
+            api_class_cents: 129,
+            other_class_cents: 0,
+            default_credits_cents: None,
+        };
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_key_available(true)
+                .with_console_balance_cents(Some(34_000))
+                .with_console_postpaid(Some(postpaid));
+        let out = format_limits_detail(&snap);
+        let console_idx = out.find("Console API:").expect("console section");
+        let oauth_idx = out
+            .find("Team postpaid OAuth / Grok Build class:")
+            .expect("Grok Build class line");
+        let balance_idx = out.find("Balance: $340").expect("prepaid Balance");
+        assert!(
+            oauth_idx > console_idx && oauth_idx < balance_idx,
+            "Grok Build class must appear near top of Console, before prepaid Balance:\n{out}"
+        );
+        assert!(
+            out.contains("$823.71"),
+            "must show OAuth / Grok Build class dollars: {out}"
+        );
+        assert!(
+            out.contains("Balance: $340"),
+            "prepaid Balance stays separate: {out}"
+        );
+        // Must not mash into one credits line.
+        assert!(
+            !out.contains("credits: $823.71") && !out.contains("Balance: $823.71"),
+            "must not fold class into prepaid Balance: {out}"
+        );
+    }
+
     #[test]
     fn format_zero_prepaid_omits_extras_amount() {
         let bal = weekly(10.0, "Aug 1, 00:00", Some(0));
@@ -1461,6 +1845,9 @@ mod tests {
             dollar_extras: None,
             dollar_extras_observed: true,
             grok_build_usage_pct: None,
+            poll_succeeded: true,
+            included_source: IncludedSource::Unknown,
+            poll_error_class: None,
         });
         let out = format_limits_detail(&snap);
         assert!(out.contains("SuperGrok Business:"), "{out}");
@@ -1488,6 +1875,8 @@ mod tests {
             balance: Some(weekly(40.0, "Aug 1, 00:00", Some(500))),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let business = PrincipalLimitsInput {
             label: "SuperGrok (business)".into(),
@@ -1495,6 +1884,8 @@ mod tests {
             balance: Some(weekly(10.0, "Jul 30, 12:00", None)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[personal, business],
@@ -1545,6 +1936,8 @@ mod tests {
             balance: Some(weekly(24.0, "Jul 30, 12:00", None)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let business = PrincipalLimitsInput {
             label: "SuperGrok (business)".into(),
@@ -1553,6 +1946,8 @@ mod tests {
             autotopup: None,
             // Unpolled sibling: included-only absence (not "none on file").
             included_billing_only: true,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[personal, business],
@@ -1583,6 +1978,87 @@ mod tests {
         );
     }
 
+    /// Named contract: unified fill labels filled principal as shared_pool_fill
+    /// (not live_poll); successful poll principal stays live_poll; human text
+    /// names role on fill.
+    #[test]
+    fn dual_fill_provenance_not_live_poll_and_names_role() {
+        let mut business_bal = weekly(6.0, "August 10, 00:00", Some(500));
+        business_bal.is_unified_billing_user = Some(true);
+        let business = PrincipalLimitsInput {
+            label: "SuperGrok (business)".into(),
+            role_label: Some("business".into()),
+            balance: Some(business_bal),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let personal = PrincipalLimitsInput {
+            label: "SuperGrok (personal)".into(),
+            role_label: Some("personal".into()),
+            balance: None,
+            autotopup: None,
+            included_billing_only: true,
+            poll_succeeded: Some(false),
+            poll_error_class: Some("auth"),
+        };
+        let snap = LimitsSnapshot::from_principals(
+            &[business, personal],
+            SamplingIdentityKind::SuperGrokSession,
+            Some("business"),
+        );
+        assert!(snap.shared_unified_supergrok_pool);
+        assert!(
+            snap.primary.poll_succeeded,
+            "business live poll must succeed"
+        );
+        assert_eq!(snap.primary.included_source, IncludedSource::LivePoll);
+        let personal_slot = snap
+            .extra_principals
+            .iter()
+            .find(|p| p.label.contains("personal"))
+            .expect("personal slot");
+        assert!(
+            !personal_slot.poll_succeeded,
+            "filled personal must not claim pollSucceeded"
+        );
+        assert_eq!(
+            personal_slot.included_source,
+            IncludedSource::SharedPoolFill,
+            "fill must be shared_pool_fill not live_poll"
+        );
+        assert_eq!(
+            personal_slot.included.as_ref().map(|i| i.used_pct),
+            Some(6.0)
+        );
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("personal")
+                && (out.contains("shared SuperGrok pool") || out.contains("billing poll failed")),
+            "human text must name personal fail/fill: {out}"
+        );
+        // JSON path
+        let report = crate::limits_cmd::report_from_snapshot(&snap, vec![]);
+        let personal_json = report
+            .supergrok
+            .principals
+            .iter()
+            .find(|p| p.label.contains("personal"))
+            .expect("personal json");
+        assert!(!personal_json.poll_succeeded);
+        assert_eq!(personal_json.included_source, Some("shared_pool_fill"));
+        assert_eq!(personal_json.poll_error_class, Some("auth"));
+        let business_json = report
+            .supergrok
+            .principals
+            .iter()
+            .find(|p| p.label.contains("business"))
+            .expect("business json");
+        assert!(business_json.poll_succeeded);
+        assert_eq!(business_json.included_source, Some("live_poll"));
+    }
+
     /// Unified billing + cold sibling: paint the shared included pool on the
     /// empty personal/business row (not forever "no data yet").
     #[test]
@@ -1599,6 +2075,8 @@ mod tests {
                 max_amount_cents: None,
             }),
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let personal = PrincipalLimitsInput {
             label: "SuperGrok (personal)".into(),
@@ -1606,6 +2084,8 @@ mod tests {
             balance: None,
             autotopup: None,
             included_billing_only: true,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[business, personal],
@@ -1660,6 +2140,8 @@ mod tests {
             balance: Some(business_bal),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         // Sibling process cache: included only, no prepaid on this slot yet.
         let personal = PrincipalLimitsInput {
@@ -1674,6 +2156,8 @@ mod tests {
             }),
             autotopup: None,
             included_billing_only: true,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[business, personal],
@@ -1706,6 +2190,8 @@ mod tests {
             balance: Some(weekly(24.0, "Jul 30, 12:00", Some(1250))),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         // Process cache remembered included % + weekly period (no prepaid).
         let sibling = PrincipalLimitsInput {
@@ -1719,6 +2205,8 @@ mod tests {
             }),
             autotopup: None,
             included_billing_only: true,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[active, sibling],
@@ -1766,6 +2254,9 @@ mod tests {
             dollar_extras: None,
             dollar_extras_observed: false,
             grok_build_usage_pct: None,
+            poll_succeeded: true,
+            included_source: IncludedSource::Unknown,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot {
             live_identity: SamplingIdentityKind::SuperGrokSession,
@@ -1784,6 +2275,9 @@ mod tests {
                 }),
                 dollar_extras_observed: true,
                 grok_build_usage_pct: None,
+                poll_succeeded: true,
+                included_source: IncludedSource::Unknown,
+                poll_error_class: None,
             },
             extra_principals: vec![slot],
             console: ConsoleMeter {
@@ -1836,6 +2330,8 @@ mod tests {
                 max_amount_cents: None,
             }),
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let personal = PrincipalLimitsInput {
             label: "SuperGrok (personal)".into(),
@@ -1844,6 +2340,8 @@ mod tests {
             balance: Some(weekly(15.0, "August 3, 19:25", None)),
             autotopup: None,
             included_billing_only: true,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[business, personal],
@@ -1906,6 +2404,8 @@ mod tests {
                 max_amount_cents: None,
             }),
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         // Sibling poll: same included % + reset the credits API returns for the
         // personal OIDC token under unified billing (distinct token, same pool).
@@ -1915,6 +2415,8 @@ mod tests {
             balance: Some(weekly(62.0, "August 3, 19:25", None)),
             autotopup: None,
             included_billing_only: true,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[business, personal],
@@ -1967,6 +2469,8 @@ mod tests {
             balance: Some(weekly(62.0, "August 3, 19:25", Some(10029))),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let personal = PrincipalLimitsInput {
             label: "SuperGrok (personal)".into(),
@@ -1974,6 +2478,8 @@ mod tests {
             balance: Some(weekly(62.0, "August 3, 19:25", None)),
             autotopup: None,
             included_billing_only: true,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[business, personal],
@@ -2004,6 +2510,8 @@ mod tests {
             balance: Some(weekly(100.0, "Jul 30, 12:00", Some(100))),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let snap = LimitsSnapshot::from_principals(
             &[personal],
@@ -2152,6 +2660,8 @@ mod tests {
                     balance: Some(bal),
                     autotopup: None,
                     included_billing_only: false,
+                    poll_succeeded: None,
+                    poll_error_class: None,
                 },
                 PrincipalLimitsInput {
                     label: "SuperGrok (business)".into(),
@@ -2159,6 +2669,8 @@ mod tests {
                     balance: Some(bal2),
                     autotopup: None,
                     included_billing_only: true,
+                    poll_succeeded: None,
+                    poll_error_class: None,
                 },
             ],
             SamplingIdentityKind::SuperGrokSession,
@@ -2270,6 +2782,8 @@ mod tests {
                     balance: Some(active),
                     autotopup: None,
                     included_billing_only: false,
+                    poll_succeeded: None,
+                    poll_error_class: None,
                 },
                 PrincipalLimitsInput {
                     label: "SuperGrok (personal)".into(),
@@ -2277,6 +2791,8 @@ mod tests {
                     balance: Some(sibling),
                     autotopup: None,
                     included_billing_only: false,
+                    poll_succeeded: None,
+                    poll_error_class: None,
                 },
             ],
             SamplingIdentityKind::SuperGrokSession,

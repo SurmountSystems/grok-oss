@@ -280,6 +280,48 @@ pub fn prefer_live_identity_after_credit_exhaust(config: &mut SamplerConfig) -> 
     rotate_identity_config(config, HopCause::CreditExhausted)
 }
 
+/// After a **console** credit/spend death, make SuperGrok recovery hoppable once.
+///
+/// Free-period-first ExhaustedAll marks SuperGrok out of allowance so the next
+/// turn starts on console (prefer_live). That preemptive memo also pruned
+/// SuperGrok from failover, so a console team 403 had nowhere to go. On credit
+/// exhaust while active is console and `session_identity_key` is set:
+/// clear the SuperGrok memo once and put that JWT first in failover so rotate
+/// can hop to free SuperGrok period (wire re-marks if SuperGrok is still dead).
+///
+/// No-op when active is already SuperGrok session, or no session identity key.
+pub fn ensure_supergrok_recovery_after_console_credit_exhaust(config: &mut SamplerConfig) {
+    let active = config.api_key.as_deref().unwrap_or("").trim().to_owned();
+    if active.is_empty() {
+        return;
+    }
+    // Active SuperGrok session (JWT match or live bearer) is not console-dead.
+    if is_session_identity(config, &active) || config.bearer_resolver.is_some() {
+        return;
+    }
+    let Some(sess) = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    if sess == active {
+        return;
+    }
+    let sess_fp = fingerprint_secret(&sess);
+    if exhausted_identity::is_exhausted(&sess_fp) {
+        // One recovery attempt after console team credit death. Period may have
+        // reset; if SuperGrok is still full, wire credit error re-marks.
+        exhausted_identity::clear_exhausted(&sess_fp);
+    }
+    // Prefer SuperGrok recovery first on the credit path (before other console keys).
+    config.failover_api_keys.retain(|k| k.trim() != sess);
+    config.failover_api_keys.insert(0, sess);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +525,71 @@ mod tests {
                 vec![other.to_string()],
                 "exhausted SuperGrok session must be pruned; other console kept"
             );
+        });
+    }
+
+    /// Named contract: console credit death with SuperGrok memoized exhausted
+    /// must reinject SuperGrok recovery (clear preemptive memo once).
+    #[test]
+    fn ensure_supergrok_recovery_after_console_credit_clears_memo_and_queues() {
+        exhausted_identity::with_memo_lock(|| {
+            let session = "recovery-session-jwt";
+            let console = "recovery-console-key";
+            exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+
+            let mut config = SamplerConfig {
+                api_key: Some(console.into()),
+                failover_api_keys: vec![],
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: Some(session.into()),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                ..Default::default()
+            };
+            ensure_supergrok_recovery_after_console_credit_exhaust(&mut config);
+            assert!(
+                !exhausted_identity::is_credential_exhausted(session),
+                "preemptive SuperGrok memo must clear for one recovery attempt"
+            );
+            assert_eq!(
+                config.failover_api_keys.first().map(String::as_str),
+                Some(session),
+                "SuperGrok recovery must be first failover: {:?}",
+                config.failover_api_keys
+            );
+
+            let reason = rotate_identity_config(&mut config, HopCause::CreditExhausted)
+                .expect("console→SuperGrok recovery hop");
+            assert_eq!(config.api_key.as_deref(), Some(session));
+            assert!(
+                config.base_url.contains("cli-chat-proxy"),
+                "must switch to SuperGrok host: {}",
+                config.base_url
+            );
+            assert!(reason.contains("out of allowance"), "{reason}");
+            assert!(
+                reason.contains("SuperGrok") || reason.contains("session"),
+                "{reason}"
+            );
+        });
+    }
+
+    /// No hop invent when SuperGrok session identity is absent (also dead).
+    #[test]
+    fn ensure_supergrok_recovery_noop_without_session_identity() {
+        exhausted_identity::with_memo_lock(|| {
+            let mut config = SamplerConfig {
+                api_key: Some("console-only".into()),
+                failover_api_keys: vec![],
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: None,
+                ..Default::default()
+            };
+            ensure_supergrok_recovery_after_console_credit_exhaust(&mut config);
+            assert!(config.failover_api_keys.is_empty());
+            assert!(rotate_identity_config(&mut config, HopCause::CreditExhausted).is_none());
         });
     }
 }

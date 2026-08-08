@@ -284,13 +284,30 @@ or code — not only here. Closed campaign history:
    honesty for included weekly + SuperGrok $ extras. Useful; incomplete only
    relative to the **full** two-half ask. Detail under shipped bullets below.
    Do **not** discard or reframe Half A as pure waste.
+   **Dual SuperGrok billing poll honesty (Option B, 2026-08-07):** process-local
+   poll outcome per identity; CLI/JSON role + re-login fail notes;
+   `pollSucceeded` / `includedSource` (live_poll | process_cache |
+   shared_pool_fill); labeled unified fill; active free-period chrome not
+   painted healthy from sibling-only when active poll AuthFailed; doctor dual
+   poll health; rank prefers poll-OK SuperGrok (auth-failed demotes free-period
+   cache headroom). Filters: `auth_failed_poll`, `dual_fill_provenance`,
+   `order_live_prefers_poll_ok`, `format_human_dual_poll` in
+   [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md) §2c.
+   Report: `.agents/reports/impl-dual-supergrok-billing-honesty-2026-08-07.md`.
+   **Still soft / residual:** multi-slot OIDC refresh before sibling poll;
+   demote from poll list after N consecutive auth fails without auto-delete of
+   secrets.
 
    ### Half B — console team Usage class meters (**core prepaid + M3 postpaid
-   shipped; series charts still optional**)
+   + SuperGrok-live team visibility shipped; license charts non-goal; series
+   charts UI still optional**)
    TUI picture of team prepaid / postpaid OAuth vs API class / optional token
    spend charts (console product, Team Surmount), via xAI **Management API** +
-   `team_id`. **Do not invent scrape of console.x.ai HTML** or fake endpoints.
-   Not "web only / different surface / not our work."
+   `team_id`. **Naming:** Half B "Business Usage class" = team **API** prepaid /
+   postpaid / USD series — **not** Platforms → Grok Business **licenses**
+   (messages / conversations). License page zeros are expected for CLI SuperGrok
+   dogfood; product does not drive that page. **Do not invent scrape of
+   console.x.ai HTML** or fake license endpoints.
 
    **Shipped (core dual-auth):** first-party resolve merge (session primary +
    console failover; `preferred_method=api_key` reverses); hop on credit /
@@ -315,6 +332,13 @@ or code — not only here. Closed campaign history:
    - **Meter honesty sticky console:** silent prefer-console / console auth
      primary no longer sells SuperGrok dollar extras as live spend
      (`meter_sampling_identity`, allowance Cleared keeps ConsoleKey).
+   - **Free SuperGrok period before credits chrome (shipped 2026-08-07):** sticky
+     exhaust memo must not paint `console · $N` while live free SuperGrok period
+     still has headroom (`status_sampling_identity_for_compact_meter` + Design A).
+     `limits --json` / human **Active:** `activeDriver` names free SuperGrok
+     period | SuperGrok extras | console key. Settlement dual-bill (C6 + flat
+     free period note) stays distinct from SuperGrok extras. Client TE vertical
+     complete; **C4 server free-period debit** still open below.
    Joins: `/tmp/grok-join-impl-dual-supergrok-auto-failover-2026-07-29.md`,
    `/tmp/grok-join-impl-auto-wire-hop-2026-07-29.md`,
    `/tmp/grok-join-impl-billing-meter-honesty-2026-07-29.md`,
@@ -398,10 +422,10 @@ or code — not only here. Closed campaign history:
      `ConsoleTeamPrepaidMeter` + 60s process cache
    - TUI wire: billing refresh populates cents; footer
      `Console key · team prepaid: $N` when console live; `/limits`
-     `Balance (console team prepaid): $N`; honest **distinct** gaps when
-     unknown: `no management key` | `no management team id` |
-     `loading team prepaid...` | `team prepaid unavailable` (soft
-     `no $ meter yet` and mushy `no management key/team id` retired)
+     `Balance: $N`; honest **distinct** gaps when unknown: `no management key`
+     | `no management team id` | `loading team prepaid...` |
+     `team prepaid unavailable` (soft `no $ meter yet` and mushy
+     `no management key/team id` retired)
    - User-guide: `02-authentication` + `04-slash-commands` `/limits`
    Joins: `/tmp/grok-join-impl-mgmt-key-team-fetch-2026-07-30.md`,
    `/tmp/grok-join-impl-console-meter-tui-2026-07-30.md`,
@@ -413,6 +437,41 @@ or code — not only here. Closed campaign history:
    SuperGrok session billing / SuperGrok $ extras as live console spend.
    Report: `/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`.
 
+   **Also shipped (SuperGrok-live team Management visibility — 2026-08-04):**
+   Footer and `/usage` surface team prepaid $ (or loading/unavailable gap)
+   while SuperGrok session is live; `/limits` Console API Balance stays when
+   `console.isLive=false`; license-page honesty note (licenses messages/
+   conversations ≠ SuperGrok / team Management). FetchBilling already refreshed
+   prepaid+postpaid regardless of console live. **Non-goal:** Grok Business
+   license charts non-zero. Report:
+   [`.agents/reports/impl-supergrok-live-team-usage-2026-08-04.md`](.agents/reports/impl-supergrok-live-team-usage-2026-08-04.md).
+   OAuth-after-period-reset dogfood:
+   [`.agents/reports/plan-oauth-after-period-reset-2026-08-04.md`](.agents/reports/plan-oauth-after-period-reset-2026-08-04.md).
+
+   **Also shipped (license zeros honesty + Grok Build class prominence —
+   2026-08-07):** Doctor + user-guide + sharper `/limits` note: Platforms →
+   Grok Business **licenses** Usage zeros are **expected** for CLI SuperGrok
+   (not dogfood proof). Real burn = team Usage / Grok Build class $ (browser
+   team `.../usage` + Management postpaid OAuth / series) and SuperGrok meters.
+   P1: `/limits` Console puts **Team postpaid OAuth / Grok Build class** near
+   top when known; SuperGrok-live footer chip `team Grok Build class: $N` when
+   postpaid OAuth class is in Management process cache (separate from team
+   prepaid and free SuperGrok period %). Design A compact free-period `%`
+   unchanged. Dual SuperGrok poll honesty stays closed for this problem. Report:
+   [`.agents/reports/impl-grok-business-license-zeros-vs-team-usage-2026-08-07.md`](.agents/reports/impl-grok-business-license-zeros-vs-team-usage-2026-08-07.md).
+
+   **Also shipped (P2 usage series on FetchBilling / `/limits` warm path —
+   2026-08-07):** Management usage series (POST analytics; OAuth / Grok Build
+   class + API class + top descriptions) uses the same practical path as other
+   Management meters: background `FetchBilling`, TUI `/limits` open (force
+   clear then silent refresh), and CLI `grok limits`. Process cache shares the
+   60s soft TTL with prepaid/postpaid; explicit open/collect busts series with
+   the other billing meters (no unbounded spam). `/limits` rebuild attaches
+   warm series into the Console block when known. Meters stay distinct (series
+   USD ≠ team prepaid ≠ free SuperGrok period %). Full browser-style series
+   **charts** UI still not shipped (text totals only). Report:
+   [`.agents/reports/impl-p2-usage-series-fetch-billing-2026-08-07.md`](.agents/reports/impl-p2-usage-series-fetch-billing-2026-08-07.md).
+
    **Also shipped (Token Economy full product — 2026-08-03):** implement-effort
    policy under economic mode (ceiling 3 / desired 2 / all implement entry
    paths / clamp+toast); free SuperGrok period linear-burn pacing on
@@ -421,6 +480,9 @@ or code — not only here. Closed campaign history:
    [`.agents/joins/impl-token-economy-full-2026-08-03.md`](.agents/joins/impl-token-economy-full-2026-08-03.md).
    Lasting bullet: [`FORK.md`](FORK.md). **Operator dogfood only** (rebuild +
    management key for remote book) — not open code residual.
+   **Token Economy further options plan is parked (2026-08-04), not cancelled**
+   (resume later; do not implement TE pillars in the SuperGrok-live team usage
+   exclusive priority).
 
    **Still open (limits-first + Half B remaining — do not invent C4 debit):**
    - **C4 SuperGrok included debit still FAIL / branch 2b (server-side;

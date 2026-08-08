@@ -107,21 +107,55 @@ account and a Business / team SuperGrok session):
    not wipe it.
 3. Check with **`/doctor`** (dual-auth block) or **`grok login --list-api-keys`**.
    Both list SuperGrok principals with **role labels + fingerprints only** (no
-   raw tokens or emails as secrets).
+   raw tokens or emails as secrets). Doctor also shows **billing poll health**
+   for each SuperGrok role (last poll OK / auth failed / never this process)
+   without secrets.
 
-`/limits` stacks separate SuperGrok sections when two principals exist (for
-example `SuperGrok (personal)` and `SuperGrok (business)`), with a live sampling
-line that names which principal is active when known. The non-active sibling may
-show **no data yet** until its billing pool has been polled. Meters stay
-distinct: personal **included** ≠ Business **included** ≠ SuperGrok **dollar
-extras** ≠ **console API spend**.
+`/limits` and `grok limits` / `grok limits --json` stack SuperGrok sections when
+two principals exist (for example `SuperGrok (personal)` and
+`SuperGrok (business)`), with a live sampling line that names which principal is
+active when known.
 
-**Honesty (not a code bug):** personal SuperGrok, Business SuperGrok, SuperGrok
-dollar extras, and console team prepaid are **separate product pools** on the
-xAI side (often separate seats or prepaid balances). Seeing more than one meter,
-or feeling like you are "paying double," is that billing structure — Grok OSS
-surfaces each pool honestly and can hop between identities; it does **not**
-merge them into one shared subscription.
+**Each principal is polled with its own JWT.** When one login is expired or
+revoked (`no auth context`) and the other still works:
+
+- Notes name the **role** (personal / business), a short **fingerprint**, and a
+  re-login path (`grok login`). Do not rely on a bare 12-character id alone.
+- Under **unified SuperGrok billing** (one shared free-period pool and one
+  Extra Usage Credits pool for both logins), empty dual rows may still show the
+  same free SuperGrok period % and the same SuperGrok dollar extras. That is
+  **shared-pool fill**, labeled in human `/limits` and in JSON as
+  `includedSource: "shared_pool_fill"` with `pollSucceeded: false` for the
+  login that did not poll OK. A successful poll is `includedSource: "live_poll"`.
+- Compact status / live free-period chrome uses the **active** SuperGrok
+  principal only. If the active login's poll failed, free-period % is not
+  painted healthy from the sibling alone (honest cold `...%` until re-login).
+
+Meters that stay distinct even when dual SuperGrok share one free-period pool:
+
+| Meter | What it is | What it is not |
+|-------|------------|----------------|
+| Free SuperGrok period allowance | Period quota usage % (included weekly/period) | SuperGrok $ top-ups; console prepaid; team invoice |
+| SuperGrok Extra Usage Credits | Prepaid **dollar** top-ups on SuperGrok | Free period %; console team prepaid; team Grok Build class |
+| Console team prepaid | Console API team prepaid wallet remaining | SuperGrok extras; free period; team postpaid invoice class |
+| Team Grok Build / OAuth class $ | Team invoice settlement for OAuth / Grok Build | Free-period burn proof; SuperGrok extras as live driver; console key live |
+| Console monthly spend limit | Separate console gate | Free SuperGrok period |
+
+**Burn order (token economy):** free SuperGrok period first while used percent is
+below 100 → then SuperGrok dollar extras (after-burner when free period is full)
+→ then console API key. Status compact meter and `/limits` **Active:** line use
+the same rule. Team Grok Build class dollars can still climb under SuperGrok
+session without free period moving (settlement dual-bill honesty); that is not
+"on SuperGrok extras" and not a reason to paint `console · $N` while free period
+has room.
+
+**If status shows `console · $N` while free SuperGrok period still has room**
+(for example `limits --json` shows SuperGrok live and included used under 100%):
+that is a product chrome bug. Rebuild from a tree that includes the sticky-pin
+headroom fix, then report if it still happens.
+
+**Which SuperGrok login to re-auth:** open `/limits` or `grok doctor`, find the
+role whose poll failed (auth), run `grok login` for that SuperGrok account.
 
 Re-auth clears the active base session so you can sign in again; multi-slot
 siblings stay until you log them out. Logout removes the active multi-slot (and
@@ -159,8 +193,8 @@ ranking uses the **live** SuperGrok JWT (including SuperGrok Heavy tier
 sessions) rather than silently staying on the console API key.
 
 This free-period-first setting is **not** a `preferred_method` value
-(`preferred_method` stays `api_key` / `oauth` / `oidc` only, matching ordinary
-grok). Hard pin: `[auth] preferred_method = "api_key"` stays console-primary even
+(`preferred_method` stays `api_key` / `oidc` only, matching ordinary grok).
+Hard pin: `[auth] preferred_method = "api_key"` stays console-primary even
 when free SuperGrok period allowance remains (you chose console).
 
 **Turn free-period-first off** (classic dual-auth: session primary + console
@@ -176,10 +210,16 @@ value. Only missing key / empty new config gets the default `true`.
 
 When free SuperGrok period allowance is full, SuperGrok top-up dollars are gone
 or unknown, and at least one console key is bound, sampling **prefers the first
-live console key** (and `api.x.ai` when hosts are split). When top-up dollars
-still remain under free-period-first ranking (`auto_use_included_limits`), the
-SuperGrok session stays primary until top-ups run out or a true credit/402 hop
-switches to console.
+live console key** (and `api.x.ai` when hosts are split). A **live SuperGrok
+JWT stays on the recovery failover tail** so a console team credit or monthly
+spending-limit 403 can hop back to free SuperGrok period (Retrying "out of
+allowance"). Hard-expired SuperGrok is never recovery. When SuperGrok is also
+dead, the terminal shows plain team admin English (add credits / raise monthly
+spend limit), not an Internal error JSON envelope. Free SuperGrok period,
+SuperGrok top-up dollars, and console team prepaid / monthly spend limit remain
+**distinct meters**. When top-up dollars still remain under free-period-first
+ranking (`auto_use_included_limits`), the SuperGrok session stays primary until
+top-ups run out or a true credit/402 hop switches to console.
 
 Mid-request hop uses the next configured identity when:
 
@@ -259,21 +299,27 @@ key `https://management-api.x.ai` — distinct from the inference console slot
 
 When the Management key is available (and team id is pinned or discovered),
 billing refresh (session start, turn end, `/usage`, `grok limits`) fetches
-the prepaid ledger and fills:
+the prepaid ledger **regardless of whether console or SuperGrok is live** and
+fills:
 
-- Footer when console is live: `Console key · team prepaid: $N`
-- `/limits` / `grok limits`: `Balance: $N` under **Console API** (console team
-  **prepaid ledger** — never labeled SuperGrok dollar extras; may differ from
-  dashboard Credits remaining when the UI includes more than prepaid)
+- Footer when **console** is live: `Console key · team prepaid: $N`
+- Footer when **SuperGrok** is live and prepaid is known: SuperGrok % / extras
+  when those warn, **plus** `team prepaid: $N` (or a standalone team prepaid
+  chip when SuperGrok alone would be quiet). Team dollars never re-label live
+  sampling as console.
+- `/limits` / `grok limits`: `Balance: $N` under **Console API** even when
+  `console.isLive` is false (SuperGrok serving). Console team **prepaid
+  ledger** — never labeled SuperGrok dollar extras; may differ from dashboard
+  Credits remaining when the UI includes more than prepaid.
 - `grok limits --json`: `console.teamPrepaidUsd` (or `console.teamPrepaidGap`)
 
 Honest gap copy is **distinct** by what is missing (no invented balance):
 
 | State | Footer / `/limits` Balance line |
 |-------|----------------------------------|
-| No management key | **no management key** |
+| No management key | **no management key** (always on `/limits` Balance; SuperGrok-only footer stays SuperGrok-focused) |
 | Key set; team id still unknown after fetch | **no management team id** |
-| Key set; fetch in flight / cold | **loading team prepaid...** |
+| Key set; fetch in flight / cold | **loading team prepaid...** (footer surfaces this on SuperGrok live too) |
 | Key + team known; fetch done but no balance | **team prepaid unavailable** |
 | Balance known | **team prepaid: $N** / **Balance: $N** |
 
@@ -291,11 +337,55 @@ When postpaid preview is available, `/limits` and `grok limits` also show:
   `analyticsRequest`): a short day-window summary with OAuth / Grok Build class
   vs API-key class totals (and top description rows). Not a GET invent. JSON:
   `console.teamUsageSeriesOauthClassUsd` / `teamUsageSeriesApiClassUsd` plus
-  window start/end. Full chart UI may grow later; the series path is live when
-  management credentials work.
+  window start/end. Refreshes with other Management meters on TUI `/limits`,
+  background billing (soft ~60s cache), and `grok limits` — not a rare CLI-only
+  path. Full browser-style chart UI is still not a product goal; text totals are.
+
+#### Three surfaces that look similar (keep distinct)
+
+| Surface | What it is | Product |
+|---------|------------|---------|
+| **Platforms → Grok Business → licenses Usage** (browser: messages / conversations / active users) | Seat/license product charts on console.x.ai | **Not wired.** No client. Zeros there do not prove SuperGrok or team Management are idle. |
+| **Team API Usage $** (browser Usage / Management postpaid + series) | Team OAuth vs API class **dollars** | `/limits` postpaid + usage series when management key works |
+| **TUI SuperGrok + Management meters** | SuperGrok included % / extras; team prepaid / postpaid / series | Status, footer, `/limits`, `grok limits` |
 
 Enterprise `GROK_DEPLOYMENT_KEY` is a different surface (managed config /
 attribution), not a substitute for these meters.
+
+#### If Grok Business license Usage is all zeros
+
+**Expected for CLI SuperGrok dogfood.** Platforms → **Grok Business** →
+**Usage** (`.../grok-business/usage`) counts license seat activity (messages,
+conversations, active users). grok-oss SuperGrok traffic uses the session /
+cli-chat-proxy path; it does **not** drive those seat counters. There is no
+public Management API for license message charts, and this product does not
+scrape console HTML or invent counts.
+
+**Where real burn shows:**
+
+1. **Product:** `grok-oss limits` or TUI `/limits` — team postpaid OAuth
+   (**Grok Build class**) and usage series when a management key is set;
+   SuperGrok included % / extras; team prepaid remaining (separate wallet).
+2. **Browser:** team **Usage** spend charts (`console.x.ai` team `.../usage`,
+   not the licenses page) — often mostly **Grok Build**.
+
+Zeros on the licenses page do **not** mean dogfood is idle. See also
+`grok doctor` (dogfood burn proof block) and the always-on `/limits` note.
+
+#### Prefer free SuperGrok period allowance after a period reset
+
+When the free SuperGrok period has reset and you want session dogfood on
+included limits (not SuperGrok $ extras or console burn first):
+
+```toml
+# ~/.grok/config.toml
+[auth]
+preferred_method = "oidc"            # SuperGrok session primary
+auto_use_included_limits = true      # prefer free period allowance before extras / console
+```
+
+That pairing does **not** fill Grok Business **license** charts. It only ranks
+credentials so SuperGrok included weekly is preferred while it has headroom.
 
 ---
 

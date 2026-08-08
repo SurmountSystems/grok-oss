@@ -1457,32 +1457,49 @@ impl AgentView {
             // Session start / turn end still FetchBilling for agents; hide
             // only gateway/chat sessions. SuperGrok cold → honest `...%`
             // placeholder so the slot is never invisible until first fetch.
+            //
+            // Design A: free-period % only when free SuperGrok period is the
+            // active meter. Console live → team prepaid (never SuperGrok %).
+            // SuperGrok free period full + $ extras → extras $, not bare 100%.
+            // Sticky exhaust memo may pin console only when free SuperGrok
+            // period is full or unknown; live free-period headroom blocks a
+            // false console · $ paint (limits before credits chrome law).
             if !self.chat_kind {
                 use crate::views::credit_bar;
+                if !self.sampling_identity.is_console() {
+                    let grok_home = xai_grok_shell::util::grok_home::grok_home();
+                    let memo_out =
+                        xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(
+                            &grok_home,
+                        );
+                    let (known, pct) = match self.credit_balance.as_ref() {
+                        Some(b) if b.included_usage_known => (true, b.usage_pct),
+                        _ => (false, 0.0),
+                    };
+                    self.sampling_identity = credit_bar::status_sampling_identity_for_compact_meter(
+                        self.sampling_identity,
+                        known,
+                        pct,
+                        memo_out,
+                    );
+                }
                 let meter_line = if self.sampling_identity.is_console() {
                     let console_prepaid = self
                         .console_team_prepaid_cents
                         .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
                     let gap = credit_bar::resolve_console_team_prepaid_gap_default();
-                    let (text, color) = match console_prepaid {
-                        Some(cents) => {
-                            let dollars = cents.abs() as f64 / 100.0;
-                            let t = if dollars.fract() == 0.0 {
-                                format!("console · ${dollars:.0}")
-                            } else {
-                                format!("console · ${dollars:.2}")
-                            };
-                            let c = if cents.abs() <= 1000 {
-                                theme.warning
-                            } else {
-                                theme.accent_success
-                            };
-                            (t, c)
-                        }
-                        None => (
-                            format!("console · {}", gap.as_display_str()),
-                            theme.gray_dim,
-                        ),
+                    let text = credit_bar::compact_meter_text_for_live_identity(
+                        credit_bar::SamplingIdentityKind::ConsoleKey,
+                        false,
+                        0.0,
+                        console_prepaid,
+                        gap,
+                        None,
+                    );
+                    let color = match console_prepaid {
+                        Some(cents) if cents.abs() <= 1000 => theme.warning,
+                        Some(_) => theme.accent_success,
+                        None => theme.gray_dim,
                     };
                     let mut style = Style::default().fg(color).bg(theme.bg_base);
                     if self.hit_credits.hovered {
@@ -2469,13 +2486,23 @@ impl AgentView {
         // Meter = live spend pool. Silent sticky console (SuperGrok still
         // memoized out of allowance) must not keep SuperGrok extras as the
         // footer when tracked identity is still the default SuperGrokSession.
-        // Probe only while tracked is SuperGrok; on hit, pin ConsoleKey so
-        // later frames skip dual-auth/disk work.
+        // Live free SuperGrok period headroom blocks false sticky console pin
+        // (same helper as status compact meter; limits before credits).
         if !self.sampling_identity.is_console() {
             let grok_home = xai_grok_shell::util::grok_home::grok_home();
-            if xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(&grok_home) {
-                self.sampling_identity = crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
-            }
+            let memo_out =
+                xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(&grok_home);
+            let (known, pct) = match self.credit_balance.as_ref() {
+                Some(b) if b.included_usage_known => (true, b.usage_pct),
+                _ => (false, 0.0),
+            };
+            self.sampling_identity =
+                crate::views::credit_bar::status_sampling_identity_for_compact_meter(
+                    self.sampling_identity,
+                    known,
+                    pct,
+                    memo_out,
+                );
         }
         // When dual SuperGrok principals exist, name which role's included pool
         // the footer is talking about (active base identity).
@@ -2503,8 +2530,13 @@ impl AgentView {
         // Honest gap when cents unknown (not soft "no $ meter yet").
         let console_prepaid_gap =
             crate::views::credit_bar::resolve_console_team_prepaid_gap_default();
+        // Team postpaid OAuth / Grok Build class period $ from Management process
+        // cache (filled with billing / /limits). Distinct from team prepaid.
+        let team_postpaid_oauth_class_cents =
+            xai_grok_shell::auth::cached_console_team_postpaid_default()
+                .map(|p| p.oauth_class_cents);
         let warning =
-            crate::views::credit_bar::usage_warning_for_session_with_identity_principal_and_gap(
+            crate::views::credit_bar::usage_warning_for_session_with_identity_principal_gap_and_postpaid(
                 self.credit_balance.as_ref(),
                 self.auto_topup.as_ref(),
                 self.openrouter_credit_balance.as_ref(),
@@ -2515,6 +2547,7 @@ impl AgentView {
                 live_principal_role.as_deref(),
                 console_prepaid,
                 console_prepaid_gap,
+                team_postpaid_oauth_class_cents,
             );
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
@@ -5202,6 +5235,90 @@ mod clear_done_and_limits_chrome_tests {
         assert!(
             text.contains("console") && text.contains("125"),
             "console live under team must paint console · $125, got {text:?}"
+        );
+    }
+
+    /// Named contract (Design A): SuperGrok live after free period full with
+    /// SuperGrok $ extras → status meter shows extras $, not free-period 100%.
+    #[test]
+    fn status_bar_supergrok_on_extras_paints_dollars_not_free_period_pct() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        let mut agent = make_agent();
+        agent.billing_surface_visible = true;
+        agent.chat_kind = false;
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        let mut bal = warm_supergrok_balance(100.0);
+        bal.prepaid_balance_cents = Some(453);
+        agent.credit_balance = Some(bal);
+        let buf = draw_hits(&mut agent);
+        let text = credits_hit_text(&agent, &buf);
+        assert!(
+            text.to_ascii_lowercase().contains("extras") && text.contains("4.53"),
+            "status bar on SuperGrok extras must show $ not bare free-period %: {text:?}"
+        );
+        assert!(
+            !text.contains('%'),
+            "must not paint free-period % while extras drive: {text:?}"
+        );
+    }
+
+    /// Console live must not paint SuperGrok free-period chrome even when a
+    /// SuperGrok balance with extras is still cached on the agent.
+    #[test]
+    fn status_bar_console_live_ignores_cached_supergrok_free_period_pct() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        let mut agent = make_agent();
+        agent.billing_surface_visible = false;
+        agent.chat_kind = false;
+        agent.sampling_identity = SamplingIdentityKind::ConsoleKey;
+        agent.console_team_prepaid_cents = Some(7_700);
+        // Stale SuperGrok cache must not leak into console-live chrome.
+        let mut bal = warm_supergrok_balance(87.0);
+        bal.prepaid_balance_cents = Some(12_500);
+        agent.credit_balance = Some(bal);
+        let buf = draw_hits(&mut agent);
+        let text = credits_hit_text(&agent, &buf);
+        assert!(
+            text.contains("console") && text.contains("77"),
+            "console live must show team prepaid: {text:?}"
+        );
+        assert!(
+            !text.contains('%') && !text.to_ascii_lowercase().contains("extras"),
+            "console live must not show SuperGrok free period or extras: {text:?}"
+        );
+    }
+
+    /// Named contract (P1 smoking gun paint path): SuperGrok live + free period
+    /// 6% + team prepaid $340 known → compact status is **`6%`**, never
+    /// **`console · $340`**. Pure helper already blocks sticky memo; paint path
+    /// must keep SuperGrok free-period chrome under the same inputs.
+    #[test]
+    fn status_bar_free_period_headroom_not_console_prepaid_dollars() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        let mut agent = make_agent();
+        agent.billing_surface_visible = true;
+        agent.chat_kind = false;
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.console_team_prepaid_cents = Some(34_000);
+        let mut bal = warm_supergrok_balance(6.0);
+        bal.prepaid_balance_cents = Some(10_029);
+        agent.credit_balance = Some(bal);
+        let buf = draw_hits(&mut agent);
+        let text = credits_hit_text(&agent, &buf);
+        assert!(
+            text.contains("6%") && !text.to_ascii_lowercase().contains("console"),
+            "free period headroom must paint 6% not console · $340: {text:?}"
+        );
+        assert!(
+            !text.contains("340") && !text.contains("$340"),
+            "must not paint team prepaid as status chrome while free period drives: {text:?}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "must not paint SuperGrok extras while free period has room: {text:?}"
         );
     }
 }

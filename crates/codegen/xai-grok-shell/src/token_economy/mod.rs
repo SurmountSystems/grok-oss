@@ -11,8 +11,10 @@ pub mod reconcile;
 
 pub use config::{
     DEFAULT_DESIRED_IMPLEMENT_EFFORT, DEFAULT_MAX_IMPLEMENT_EFFORT, TokenEconomyConfig,
-    TokenEconomyConfigError, implement_effort_policy_active, resolve_grok_oss_database_path,
-    token_economy_from_disk, token_economy_from_toml,
+    TokenEconomyConfigError, clear_token_economy_live, implement_effort_policy_active,
+    reset_token_economy_live_to_defaults, resolve_grok_oss_database_path, set_token_economy_live,
+    set_token_economy_live_bool, set_token_economy_live_int, token_economy_from_disk,
+    token_economy_from_toml,
 };
 pub use implement_effort::{
     ImplementEffortRewrite, apply_implement_effort_policy, is_implement_command,

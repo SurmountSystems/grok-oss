@@ -4210,13 +4210,15 @@ pub(crate) fn execute(
                     // Always refresh OpenRouter credits alongside xAI billing so
                     // OR-only / OR-active sessions still update the footer when
                     // the xAI extension is unavailable (no grok.com auth).
-                    // Management team prepaid + postpaid run in parallel (no-op
-                    // when key/team unset). Postpaid fills process cache for
-                    // `/limits` rebuild; TTL honored unless explicit open cleared.
-                    let (openrouter_balance, console_team_prepaid_cents, _) = tokio::join!(
+                    // Management team prepaid + postpaid + usage series run in
+                    // parallel (no-op when key/team unset). Postpaid and series
+                    // fill process cache for `/limits` rebuild; TTL honored
+                    // unless explicit open cleared (no unbounded spam).
+                    let (openrouter_balance, console_team_prepaid_cents, _, _) = tokio::join!(
                         fetch_openrouter_credit_balance(),
                         fetch_console_team_prepaid_cents(),
                         fetch_console_team_postpaid_into_process_cache(),
+                        fetch_console_team_usage_series_into_process_cache(),
                     );
                     let req = acp::ExtRequest::new(
                         "x.ai/billing",
@@ -4239,6 +4241,16 @@ pub(crate) fn execute(
                             // SuperGrok path failed — never wipe SuperGrok cache.
                             // Still surface OR / console prepaid if we got them
                             // (CreditBalanceFetch::Unchanged keeps last-good SuperGrok).
+                            let err_text = sanitize_user_error(&format!("{e}"));
+                            if let Some(id) =
+                                xai_grok_shell::auth::active_supergrok_identity_id(
+                                    &xai_grok_shell::util::grok_home::grok_home(),
+                                )
+                            {
+                                xai_grok_shell::auth::remember_supergrok_billing_poll_failed(
+                                    &id, &err_text,
+                                );
+                            }
                             if openrouter_balance.is_some()
                                 || console_team_prepaid_cents.is_some()
                             {
@@ -4254,7 +4266,7 @@ pub(crate) fn execute(
                             }
                             return TaskResult::BillingError {
                                 agent_id,
-                                error: sanitize_user_error(&format!("{e}")),
+                                error: err_text,
                                 silent,
                             };
                         }
@@ -4263,6 +4275,16 @@ pub(crate) fn execute(
                         Ok(billing) => billing,
                         Err(e) => {
                             // Same keep-last-good SuperGrok policy as transport fail.
+                            let err_text = format!("Parse error: {e}");
+                            if let Some(id) =
+                                xai_grok_shell::auth::active_supergrok_identity_id(
+                                    &xai_grok_shell::util::grok_home::grok_home(),
+                                )
+                            {
+                                xai_grok_shell::auth::remember_supergrok_billing_poll_failed(
+                                    &id, &err_text,
+                                );
+                            }
                             if openrouter_balance.is_some()
                                 || console_team_prepaid_cents.is_some()
                             {
@@ -4278,7 +4300,7 @@ pub(crate) fn execute(
                             }
                             return TaskResult::BillingError {
                                 agent_id,
-                                error: format!("Parse error: {e}"),
+                                error: err_text,
                                 silent,
                             };
                         }
