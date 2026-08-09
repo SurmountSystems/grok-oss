@@ -73,17 +73,32 @@ less than product code and tests. Do not invent long essays or git nags.
    not try to *be* human. Full pin: host `~/.grok/AGENTS.md` § Sapient
    Experience; open residual [`RESIDUAL.md`](RESIDUAL.md) §2f. Do not dump
    novels here.
-   **Billing meters stay distinct:** personal SuperGrok dollar credits ≠
-   free SuperGrok period allowance ≠ console API spend. Name which meter.
+   **Billing meters stay distinct:** SuperGrok dollar credits ≠ free SuperGrok
+   period limits ≠ console team prepaid / console API credits. Name which meter.
+   **Limits and credits vocabulary (pinned 2026-08-08):** say **limits** not
+   bare "allowance"; say **credits** not bare "extras." When the meter matters,
+   use the full name: free SuperGrok period limits; SuperGrok dollar credits;
+   console team prepaid / console API credits. Desired spend order (docs and
+   comments): free SuperGrok period limits first, then SuperGrok dollar credits,
+   then console team prepaid / console API credits. While free SuperGrok period
+   limits still have room, stay on SuperGrok session and do not make the console
+   API key primary. Never invent free SuperGrok period used % on the client.
    **Complete thoughts (pinned 2026-08-03):** Plans, residual, reports, board
    titles, user-facing docs, and chat about product work must use **complete
    American English thoughts**. Do not use half-labels as if they were sentences
-   (wrong: "SuperGrok included weekly"). Right: "the free SuperGrok allowance
+   (wrong: "SuperGrok included weekly"). Right: "the free SuperGrok period limits
    for the current billing period (how much of that free quota is already used)."
    When naming a meter, say what it is and what it is not. Conditions use full
    clauses (not "room/headroom"). Config and wire names may follow the plain
    thought in parentheses. Operator corrections about incomplete phrasing are
    permanent law. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **No bad metaphors, no sloppy language, no imprecision (pinned 2026-08-09):**
+   Accurate, precise, concise natural American English. Say what the product
+   actually does. No invented metaphors that name things not in the product
+   (e.g. "media player pause" when there is no media player), no clever
+   analogies the reader must decode, no vague handwaves when two paths differ.
+   Real control, path, or outcome first. Host dual-pin: `~/.grok/AGENTS.md` §
+   Prose + tone.
    **Self-improving feedback loop (pinned 2026-08-03):** trigger phrases such as
    "always remember", "please remember", "I hate repeating myself" (and close
    variants) mean same-turn standing pin (project `AGENTS.md` / residual when
@@ -100,14 +115,17 @@ less than product code and tests. Do not invent long essays or git nags.
    session `plan.md` and re-present; do not invent `ask:*` queues as a
    substitute. **Clarify** is answer-only. Host:
    `~/.grok/AGENTS.md` § *Plan approval* item 8.
-   **Dual-auth language (pinned 2026-07-27):** ban bare jargon **proactive hop**,
-   **sticky exhaust** / **sticky hop**, and **dual-host** without plain
-   explanation. Prefer: *mark SuperGrok used up from billing % / leave SuperGrok
-   when free SuperGrok period allowance is full*; *stay on the console key after
-   switch / remember this SuperGrok identity is out of allowance*; *also switch
-   the API host (SuperGrok proxy ↔ `api.x.ai`)*. Residual, reports, comments,
-   tests, and **identifiers** use the plain names. (UI sticky headers /
-   permission sticky cursor are unrelated product terms — leave those alone.)
+   **Dual-auth language (pinned 2026-07-27; vocabulary 2026-08-08):** ban bare
+   jargon **proactive hop**, **sticky exhaust** / **sticky hop**, and
+   **dual-host** without plain explanation. Prefer: *mark SuperGrok used up from
+   billing % / leave SuperGrok when free SuperGrok period limits are full*;
+   *stay on the console key after switch / remember this SuperGrok identity is
+   out of free SuperGrok period limits*; *also switch the API host (SuperGrok
+   proxy ↔ `api.x.ai`)*. Residual, reports, comments, tests, and **identifiers**
+   use the plain names. Prefer **limits** over bare "allowance" and **credits**
+   over bare "extras" (see **Limits and credits vocabulary** above). (UI sticky
+   headers / permission sticky cursor are unrelated product terms — leave those
+   alone.)
 5. **Never ask permission to continue clear work.** If the goal is known
    (finish the onto stack, resolve conflicts, keep going), **do the next step**
    — do not end with “say the word,” “want me to continue?,” or similar. Ask
@@ -236,8 +254,9 @@ if disjoint). Host: § *Hard stop* default loop.
   subagent `task_id`s + board owners before spawn/demote/complete. Never demote
   `in_progress` work that still has a live subagent (abandonment = kill class).
   First track stays `in_progress` until the report; closeout still required. Product
-  binding (todo ↔ agent id, block demote while live) is open residual, not
-  shipped. Host: § *Multi-track: prose is not enough*.
+  binding: first cut shipped (`meta.taskId` + demote reject while Running;
+  see FORK). Full auto-bind / sticky-on-new-message remain soft residual.
+  Host: § *Multi-track: prose is not enough*.
 
 ## Never assume without checking
 

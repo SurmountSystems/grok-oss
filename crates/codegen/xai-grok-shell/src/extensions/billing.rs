@@ -307,6 +307,10 @@ pub async fn fetch_credits_config_with_session(
 ///
 /// Best-effort: a failed sibling poll does not fail the active billing path.
 /// No-op when fewer than two SuperGrok principals are stored.
+///
+/// Before each sibling credits request, OIDC-refreshes a multi-slot JWT that
+/// is past the early-invalidation buffer when refresh credentials are present
+/// ([`crate::auth::ensure_fresh_access_token_for_supergrok_billing_poll`]).
 pub async fn poll_and_remember_non_active_supergrok_included_billing(
     grok_home: &std::path::Path,
     proxy_base: &str,
@@ -316,9 +320,19 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
         return;
     }
     for target in targets {
-        match fetch_credits_config_with_session(proxy_base, &target.access_token, &target.user_id)
+        // Multi-slot OIDC refresh before sibling poll: AuthManager only keeps
+        // the active base fresh; siblings can hold a stale multi-slot JWT.
+        let (access_token, user_id) =
+            match crate::auth::ensure_fresh_access_token_for_supergrok_billing_poll(
+                grok_home,
+                &target.identity_id,
+            )
             .await
-        {
+            {
+                Some((tok, uid)) => (tok, uid),
+                None => (target.access_token.clone(), target.user_id.clone()),
+            };
+        match fetch_credits_config_with_session(proxy_base, &access_token, &user_id).await {
             Ok(resp) => {
                 let Some(config) = resp.config.as_ref() else {
                     tracing::debug!(

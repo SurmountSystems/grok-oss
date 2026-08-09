@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+dunce = { workspace = true }
 futures = { workspace = true }
 grok-rate-limit = { workspace = true }
 indicatif = { workspace = true }

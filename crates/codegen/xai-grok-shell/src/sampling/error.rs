@@ -111,13 +111,19 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             status, message, ..
         } => match status {
             StatusCode::UNAUTHORIZED => acp::Error::auth_required().data(message),
-            // 403 Forbidden is NOT an auth error — the request was
+            // 403 Forbidden is usually not auth — the request was
             // authenticated, but the action is not permitted (content-safety
             // blocks, ZDR-gated operations, remote-settings-blocked users).
             // Surfacing the proxy's message via internal_error keeps the
-            // explanation visible to the user without triggering the client's
-            // re-auth flow on -32000.
+            // explanation visible without triggering re-auth on -32000.
+            // Exception: credentials-rejected bodies (`bad-credentials`,
+            // OAuth token could not be validated) are the same class as 401.
             StatusCode::FORBIDDEN => {
+                if xai_grok_sampling_types::is_credentials_rejected_message(&message)
+                    && !xai_grok_sampling_types::is_credit_exhausted_message(&message)
+                {
+                    return acp::Error::auth_required().data(message);
+                }
                 // Team credits / monthly spending limit: plain English body,
                 // not Internal error JSON envelope. Bare 403 (policy/ZDR) stays
                 // on the internal_error path with the proxy message.
@@ -136,8 +142,7 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
                 } else {
                     message
                 };
-                // 403 is content-safety, never auth: on this setup path it stays
-                // `internal_error` → `server_error`.
+                // Policy/ZDR 403: internal_error with proxy message.
                 acp::Error::internal_error().data(message)
             }
             StatusCode::BAD_REQUEST => acp::Error::invalid_params().data(message),
@@ -657,6 +662,32 @@ mod tests {
                 "Content violates usage guidelines. Failed check: SAFETY_CHECK_TYPE_DATA_LEAKAGE"
                     .into()
             ))
+        );
+    }
+
+    /// Dogfood: 403 + bad-credentials (OAuth token not validated) must map to
+    /// auth_required, not Internal error. Same operator recovery as 401.
+    #[test]
+    fn forbidden_bad_credentials_maps_to_auth_required() {
+        let body = "unauthenticated:bad-credentials: The OAuth2 access token \
+                    could not be validated.";
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: body.to_string(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        let acp_err = map_sampling_err_to_acp(err);
+        assert_eq!(
+            acp_err.code,
+            acp::Error::auth_required().code,
+            "403 bad-credentials must surface as auth_required"
+        );
+        assert_eq!(
+            acp_err.data,
+            Some(serde_json::Value::String(body.to_string())),
+            "preserve server body for logs; UI uses re-auth prompt"
         );
     }
 

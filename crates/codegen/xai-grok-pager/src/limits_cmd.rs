@@ -9,7 +9,8 @@
 //! (dashboard allotment) ≠ Management usage series window.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::Serialize;
@@ -23,12 +24,46 @@ use crate::views::limits_snapshot::{
     LimitsSnapshot, PrincipalLimitsInput, format_limits_detail, honesty_notes_for_snapshot,
 };
 
-/// CLI args for `grok limits`.
+/// CLI args for `grok limits` / `grok limits multipoll`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct LimitsArgs {
     /// Emit machine-readable JSON (schemaVersion 1). No secrets.
     #[arg(long)]
     pub json: bool,
+    #[command(subcommand)]
+    pub command: Option<LimitsCommand>,
+}
+
+/// Subcommands under `grok limits`.
+#[derive(Clone, Debug, Eq, PartialEq, clap::Subcommand)]
+pub enum LimitsCommand {
+    /// Sample live limits N times and classify path (P1) vs free-period series (P2).
+    ///
+    /// Writes JSONL samples plus a summary under `--out-dir` (default
+    /// `.agents/reports/limits-multipoll-<utc>/`). Exit **0** when the
+    /// limits-first path is OK or skipped; exit **non-zero only** on path
+    /// failure (console live while free SuperGrok period limits still have
+    /// room). Free SuperGrok period staying flat is measurement only and does
+    /// **not** fail the process.
+    Multipoll(MultipollArgs),
+}
+
+/// Args for `grok limits multipoll`.
+#[derive(Clone, Debug, Eq, PartialEq, clap::Args)]
+pub struct MultipollArgs {
+    /// Number of live samples (default 2; need ≥2 for free-period series class).
+    #[arg(long, default_value_t = 2)]
+    pub samples: usize,
+    /// Seconds to sleep between sample ends (default 30; matches flat-detector
+    /// [`xai_grok_shell::auth::DEFAULT_MIN_WINDOW`]).
+    #[arg(long, default_value_t = 30)]
+    pub sleep_secs: u64,
+    /// Directory for `samples.jsonl` + `summary.json` (created if missing).
+    /// Default: `.agents/reports/limits-multipoll-<utc>/` when a repo
+    /// `.agents` tree is present, else under the process temp dir.
+    #[arg(long)]
+    pub out_dir: Option<PathBuf>,
 }
 
 /// Management prepaid/postpaid/usage-series process-cache policy for a product
@@ -134,6 +169,17 @@ pub struct LimitsCliReport {
     pub active_driver_label: String,
     pub supergrok: SuperGrokCliSection,
     pub console: ConsoleCliSection,
+    /// True when process + durable SuperGrok included poll history shows free
+    /// SuperGrok period % flat across a multi-poll window (≥2 polls, ≥30s wall
+    /// by default). Ticket / multipoll evidence for unproven free-period debit.
+    /// Does **not** invent a higher free-period %; measurement only.
+    pub flat_poll_unproven_debit: bool,
+    /// True when every sample in the flat window carried Grok Build product %.
+    /// Only meaningful when [`Self::flat_poll_unproven_debit`] is true.
+    pub flat_poll_observed_build: bool,
+    /// True when every sample in the flat window carried SuperGrok $ extras.
+    /// Only meaningful when [`Self::flat_poll_unproven_debit`] is true.
+    pub flat_poll_observed_extras: bool,
     /// Non-secret warnings (fetch failures, no auth, …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
@@ -142,8 +188,9 @@ pub struct LimitsCliReport {
 /// Active spend driver from a `/limits` snapshot (same Design A logic as status).
 ///
 /// Uses primary SuperGrok free-period % and SuperGrok dollar extras when live
-/// is SuperGrok. Console live always returns console key. Team prepaid and
-/// team Grok Build settlement are never the active driver label here.
+/// is SuperGrok. Console live always returns console key. Team prepaid remaining
+/// and team Grok Build settlement are never the `activeDriver` label here
+/// (intent chrome only; settlement honesty notes name those meters separately).
 pub fn active_spend_driver_from_snapshot(snap: &LimitsSnapshot) -> ActiveSpendDriver {
     let included_known = snap.primary.included.is_some();
     let included_pct = snap
@@ -411,6 +458,9 @@ pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> Limits
         live_principal_role: snap.live_principal_label.clone(),
         active_driver: driver.as_wire(),
         active_driver_label: format!("Active: {}", driver.as_human()),
+        flat_poll_unproven_debit: snap.flat_poll_unproven_debit,
+        flat_poll_observed_build: snap.flat_poll_observed_build,
+        flat_poll_observed_extras: snap.flat_poll_observed_extras,
         supergrok: SuperGrokCliSection {
             principals,
             shared_unified_pool: snap.shared_unified_supergrok_pool,
@@ -1036,11 +1086,16 @@ fn short_id(id: &str) -> &str {
     }
 }
 
-/// Run `grok limits` / `grok limits --json`.
+/// Run `grok limits` / `grok limits --json` / `grok limits multipoll`.
 pub async fn run(args: LimitsArgs) -> Result<()> {
-    let (report, snap) = collect_limits_report().await?;
-    write_limits_output(&report, &snap, args.json, &mut std::io::stdout().lock())?;
-    Ok(())
+    match args.command {
+        None => {
+            let (report, snap) = collect_limits_report().await?;
+            write_limits_output(&report, &snap, args.json, &mut std::io::stdout().lock())?;
+            Ok(())
+        }
+        Some(LimitsCommand::Multipoll(mp)) => run_multipoll(mp).await,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,6 +1202,395 @@ pub fn check_limits_first_path_json_str(
     let value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("limits --json parse error: {e}"))?;
     Ok(check_limits_first_path_json(&value, ctx))
+}
+
+// ---------------------------------------------------------------------------
+// Multipoll evidence harness (token economy proof)
+//
+// Pure classification of fixture / live sample series. Network I/O only in
+// [`run_multipoll`]. Exit non-zero only on path failure (P1); free SuperGrok
+// period flat (P2) is measurement and never fails the process alone.
+// ---------------------------------------------------------------------------
+
+/// Free SuperGrok period used-% series across multipoll samples (P2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreePeriodSeriesClass {
+    /// Free SuperGrok period used % stepped between samples (P2 stepped).
+    Stepped,
+    /// Free SuperGrok period used % stayed the same (P2 flat / unproven debit).
+    Flat,
+    /// Fewer than two samples or no `includedUsedPct` to compare.
+    Insufficient,
+}
+
+impl FreePeriodSeriesClass {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Stepped => "stepped",
+            Self::Flat => "flat",
+            Self::Insufficient => "insufficient",
+        }
+    }
+
+    pub fn free_period_stepped(self) -> bool {
+        matches!(self, Self::Stepped)
+    }
+}
+
+/// Combined multipoll verdict: path (P1) + free SuperGrok period series (P2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipollClassification {
+    /// Limits-first path check across samples (any path fail → Fail).
+    pub path: LimitsFirstPathCheck,
+    /// Free SuperGrok period used % flat / stepped / insufficient.
+    pub free_period: FreePeriodSeriesClass,
+}
+
+impl MultipollClassification {
+    /// True when path is Ok or Skipped (not a path failure).
+    pub fn path_ok(&self) -> bool {
+        self.path.is_ok()
+    }
+
+    /// True only when free SuperGrok period used % stepped between samples.
+    pub fn free_period_stepped(&self) -> bool {
+        self.free_period.free_period_stepped()
+    }
+
+    /// Process exit code: **0** path ok/skip; **1** path fail only.
+    /// Free SuperGrok period flat never forces non-zero by itself.
+    pub fn exit_code(&self) -> i32 {
+        if self.path.is_fail() { 1 } else { 0 }
+    }
+}
+
+/// Classify multipoll fixture samples (no network).
+///
+/// **P1 path:** any sample that fails [`check_limits_first_path_json`] makes
+/// the whole series Fail (console live under free SuperGrok period headroom).
+/// Otherwise last non-Ok result wins when all are Skipped; all Ok → Ok.
+///
+/// **P2 free SuperGrok period:** see [`classify_free_period_series`].
+pub fn classify_multipoll_samples(
+    samples: &[serde_json::Value],
+    ctx: LimitsFirstPathCheckContext,
+) -> MultipollClassification {
+    let path = classify_multipoll_path(samples, ctx);
+    let free_period = classify_free_period_series(samples);
+    MultipollClassification { path, free_period }
+}
+
+/// Path (P1) only across samples.
+pub fn classify_multipoll_path(
+    samples: &[serde_json::Value],
+    ctx: LimitsFirstPathCheckContext,
+) -> LimitsFirstPathCheck {
+    if samples.is_empty() {
+        return LimitsFirstPathCheck::Skipped {
+            reason: "no multipoll samples",
+        };
+    }
+    let mut last_skip: Option<LimitsFirstPathCheck> = None;
+    let mut saw_ok = false;
+    for s in samples {
+        match check_limits_first_path_json(s, ctx) {
+            fail @ LimitsFirstPathCheck::Fail { .. } => return fail,
+            LimitsFirstPathCheck::Ok => saw_ok = true,
+            skip @ LimitsFirstPathCheck::Skipped { .. } => last_skip = Some(skip),
+        }
+    }
+    if saw_ok {
+        LimitsFirstPathCheck::Ok
+    } else {
+        last_skip.unwrap_or(LimitsFirstPathCheck::Ok)
+    }
+}
+
+/// Free SuperGrok period used % series (P2) from multipoll `limits --json` values.
+///
+/// For each SuperGrok principal label, collect `includedUsedPct` across samples
+/// that report it. Any label with two or more known values that are not all
+/// equal → **Stepped**. If every comparable series stays equal → **Flat**.
+/// Fewer than two samples or no comparable series → **Insufficient**.
+pub fn classify_free_period_series(samples: &[serde_json::Value]) -> FreePeriodSeriesClass {
+    if samples.len() < 2 {
+        return FreePeriodSeriesClass::Insufficient;
+    }
+    // label -> ordered list of includedUsedPct across samples (skip missing)
+    let mut by_label: std::collections::BTreeMap<String, Vec<f64>> =
+        std::collections::BTreeMap::new();
+    for s in samples {
+        let Some(principals) = s
+            .get("supergrok")
+            .and_then(|g| g.get("principals"))
+            .and_then(|p| p.as_array())
+        else {
+            continue;
+        };
+        for p in principals {
+            let label = p
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SuperGrok")
+                .to_owned();
+            if let Some(pct) = p.get("includedUsedPct").and_then(|v| v.as_f64()) {
+                by_label.entry(label).or_default().push(pct);
+            }
+        }
+    }
+    let mut saw_comparable = false;
+    for series in by_label.values() {
+        if series.len() < 2 {
+            continue;
+        }
+        saw_comparable = true;
+        let first = series[0];
+        if series.iter().any(|v| *v != first) {
+            return FreePeriodSeriesClass::Stepped;
+        }
+    }
+    if saw_comparable {
+        FreePeriodSeriesClass::Flat
+    } else {
+        FreePeriodSeriesClass::Insufficient
+    }
+}
+
+/// Compact multipoll sample fields extracted from `limits --json` (no secrets).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipollSampleFields {
+    pub sample_index: usize,
+    pub captured_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_sampling: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_driver: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub console_is_live: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flat_poll_unproven_debit: Option<bool>,
+    pub principals: Vec<MultipollPrincipalFields>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_postpaid_oauth_class_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_postpaid_api_class_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipollPrincipalFields {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub included_used_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dollar_credits_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grok_build_usage_pct: Option<f64>,
+}
+
+/// Pull multipoll evidence fields from one `limits --json` value.
+pub fn extract_multipoll_sample_fields(
+    sample_index: usize,
+    captured_at: &str,
+    value: &serde_json::Value,
+) -> MultipollSampleFields {
+    let live_sampling = value
+        .get("liveSampling")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let active_driver = value
+        .get("activeDriver")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let console_is_live = value
+        .get("console")
+        .and_then(|c| c.get("isLive"))
+        .and_then(|v| v.as_bool());
+    let flat_poll_unproven_debit = value.get("flatPollUnprovenDebit").and_then(|v| v.as_bool());
+    let team_postpaid_oauth_class_usd = value
+        .get("console")
+        .and_then(|c| c.get("teamPostpaidOauthClassUsd"))
+        .and_then(|v| v.as_f64());
+    let team_postpaid_api_class_usd = value
+        .get("console")
+        .and_then(|c| c.get("teamPostpaidApiClassUsd"))
+        .and_then(|v| v.as_f64());
+    let mut principals = Vec::new();
+    if let Some(arr) = value
+        .get("supergrok")
+        .and_then(|s| s.get("principals"))
+        .and_then(|p| p.as_array())
+    {
+        for p in arr {
+            principals.push(MultipollPrincipalFields {
+                label: p
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("SuperGrok")
+                    .to_owned(),
+                role: p.get("role").and_then(|v| v.as_str()).map(str::to_owned),
+                included_used_pct: p.get("includedUsedPct").and_then(|v| v.as_f64()),
+                // SuperGrok dollar credits (wire still dollarExtrasUsd).
+                dollar_credits_usd: p.get("dollarExtrasUsd").and_then(|v| v.as_f64()),
+                grok_build_usage_pct: p.get("grokBuildUsagePct").and_then(|v| v.as_f64()),
+            });
+        }
+    }
+    MultipollSampleFields {
+        sample_index,
+        captured_at: captured_at.to_owned(),
+        live_sampling,
+        active_driver,
+        console_is_live,
+        flat_poll_unproven_debit,
+        principals,
+        team_postpaid_oauth_class_usd,
+        team_postpaid_api_class_usd,
+    }
+}
+
+/// Default multipoll output directory with UTC timestamp.
+pub fn default_multipoll_out_dir() -> PathBuf {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    // Prefer repo `.agents/reports/` when we look like a checkout (`.agents`
+    // or workspace `crates/`); otherwise write under the process temp dir.
+    let in_repo = Path::new(".agents").is_dir()
+        || Path::new(".agents/reports").is_dir()
+        || Path::new("crates").is_dir();
+    let base = if in_repo {
+        PathBuf::from(".agents/reports")
+    } else {
+        std::env::temp_dir().join("grok-limits-multipoll")
+    };
+    base.join(format!("limits-multipoll-{stamp}"))
+}
+
+/// Load path-check context from live dual-auth / preferred config (disk).
+pub fn multipoll_path_context_from_disk() -> LimitsFirstPathCheckContext {
+    let grok_home = xai_grok_shell::util::grok_home::grok_home();
+    let dual = xai_grok_shell::auth::collect_dual_auth_status(&grok_home);
+    let preferred_is_api_key = dual.preferred_method == Some("api_key");
+    LimitsFirstPathCheckContext {
+        auto_use_included_limits: dual.auto_use_included_limits,
+        preferred_is_api_key,
+    }
+}
+
+/// Live multipoll: N samples, sleep between ends, JSONL + summary, plain exit.
+pub async fn run_multipoll(args: MultipollArgs) -> Result<()> {
+    let n = args.samples.max(1);
+    let sleep = Duration::from_secs(args.sleep_secs);
+    let out_dir = args.out_dir.unwrap_or_else(default_multipoll_out_dir);
+    std::fs::create_dir_all(&out_dir)?;
+    let samples_path = out_dir.join("samples.jsonl");
+    let summary_path = out_dir.join("summary.json");
+    let fields_path = out_dir.join("fields.jsonl");
+
+    let ctx = multipoll_path_context_from_disk();
+    let mut raw_samples: Vec<serde_json::Value> = Vec::with_capacity(n);
+    let mut fields_rows: Vec<MultipollSampleFields> = Vec::with_capacity(n);
+
+    let mut samples_file = std::fs::File::create(&samples_path)?;
+    let mut fields_file = std::fs::File::create(&fields_path)?;
+
+    for i in 0..n {
+        let captured_at = chrono::Utc::now().to_rfc3339();
+        let (report, _snap) = collect_limits_report().await?;
+        let json_text = format_limits_json_pretty(&report)?;
+        let value: serde_json::Value = serde_json::from_str(&json_text)
+            .map_err(|e| anyhow::anyhow!("serialize limits report: {e}"))?;
+
+        // Full report line (evidence).
+        writeln!(samples_file, "{}", serde_json::to_string(&value)?)?;
+        let fields = extract_multipoll_sample_fields(i, &captured_at, &value);
+        writeln!(fields_file, "{}", serde_json::to_string(&fields)?)?;
+        fields_rows.push(fields);
+        raw_samples.push(value);
+
+        if i + 1 < n {
+            eprintln!(
+                "limits multipoll: sample {}/{} done; sleeping {}s before next",
+                i + 1,
+                n,
+                args.sleep_secs
+            );
+            tokio::time::sleep(sleep).await;
+        }
+    }
+
+    let class = classify_multipoll_samples(&raw_samples, ctx);
+    let flat_ev = xai_grok_shell::auth::flat_poll_evidence_from_history();
+
+    let path_status = match &class.path {
+        LimitsFirstPathCheck::Ok => "ok".to_owned(),
+        LimitsFirstPathCheck::Skipped { reason } => format!("skipped ({reason})"),
+        LimitsFirstPathCheck::Fail { message } => format!("fail ({message})"),
+    };
+    let free_period_status = class.free_period.as_wire();
+
+    let summary = serde_json::json!({
+        "schemaVersion": "1",
+        "kind": "limits_multipoll_summary",
+        "samples": n,
+        "sleepSecs": args.sleep_secs,
+        "outDir": out_dir.display().to_string(),
+        "samplesJsonl": samples_path.display().to_string(),
+        "fieldsJsonl": fields_path.display().to_string(),
+        "pathOk": class.path_ok(),
+        "pathStatus": path_status,
+        "freePeriodSeries": free_period_status,
+        "freePeriodStepped": class.free_period_stepped(),
+        "flatPollUnprovenDebit": flat_ev.unproven,
+        "flatPollObservedBuild": flat_ev.observed_build,
+        "flatPollObservedExtras": flat_ev.observed_extras,
+        "autoUseIncludedLimits": ctx.auto_use_included_limits,
+        "preferredIsApiKey": ctx.preferred_is_api_key,
+        "sampleFields": fields_rows,
+    });
+    std::fs::write(
+        &summary_path,
+        format!("{}\n", serde_json::to_string_pretty(&summary)?),
+    )?;
+
+    // Plain human summary on stdout.
+    println!("limits multipoll summary");
+    println!(
+        "  samples:     {n} (sleep {}s between ends)",
+        args.sleep_secs
+    );
+    println!("  out dir:     {}", out_dir.display());
+    println!("  samples:     {}", samples_path.display());
+    println!("  fields:      {}", fields_path.display());
+    println!("  summary:     {}", summary_path.display());
+    println!(
+        "  P1 path:     {}",
+        if class.path_ok() {
+            format!("OK ({path_status})")
+        } else {
+            format!("FAIL ({path_status})")
+        }
+    );
+    println!(
+        "  P2 free SuperGrok period limits: {free_period_status}{}",
+        if class.free_period == FreePeriodSeriesClass::Flat {
+            " (flat is measurement only; not a path fail)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  flatPollUnprovenDebit (process history): {}",
+        flat_ev.unproven
+    );
+    if !class.path_ok() {
+        eprintln!("limits multipoll: path failure (exit 1)");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// True when any SuperGrok principal has `includedUsedPct` strictly below 100.
@@ -1410,7 +1854,7 @@ mod tests {
         );
         assert!(human.contains("Console API:"), "console section: {human}");
         assert!(
-            human.contains("Balance: no management key"),
+            human.contains("Team prepaid remaining: no management key"),
             "honest gap: {human}"
         );
         // Slice 3: poll-reading honesty in body; no forbidden burn overclaim.
@@ -1493,6 +1937,14 @@ mod tests {
             snap.flat_poll_observed_build && snap.flat_poll_observed_extras,
             "history with Build + extras must set observed flags"
         );
+        assert!(
+            report.flat_poll_unproven_debit,
+            "limits --json must export flatPollUnprovenDebit for multipoll / ticket evidence"
+        );
+        assert!(
+            report.flat_poll_observed_build && report.flat_poll_observed_extras,
+            "limits --json must export observed Build/extras flags with flat-poll evidence"
+        );
         let expected = flat_poll_unproven_debit_note(true, true);
         assert!(
             report.notes.iter().any(|n| n == &expected),
@@ -1559,6 +2011,14 @@ mod tests {
             .with_flat_poll_unproven_debit(true)
             .with_flat_poll_observed_meters(false, false);
         let report = report_from_snapshot(&snap, vec![]);
+        assert!(
+            report.flat_poll_unproven_debit,
+            "report_from_snapshot must pass flat_poll_unproven_debit into limits --json"
+        );
+        assert!(
+            !report.flat_poll_observed_build && !report.flat_poll_observed_extras,
+            "observed flags must match snapshot (included-only window)"
+        );
         let human = format_limits_human(&snap, &report.notes);
         let expected_flat = flat_poll_unproven_debit_note(false, false);
 
@@ -1627,7 +2087,7 @@ mod tests {
             "console live: {human}"
         );
         assert!(
-            human.contains("Balance: $25"),
+            human.contains("Team prepaid remaining: $25"),
             "console team prepaid dollars: {human}"
         );
         assert_eq!(report.live_sampling, "console_key");
@@ -2027,6 +2487,15 @@ mod tests {
             "C6 honesty when SuperGrok live + OAuth dominates: {:?}",
             report.notes
         );
+        assert!(
+            report.notes.iter().any(|n| {
+                n.contains("intent chrome")
+                    || n.contains("spend-order driver")
+                    || n.contains("not proof of which wallet")
+            }),
+            "intent-not-settlement honesty when SuperGrok live + team meters: {:?}",
+            report.notes
+        );
 
         let pretty = format_limits_json_pretty(&report).expect("json");
         let v: serde_json::Value = serde_json::from_str(&pretty).expect("parse");
@@ -2056,7 +2525,8 @@ mod tests {
         );
         // Prepaid balance still distinct.
         assert!(
-            human.contains("Balance: $340") || human.contains("Balance: $340.00"),
+            human.contains("Team prepaid remaining: $340")
+                || human.contains("Team prepaid remaining: $340.00"),
             "prepaid balance line still present: {human}"
         );
         // Item 5b: default credits own line, not folded into prepaid $340.
@@ -2069,7 +2539,7 @@ mod tests {
             "default credits must be its own labeled line: {human}"
         );
         assert!(
-            !human.contains("Balance: $1500"),
+            !human.contains("Team prepaid remaining: $1500"),
             "must not fold default credits into prepaid Balance line: {human}"
         );
     }
@@ -2155,7 +2625,8 @@ mod tests {
             "default credits full label: {human}"
         );
         assert!(
-            human.contains("Balance: $340") || human.contains("Balance: $340.00"),
+            human.contains("Team prepaid remaining: $340")
+                || human.contains("Team prepaid remaining: $340.00"),
             "prepaid stays $340: {human}"
         );
     }
@@ -2442,5 +2913,100 @@ mod tests {
                 panic!("{message}");
             }
         }
+    }
+
+    // ----- Multipoll pure classification (fixtures, no network) -------------
+
+    /// Named contract: console live under free SuperGrok period headroom →
+    /// multipoll path fail (P1).
+    #[test]
+    fn multipoll_path_fail_when_console_live_under_free_period_headroom() {
+        let a = sample_limits_json("console_key", true, Some(6.0));
+        let b = sample_limits_json("console_key", true, Some(6.0));
+        let class = classify_multipoll_samples(&[a, b], limits_first_auto_ctx());
+        assert!(class.path.is_fail(), "path must fail: {:?}", class.path);
+        assert!(!class.path_ok());
+        assert_eq!(class.exit_code(), 1);
+        assert_eq!(class.free_period, FreePeriodSeriesClass::Flat);
+    }
+
+    /// Named contract: free SuperGrok period used % stays flat across samples
+    /// → P2 flat (measurement). Path OK still exit 0.
+    #[test]
+    fn multipoll_free_period_flat_measurement_exit_zero_when_path_ok() {
+        let a = sample_limits_json("supergrok_session", false, Some(6.0));
+        let b = sample_limits_json("supergrok_session", false, Some(6.0));
+        let class = classify_multipoll_samples(&[a, b], limits_first_auto_ctx());
+        assert_eq!(class.path, LimitsFirstPathCheck::Ok);
+        assert!(class.path_ok());
+        assert_eq!(class.free_period, FreePeriodSeriesClass::Flat);
+        assert!(!class.free_period_stepped());
+        assert_eq!(
+            class.exit_code(),
+            0,
+            "flat free SuperGrok period limits must not fail exit"
+        );
+    }
+
+    /// Named contract: free SuperGrok period used % steps → P2 stepped.
+    #[test]
+    fn multipoll_free_period_stepped_measurement() {
+        let a = sample_limits_json("supergrok_session", false, Some(6.0));
+        let b = sample_limits_json("supergrok_session", false, Some(7.0));
+        let class = classify_multipoll_samples(&[a, b], limits_first_auto_ctx());
+        assert!(class.path_ok());
+        assert_eq!(class.free_period, FreePeriodSeriesClass::Stepped);
+        assert!(class.free_period_stepped());
+        assert_eq!(class.exit_code(), 0);
+    }
+
+    /// Named contract: path OK + free SuperGrok period flat still exit 0
+    /// (P1/P2 separation — never fail only because period stayed flat).
+    #[test]
+    fn multipoll_path_ok_plus_flat_still_exit_zero() {
+        let a = sample_limits_json("supergrok_session", false, Some(66.0));
+        let b = sample_limits_json("supergrok_session", false, Some(66.0));
+        let class = classify_multipoll_samples(&[a, b], limits_first_auto_ctx());
+        assert!(class.path_ok());
+        assert_eq!(class.free_period, FreePeriodSeriesClass::Flat);
+        assert_eq!(class.exit_code(), 0);
+    }
+
+    /// Named contract: one sample alone cannot prove free-period stepped/flat.
+    #[test]
+    fn multipoll_free_period_insufficient_with_one_sample() {
+        let a = sample_limits_json("supergrok_session", false, Some(6.0));
+        assert_eq!(
+            classify_free_period_series(&[a]),
+            FreePeriodSeriesClass::Insufficient
+        );
+    }
+
+    /// Named contract: path fail on any sample fails the multipoll series.
+    #[test]
+    fn multipoll_path_fail_if_any_sample_is_console_under_headroom() {
+        let good = sample_limits_json("supergrok_session", false, Some(6.0));
+        let bad = sample_limits_json("console_key", true, Some(6.0));
+        let class = classify_multipoll_samples(&[good, bad], limits_first_auto_ctx());
+        assert!(class.path.is_fail(), "{:?}", class.path);
+        assert_eq!(class.exit_code(), 1);
+        // Free period still flat (both 6.0) — measurement only.
+        assert_eq!(class.free_period, FreePeriodSeriesClass::Flat);
+    }
+
+    #[test]
+    fn multipoll_extract_fields_reads_active_driver_and_credits() {
+        let mut v = sample_limits_json("supergrok_session", false, Some(6.0));
+        v["activeDriver"] = serde_json::json!("supergrok_free_period");
+        v["flatPollUnprovenDebit"] = serde_json::json!(true);
+        v["console"]["teamPostpaidOauthClassUsd"] = serde_json::json!(123.45);
+        let f = extract_multipoll_sample_fields(0, "2026-08-08T00:00:00Z", &v);
+        assert_eq!(f.live_sampling.as_deref(), Some("supergrok_session"));
+        assert_eq!(f.active_driver.as_deref(), Some("supergrok_free_period"));
+        assert_eq!(f.console_is_live, Some(false));
+        assert_eq!(f.flat_poll_unproven_debit, Some(true));
+        assert_eq!(f.team_postpaid_oauth_class_usd, Some(123.45));
+        assert_eq!(f.principals[0].included_used_pct, Some(6.0));
+        assert_eq!(f.principals[0].dollar_credits_usd, Some(100.29));
     }
 }

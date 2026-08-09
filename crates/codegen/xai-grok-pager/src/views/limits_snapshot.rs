@@ -629,8 +629,9 @@ impl LimitsSnapshot {
 /// **Active:** line for human `/limits` (same Design A driver as status chrome).
 ///
 /// Names free SuperGrok period, SuperGrok extras after-burner, or console key.
-/// Does not name team Grok Build settlement or console team prepaid as the
-/// active driver (those stay distinct meters below).
+/// This is client spend-order **intent chrome**, not settlement proof. Does not
+/// name team Grok Build settlement or console team prepaid as the active driver
+/// (those stay distinct meters below; honesty notes explain the split).
 pub fn active_driver_line_for_snapshot(snap: &LimitsSnapshot) -> String {
     use super::credit_bar::active_spend_driver;
 
@@ -1000,6 +1001,8 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         .as_ref()
         .and_then(|p| p.default_credits_cents)
         .is_some();
+    // Pure guard from snapshot + config (no re-scan of poll history rings).
+    let turns_blocked = turns_blocked_free_period_debit_unproven_for_snapshot(snap);
     honesty_notes_for_limits(LimitsHonestyInput {
         live: snap.live_identity,
         has_included_reading: has_included,
@@ -1009,7 +1012,38 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         oauth_postpaid_dominates,
         has_console_team_prepaid_reading: snap.console.balance_cents.is_some(),
         has_team_default_credits_reading: has_team_default_credits,
+        turns_blocked_free_period_debit_unproven: turns_blocked,
     })
+}
+
+/// Whether sampler turns would be blocked under unproven free SuperGrok period
+/// debit, derived from this snapshot + config (not a second history load).
+fn turns_blocked_free_period_debit_unproven_for_snapshot(snap: &LimitsSnapshot) -> bool {
+    use xai_grok_shell::auth::{
+        allow_spend_when_free_period_debit_unproven_from_config,
+        free_period_headroom_from_usage_readings,
+        should_block_spend_when_free_period_debit_unproven,
+    };
+    // Console live = intentional console spend; never claim free-period block.
+    let preferred_console = snap.live_identity.is_console();
+    let allow = allow_spend_when_free_period_debit_unproven_from_config();
+    let mut readings: Vec<Option<f64>> = Vec::new();
+    if let Some(pct) = snap.primary.included.as_ref().map(|i| i.used_pct) {
+        readings.push(Some(pct));
+    }
+    for slot in &snap.extra_principals {
+        if let Some(pct) = slot.included.as_ref().map(|i| i.used_pct) {
+            readings.push(Some(pct));
+        }
+    }
+    let head = free_period_headroom_from_usage_readings(&readings);
+    should_block_spend_when_free_period_debit_unproven(
+        allow,
+        preferred_console,
+        head.usage_known,
+        head.has_headroom,
+        snap.flat_poll_unproven_debit,
+    )
 }
 
 /// Dual SuperGrok poll-fail + shared-pool fill notes (human `/limits` body
@@ -1171,13 +1205,19 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
             fmt_dollars(p.oauth_class_cents)
         ));
     }
+    // First-class team prepaid remaining (never SuperGrok dollar extras).
+    // Matches console.x.ai team Billing Credits remaining wallet. Shown under
+    // SuperGrok live too when Management knows the meter (not only when console
+    // key is live).
     match c.balance_cents {
-        // Short Balance line — dollars are console team prepaid (never SuperGrok extras).
-        Some(cents) => lines.push(format!("  Balance: {}", fmt_dollars(cents))),
+        Some(cents) => lines.push(format!("  Team prepaid remaining: {}", fmt_dollars(cents))),
         None => {
-            // Short Balance gap only. No Management Key lecture wall — operators
+            // Short gap only. No Management Key lecture wall; operators
             // rejected that framing for chat-key honesty (dogfood).
-            lines.push(format!("  Balance: {}", c.prepaid_gap.as_display_str()));
+            lines.push(format!(
+                "  Team prepaid remaining: {}",
+                c.prepaid_gap.as_display_str()
+            ));
         }
     }
     // Postpaid period + API class (OAuth / Grok Build already above when > 0).
@@ -1379,7 +1419,7 @@ mod tests {
             "Path: wording retired (read as key missing): {out}"
         );
         assert!(
-            out.contains("Balance: no management key"),
+            out.contains("Team prepaid remaining: no management key"),
             "honest console missing key: {out}"
         );
         assert!(
@@ -1413,7 +1453,7 @@ mod tests {
         );
         assert!(!out.contains("Path:"), "Path: wording retired: {out}");
         assert!(
-            out.contains("Balance: no management key"),
+            out.contains("Team prepaid remaining: no management key"),
             "no fake console $: {out}"
         );
         assert!(
@@ -1454,7 +1494,7 @@ mod tests {
             "omit saved; presence is implicit: {out}"
         );
         assert!(
-            out.contains("Balance: $125"),
+            out.contains("Team prepaid remaining: $125"),
             "real management prepaid dollars (short Balance): {out}"
         );
         assert!(
@@ -1486,7 +1526,10 @@ mod tests {
             out.contains("SuperGrok dollar extras: none on file"),
             "{out}"
         );
-        assert!(out.contains("Balance: no management key"), "{out}");
+        assert!(
+            out.contains("Team prepaid remaining: no management key"),
+            "{out}"
+        );
         assert!(!out.contains("no management key/team id"), "{out}");
         assert!(!out.contains("no $ meter yet"), "{out}");
     }
@@ -1498,7 +1541,7 @@ mod tests {
             LimitsSnapshot::from_billing(None, None, SamplingIdentityKind::ConsoleKey);
         let out_k = format_limits_detail(&missing_key);
         assert!(
-            out_k.contains("Balance: no management key"),
+            out_k.contains("Team prepaid remaining: no management key"),
             "default missing key: {out_k}"
         );
         assert!(
@@ -1511,12 +1554,12 @@ mod tests {
                 .with_console_prepaid_gap(ConsoleTeamPrepaidGap::MissingTeamId);
         let out_t = format_limits_detail(&missing_team);
         assert!(
-            out_t.contains("Balance: no management team id"),
+            out_t.contains("Team prepaid remaining: no management team id"),
             "missing team: {out_t}"
         );
         assert!(
-            !out_t.contains("Balance: no management key\n")
-                && !out_t.contains("Balance: no management key"),
+            !out_t.contains("Team prepaid remaining: no management key\n")
+                && !out_t.contains("Team prepaid remaining: no management key"),
             "must not mash missing team into missing key: {out_t}"
         );
 
@@ -1525,7 +1568,7 @@ mod tests {
                 .with_console_prepaid_gap(ConsoleTeamPrepaidGap::Unavailable);
         let out_a = format_limits_detail(&unavailable);
         assert!(
-            out_a.contains("Balance: team prepaid unavailable"),
+            out_a.contains("Team prepaid remaining: team prepaid unavailable"),
             "{out_a}"
         );
         assert!(!out_a.contains("no $ meter yet"), "{out_a}");
@@ -1534,7 +1577,7 @@ mod tests {
             .with_console_prepaid_gap(ConsoleTeamPrepaidGap::Loading);
         let out_l = format_limits_detail(&loading);
         assert!(
-            out_l.contains("Balance: loading team prepaid..."),
+            out_l.contains("Team prepaid remaining: loading team prepaid..."),
             "{out_l}"
         );
 
@@ -1543,7 +1586,7 @@ mod tests {
                 .with_console_balance_cents(Some(2500));
         let out_d = format_limits_detail(&with_dollars);
         assert!(
-            out_d.contains("Balance: $25"),
+            out_d.contains("Team prepaid remaining: $25"),
             "short Balance line: {out_d}"
         );
         assert!(
@@ -1593,7 +1636,7 @@ mod tests {
             "console key on file but SuperGrok serving: {out}"
         );
         assert!(
-            out.contains("Balance: $125"),
+            out.contains("Team prepaid remaining: $125"),
             "team prepaid must show even when console.isLive=false: {out}"
         );
         assert!(
@@ -1627,7 +1670,7 @@ mod tests {
         let out = format_limits_detail(&snap);
         assert!(out.contains("Console API:"), "team section present: {out}");
         assert!(
-            out.contains("Balance: no management key"),
+            out.contains("Team prepaid remaining: no management key"),
             "honest team gap, not silent omit: {out}"
         );
         assert!(
@@ -1715,7 +1758,7 @@ mod tests {
             "series OAuth / Grok Build class must appear: {out}"
         );
         assert!(
-            out.contains("Balance: $340"),
+            out.contains("Team prepaid remaining: $340"),
             "team prepaid Balance stays its own meter: {out}"
         );
         assert!(
@@ -1724,7 +1767,8 @@ mod tests {
         );
         // No mash: prepaid Balance must not show series window dollars.
         assert!(
-            !out.contains("Balance: $823") && !out.contains("Balance: $823.71"),
+            !out.contains("Team prepaid remaining: $823")
+                && !out.contains("Team prepaid remaining: $823.71"),
             "must not fold series into prepaid Balance: {out}"
         );
         // Free SuperGrok period line is percent, not series USD.
@@ -1763,7 +1807,9 @@ mod tests {
         let oauth_idx = out
             .find("Team postpaid OAuth / Grok Build class:")
             .expect("Grok Build class line");
-        let balance_idx = out.find("Balance: $340").expect("prepaid Balance");
+        let balance_idx = out
+            .find("Team prepaid remaining: $340")
+            .expect("prepaid Balance");
         assert!(
             oauth_idx > console_idx && oauth_idx < balance_idx,
             "Grok Build class must appear near top of Console, before prepaid Balance:\n{out}"
@@ -1773,12 +1819,12 @@ mod tests {
             "must show OAuth / Grok Build class dollars: {out}"
         );
         assert!(
-            out.contains("Balance: $340"),
+            out.contains("Team prepaid remaining: $340"),
             "prepaid Balance stays separate: {out}"
         );
         // Must not mash into one credits line.
         assert!(
-            !out.contains("credits: $823.71") && !out.contains("Balance: $823.71"),
+            !out.contains("credits: $823.71") && !out.contains("Team prepaid remaining: $823.71"),
             "must not fold class into prepaid Balance: {out}"
         );
     }
@@ -1921,7 +1967,10 @@ mod tests {
             "personal extras stay SuperGrok-labeled: {out}"
         );
         // Console separate.
-        assert!(out.contains("Balance: no management key"), "{out}");
+        assert!(
+            out.contains("Team prepaid remaining: no management key"),
+            "{out}"
+        );
         assert!(!out.contains("no management key/team id"), "{out}");
         assert!(!out.contains("no $ meter yet"), "{out}");
         // Must not mash meters.

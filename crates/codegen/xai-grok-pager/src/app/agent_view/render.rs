@@ -51,6 +51,9 @@ pub struct AppRenderParams<'a> {
     /// attached-agent popup). Feeds the hint path so the bar never
     /// advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
+    /// Process-level fearless global pause is active. Drives status-row
+    /// `[resume]` chrome and shortcuts-bar pause/resume hint.
+    pub global_paused: bool,
 }
 impl AgentView {
     pub(crate) fn update_scrollback_selection_state(
@@ -425,7 +428,11 @@ impl AgentView {
             self.multiline_mode,
             self.vim_mode,
             self.is_subagent_view,
+            // Parked empty sendable wait: Enter cancel-and-sends, so treat as not
+            // "running" for the footer label (send, not queue). Held queue suppresses
+            // the parked marker, so turn_running stays true → queue.
             self.session.state.is_turn_running() && !self.renders_parked(),
+            self.holds_queue_for_background(),
             self.esc_would_cancel_turn(esc_owned_before_agent),
             !self.visible_queue_is_empty(),
             selected_is_user_prompt,
@@ -440,6 +447,18 @@ impl AgentView {
             && let Some(def) = registry.find(ActionId::ToggleQueue)
         {
             hints.push(def.hint());
+        }
+        // While global pause holds every session idle, still advertise resume
+        // (status-row `[resume]` is the mouse path; footer names the chord).
+        if self.global_work_paused
+            && !hints
+                .iter()
+                .any(|h| h.label == "pause" || h.label == "resume")
+            && let Some(def) = registry.find(ActionId::ToggleGlobalPause)
+        {
+            let mut hint = def.hint();
+            hint.label = std::borrow::Cow::Borrowed("resume");
+            hints.push(hint);
         }
         hints
     }
@@ -733,7 +752,9 @@ impl AgentView {
             voice_listening,
             voice_interim,
             esc_owned_before_agent,
+            global_paused,
         } = app_params;
+        self.global_work_paused = global_paused;
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
@@ -1159,13 +1180,20 @@ impl AgentView {
             self.maybe_push_parked_marker();
         }
         let parked = self.renders_parked();
+        // Plan approval soft-park (and idle plan-mode review cue) need a status
+        // row even when the turn is idle — otherwise the clickable review
+        // chip never paints and operators only see a bare "plan" mode badge.
+        let plan_status_cue = self.plan_approval_view.is_some()
+            || (self.plan_mode_active && self.plan_preview_available());
         let turn_status_height = if turn_status::should_show(
             &self.session.state,
             drain_blocked,
             self.mcp_init_progress.as_ref(),
             watchers,
             parked,
-        ) {
+            self.global_work_paused,
+        ) || plan_status_cue
+        {
             1
         } else {
             0
@@ -1950,7 +1978,49 @@ impl AgentView {
                 self.hit_follow_indicator.clear();
             }
         }
-        if let Some(msg) = self.active_toast_message() {
+        // `/rebuild` progress strip: full-width bar + percent + stage at the
+        // bottom of the scrollback. Prefer this over the corner toast while a
+        // rebuild is live so the operator sees real progress.
+        if let Some(progress) = self.rebuild_progress.as_ref() {
+            let sb = layout.scrollback;
+            if sb.height > 0 && sb.width > 8 {
+                let y = sb.bottom().saturating_sub(1);
+                let line = crate::views::rebuild_progress::rebuild_progress_line(
+                    sb.width,
+                    progress.fraction,
+                    &progress.detail,
+                    theme.accent_running,
+                    theme.gray_dim,
+                    theme.bg_base,
+                    theme.gray_bright,
+                );
+                let mut x = sb.x;
+                for span in line.spans {
+                    for ch in span.content.chars() {
+                        if x >= sb.right() {
+                            break;
+                        }
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(ch);
+                            if let Some(fg) = span.style.fg {
+                                cell.fg = fg;
+                            }
+                            if let Some(bg) = span.style.bg {
+                                cell.bg = bg;
+                            }
+                            cell.modifier = span.style.add_modifier;
+                        }
+                        x = x.saturating_add(1);
+                    }
+                }
+                self.frame_occluder_rects.push(Rect {
+                    x: sb.x,
+                    y,
+                    width: sb.width,
+                    height: 1,
+                });
+            }
+        } else if let Some(msg) = self.active_toast_message() {
             let sb = layout.scrollback;
             if let Some(toast_text) = fit_toast_text(msg, sb.width) {
                 let w = toast_text.chars().count() as u16;
@@ -2217,6 +2287,47 @@ impl AgentView {
                     1,
                 ));
                 self.hit_cancel_button.rect = None;
+                self.hit_pause_button.rect = None;
+                self.hit_bg_button.rect = None;
+                self.hit_watching_cue.rect = None;
+            } else if self.plan_mode_active && self.plan_preview_available() {
+                // Plan mode still on, no live reverse-request: clickable review
+                // cue so freeform "waiting on plan panel" is not a dead end.
+                let diamond_color = crate::views::turn_status::pending_diamond_color(
+                    &theme,
+                    theme.accent_plan,
+                    tick,
+                );
+                let text_style = if self.hit_plan_approval_status.hovered {
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .add_modifier(ratatui::style::Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(theme.gray)
+                };
+                let status_label = crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS;
+                let spans = vec![
+                    Span::styled(
+                        format!("{} ", crate::glyphs::diamond_filled()),
+                        Style::default().fg(diamond_color),
+                    ),
+                    Span::styled(status_label, text_style),
+                ];
+                buf.set_line_safe(
+                    turn_area.x,
+                    turn_area.y,
+                    &Line::from(spans),
+                    turn_area.width,
+                );
+                let item_width: u16 = 2u16.saturating_add(status_label.len() as u16);
+                self.hit_plan_approval_status.rect = Some(Rect::new(
+                    turn_area.x,
+                    turn_area.y,
+                    item_width.min(turn_area.width),
+                    1,
+                ));
+                self.hit_cancel_button.rect = None;
+                self.hit_pause_button.rect = None;
                 self.hit_bg_button.rect = None;
                 self.hit_watching_cue.rect = None;
             } else {
@@ -2246,6 +2357,7 @@ impl AgentView {
                         drain_blocked,
                         buttons: Some(turn_status::MouseButtons {
                             cancel_hovered: self.hit_cancel_button.hovered,
+                            pause_hovered: self.hit_pause_button.hovered,
                             bg_hovered: self.hit_bg_button.hovered,
                             watching_hovered: self.hit_watching_cue.hovered,
                         }),
@@ -2260,10 +2372,13 @@ impl AgentView {
                         flat_background: false,
                         held_queue,
                         held_queue_top_sendable,
+                        global_paused: self.global_work_paused,
                     },
                 );
                 self.hit_cancel_button
                     .set_unless_dropdown(turn_output.cancel_button, dropdown_open);
+                self.hit_pause_button
+                    .set_unless_dropdown(turn_output.pause_button, dropdown_open);
                 self.hit_bg_button
                     .set_unless_dropdown(turn_output.bg_button, dropdown_open);
                 self.hit_watching_cue
@@ -2271,6 +2386,7 @@ impl AgentView {
             }
         } else {
             self.hit_cancel_button.clear();
+            self.hit_pause_button.clear();
             self.hit_bg_button.clear();
             self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
@@ -5103,8 +5219,8 @@ mod clear_done_and_limits_chrome_tests {
         let buf = draw_hits(&mut agent);
         let text = credits_hit_text(&agent, &buf);
         assert!(
-            text.contains("42%") && !text.contains("Credits"),
-            "status meter should show just 42% (no Credits used label), got {text:?}"
+            text.contains("intent") && text.contains("42%") && !text.contains("Credits"),
+            "status meter should show intent · 42% (no Credits used label), got {text:?}"
         );
     }
 
@@ -5125,8 +5241,8 @@ mod clear_done_and_limits_chrome_tests {
         let buf = draw_hits(&mut agent);
         let text = credits_hit_text(&agent, &buf);
         assert!(
-            text.contains("37%") && !text.contains("Credits"),
-            "team dual-auth SuperGrok warm must paint 37% (not hide for billing_surface off), got {text:?}"
+            text.contains("intent") && text.contains("37%") && !text.contains("Credits"),
+            "team dual-auth SuperGrok warm must paint intent · 37% (not hide for billing_surface off), got {text:?}"
         );
     }
 
@@ -5144,8 +5260,8 @@ mod clear_done_and_limits_chrome_tests {
         let buf = draw_hits(&mut agent);
         let text = credits_hit_text(&agent, &buf);
         assert!(
-            text.contains("...%") && !text.contains("Credits"),
-            "team dual-auth SuperGrok cold must paint ...%, got {text:?}"
+            text.contains("...%") && text.contains("intent") && !text.contains("Credits"),
+            "team dual-auth SuperGrok cold must paint intent · ...%, got {text:?}"
         );
         let rect = agent.hit_credits.rect.unwrap();
         let out = agent.handle_input(
@@ -5183,8 +5299,8 @@ mod clear_done_and_limits_chrome_tests {
         let buf = draw_hits(&mut agent);
         let text = credits_hit_text(&agent, &buf);
         assert!(
-            text.contains("...%") || text.contains("loading"),
-            "cold status meter must show honest placeholder (not blank), got {text:?}"
+            (text.contains("...%") || text.contains("loading")) && text.contains("intent"),
+            "cold status meter must show intent-labeled honest placeholder (not blank), got {text:?}"
         );
         // Click still dispatches ShowLimits (same path as warm meter).
         let rect = agent.hit_credits.rect.unwrap();
@@ -5309,8 +5425,10 @@ mod clear_done_and_limits_chrome_tests {
         let buf = draw_hits(&mut agent);
         let text = credits_hit_text(&agent, &buf);
         assert!(
-            text.contains("6%") && !text.to_ascii_lowercase().contains("console"),
-            "free period headroom must paint 6% not console · $340: {text:?}"
+            text.contains("intent")
+                && text.contains("6%")
+                && !text.to_ascii_lowercase().contains("console"),
+            "free period headroom must paint intent · 6% not console · $340: {text:?}"
         );
         assert!(
             !text.contains("340") && !text.contains("$340"),

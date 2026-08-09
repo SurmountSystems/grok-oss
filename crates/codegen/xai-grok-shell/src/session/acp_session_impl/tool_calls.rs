@@ -130,6 +130,53 @@ pub(super) fn should_intercept_exit_plan_approval(
     }
     true
 }
+
+/// Client-facing and wire names for the exit-plan-mode gate tool.
+pub(super) fn is_exit_plan_mode_tool_name(name: &str) -> bool {
+    matches!(name, "exit_plan_mode" | "ExitPlanMode")
+}
+
+/// When a multi-tool batch includes both normal tools and `exit_plan_mode`,
+/// split so non-exit tools run to completion first.
+///
+/// Named contract: a same-turn rewrite of session `plan.md` (or any other
+/// co-batched tool) must finish before `exit_plan_mode` parks approval and
+/// re-reads the plan. Otherwise prepare awaits the operator while the write
+/// is only prepared, not dispatched, so the panel and post-approve tool body
+/// freeze the pre-write plan (dogfood 2026-08-09: secrets plan rewritten in
+/// the same turn as exit still presented "Deploy automation").
+///
+/// Returns `Ok((others, exits))` when a split is needed, or `Err(original)`
+/// when the batch is exit-only / has no exit (caller keeps the original order).
+pub(super) fn split_tool_batch_before_exit_plan_mode(
+    tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
+) -> Result<
+    (
+        Vec<crate::sampling::types::ToolCallResponse>,
+        Vec<crate::sampling::types::ToolCallResponse>,
+    ),
+    Vec<crate::sampling::types::ToolCallResponse>,
+> {
+    let has_exit = tool_calls
+        .iter()
+        .any(|c| is_exit_plan_mode_tool_name(&c.function.name));
+    let has_other = tool_calls
+        .iter()
+        .any(|c| !is_exit_plan_mode_tool_name(&c.function.name));
+    if !has_exit || !has_other {
+        return Err(tool_calls);
+    }
+    let mut others = Vec::with_capacity(tool_calls.len());
+    let mut exits = Vec::new();
+    for call in tool_calls {
+        if is_exit_plan_mode_tool_name(&call.function.name) {
+            exits.push(call);
+        } else {
+            others.push(call);
+        }
+    }
+    Ok((others, exits))
+}
 /// Verdict for a tool call evaluated against the plan-mode edit gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlanEditGate {
@@ -229,11 +276,20 @@ const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
 fn revise_plan_message(feedback: &str) -> String {
     let feedback = feedback.trim();
     if feedback.is_empty() {
-        "The user wants to revise the plan. \
-         Ask the user what changes they would like to make."
+        // Bare Revise CTA (no freeform): unpark is already done. Do not stall
+        // only on "what should change?" — rewrite from conversation context
+        // when possible, then re-present with exit_plan_mode.
+        "The user clicked Revise without written notes. Stay in plan mode. \
+         Rewrite plan.md based on the conversation and any earlier feedback. \
+         If the needed change is genuinely unclear, ask one short question, \
+         then revise. When the plan is ready, call exit_plan_mode again."
             .to_string()
     } else {
-        format!("The user wants to revise the plan. The user said:\n{feedback}")
+        format!(
+            "The user wants to revise the plan. Stay in plan mode, rewrite \
+             plan.md from their notes, then call exit_plan_mode again.\n\n\
+             The user said:\n{feedback}"
+        )
     }
 }
 /// Shared clarifying-question message for the Questions outcome (not a rewrite).
@@ -309,6 +365,49 @@ impl SessionActor {
         &self,
         tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
     ) -> Result<ToolLoop, acp::Error> {
+        // Same-batch write(plan.md) + exit_plan_mode: run non-exit tools to
+        // completion first so prepare's plan re-read and soft-park see the
+        // rewritten body (not a pre-write snapshot frozen while write sits
+        // only in the prepared queue).
+        let tool_calls = match split_tool_batch_before_exit_plan_mode(tool_calls) {
+            Ok((others, exits)) => {
+                let first = Box::pin(self.execute_tool_calls(others)).await?;
+                match &first {
+                    ToolLoop::Continue => {}
+                    other => {
+                        for call in exits {
+                            let message = match other {
+                                ToolLoop::PermissionReject { .. } => format!(
+                                    "Tool execution cancelled due to earlier permission rejection for tool `{}`",
+                                    call.function.name
+                                ),
+                                ToolLoop::Cancelled => format!(
+                                    "Tool execution cancelled due to earlier user cancellation for tool `{}`",
+                                    call.function.name
+                                ),
+                                ToolLoop::FollowupMessage(_) => format!(
+                                    "Tool execution cancelled due to earlier user followup message for tool `{}`",
+                                    call.function.name
+                                ),
+                                _ => format!(
+                                    "Tool execution cancelled for tool `{}`",
+                                    call.function.name
+                                ),
+                            };
+                            self.chat_state_handle
+                                .push_tool_result(ConversationItem::tool_result(
+                                    call.id.clone(),
+                                    message,
+                                ));
+                        }
+                        return Ok(first);
+                    }
+                }
+                return Box::pin(self.execute_tool_calls(exits)).await;
+            }
+            Err(unchanged) => unchanged,
+        };
+
         if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
             tracing::Span::current().record("model_id", cfg.model.as_str());
         }
@@ -2907,7 +3006,20 @@ mod execute_tool_call_parts_tests {
 }
 #[cfg(test)]
 mod exit_plan_intercept_tests {
-    use super::{PlanFileRead, classify_plan_file_read, should_intercept_exit_plan_approval};
+    use super::{
+        PlanFileRead, classify_plan_file_read, is_exit_plan_mode_tool_name,
+        should_intercept_exit_plan_approval, split_tool_batch_before_exit_plan_mode,
+    };
+    use crate::sampling::types::{ToolCallFunction, ToolCallResponse};
+
+    fn call(id: &str, name: &str) -> ToolCallResponse {
+        ToolCallResponse {
+            id: id.to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunction::new(name, "{}"),
+        }
+    }
+
     #[test]
     fn exit_plan_mode_empty_plan_still_intercepts() {
         assert!(should_intercept_exit_plan_approval(
@@ -2925,6 +3037,52 @@ mod exit_plan_intercept_tests {
             false,
             &PlanFileRead::Present("plan body".into()),
         ));
+    }
+
+    #[test]
+    fn is_exit_plan_mode_tool_name_matches_wire_and_client_ids() {
+        assert!(is_exit_plan_mode_tool_name("exit_plan_mode"));
+        assert!(is_exit_plan_mode_tool_name("ExitPlanMode"));
+        assert!(!is_exit_plan_mode_tool_name("write"));
+        assert!(!is_exit_plan_mode_tool_name("enter_plan_mode"));
+    }
+
+    /// Named contract: same-batch write + exit_plan_mode must run the write
+    /// pass first so park/re-read sees the rewritten plan.md, not a freeze of
+    /// the pre-write body.
+    #[test]
+    fn split_tool_batch_runs_non_exit_before_exit_plan_mode() {
+        let batch = vec![
+            call("w1", "write"),
+            call("t1", "todo_write"),
+            call("e1", "exit_plan_mode"),
+            call("e2", "ExitPlanMode"),
+        ];
+        let (others, exits) =
+            split_tool_batch_before_exit_plan_mode(batch).expect("mixed batch must split");
+        assert_eq!(
+            others
+                .iter()
+                .map(|c| c.function.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["write", "todo_write"]
+        );
+        assert_eq!(
+            exits
+                .iter()
+                .map(|c| c.function.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["exit_plan_mode", "ExitPlanMode"]
+        );
+        assert_eq!(others[0].id, "w1");
+        assert_eq!(exits[0].id, "e1");
+    }
+
+    #[test]
+    fn split_tool_batch_skips_when_exit_only_or_no_exit() {
+        assert!(split_tool_batch_before_exit_plan_mode(vec![call("e", "exit_plan_mode")]).is_err());
+        assert!(split_tool_batch_before_exit_plan_mode(vec![call("w", "write")]).is_err());
+        assert!(split_tool_batch_before_exit_plan_mode(vec![]).is_err());
     }
     #[test]
     fn create_plan_empty_still_intercepts() {
@@ -3158,11 +3316,32 @@ mod plan_approval_helper_tests {
     }
     #[test]
     fn revise_plan_message_includes_feedback_when_present() {
-        assert!(revise_plan_message("").contains("Ask the user what changes"));
-        assert!(revise_plan_message("   ").contains("Ask the user what changes"));
+        // Bare Revise (empty freeform): push rewrite + re-present, not stall-only ask.
+        let empty = revise_plan_message("");
+        assert!(
+            empty.contains("clicked Revise") || empty.contains("without written notes"),
+            "empty revise must name bare Revise CTA: {empty}"
+        );
+        assert!(
+            empty.contains("Rewrite plan.md") || empty.contains("rewrite plan.md"),
+            "empty revise must push a plan rewrite: {empty}"
+        );
+        assert!(
+            empty.contains("exit_plan_mode again"),
+            "empty revise must re-present via exit_plan_mode: {empty}"
+        );
+        let blank = revise_plan_message("   ");
+        assert!(
+            blank.contains("exit_plan_mode again"),
+            "whitespace-only freeform is empty revise: {blank}"
+        );
         let with = revise_plan_message("use async");
         assert!(with.contains("The user said:"));
         assert!(with.contains("use async"));
+        assert!(
+            with.contains("exit_plan_mode again"),
+            "feedback revise must still re-present: {with}"
+        );
     }
     #[test]
     fn questions_plan_message_is_not_revise_and_forbids_rewrite() {

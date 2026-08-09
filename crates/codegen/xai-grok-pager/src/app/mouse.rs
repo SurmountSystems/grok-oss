@@ -133,6 +133,12 @@ impl AgentView {
                 {
                     return InputOutcome::Action(Action::DemoteToBackground);
                 }
+                if self.hit_pause_button.contains(mouse.column, mouse.row)
+                    && !self.pos_occluded(mouse.column, mouse.row)
+                {
+                    // Pause is never CancelTurn — always process-level global pause.
+                    return InputOutcome::Action(Action::ToggleGlobalPause);
+                }
                 if self.hit_cancel_button.contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
@@ -1027,6 +1033,7 @@ impl AgentView {
                     .hit_follow_indicator
                     .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cancel_button.update_hover(mouse.column, mouse.row);
+                changed |= self.hit_pause_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_watching_cue.update_hover(mouse.column, mouse.row);
                 changed |= self

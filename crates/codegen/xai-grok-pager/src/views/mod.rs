@@ -38,6 +38,7 @@ pub mod prompt_suggestion;
 pub mod prompt_widget;
 pub mod question_view;
 pub mod queue_pane;
+pub mod rebuild_progress;
 pub mod rewind;
 pub mod scroll_debug_hud;
 pub mod session_picker;

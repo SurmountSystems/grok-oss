@@ -860,15 +860,28 @@ impl AgentView {
         {
             return Some(InputOutcome::Changed);
         }
-        // Mid-turn (minimal / non-vim): cancel immediately from prompt or
-        // scrollback, even with a draft. Also — in every mode — while already
-        // cancelling, so a lost cancel notification is re-sent (Ctrl+C
-        // escalates to Quit instead). Push the grace deadline out so an Esc
-        // mash past the cancel cannot silently arm the rewind picker below.
-        if self.session.state.is_turn_running() || self.session.state.is_cancelling() {
+        // While already cancelling: re-send cancel in every mode (lost ack).
+        // Ctrl+C escalates to Quit instead. Push the post-cancel grace so an
+        // Esc mash cannot silently arm the rewind picker after the turn goes
+        // idle. Does not use double-Esc arming — the user already committed.
+        if self.session.state.is_cancelling() {
             self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Action(Action::CancelTurn));
+        }
+        // Mid-turn (minimal / non-vim): arm double-Esc cancel confirm from
+        // prompt or scrollback, even with a draft (the draft is preserved,
+        // unlike Ctrl+C's clear-first gesture). First press is harmless so
+        // Esc that only closed a modal/dropdown cannot also cancel. Second
+        // Esc within the confirm window fires CancelTurn (AppView installs
+        // the pending and sets cancel_trigger_hint + rewind grace on fire).
+        if self.session.state.is_turn_running() {
+            return Some(InputOutcome::ArmPending {
+                action: Action::CancelTurn,
+                shortcut: crate::input::key::KeyShortcut::from(*key),
+                label: Some("cancel"),
+                ttl: crate::app::app_view::esc_double_press_ttl(),
+            });
         }
 
         // The two idle arms split on pane ownership. CLEAR mutates the composer

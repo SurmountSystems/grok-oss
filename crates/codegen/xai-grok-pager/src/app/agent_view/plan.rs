@@ -135,7 +135,7 @@ impl AgentView {
         self.session.is_auto() && !self.session.is_yolo() && !effective_plan
     }
     /// Whether plan content is available for preview.
-    fn plan_preview_available(&self) -> bool {
+    pub(crate) fn plan_preview_available(&self) -> bool {
         self.plan_body_for_preview().is_some()
     }
     /// Whether the "plan" status-bar chip should be rendered.
@@ -374,6 +374,44 @@ impl AgentView {
         }
     }
 
+    /// After a turn ends in plan mode with no live reverse-request chrome,
+    /// auto-open the plan side panel and toast so the operator is never stuck
+    /// on a bare "plan" mode badge after freeform "waiting on the plan panel"
+    /// agent text (dogfood 2026-08-08).
+    ///
+    /// Live soft-park (`plan_approval_view` with open response channel) already
+    /// owns the surface — this is a no-op there. Prompt stays focused (L1
+    /// modal-free). Real Approve/Revise/Quit still require `exit_plan_mode`.
+    pub(crate) fn surface_idle_plan_review_if_needed(&mut self) {
+        if self.plan_approval_view.is_some() {
+            return;
+        }
+        let in_plan = self.plan_mode_active || self.plan_mode_pending == Some(true);
+        if !in_plan {
+            return;
+        }
+        if !self.plan_preview_available() {
+            // Stuck in plan mode with nothing to open — still tell the operator
+            // how to leave so the mode badge is not a dead end.
+            self.show_toast(
+                "Still in plan mode with no plan file yet. Shift+Tab leaves plan mode, \
+                 or ask the agent to write the plan and present it for approval.",
+            );
+            return;
+        }
+        let already_open = self.is_plan_viewer()
+            && self
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.side_panel || v.fullscreen);
+        if !already_open {
+            self.show_plan_preview_if_available();
+            // Keep the main prompt focused so typing is never trapped.
+            self.set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+        }
+        self.show_toast(crate::views::plan_approval_view::PLAN_IDLE_REVIEW_TOAST);
+    }
+
     /// Test fixture: drive the agent into casual-commenting state
     /// (line viewer open in plan-preview mode + `casual_commenting_range`
     /// armed) so the `Event::Paste` plan-feedback arm at ~1539 is
@@ -570,12 +608,31 @@ impl AgentView {
             return Some(self.focus_plan_prompt(PlanPromptIntent::Questions));
         }
         if hits.revise.contains(col, row) {
-            return Some(self.focus_plan_prompt(PlanPromptIntent::Revise));
+            // Immediate revise (not focus-only): bare click used to re-set the
+            // default Revise intent while the panel stayed open — felt stuck.
+            return Some(self.request_plan_revise());
         }
         if hits.quit.contains(col, row) {
             return Some(self.abandon_plan());
         }
         None
+    }
+
+    /// Submit plan **Revise** immediately (ACP `cancelled`).
+    ///
+    /// Mouse Revise and empty-prompt panel `s` are decisive actions, like
+    /// Approve / Quit — not a silent focus flip onto the default intent.
+    /// Freeform already in the composer rides as feedback; empty freeform
+    /// still unparks so the agent can rewrite `plan.md` and re-present.
+    /// Toast: "Revision sent — agent will rewrite the plan."
+    pub(crate) fn request_plan_revise(&mut self) -> InputOutcome {
+        let text = self.prompt.text_without_image_chips();
+        let freeform = if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        };
+        self.send_plan_feedback(freeform)
     }
 
     /// Capture the plan line selection to attach to revise/clarify feedback.
@@ -836,6 +893,15 @@ impl AgentView {
         // here — that traps typing and feels like a modal soft-park.
         // Side panel (line_viewer open) keeps empty-prompt accelerators in
         // `handle_line_viewer_key`.
+        // Empty-composer Ctrl+C quits plan approval (same outcome as panel `q`
+        // / soft-park mouse Quit). Non-empty falls through to prompt clear;
+        // a second empty Ctrl+C then abandons. Bare Esc stays focus step-back.
+        if crate::key!('c', CONTROL).matches(key)
+            && self.prompt.text().is_empty()
+            && self.prompt.images.is_empty()
+        {
+            return self.abandon_plan();
+        }
         // Soft-park: composer keys flip Preview → Prompt so the caret paints.
         if self.line_viewer.is_none()
             && !is_commenting
@@ -1684,43 +1750,109 @@ mod approve_plan_flush_tests {
         );
     }
 
-    /// Phase P: soft-park Revise CTA then freeform Enter → cancelled + notes.
+    /// Dogfood 2026-08-09: bare Revise CTA must unpark + notify the agent
+    /// (ACP cancelled), not silently re-set default Revise intent while the
+    /// panel stays open with Enter:approve. Empty freeform still revises.
     #[test]
-    fn soft_park_revise_cta_then_enter_submits_cancelled() {
+    fn soft_park_revise_cta_click_submits_cancelled_immediately() {
         use ratatui::layout::Rect;
 
         let mut agent = make_agent();
-        let rx = install_plan_approval(&mut agent, "# Soft park revise");
+        let rx = install_plan_approval(&mut agent, "# Soft park revise now");
         assert!(agent.line_viewer.is_none(), "soft-park: no panel");
-
-        let hit = Rect::new(20, 24, 10, 1);
-        agent.hit_soft_park_ctas.revise.set(Some(hit));
-        agent
-            .handle_soft_park_cta_click(hit.x + 1, hit.y)
-            .expect("Revise click must dispatch");
+        // Park already defaults to Revise intent — click must still be decisive.
         assert_eq!(
             agent.plan_approval_view.as_ref().unwrap().prompt_intent,
             PlanPromptIntent::Revise
         );
 
-        agent.prompt.set_text("rewrite step 2");
-        // Soft-park CTA leaves Prompt focus; Enter submits under intent.
-        if let Some(ref mut pav) = agent.plan_approval_view {
-            pav.focus = PlanApprovalFocus::Prompt;
-        }
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let _ = agent.handle_plan_feedback_key(&enter);
+        let hit = Rect::new(20, 24, 10, 1);
+        agent.hit_soft_park_ctas.revise.set(Some(hit));
+        let outcome = agent
+            .handle_soft_park_cta_click(hit.x + 1, hit.y)
+            .expect("Revise click must dispatch");
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Revise click must complete a revise cycle; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Revise CTA must clear plan approval park (not leave panel stuck)"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "Revise CTA must close plan panel if open"
+        );
 
         let parsed = parse_outcome(rx);
         assert_eq!(
             parsed["outcome"], "cancelled",
-            "soft-park Revise → Enter must rewrite; got {parsed:?}"
+            "bare Revise must send cancelled so the agent rewrites; got {parsed:?}"
         );
+    }
+
+    /// Freeform already in the composer rides with an immediate Revise click.
+    #[test]
+    fn soft_park_revise_cta_click_includes_existing_freeform() {
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Soft park revise notes");
+        agent.prompt.set_text("rewrite step 2");
+
+        let hit = Rect::new(20, 24, 10, 1);
+        agent.hit_soft_park_ctas.revise.set(Some(hit));
+        let _ = agent
+            .handle_soft_park_cta_click(hit.x + 1, hit.y)
+            .expect("Revise click must dispatch");
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(parsed["outcome"], "cancelled");
         assert!(
             parsed["feedback"]
                 .as_str()
                 .unwrap_or("")
-                .contains("rewrite step 2")
+                .contains("rewrite step 2"),
+            "existing freeform must ride revise; got {:?}",
+            parsed["feedback"]
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "approval must clear after revise with freeform"
+        );
+    }
+
+    /// Panel empty-prompt `s` accelerator must also revise immediately (same
+    /// contract as mouse Revise — not a silent focus flip).
+    #[test]
+    fn panel_empty_prompt_s_submits_cancelled_immediately() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Panel s revise");
+        // Simulate side panel open (line viewer present).
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.is_some(),
+            "fixture needs panel open for empty-prompt accelerators"
+        );
+        agent.prompt.set_text("");
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+
+        let s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let outcome = agent.handle_line_viewer_key(&s);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "panel s must revise; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "panel s must clear approval park"
+        );
+        let parsed = parse_outcome(rx);
+        assert_eq!(
+            parsed["outcome"], "cancelled",
+            "panel s must send cancelled; got {parsed:?}"
         );
     }
 
@@ -3332,6 +3464,124 @@ mod approve_plan_flush_tests {
         assert_eq!(agent.prompt.text(), "q");
     }
 
+    /// Named contract: empty-composer Ctrl+C while plan approval is soft-parked
+    /// must quit plan approval (same outcome as soft-park mouse Quit / panel `q`),
+    /// not swallow as a no-op. Dogfood: soft-park left operators stuck on Ctrl+C.
+    #[test]
+    fn soft_park_empty_ctrl_c_abandons_plan_approval() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let mut rx = install_plan_approval(&mut agent, "# Soft park Ctrl+C quit");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.stashed_prompt = StashedPrompt::default();
+        }
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+        agent.set_active_pane(ActivePane::Prompt, true);
+        assert!(agent.line_viewer.is_none(), "soft-park has no side panel");
+
+        let registry = ActionRegistry::defaults();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let outcome = agent.handle_input(&Event::Key(ctrl_c), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "empty Ctrl+C must be consumed as plan quit; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "empty Ctrl+C must clear plan_approval_view (not soft-park no-op)"
+        );
+        let resp = rx.try_recv().expect("abandon response on Ctrl+C");
+        let raw = resp.expect("Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(
+            parsed["outcome"], "abandoned",
+            "Ctrl+C empty soft-park must abandon like mouse Quit; got {parsed:?}"
+        );
+    }
+
+    /// Empty Ctrl+C with plan side panel open (Preview) must also abandon —
+    /// the panel path used to return Changed and swallow the chord.
+    #[test]
+    fn plan_panel_empty_ctrl_c_abandons_plan_approval() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let mut rx = install_plan_approval(&mut agent, "# Panel Ctrl+C quit");
+        agent.show_plan_preview();
+        assert!(agent.line_viewer.is_some(), "panel requires line_viewer");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+
+        let registry = ActionRegistry::defaults();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let outcome = agent.handle_input(&Event::Key(ctrl_c), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "panel empty Ctrl+C must abandon; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "panel empty Ctrl+C must clear plan approval"
+        );
+        let resp = rx.try_recv().expect("abandon response");
+        let raw = resp.expect("Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "abandoned");
+    }
+
+    /// Non-empty plan composer: Ctrl+C clears draft first (composer contract),
+    /// keeps plan approval open. Second empty Ctrl+C then abandons.
+    #[test]
+    fn plan_approval_ctrl_c_clears_draft_then_second_abandons() {
+        use crossterm::event::Event;
+
+        let mut agent = make_agent();
+        let mut rx = install_plan_approval(&mut agent, "# Ctrl+C clear then quit");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.stashed_prompt = StashedPrompt::default();
+        }
+        agent.prompt.set_text("draft notes");
+        agent.set_active_pane(ActivePane::Prompt, true);
+        assert!(agent.line_viewer.is_none());
+
+        let registry = ActionRegistry::defaults();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let first = agent.handle_input(&Event::Key(ctrl_c), &registry);
+        assert!(
+            matches!(first, InputOutcome::Changed),
+            "first Ctrl+C with draft must clear; got {first:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "first Ctrl+C must not abandon while draft existed"
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "first Ctrl+C must clear composer draft"
+        );
+
+        let second = agent.handle_input(&Event::Key(ctrl_c), &registry);
+        assert!(
+            matches!(second, InputOutcome::Changed | InputOutcome::Action(_)),
+            "second empty Ctrl+C must abandon; got {second:?}"
+        );
+        assert!(agent.plan_approval_view.is_none());
+        let resp = rx.try_recv().expect("abandon on second Ctrl+C");
+        let raw = resp.expect("Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "abandoned");
+    }
+
     /// Named contract: soft-park uses empty stash until reopen. Abandon must
     /// clear plan approval and keep live freeform, never restore(empty) over it.
     #[test]
@@ -3992,13 +4242,17 @@ mod approve_plan_flush_tests {
         assert_eq!(pav.prompt_intent, PlanPromptIntent::ApproveNotes);
     }
 
-    /// Click clarify / revise / quit buttons dispatch the matching actions.
+    /// Panel footer clicks: Clarify focuses prompt; Revise is decisive
+    /// (ACP cancelled + clear park); Quit abandons.
+    ///
+    /// Named contract 2026-08-09: panel Revise is immediate `request_plan_revise`,
+    /// not focus-only (bare click used to re-set default Revise intent and feel stuck).
     #[test]
     fn plan_panel_click_clarify_revise_quit_buttons() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
 
-        // Clarify
+        // Clarify — still focus-only (needs freeform question text).
         {
             let mut agent = make_agent();
             let _rx = install_plan_approval(&mut agent, "# Plan");
@@ -4028,10 +4282,10 @@ mod approve_plan_flush_tests {
             assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
             assert_eq!(pav.prompt_intent, PlanPromptIntent::Questions);
         }
-        // Revise
+        // Revise — decisive: unpark + ACP cancelled (not focus-only).
         {
             let mut agent = make_agent();
-            let _rx = install_plan_approval(&mut agent, "# Plan");
+            let rx = install_plan_approval(&mut agent, "# Plan");
             agent.show_plan_preview();
             let hit = Rect::new(5, 22, 10, 1);
             agent
@@ -4054,9 +4308,19 @@ mod approve_plan_flush_tests {
                 modifiers: KeyModifiers::NONE,
             };
             let _ = agent.handle_line_viewer_mouse(&click);
-            let pav = agent.plan_approval_view.as_ref().unwrap();
-            assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
-            assert_eq!(pav.prompt_intent, PlanPromptIntent::Revise);
+            assert!(
+                agent.plan_approval_view.is_none(),
+                "panel Revise must clear plan approval park (not leave focus-only)"
+            );
+            assert!(
+                agent.line_viewer.is_none(),
+                "panel Revise must close the plan panel"
+            );
+            let parsed = parse_outcome(rx);
+            assert_eq!(
+                parsed["outcome"], "cancelled",
+                "panel Revise must send cancelled so the agent rewrites; got {parsed:?}"
+            );
         }
         // Quit
         {
@@ -4795,8 +5059,134 @@ mod approve_plan_flush_tests {
         );
     }
 
-    /// Named contract (dogfood 2026-07-29): mouse click on painted Revise
-    /// dispatches focus_plan_prompt(Revise) — not a no-op empty hit.
+    /// Named contract (dogfood 2026-08-08): plan mode still active, no reverse-
+    /// request chrome, plan body available → auto-open side panel + toast so
+    /// freeform "waiting on plan panel" is not a dead mode badge + idle footer.
+    #[test]
+    fn idle_plan_mode_without_approval_surfaces_review_panel() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.latest_inline_plan_content =
+            Some("# Deploy ladder\n\n1. Harden\n2. Automate\n".into());
+        agent.prompt.set_text("still typing");
+        agent.set_active_pane(ActivePane::Prompt, false);
+
+        agent.surface_idle_plan_review_if_needed();
+
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "must not invent a reverse-request without exit_plan_mode"
+        );
+        let viewer = agent
+            .line_viewer
+            .as_ref()
+            .expect("must auto-open plan side panel for review");
+        assert!(
+            viewer.side_panel && !viewer.fullscreen,
+            "idle review panel must be side panel, not fullscreen trap"
+        );
+        assert_eq!(
+            agent.active_pane,
+            ActivePane::Prompt,
+            "L1 typing must stay free (Prompt focused)"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "still typing",
+            "must not clear live draft"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some(crate::views::plan_approval_view::PLAN_IDLE_REVIEW_TOAST),
+            "toast must name review path and how to leave plan mode"
+        );
+    }
+
+    /// Live soft-park must not be replaced by the idle-review surface.
+    #[test]
+    fn idle_plan_review_surface_skips_when_approval_parked() {
+        let mut agent = make_agent();
+        soft_park_style_open(&mut agent, "# Live park\n\nKeep CTAs\n");
+        agent.plan_mode_active = true;
+        let before_toast = agent.toast.clone();
+        let had_viewer = agent.line_viewer.is_some();
+
+        agent.surface_idle_plan_review_if_needed();
+
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "live reverse-request must remain"
+        );
+        assert_eq!(
+            agent.line_viewer.is_some(),
+            had_viewer,
+            "must not dismiss soft-park panel"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            before_toast.as_ref().map(|(m, _)| m.as_str()),
+            "must not overwrite soft-park toast with idle-review toast"
+        );
+    }
+
+    /// After stale approval clear, turn-end surface still opens review when
+    /// plan mode remains active with a body available.
+    #[test]
+    fn turn_end_stale_clear_then_surfaces_idle_plan_review() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        soft_park_style_open(&mut agent, "# Stale then surface\n\nBody\n");
+        agent.latest_inline_plan_content = Some("# Stale then surface\n\nBody\n".into());
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            let _ = pav.response_tx.take();
+        }
+
+        agent.dismiss_plan_approval_after_turn_if_stale();
+        assert!(agent.plan_approval_view.is_none());
+        assert!(agent.line_viewer.is_none());
+
+        agent.surface_idle_plan_review_if_needed();
+
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.side_panel && !v.fullscreen),
+            "after stale clear, idle plan mode must re-open review side panel"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some(crate::views::plan_approval_view::PLAN_IDLE_REVIEW_TOAST),
+        );
+    }
+
+    /// Idle plan-mode status cue is painted and clickable (opens panel).
+    #[test]
+    fn idle_plan_mode_draw_paints_clickable_review_status() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_approval_view = None;
+        agent.latest_inline_plan_content = Some("# Status cue plan\n\nDo it\n".into());
+
+        let _buf = draw_agent_hits(&mut agent, 120, 40);
+
+        let hit = agent
+            .hit_plan_approval_status
+            .rect
+            .expect("idle plan mode must paint clickable review status");
+        assert!(hit.width >= 8, "status hit must be wide enough to click");
+        // Click the status — same path as soft-park chip when no approval.
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v.side_panel),
+            "status path must open side panel for review"
+        );
+    }
+
+    /// Named contract (dogfood 2026-07-29 + 2026-08-09): painted Revise hit
+    /// dispatches immediate revise (ACP cancelled), not a silent focus flip.
     #[test]
     fn soft_park_revise_cta_click_after_paint() {
         use crate::theme::Theme;
@@ -4805,7 +5195,7 @@ mod approve_plan_flush_tests {
         use ratatui::layout::Rect;
 
         let mut agent = make_agent();
-        let _rx = install_plan_approval(&mut agent, "# Soft park revise click");
+        let rx = install_plan_approval(&mut agent, "# Soft park revise click");
         assert!(agent.line_viewer.is_none(), "soft-park: no panel");
 
         let theme = Theme::current();
@@ -4826,15 +5216,17 @@ mod approve_plan_flush_tests {
             .handle_soft_park_cta_click(revise.x, revise.y)
             .expect("Revise click must dispatch");
         assert!(
-            matches!(outcome, InputOutcome::Changed),
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
             "Revise click outcome; got {outcome:?}"
         );
-        let pav = agent.plan_approval_view.as_ref().expect("still parked");
-        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "painted Revise must unpark approval"
+        );
+        let parsed = parse_outcome(rx);
         assert_eq!(
-            pav.prompt_intent,
-            PlanPromptIntent::Revise,
-            "mouse Revise must set revise intent"
+            parsed["outcome"], "cancelled",
+            "painted Revise must notify agent; got {parsed:?}"
         );
     }
 
@@ -5197,6 +5589,7 @@ mod plan_chip_tests {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
+                cancel_resume_prompt_text: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,

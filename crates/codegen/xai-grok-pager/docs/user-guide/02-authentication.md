@@ -142,12 +142,15 @@ Meters that stay distinct even when dual SuperGrok share one free-period pool:
 | Console monthly spend limit | Separate console gate | Free SuperGrok period |
 
 **Burn order (token economy):** free SuperGrok period first while used percent is
-below 100 → then SuperGrok dollar extras (after-burner when free period is full)
+below 100 → then SuperGrok dollar credits (after-burner when free period is full)
 → then console API key. Status compact meter and `/limits` **Active:** line use
-the same rule. Team Grok Build class dollars can still climb under SuperGrok
-session without free period moving (settlement dual-bill honesty); that is not
-"on SuperGrok extras" and not a reason to paint `console · $N` while free period
-has room.
+the same rule as **intent chrome** (for example compact `intent · 15%` while free
+SuperGrok period has room). Team prepaid remaining and team Grok Build class
+dollars can still climb under SuperGrok session without free SuperGrok period
+moving; the prompt footer labels those as **Team settlement:** secondary chips,
+not as a replacement for free SuperGrok period intent. That is not "on SuperGrok
+dollar credits" and not a reason to paint `console · $N` while free SuperGrok
+period has room.
 
 **If status shows `console · $N` while free SuperGrok period still has room**
 (for example `limits --json` shows SuperGrok live and included used under 100%):
@@ -207,6 +210,32 @@ auto_use_included_limits = false
 
 Existing homes that already set the flag (including explicit `false`) keep that
 value. Only missing key / empty new config gets the default `true`.
+
+### Free SuperGrok period debit unproven (flat poll)
+
+The free-period-first **path** can be correct (SuperGrok session live, console
+key not primary, Active: free SuperGrok period) while free SuperGrok period
+used % never steps across multipoll and team Grok Build / OAuth settlement
+dollars still climb. That is a **server debit** gap (not a client chrome bug).
+The product does **not** invent free SuperGrok period used %.
+
+**Default: new agent turns are allowed** so dogfood is not hard-stopped by the
+server gap. `/limits`, multipoll, and doctor dual-auth status still show loud
+honesty when free SuperGrok period limits stay flat (unproven debit) and team
+settlement can move.
+
+To **opt into a hard block** of new turns when free SuperGrok period still has
+room and multipoll marks free SuperGrok period debit **unproven**
+(`flatPollUnprovenDebit` on `grok limits --json`):
+
+```toml
+[auth]
+allow_spend_when_free_period_debit_unproven = false
+```
+
+Or set env `GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN=0` (falsy when set
+blocks; truthy allows; unset uses config / default **true**). Console primary
+pin (`preferred_method = "api_key"`) is not blocked by this guard.
 
 When free SuperGrok period allowance is full, SuperGrok top-up dollars are gone
 or unknown, and at least one console key is bound, sampling **prefers the first
@@ -302,16 +331,26 @@ billing refresh (session start, turn end, `/usage`, `grok limits`) fetches
 the prepaid ledger **regardless of whether console or SuperGrok is live** and
 fills:
 
-- Footer when **console** is live: `Console key · team prepaid: $N`
-- Footer when **SuperGrok** is live and prepaid is known: SuperGrok % / extras
-  when those warn, **plus** `team prepaid: $N` (or a standalone team prepaid
-  chip when SuperGrok alone would be quiet). Team dollars never re-label live
-  sampling as console.
-- `/limits` / `grok limits`: `Balance: $N` under **Console API** even when
-  `console.isLive` is false (SuperGrok serving). Console team **prepaid
-  ledger** — never labeled SuperGrok dollar extras; may differ from dashboard
-  Credits remaining when the UI includes more than prepaid.
-- `grok limits --json`: `console.teamPrepaidUsd` (or `console.teamPrepaidGap`)
+- Footer when **console** is live: `Console key · team prepaid: $N` (optional
+  `team Grok Build class: $N` when known). Under console live, team prepaid is
+  the live console pool.
+- Footer when **SuperGrok** is live and team prepaid and/or Grok Build class is
+  known: free SuperGrok period remaining / SuperGrok dollar credits when those
+  warn, **plus** labeled settlement such as
+  `Team settlement: prepaid $N · Grok Build class $M` (or a standalone Team
+  settlement chip when SuperGrok alone would be quiet). Team settlement never
+  re-labels live sampling as console and never replaces compact
+  `intent · N%` while free SuperGrok period has room.
+- Status compact meter (upper-right): free SuperGrok period paints as
+  `intent · N%` (or SuperGrok extras `$` after free SuperGrok period is full).
+  Team prepaid dollars do not paint there while free SuperGrok period drives.
+- `/limits` / `grok limits`: `Team prepaid remaining: $N` under **Console API**
+  even when `console.isLive` is false (SuperGrok serving). Console team
+  **prepaid ledger** is never labeled SuperGrok dollar credits; it may differ
+  from dashboard Credits remaining when the UI includes more than prepaid.
+- `grok limits --json`: `console.teamPrepaidUsd` (or `console.teamPrepaidGap`);
+  `activeDriver` stays free SuperGrok period / SuperGrok extras / console key
+  (intent only, not team settlement).
 
 Honest gap copy is **distinct** by what is missing (no invented balance):
 
@@ -319,9 +358,9 @@ Honest gap copy is **distinct** by what is missing (no invented balance):
 |-------|----------------------------------|
 | No management key | **no management key** (always on `/limits` Balance; SuperGrok-only footer stays SuperGrok-focused) |
 | Key set; team id still unknown after fetch | **no management team id** |
-| Key set; fetch in flight / cold | **loading team prepaid...** (footer surfaces this on SuperGrok live too) |
-| Key + team known; fetch done but no balance | **team prepaid unavailable** |
-| Balance known | **team prepaid: $N** / **Balance: $N** |
+| Key set; fetch in flight / cold | **loading team prepaid...** (SuperGrok live footer: `Team settlement: loading team prepaid...`) |
+| Key + team known; fetch done but no balance | **team prepaid unavailable** (SuperGrok live footer under Team settlement) |
+| Balance known | SuperGrok live: **Team settlement: prepaid $N**; console live: **team prepaid: $N**; `/limits`: **Team prepaid remaining: $N** |
 
 `grok limits` also prints a short **Notes** hint when the management key or
 team id is missing (how to configure). SuperGrok $ extras stay SuperGrok-only.
@@ -372,20 +411,65 @@ scrape console HTML or invent counts.
 Zeros on the licenses page do **not** mean dogfood is idle. See also
 `grok doctor` (dogfood burn proof block) and the always-on `/limits` note.
 
-#### Prefer free SuperGrok period allowance after a period reset
+#### Prefer free SuperGrok period limits after a period reset
 
-When the free SuperGrok period has reset and you want session dogfood on
-included limits (not SuperGrok $ extras or console burn first):
+When the free SuperGrok period has reset and you want session dogfood on free
+SuperGrok period limits (not SuperGrok dollar credits or console burn first):
 
 ```toml
 # ~/.grok/config.toml
 [auth]
 preferred_method = "oidc"            # SuperGrok session primary
-auto_use_included_limits = true      # prefer free period allowance before extras / console
+auto_use_included_limits = true      # free SuperGrok period limits before credits / console
 ```
 
 That pairing does **not** fill Grok Business **license** charts. It only ranks
-credentials so SuperGrok included weekly is preferred while it has headroom.
+credentials so free SuperGrok period limits are preferred while they still have
+room.
+
+#### Token economy proof checklist
+
+Use this short checklist before and after SuperGrok dogfood when you need
+**evidence** that the client path is right (P1) and whether free SuperGrok
+period limits moved (P2). Meters stay distinct: free SuperGrok period limits ≠
+SuperGrok dollar credits ≠ console team prepaid / console API credits.
+
+1. **Hermetic path suite (no network):** run `just check-limits-first-path`.
+   This is the unit-test contract for limits-first ranking and the pure
+   `limits --json` path checker. It does not measure live free SuperGrok period
+   debit.
+2. **Live path gate (one sample):** rebuild or install, then run
+   `just check-limits-first-live`. That runs `grok-oss limits --json` once and
+   applies the same pure path checker. Expect SuperGrok session primary and
+   `console.isLive=false` while free SuperGrok period used is still below 100%
+   under default free-period-first config.
+3. **Multipoll harness (before and after SuperGrok dogfood):**
+   `just limits-multipoll` or `grok-oss limits multipoll` (default **2** samples
+   and **30s** sleep between sample ends so the flat-poll window can fire).
+   Writes `samples.jsonl`, `fields.jsonl`, and `summary.json` under
+   `.agents/reports/limits-multipoll-<utc>/` (override with `--out-dir` or
+   `LIMITS_MULTIPOLL_OUT_DIR`). Capture once before a dogfood window and once
+   after so you can compare free SuperGrok period used % and team settlement
+   dollars.
+4. **How to read P1 vs P2:**
+   - **P1 path:** process exit and `pathOk` / `pathStatus` in the multipoll
+     summary. Path **fail** means console was live primary while free SuperGrok
+     period limits still had room (Design A broken). Path **OK** means the
+     client stayed on SuperGrok when free SuperGrok period limits still had room
+     (or the checker skipped for config reasons).
+   - **P2 free SuperGrok period series:** `freePeriodSeries` is `flat`,
+     `stepped`, or `insufficient`. **Flat at 6% (or any fixed %) is not a
+     client path failure** and is **not** proof that the product left free
+     SuperGrok period limits. It is measurement that free SuperGrok period used
+     % did not step across the multipoll window (server debit still unproven).
+     Stepped means free SuperGrok period used % moved between samples. Exit code
+     is **non-zero only on path failure**; flat free SuperGrok period limits
+     always keep exit 0 when path is OK.
+
+Spend order while free SuperGrok period limits still have room: free SuperGrok
+period limits first, then SuperGrok dollar credits, then console team prepaid /
+console API credits. Stay on SuperGrok session; do not make the console API key
+primary. Never invent free SuperGrok period used % on the client.
 
 ---
 

@@ -279,6 +279,10 @@ mod tests {
             prompt.contains("red/green TDD") || prompt.contains("failing test first"),
             "Planning section should mention red/green TDD for user-reported bugs/features"
         );
+        assert!(
+            prompt.contains("meta.taskId") || prompt.contains("taskId"),
+            "Planning section should teach meta.taskId bind for multi-track also-guard"
+        );
     }
 
     #[test]

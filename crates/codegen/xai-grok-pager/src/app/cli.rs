@@ -221,6 +221,18 @@ See ~/.grok/README.md for more information.
         #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
         enterprise: bool,
     },
+    /// Rebuild this tree's `grok-oss` and soft-relaunch live leaders.
+    ///
+    /// Runs `just install` (or fixed cargo argv) from a resolved Grok OSS
+    /// checkout, verifies `--version`, then signals reachable leaders with
+    /// `RelaunchForUpdate`. Does **not** use the SpaceXAI auto-updater.
+    /// Prefer `/rebuild` in the TUI so this session re-execs onto the new
+    /// binary with the same session id.
+    Rebuild {
+        /// Source tree to build (default: walk up from the process cwd).
+        #[arg(long, value_name = "DIR")]
+        source: Option<std::path::PathBuf>,
+    },
     /// Print version information
     #[command(visible_alias = "v")]
     Version {
@@ -1632,16 +1644,46 @@ mod tests {
         assert!(matches!(
             bare.command,
             Some(Command::Limits(crate::limits_cmd::LimitsArgs {
-                json: false
+                json: false,
+                command: None,
             }))
         ));
         let json = PagerArgs::try_parse_from(["grok", "limits", "--json"]).expect("limits --json");
         assert!(matches!(
             json.command,
             Some(Command::Limits(crate::limits_cmd::LimitsArgs {
-                json: true
+                json: true,
+                command: None,
             }))
         ));
+    }
+
+    #[test]
+    fn limits_multipoll_parses() {
+        let args = PagerArgs::try_parse_from([
+            "grok",
+            "limits",
+            "multipoll",
+            "--samples",
+            "3",
+            "--sleep-secs",
+            "30",
+        ])
+        .expect("limits multipoll parses");
+        match args.command {
+            Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                command:
+                    Some(crate::limits_cmd::LimitsCommand::Multipoll(
+                        crate::limits_cmd::MultipollArgs {
+                            samples: 3,
+                            sleep_secs: 30,
+                            out_dir: None,
+                        },
+                    )),
+                ..
+            })) => {}
+            other => panic!("expected limits multipoll, got {other:?}"),
+        }
     }
 
     #[test]

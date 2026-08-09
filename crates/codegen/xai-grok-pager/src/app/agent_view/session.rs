@@ -162,6 +162,7 @@ impl AgentView {
             session_reload: None,
             unexpected_replay_drops: 0,
             replayed_terminal_prompts: HashSet::new(),
+            last_primary_user_turn_completed_in_replay: false,
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
@@ -264,7 +265,9 @@ impl AgentView {
             hit_follow_indicator: Default::default(),
             hit_cwd: Default::default(),
             hit_cancel_button: Default::default(),
+            hit_pause_button: Default::default(),
             hit_watching_cue: Default::default(),
+            global_work_paused: false,
             watching_cue_toast_shown: false,
             hit_announcement_hide: Default::default(),
             hit_announcement_cta: Default::default(),
@@ -305,6 +308,7 @@ impl AgentView {
             btw_focused: false,
             hit_btw_close: Default::default(),
             toast: None,
+            rebuild_progress: None,
             ephemeral_tip: Default::default(),
             word_select_tip_prompt_snapshot: None,
             last_word_select_probe: None,
@@ -443,6 +447,7 @@ impl AgentView {
         self.clear_minimal_btw_lifecycle();
         self.session.loading_replay = true;
         self.replayed_terminal_prompts.clear();
+        self.last_primary_user_turn_completed_in_replay = false;
         self.unexpected_replay_drops = 0;
         self.pending_stop_hooks = None;
         self.clear_send_now_expectation();

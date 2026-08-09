@@ -64,6 +64,8 @@ pub(crate) struct RunResult {
     /// When set, the process should re-exec into the other screen mode after
     /// terminal restore. See `/minimal` and `/fullscreen`.
     pub relaunch: Option<super::app_view::ScreenModeRelaunch>,
+    /// When set, re-exec the newly installed binary after `/rebuild`.
+    pub rebuild_relaunch: Option<super::app_view::RebuildRelaunch>,
 }
 
 /// In-flight reconnect re-initialization, tied to the agents whose reload
@@ -2170,9 +2172,17 @@ pub(crate) async fn run(
             }
 
             Some(msg) = progress_rx.recv() => {
-                let result = TaskResult::SessionRestoreProgress {
-                    agent_id: msg.agent_id,
-                    message: msg.message,
+                let result = if msg.toast {
+                    TaskResult::RebuildProgress {
+                        agent_id: msg.agent_id,
+                        message: msg.message,
+                        fraction: msg.fraction.unwrap_or(0.0),
+                    }
+                } else {
+                    TaskResult::SessionRestoreProgress {
+                        agent_id: msg.agent_id,
+                        message: msg.message,
+                    }
                 };
                 let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
                 if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
@@ -3037,6 +3047,7 @@ fn make_run_result(app: &AppView) -> RunResult {
         exit_info,
         quit_for_update: app.quit_for_update,
         relaunch: app.relaunch.clone(),
+        rebuild_relaunch: app.rebuild_relaunch.clone(),
     }
 }
 

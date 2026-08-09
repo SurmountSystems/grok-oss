@@ -641,7 +641,9 @@ pub(super) fn set_resume_canceled_turn_on_restart_inner(app: &mut AppView, new: 
     app.current_ui.resume_canceled_turn_on_restart = Some(new);
 }
 
-/// Resume explicitly canceled turns once when reopening a session (default on).
+/// Continue an interrupted turn once when reopening a session (default on).
+///
+/// Operator-facing name: **continue interrupted turn**. Not `/resume` session pick.
 pub(in crate::app::dispatch) fn set_resume_canceled_turn_on_restart(
     app: &mut AppView,
     new: bool,
@@ -652,7 +654,10 @@ pub(in crate::app::dispatch) fn set_resume_canceled_turn_on_restart(
     }
     set_resume_canceled_turn_on_restart_inner(app, new);
     refresh_open_settings_modals(app);
-    app.show_toast(&save_success_toast("Resume canceled turn on restart", new));
+    app.show_toast(&save_success_toast(
+        "Continue interrupted turn on restart",
+        new,
+    ));
     vec![Effect::PersistSetting {
         key: "resume_canceled_turn_on_restart",
         value: crate::settings::SettingValue::Bool(new),

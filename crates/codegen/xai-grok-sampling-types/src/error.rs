@@ -152,23 +152,26 @@ impl SamplingError {
     }
 
     pub fn is_auth_error(&self) -> bool {
-        // Only 401 Unauthorized means the credentials themselves were rejected
-        // and warrant a token refresh / re-auth. 403 Forbidden means the
-        // request was authenticated successfully but the action is not
-        // permitted (e.g. content-safety blocks, ZDR-blocked operations,
-        // or other policy denials unrelated to credentials). Treating 403
-        // as an auth error triggers a pointless
-        // OIDC refresh and then surfaces as acp::Error::auth_required on
-        // the client, which in the desktop app tears down the session and
-        // can race with invalid_grant_threshold to wipe auth.json.
-        matches!(
-            self,
-            SamplingError::Auth(_)
-                | SamplingError::Api {
-                    status: StatusCode::UNAUTHORIZED,
-                    ..
-                }
-        )
+        // 401 Unauthorized always means credentials were rejected (refresh /
+        // re-auth). Bare 403 Forbidden is usually policy (content-safety,
+        // ZDR, remote settings) and must NOT trigger OIDC refresh or
+        // auth_required teardown. Exception: some gateways return 403 with a
+        // credentials-rejected body (`unauthenticated:bad-credentials`,
+        // "OAuth2 access token could not be validated") — that is the same
+        // class as 401 and must refresh / re-auth, not Internal error.
+        // Credit-exhausted 403 wording is not auth (failover / plain credits).
+        match self {
+            SamplingError::Auth(_) => true,
+            SamplingError::Api {
+                status, message, ..
+            } => {
+                *status == StatusCode::UNAUTHORIZED
+                    || (*status == StatusCode::FORBIDDEN
+                        && is_credentials_rejected_message(message)
+                        && !is_credit_exhausted_message(message))
+            }
+            _ => false,
+        }
     }
 
     pub fn is_rate_limited(&self) -> bool {
@@ -518,6 +521,23 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("context_length_exceeded")
 }
 
+/// True when the error body says the **credentials themselves** were rejected
+/// (invalid / unvalidated OAuth or API token), not a policy or credit denial.
+///
+/// xAI / cli-chat-proxy sometimes returns this on **HTTP 403** (not only 401),
+/// e.g. `unauthenticated:bad-credentials: The OAuth2 access token could not be
+/// validated.` Bare "403 Forbidden" and content-safety / ZDR bodies must not
+/// match. Prefer this over status alone so policy 403s stay non-auth.
+pub fn is_credentials_rejected_message(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("bad-credentials")
+        || m.contains("bad_credentials")
+        || m.contains("oauth2 access token could not be validated")
+        || m.contains("access token could not be validated")
+        || m.contains("unauthenticated:bad-credentials")
+        || m.contains("unauthenticated: bad-credentials")
+}
+
 /// Credit / spending-limit wording shared by xAI Build, OpenRouter, SuperGrok
 /// Heavy subscription caps, and proxies.
 ///
@@ -816,6 +836,49 @@ mod tests {
             !err.is_auth_error(),
             "403 Forbidden must not be treated as an auth error"
         );
+    }
+
+    /// Dogfood 2026-08-09: gateway returned HTTP 403 with
+    /// `unauthenticated:bad-credentials` / OAuth token validation failure.
+    /// That is credential rejection, not policy — classify as auth so the
+    /// session can refresh or show re-auth instead of Internal error JSON.
+    #[test]
+    fn forbidden_bad_credentials_is_auth_error() {
+        let body = "unauthenticated:bad-credentials: The OAuth2 access token \
+                    could not be validated.";
+        assert!(
+            is_credentials_rejected_message(body),
+            "body classifier must match dogfood wording"
+        );
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: body.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            err.is_auth_error(),
+            "403 + bad-credentials must be auth for refresh / re-auth UX"
+        );
+        assert!(
+            !err.is_credit_exhausted(),
+            "bad-credentials is not team credits"
+        );
+
+        // Bare 403 / policy still non-auth.
+        assert!(!is_credentials_rejected_message("Forbidden"));
+        assert!(!is_credentials_rejected_message(
+            "Content violates usage guidelines."
+        ));
+        let policy = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!policy.is_auth_error());
     }
 
     #[test]

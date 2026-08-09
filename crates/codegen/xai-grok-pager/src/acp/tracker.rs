@@ -500,6 +500,20 @@ impl AcpUpdateTracker {
     pub fn remove_pending_tool(&mut self, tool_call_id: &str) {
         self.pending_tools.remove(tool_call_id);
     }
+
+    /// True when replay left mid-turn tracker state that scrollback may not show.
+    ///
+    /// Suppressed wait tools (`get_command_or_subagent_output`, …) never create
+    /// running scrollback entries; after killall mid-wait the only live signal
+    /// is `blocking_waits` / pending tools / open thinking or agent message.
+    /// Session-load history recovery must consult this **before** `finish_turn`.
+    pub fn has_in_flight_mid_turn_activity(&self) -> bool {
+        !self.blocking_waits.is_empty()
+            || !self.pending_tools.is_empty()
+            || self.current_thinking.is_some()
+            || self.current_agent_msg.is_some()
+    }
+
     /// Get the tool_call_id of the currently running Execute tool, if any.
     ///
     /// Used by demotion (Ctrl+B) to know which tool to background.

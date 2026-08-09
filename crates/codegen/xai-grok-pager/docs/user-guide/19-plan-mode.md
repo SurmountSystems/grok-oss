@@ -110,12 +110,14 @@ The action bar shows these shortcuts:
 | `a`      | **Approve** — leave plan mode and start building immediately (no notes required). Pending line notes, if any, still ride along. |
 | `A`      | **Approve w/ comment** — focus the prompt for overall notes; `Enter` with text approves and attaches those notes. |
 | `?`      | **Clarify** — answers without rewriting the plan. Focus moves to the prompt; type your question and press `Enter`. Plan mode stays active; the agent answers read-only and should call `exit_plan_mode` again so approval reappears. |
-| `s`      | **Revise** — rewrites the plan from your notes. Focus moves to the prompt; type revision notes and press `Enter`. Plan mode stays active while the agent revises. Do not use Clarify when you want the plan file changed. |
+| `s`      | **Revise** — immediately sends the agent back to rewrite the plan (toast: "Revision sent…"). Any freeform already in the prompt rides as notes. Plan mode stays active while the agent revises and calls `exit_plan_mode` again. Do not use Clarify when you want the plan file changed. |
 | `q`      | **Quit** — abandon the plan without approving and turn plan mode off. |
 
 There is **no primary Comment button**. You can still attach line-level notes with `Enter` on a selected line (or double-click); those notes go with Approve / Clarify / Revise when you submit.
 
-Press `Tab` to move focus between the plan preview and the prompt. **Empty `Enter` on the prompt still approves** (same as `a`), even if you opened the prompt with `A`, `?`, or `s`.
+**Revise is decisive** (mouse footer button and empty-prompt `s` / panel footer Revise): it unparks approval and notifies the agent right away — it does **not** only flip a silent intent while the panel stays open. To attach written notes, type them first, then click **Revise** (or press freeform `Enter`, which revises by default when the prompt has text).
+
+Press `Tab` to move focus between the plan preview and the prompt. **Empty `Enter` on the prompt still approves** (same as `a`), even if you opened the prompt with `A` or `?`.
 
 ### Clarify vs Revise vs Approve
 
@@ -124,7 +126,7 @@ Press `Tab` to move focus between the plan preview and the prompt. **Empty `Ente
 | **Approve** (`a` / empty Enter) | Build it | Leave plan mode and implement |
 | **Approve w/ comment** (`A` + notes + Enter) | Build it, with notes | Leave plan mode; notes are attached as review comments |
 | **Clarify** (`?`) | Understand the plan | Answer from the plan and research; **do not** rewrite `plan.md` unless you explicitly ask to change it; re-present approval when done |
-| **Revise** (`s`) | Change the plan | Revise `plan.md` from your notes; stay in plan mode; re-present when ready |
+| **Revise** (`s` / mouse Revise) | Change the plan | Unpark immediately; revise `plan.md` from any freeform notes (or ask what to change if empty); stay in plan mode; re-present when ready |
 | **Quit** (`q`) | Abort | Leave plan mode; no implement |
 
 ### Providing Feedback
@@ -133,7 +135,7 @@ The approval view has three focus states:
 
 - **Preview**: Scroll the plan and use the primary CTAs above.
 - **Commenting** (secondary): Add an inline note on a selected line range (`Enter` on a line, or double-click). Not a primary CTA.
-- **Prompt**: Type freeform notes. What Enter does depends on how you opened the prompt (`A` approve w/ comment, `?` clarify, or `s` revise). Line notes attach to whichever action submits them.
+- **Prompt**: Type freeform notes. What Enter does depends on how you opened the prompt (`A` approve w/ comment or `?` clarify; freeform Enter defaults to revise). Line notes attach to whichever action submits them. The **Revise** CTA itself submits immediately and does not leave you on the prompt.
 
 Press `Tab` to switch between the preview and the prompt. After Clarify or Revise, plan mode stays active so you can iterate.
 
@@ -146,8 +148,9 @@ selection context — not just your freeform words:
 - **Quoted text**: each selected source line, prefixed with `>`
 - **Your notes**: freeform prompt text and/or saved line comments
 
-**Single line:** move the cursor to a line (or click it), focus the prompt with
-`s` / `?` / `A`, type notes, press `Enter`. The agent sees that line’s text.
+**Single line:** move the cursor to a line (or click it), type notes in the
+prompt (or use `?` / `A` for clarify / approve-with-comment), then press
+`Enter` or click **Revise**. The agent sees that line’s text.
 
 **Multi-line highlight:** start a visual selection over several plan lines
 (same motion as multi-line select elsewhere in the line viewer), then submit

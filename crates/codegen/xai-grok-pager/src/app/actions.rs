@@ -40,6 +40,8 @@ pub enum Action {
     Quit,
     /// Restart the binary to pick up a downloaded update.
     QuitForUpdate,
+    /// Rebuild grok-oss from source and soft-relaunch live instances (`/rebuild`).
+    RebuildAndRelaunch,
     /// Resume the recent foreign session offered on the launch welcome screen.
     ResumeForeignSession,
     /// Re-exec into the other screen mode (`true` = minimal).
@@ -2217,6 +2219,13 @@ pub enum Effect {
         target: DoctorFixTarget,
         plan: Box<crate::diagnostics::FixPlan>,
     },
+    /// `/rebuild`: install from source, signal leaders, report (async).
+    RunRebuild {
+        /// Directory to walk up for the source tree (usually process cwd).
+        start_dir: std::path::PathBuf,
+        /// Agent that invoked `/rebuild` (scrollback + toast target).
+        agent_id: AgentId,
+    },
 }
 /// Outcome of an `x.ai/subagent/cancel` request, telling dispatch whether the
 /// pager must finalize the subagent row itself.
@@ -2402,6 +2411,14 @@ pub enum TaskResult {
     SessionRestoreProgress {
         agent_id: AgentId,
         message: String,
+    },
+    /// Mid-`/rebuild` weighted progress for the progress bar (never raw cargo
+    /// on the PTY).
+    RebuildProgress {
+        agent_id: AgentId,
+        message: String,
+        /// Overall rebuild fraction `0.0..=1.0`.
+        fraction: f32,
     },
     /// Prompt response received (turn ended).
     PromptResponse {
@@ -2958,6 +2975,11 @@ pub enum TaskResult {
     DoctorFixApplied {
         target: DoctorFixTarget,
         result: Result<crate::diagnostics::FixOutcome, String>,
+    },
+    /// `/rebuild` finished (success or install/signal failure message).
+    RebuildDone {
+        agent_id: AgentId,
+        result: Result<Box<xai_grok_update::RebuildReport>, String>,
     },
 }
 #[cfg(test)]

@@ -394,11 +394,34 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             detect_plan_mode_change(&notif.request.update, agent);
 
                         let had_activity_before = agent.session.tracker.activity().is_some();
+                        let scrollback_len_before = agent.scrollback.len();
                         agent.session.handle_update(
                             notif.request.update,
                             &meta,
                             &mut agent.scrollback,
                         );
+                        // Load replay: durable TurnCompleted is not a SessionEvent.
+                        // A new resumable user prompt means the previous primary
+                        // turn's terminal (if any) is no longer "last" — clear
+                        // so open-turn history recovery can still catch killall
+                        // mid-work after a prior completed turn.
+                        if agent.session.loading_replay {
+                            use crate::scrollback::block::RenderBlock;
+                            for idx in scrollback_len_before..agent.scrollback.len() {
+                                let Some(entry) = agent.scrollback.entry(idx) else {
+                                    continue;
+                                };
+                                if let RenderBlock::UserPrompt(b) = &entry.block {
+                                    if b.is_bash || b.is_cron || b.is_interjection {
+                                        continue;
+                                    }
+                                    if b.text.trim().is_empty() {
+                                        continue;
+                                    }
+                                    agent.last_primary_user_turn_completed_in_replay = false;
+                                }
+                            }
+                        }
                         // Once the server has emitted any activity (chunk, tool,
                         // retry, etc.), the in-flight prompt can no longer be
                         // "rewound" by Ctrl+C. Clear the stash on the transition.

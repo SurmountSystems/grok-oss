@@ -28,6 +28,7 @@ mod notes;
 mod permissions;
 mod prompt;
 mod queue;
+pub(crate) mod rebuild;
 mod rewind;
 mod router;
 mod session;

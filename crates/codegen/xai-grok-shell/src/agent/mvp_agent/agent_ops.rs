@@ -1236,6 +1236,12 @@ impl MvpAgent {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
         let auto_use_included_limits =
             self.cfg.borrow().grok_com_config.auto_use_included_limits;
+        // Align sticky AuthManager base to free SuperGrok period ranked primary
+        // before SessionToken primary is read. Rank can prefer personal while
+        // base stays Team after a business login; sampling must follow rank.
+        if auto_use_included_limits {
+            let _ = self.auth_manager.align_to_ranked_free_period_primary();
+        }
         // Always surface a live/expired session when present so dual-auth
         // resolve can place console keys in failover (or session in failover
         // under preferred_method=api_key). Exclusive api_key pin with *no*

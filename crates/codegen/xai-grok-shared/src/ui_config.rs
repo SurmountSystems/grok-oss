@@ -172,9 +172,10 @@ pub struct UiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub economic_mode: Option<bool>,
     /// When true (default), opening a session that was left on an **explicit
-    /// user cancel** re-queues that turn once with a toast ("Resuming canceled
-    /// turn..."). Finished or never-canceled sessions are never invented.
-    /// Written by the settings modal; `None` = on.
+    /// user cancel** re-queues that turn once with a toast ("Continuing
+    /// interrupted turn..."). That is **continue interrupted turn**, not the
+    /// `/resume` session picker. Finished or never-canceled sessions are never
+    /// invented. Written by the settings modal; `None` = on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_canceled_turn_on_restart: Option<bool>,
     /// Startup cursor style: `None` (default) inherits the terminal's own

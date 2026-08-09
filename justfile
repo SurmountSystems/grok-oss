@@ -455,7 +455,7 @@ check-limits-first-path:
     just cargo-ci cargo test -p xai-grok-pager --lib --locked -- \
       flat_poll prepaid_lag \
       management_meter_cache_policy should_clear_management_meter \
-      check_limits_first
+      check_limits_first multipoll
     echo "check-limits-first-path passed (hermetic)"
 
 # Live C1/C3 after rebuild: SuperGrok primary while included weekly used < 100%,
@@ -509,6 +509,45 @@ check-limits-first-live:
     just cargo-ci cargo test -p xai-grok-pager --lib --locked \
       live_check_limits_first_from_env_json -- --ignored --nocapture
     echo "check-limits-first-live passed"
+
+# Token economy multipoll evidence harness (P1 path + P2 free SuperGrok period series).
+#
+# Runs `grok-oss limits multipoll` (N samples, default sleep 30s between ends to
+# meet flat-detector min wall). Writes JSONL + summary under
+# `.agents/reports/limits-multipoll-<utc>/` (or --out-dir). Exit 0 when path is
+# OK; exit non-zero only on path failure. Free SuperGrok period flat is
+# measurement only and does not fail the process.
+#
+# Env:
+#   GROK_OSS_BIN — binary (default: ./target/release/grok-oss, else grok-oss on PATH)
+#   LIMITS_MULTIPOLL_SAMPLES — default 2
+#   LIMITS_MULTIPOLL_SLEEP_SECS — default 30
+#   LIMITS_MULTIPOLL_OUT_DIR — optional override for --out-dir
+limits-multipoll *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    bin="${GROK_OSS_BIN:-}"
+    if [[ -z "${bin}" ]]; then
+      if [[ -x "${root}/target/release/grok-oss" ]]; then
+        bin="${root}/target/release/grok-oss"
+      elif command -v grok-oss >/dev/null 2>&1; then
+        bin="$(command -v grok-oss)"
+      else
+        echo "limits-multipoll: no grok-oss binary (build release, just install, or set GROK_OSS_BIN)" >&2
+        exit 2
+      fi
+    fi
+    samples="${LIMITS_MULTIPOLL_SAMPLES:-2}"
+    sleep_secs="${LIMITS_MULTIPOLL_SLEEP_SECS:-30}"
+    extra=()
+    if [[ -n "${LIMITS_MULTIPOLL_OUT_DIR:-}" ]]; then
+      extra+=(--out-dir "${LIMITS_MULTIPOLL_OUT_DIR}")
+    fi
+    # shellcheck disable=SC2086
+    cd "${root}"
+    echo "==> limits-multipoll: ${bin} limits multipoll --samples ${samples} --sleep-secs ${sleep_secs} ${extra[*]:-} {{ ARGS }}"
+    exec "${bin}" limits multipoll --samples "${samples}" --sleep-secs "${sleep_secs}" ${extra[@]+"${extra[@]}"} {{ ARGS }}
 
 # Upstream monorepo export helpers (see docs/upstream-history.md).
 upstream-detect:

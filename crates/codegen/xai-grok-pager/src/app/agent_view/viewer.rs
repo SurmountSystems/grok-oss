@@ -210,7 +210,9 @@ impl AgentView {
                 return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
             }
             if key!('s').matches(key) {
-                return self.focus_plan_prompt(PlanPromptIntent::Revise);
+                // Immediate revise (not focus-only). Bare `s` re-setting the
+                // default Revise intent left the panel stuck with Enter:approve.
+                return self.request_plan_revise();
             }
             if key!('?').matches(key) {
                 return self.focus_plan_prompt(PlanPromptIntent::Questions);
@@ -319,6 +321,14 @@ impl AgentView {
         }
         if key!(Esc).matches(key) || key!('q').matches(key) || key!('c', CONTROL).matches(key) {
             if in_plan_approval {
+                // Ctrl+C must reach the plan feedback path: empty composer
+                // abandons (like panel `q` / soft-park mouse Quit); non-empty
+                // clears the draft. Do not no-op swallow — dogfood soft-park
+                // left operators stuck. Esc / leftover bare `q` stay no-op
+                // here (Esc is focus step-back above; empty `q` is a CTA).
+                if key!('c', CONTROL).matches(key) {
+                    return self.handle_plan_feedback_key(key);
+                }
                 return InputOutcome::Changed;
             }
             // In the plan viewer, Esc first clears visual selection / search
@@ -535,7 +545,9 @@ impl AgentView {
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        return self.focus_plan_prompt(PlanPromptIntent::Revise);
+                        // Panel footer Revise: submit immediately (same as
+                        // soft-park mouse / empty-prompt `s`).
+                        return self.request_plan_revise();
                     }
                     return self.send_casual_plan_comments();
                 }

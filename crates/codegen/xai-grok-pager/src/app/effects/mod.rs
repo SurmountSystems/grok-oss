@@ -968,6 +968,8 @@ pub(crate) fn execute(
                                         .send(RestoreProgressMsg {
                                             agent_id,
                                             message: text,
+                                            toast: false,
+                                            fraction: None,
                                         });
                                 }
                             }),
@@ -1914,6 +1916,30 @@ pub(crate) fn execute(
                         result,
                     }
                 });
+        }
+        Effect::RunRebuild { start_dir, agent_id } => {
+            // Capture install stdio in xai-grok-update (never inherit TTY).
+            // Weighted progress events go through progress_tx → rebuild bar
+            // so cargo/just cannot paint the alt-screen mid-rebuild.
+            let ptx = progress_tx.clone();
+            tasks.spawn(async move {
+                let progress_agent = agent_id;
+                let result = xai_grok_update::rebuild_and_relaunch_with_progress(
+                    &start_dir,
+                    move |ev| {
+                        let _ = ptx.send(RestoreProgressMsg {
+                            agent_id: progress_agent,
+                            message: ev.detail,
+                            toast: true,
+                            fraction: Some(ev.fraction),
+                        });
+                    },
+                )
+                .await
+                .map(Box::new)
+                .map_err(|e| e.to_string());
+                TaskResult::RebuildDone { agent_id, result }
+            });
         }
         Effect::FetchChangelog => {
             tasks

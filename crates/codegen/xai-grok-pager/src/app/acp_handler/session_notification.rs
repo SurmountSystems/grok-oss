@@ -241,7 +241,28 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             ..
         } => {
             if agent.session.loading_replay {
-                agent.replayed_terminal_prompts.insert(prompt_id);
+                agent.replayed_terminal_prompts.insert(prompt_id.clone());
+                // Primary user turns only. Synthetic wake terminals
+                // (subagent-completed-*, task-completed-*, …) must not mark
+                // the parent open-turn as finished — killall mid-wait leaves
+                // those children complete while the parent turn has no
+                // durable terminal.
+                //
+                // Do **not** set the completed flag for `cancelled` stop
+                // reasons: Esc/user-cancel leaves `canceled_turn_resume.json`
+                // on purpose, and session load must still auto-resume that
+                // marker. Treating cancel as "primary completed" made clean
+                // success and cancel look the same, so a stale-marker gate
+                // would either re-fire completed turns or drop cancel resume.
+                // Success / error / rate_limit / end_turn all count as a
+                // finished primary turn for open-turn history recovery.
+                if matches!(
+                    xai_grok_shell::session::PromptOrigin::from_prompt_id(&prompt_id),
+                    xai_grok_shell::session::PromptOrigin::User
+                ) && stop_reason != "cancelled"
+                {
+                    agent.last_primary_user_turn_completed_in_replay = true;
+                }
                 false
             } else if is_wake_prompt(&prompt_id) {
                 if agent.session.state.is_busy() {
@@ -381,6 +402,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 user_model_preference: None,
                 deferred_model_switch: None,
                 in_flight_prompt: None,
+                cancel_resume_prompt_text: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
@@ -621,6 +643,24 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             }
             if !resuming {
                 agent.maybe_push_parked_marker();
+            }
+            // Parent PromptResponse success keeps cancel-resume while children
+            // still run (killall mid-child dogfood). When the **last** child
+            // finishes and the parent is idle with no more hold, drop that
+            // kept marker so a later idle `/rebuild` / reopen does not re-fire
+            // the completed parent prompt.
+            if !resuming && agent.session.state.is_idle() && !agent.holds_queue_for_background() {
+                if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) {
+                    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+                    let _ =
+                        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+                            &cwd, &sid,
+                        );
+                    tracing::info!(
+                        session = %sid,
+                        "canceled_turn_resume: cleared after last background subagent finished"
+                    );
+                }
             }
             // Queue may have been holding for live background subagents while
             // the parent looked idle. Once the last child finishes, try drain

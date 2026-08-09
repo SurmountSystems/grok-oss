@@ -11,6 +11,7 @@ pub mod dual_auth_status;
 pub mod error;
 mod external_auth;
 mod flow;
+pub mod free_period_debit_unproven_guard;
 pub mod harness_secrets;
 pub mod included_poll_history;
 mod jwt;
@@ -38,8 +39,10 @@ pub(crate) use auth_provider::{test_backdate_provider_mint, test_counting_provid
 pub(crate) use config::LEGACY_AUTH_SCOPE;
 pub use config::{
     ForceLoginTeam, GrokComConfig, OAuth2ProviderConfig, OidcAuthConfig, PreferredAuthMethod,
-    XAI_OAUTH2_ISSUER, default_auto_use_included_limits, is_xai_oauth2_issuer, xai_oauth2_issuer,
+    XAI_OAUTH2_ISSUER, default_allow_spend_when_free_period_debit_unproven,
+    default_auto_use_included_limits, is_xai_oauth2_issuer, xai_oauth2_issuer,
 };
+// free_period_debit_unproven_guard re-exports are below (after module decl).
 pub(crate) use external_auth::{parse_output, refresh_with_command};
 pub(crate) use flow::{
     AuthChannels, run_auth_flow, run_auth_flow_with_stderr_bridge,
@@ -53,25 +56,35 @@ pub use flow::{
 pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
 mod meta;
 pub use allowance_exhaust_from_billing::{
-    SupergrokBillingPollOutcome, SupergrokBillingPollOutcomeKind, SupergrokBillingPollTarget,
-    active_supergrok_identity_id, afterburner_skips_allowance_mark,
-    apply_billing_usage_to_session_exhaust, apply_billing_usage_to_session_exhaust_with_period,
-    classify_supergrok_billing_poll_error, clear_included_billing_cache,
-    demote_included_billing_on_auth_fail, format_supergrok_billing_fail_note,
+    SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD, SupergrokBillingPollOutcome,
+    SupergrokBillingPollOutcomeKind, SupergrokBillingPollTarget, active_supergrok_identity_id,
+    afterburner_skips_allowance_mark, apply_billing_usage_to_session_exhaust,
+    apply_billing_usage_to_session_exhaust_with_period, classify_supergrok_billing_poll_error,
+    clear_included_billing_cache, consecutive_auth_fail_streak,
+    demote_included_billing_on_auth_fail, ensure_fresh_access_token_for_supergrok_billing_poll,
+    find_supergrok_auth_entry_for_billing, format_supergrok_billing_fail_note,
     included_billing_fields_snapshot, load_all_session_access_tokens,
     load_non_active_supergrok_billing_poll_targets, load_session_access_token,
     load_supergrok_billing_poll_targets, load_supergrok_session_candidates,
-    remember_active_supergrok_included_billing, remember_supergrok_billing_poll_failed,
-    remember_supergrok_billing_poll_ok, remember_supergrok_build_usage,
-    remember_supergrok_dollar_extras, remember_supergrok_included_billing,
-    supergrok_billing_poll_outcome, supergrok_billing_poll_outcomes_snapshot,
-    supergrok_identity_last_poll_auth_failed, supergrok_identity_last_poll_ok,
-    supergrok_out_of_allowance_with_console_ready,
+    persist_refreshed_supergrok_billing_auth, remember_active_supergrok_included_billing,
+    remember_supergrok_billing_poll_failed, remember_supergrok_billing_poll_ok,
+    remember_supergrok_build_usage, remember_supergrok_dollar_extras,
+    remember_supergrok_included_billing, session_needs_oidc_refresh_before_billing_poll,
+    should_skip_supergrok_billing_poll_for_auth_streak, supergrok_billing_poll_outcome,
+    supergrok_billing_poll_outcomes_snapshot, supergrok_identity_last_poll_auth_failed,
+    supergrok_identity_last_poll_ok, supergrok_out_of_allowance_with_console_ready,
 };
 pub use dual_auth_status::{
     DualAuthStatus, collect_dual_auth_status, collect_dual_auth_status_with,
 };
 pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
+pub use free_period_debit_unproven_guard::{
+    ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN_ENV, FreePeriodHeadroomEvidence,
+    FreePeriodUnprovenSpendGuard, allow_spend_when_free_period_debit_unproven_from_config,
+    evaluate_free_period_unproven_spend_guard, free_period_headroom_evidence_live,
+    free_period_headroom_from_usage_readings, free_period_unproven_spend_block_message,
+    should_block_spend_when_free_period_debit_unproven,
+};
 pub use harness_secrets::{
     DISABLE_SHARED_HARNESS_ENV, GROK_ZED_CONFIG_DIR_ENV, SharedKeySource,
     probe_shared_openrouter_key, probe_shared_openrouter_key_default,
@@ -120,8 +133,9 @@ pub use supergrok_identity_rank::{
     included_remaining_from_usage_pct, list_supergrok_principal_slots,
     order_after_supergrok_included_exhaust, order_credentials_for_preferred_auto,
     order_live_supergrok_for_auto, pick_supergrok_identity_for_auto, preferred_is_console_primary,
-    preferred_uses_supergrok_auto_rank, principal_limits_label, reset_at_from_period_end,
-    role_from_session_fields, role_label,
+    preferred_uses_supergrok_auto_rank, principal_limits_label, ranked_free_period_primary_token,
+    reset_at_from_period_end, role_from_session_fields, role_label,
+    session_bearer_should_align_to_ranked_free_period_primary,
 };
 pub use xai_console::{
     XAI_CONSOLE_API_URL, XaiConsoleAuthError, add_console_api_key, clear_console_api_key,
