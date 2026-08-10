@@ -1116,6 +1116,14 @@ pub(crate) async fn run(
         )
         .value,
     );
+    crate::appearance::cache::set_always_expand_thinking(
+        xai_grok_shell::util::config::resolve_always_expand_thinking(
+            requirements.as_ref(),
+            user_config.as_ref(),
+            managed_config.as_ref(),
+        )
+        .value,
+    );
     crate::appearance::cache::set_group_tool_verbs(
         xai_grok_shell::util::config::resolve_group_tool_verbs(
             requirements.as_ref(),
@@ -2061,13 +2069,28 @@ pub(crate) async fn run(
             // Leader disconnect: the bridge fires cancel when the IPC
             // channel closes.  Without this arm the loop would hang
             // because AppView holds the client-side tx, keeping acp_rx open.
+            //
+            // Biased order puts this above quit_notify. During `/rebuild`,
+            // leaders get RelaunchForUpdate and may drop IPC while peers also
+            // receive SIGUSR1. If we break here without arming re-exec, peers
+            // quit and never come back on the new binary.
             _ = connection_cancel.cancelled() => {
+                let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+                    &mut app,
+                    dispatch::rebuild::PeerRebuildExitReason::LeaderDisconnect,
+                );
                 break;
             }
 
             // Graceful-quit request from the signal handler. Kept high in the
             // biased order so a SIGTERM quit isn't starved by an ACP firehose.
+            // SIGUSR1 peer-rebuild sets a flag first; arm re-exec before Quit so
+            // all product windows pick up the new binary after `/rebuild`.
             _ = quit_notify.notified() => {
+                let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+                    &mut app,
+                    dispatch::rebuild::PeerRebuildExitReason::SignalOrFlag,
+                );
                 let effs = dispatch::dispatch(Action::Quit, &mut app);
                 let _ = process_effects(effs, &mut tasks, &mut app, &progress_tx);
                 break;
@@ -2820,6 +2843,13 @@ pub(crate) async fn run(
     }
 
     app.notification_service.shutdown();
+
+    // Final safety net: drain a leftover SIGUSR1 flag if an exit path forgot
+    // to arm (must not opportunistic-arm on plain /exit).
+    let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+        &mut app,
+        dispatch::rebuild::PeerRebuildExitReason::SignalOrFlag,
+    );
 
     Ok(make_run_result(&app))
 }

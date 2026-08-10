@@ -5,7 +5,8 @@
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
 //! - Phase timer `Xs` (gray, never truncates)
-//! - Queued-send hint `· N queued — Enter to interject` (gray, sendable waits only)
+//! - Queued-send hint `· N queued — Enter to interject` (gray; any running turn
+//!   with held follow-ups, not only sendable waits)
 //! - Fill space
 //! - Turn timer `Xm Ys` and optional token count `⇣Nk` (right-aligned, gray)
 //! - Pause button `[pause]` / `[resume]` (quiet white on hover; global pause)
@@ -391,11 +392,10 @@ pub fn render_turn_status(
     // scrollback — it must never scroll away). Lower priority than the
     // starting-session and drain-blocked cues above.
     //
-    // When background subagents hold the pending-prompt queue, append a
-    // suffix so the operator sees that Enter queues rather than starting a
-    // turn: "Enter queues" with an empty hold, or "N queued — Interject to
-    // force" once rows are held. Sendable-wait holds on the running-turn
-    // path use "Enter to interject" instead.
+    // Still-running cue only: live background subagents do not hold the main
+    // queue or force Enter:queue (operator 2026-08-09). Mid-turn held rows use
+    // the running-turn path ("Enter to interject"). Primary idle + children
+    // → Enter sends a normal main turn.
     //
     // Work B: when primary is idle (not parked) and subagents are live, also
     // paint discoverable `[pause]` + `[stop]` on the right. Parked still
@@ -416,20 +416,10 @@ pub fn render_turn_status(
         } else {
             theme.gray
         };
-        // Held-queue suffix, or a pre-queue cue while background subagents hold
-        // drain (Enter queues even before the first follow-up is queued).
-        // Monitors/commands alone do not hold; only subagents do.
-        let queue_suffix = if held_queue > 0 && state.is_idle() {
-            if held_queue_top_sendable {
-                format!(" · {held_queue} queued — Interject to force")
-            } else {
-                format!(" · {held_queue} queued")
-            }
-        } else if state.is_idle() && watchers.subagents > 0 {
-            " · Enter queues".to_string()
-        } else {
-            String::new()
-        };
+        // Idle + children: no queue-hold suffix (Enter sends). held_queue is
+        // unused here; mid-turn path owns "N queued" hints.
+        let _ = (held_queue, held_queue_top_sendable);
+        let queue_suffix = String::new();
         // Parked: no pause/stop. Idle: subagents (or global pause) unlock them.
         let chrome = if parked {
             WorkControlChrome::default()
@@ -670,12 +660,29 @@ pub fn render_turn_status(
         .bg(timer_bg)
         .remove_modifier(Modifier::all());
 
+    // Held follow-ups while the primary is busy: persistent status ACK so
+    // Enter:queue never feels like the composer ate the text. Applies to
+    // sendable waits, mid-turn thinking/streaming, and tool runs — not only
+    // waits. "Enter to interject" only when bare empty Enter would soft-
+    // interject the top row (see `AgentView::held_queue_top_sendable`).
+    let queue_suffix = if held_queue > 0 {
+        if held_queue_top_sendable {
+            format!(" · {held_queue} queued — Enter to interject")
+        } else {
+            format!(" · {held_queue} queued")
+        }
+    } else {
+        String::new()
+    };
+    let queue_suffix_width = queue_suffix.width();
+
     // Available width for activity label (only the label truncates)
     // Layout: spinner + label + phase_timer + queued_hint + gap(1) + turn_timer + cancel
     let min_gap = 1;
     let available_for_label = (area.width as usize)
         .saturating_sub(spinner_width)
         .saturating_sub(phase_timer_width)
+        .saturating_sub(queue_suffix_width)
         .saturating_sub(min_gap)
         .saturating_sub(right_width);
 
@@ -696,8 +703,8 @@ pub fn render_turn_status(
     };
     left_spans.push(Span::styled(spinner_str, spinner_style));
 
-    // Activity label (potentially truncated)
-    let mut queued_hint: Option<Span<'static>> = None;
+    // Activity label (potentially truncated). Queue suffix is reserved above
+    // and painted after the phase timer for both tool and non-tool paths.
     if is_tool {
         if let Some(TurnActivity::ToolRunning { title, description }) = activity {
             if is_asking {
@@ -758,29 +765,8 @@ pub fn render_turn_status(
             }
         }
     } else {
-        // Sendable wait holding queued messages: the persistent inline hint
-        // saying why the queue is paused and how to send anyway. On the status
-        // row (not an ephemeral tip) so it stays visible for the whole wait,
-        // and dropped before the label truncates on a narrow terminal.
-        // "Enter to interject" is advertised only when Enter would actually
-        // soft-interject the top row (bash / client-expanded local rows refuse
-        // with a toast — see `AgentView::held_queue_top_sendable`).
-        let suffix = if held_queue > 0 && is_sendable_wait(activity) {
-            if held_queue_top_sendable {
-                format!(" · {held_queue} queued — Enter to interject")
-            } else {
-                format!(" · {held_queue} queued")
-            }
-        } else {
-            String::new()
-        };
-        if !suffix.is_empty() && label.width() + suffix.width() <= available_for_label {
-            left_spans.push(Span::styled(label.clone(), activity_style));
-            queued_hint = Some(Span::styled(suffix, Style::default().fg(theme.gray)));
-        } else {
-            let display = truncate_str(&label, available_for_label);
-            left_spans.push(Span::styled(display, activity_style));
-        }
+        let display = truncate_str(&label, available_for_label);
+        left_spans.push(Span::styled(display, activity_style));
     }
 
     // Phase timer (gray, never truncates)
@@ -789,8 +775,8 @@ pub fn render_turn_status(
     }
 
     // After the phase timer, so the elapsed time reads as the wait's, not the hint's.
-    if let Some(hint) = queued_hint {
-        left_spans.push(hint);
+    if !queue_suffix.is_empty() {
+        left_spans.push(Span::styled(queue_suffix, Style::default().fg(theme.gray)));
     }
 
     // Render left side
@@ -1860,45 +1846,56 @@ mod tests {
         );
     }
 
+    /// Named contract: primary idle + live subagents does not claim Enter
+    /// queues or force-drain. Children run in parallel; Enter sends.
     #[test]
-    fn idle_with_subagents_and_held_queue_shows_force_hint() {
+    fn idle_with_subagents_does_not_claim_enter_queues_or_force() {
         let mut args = idle_args(Watchers {
             subagents: 1,
             ..Watchers::default()
         });
+        // Even if a caller passed a stale held count, idle status must not
+        // advertise queue-hold / force-drain for background children alone.
         args.held_queue = 1;
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 90);
         assert!(
-            text.contains("1 subagent still running")
-                && text.contains("1 queued — Interject to force"),
-            "idle background hold must explain the queue + how to force, got: {text:?}"
+            text.contains("1 subagent still running"),
+            "still-running cue must remain, got: {text:?}"
         );
         assert!(
             !text.contains("Enter queues"),
-            "force hint replaces the empty-queue Enter queues cue; got: {text:?}"
+            "idle + subagents must not claim Enter queues, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Interject to force"),
+            "idle + subagents must not claim Interject to force, got: {text:?}"
         );
     }
 
-    /// Named contract: idle + live background subagent(s) with nothing queued
-    /// yet still tell the operator that Enter will queue (not start a turn).
+    /// Named contract: idle + live background subagent(s) still-running cue
+    /// without queue-hold language (Enter sends a normal main turn).
     #[test]
-    fn idle_with_subagents_empty_queue_shows_enter_queues_cue() {
+    fn idle_with_subagents_empty_queue_does_not_show_enter_queues_cue() {
         let text = render_idle_with_watchers(Watchers {
             subagents: 1,
             ..Watchers::default()
         });
         assert!(
-            text.contains("1 subagent still running") && text.contains("Enter queues"),
-            "idle hold with empty queue must advertise that Enter queues, got: {text:?}"
+            text.contains("1 subagent still running"),
+            "still-running cue must remain, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Enter queues"),
+            "idle + subagents must not claim Enter queues, got: {text:?}"
         );
         assert!(
             !text.contains("Interject to force"),
-            "empty queue must not show force-drain suffix yet, got: {text:?}"
+            "idle + subagents must not claim force-drain, got: {text:?}"
         );
     }
 
-    /// Monitors alone do not hold the queue; do not claim Enter queues.
+    /// Monitors alone never claimed Enter queues; keep that honest.
     #[test]
     fn idle_with_monitors_only_does_not_show_enter_queues_cue() {
         let text = render_idle_with_watchers(Watchers {
@@ -1911,7 +1908,7 @@ mod tests {
         );
         assert!(
             !text.contains("Enter queues"),
-            "monitors must not hold the queue or claim Enter queues, got: {text:?}"
+            "monitors must not claim Enter queues, got: {text:?}"
         );
     }
 
@@ -1925,10 +1922,9 @@ mod tests {
             text.contains("1 subagent still running") && !text.contains("subagents"),
             "single subagent must use the singular noun, got: {text:?}"
         );
-        // Same state also carries the empty-queue Enter cue (see dedicated test).
         assert!(
-            text.contains("Enter queues"),
-            "singular subagent idle hold still needs Enter queues cue, got: {text:?}"
+            !text.contains("Enter queues"),
+            "singular subagent idle must not claim Enter queues, got: {text:?}"
         );
     }
 
@@ -2071,6 +2067,55 @@ mod tests {
         assert!(
             text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to interject"),
             "phase timer must sit between the wait label and the queued hint, got: {text:?}"
+        );
+    }
+
+    /// Mid-turn thinking (not a sendable wait) must still show N queued so a
+    /// follow-up is never invisible until the next park.
+    #[test]
+    fn running_thinking_shows_queued_hint_outside_sendable_wait() {
+        let activity = Some(TurnActivity::Thinking);
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(3));
+        args.held_queue = 1;
+        args.held_queue_top_sendable = true;
+        let text = render_row_text(args, 80);
+        assert!(
+            text.contains("1 queued"),
+            "thinking mid-turn must show queued count, got: {text:?}"
+        );
+        assert!(
+            text.contains("Enter to interject"),
+            "sendable top must advertise empty-Enter interject, got: {text:?}"
+        );
+        assert!(
+            !is_sendable_wait(&activity),
+            "precondition: Thinking is not a sendable wait"
+        );
+    }
+
+    /// Tool runs also carry the queued ACK (status is not wait-only).
+    #[test]
+    fn running_tool_shows_queued_hint() {
+        let activity = Some(TurnActivity::ToolRunning {
+            title: "run_terminal_command".into(),
+            description: Some("long shell".into()),
+        });
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.held_queue = 2;
+        args.held_queue_top_sendable = false;
+        let text = render_row_text(args, 80);
+        assert!(
+            text.contains("2 queued"),
+            "tool mid-turn must show queued count, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Enter to interject"),
+            "non-sendable top must not advertise interject, got: {text:?}"
         );
     }
 
@@ -2421,8 +2466,8 @@ mod tests {
             "idle + subagents must paint pause and stop, got: {text:?}"
         );
         assert!(
-            text.contains("Enter queues"),
-            "Work A cue must not regress, got: {text:?}"
+            !text.contains("Enter queues"),
+            "pause/stop stay; Enter queues must not return, got: {text:?}"
         );
         assert!(
             output.pause_button.is_some() && output.cancel_button.is_some(),

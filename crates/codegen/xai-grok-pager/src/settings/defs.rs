@@ -1056,6 +1056,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        // SHELL-owned: `[ui].always_expand_thinking` + process-wide cache. Default OFF.
+        // When on, thinking stays fully expanded and the footer hides Ctrl+E.
+        SettingMeta {
+            key: "always_expand_thinking",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Always expand thinking",
+            description: "Keep agent thinking blocks fully expanded instead of collapsing to a \
+                          one-liner when they finish. Hides the Ctrl+E expand-thinking footer \
+                          hint while on.",
+            keywords: &[
+                "thinking",
+                "reasoning",
+                "thoughts",
+                "expand",
+                "always",
+                "collapse",
+                "ctrl+e",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.always_expand_thinking.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned: `[ui].prompt_suggestions` + process-wide cache. Default ON.
         // The `GROK_PROMPT_SUGGESTIONS` env var overrides at runtime.
         SettingMeta {

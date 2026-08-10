@@ -2073,6 +2073,23 @@ impl TextArea {
             } => {
                 self.move_cursor_down();
             }
+            // Document-level: Ctrl+Home / Ctrl+PageUp → buffer start;
+            // Ctrl+End / Ctrl+PageDown → buffer end. Bare Home/End stay
+            // visual-row (soft wrap). Ctrl+A/E remain logical-line (emacs).
+            KeyEvent {
+                code: KeyCode::Home | KeyCode::PageUp,
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.set_cursor(0);
+            }
+            KeyEvent {
+                code: KeyCode::End | KeyCode::PageDown,
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.set_cursor(self.text.len());
+            }
             // Home/End → visual row; Ctrl+A/E → logical line (emacs).
             KeyEvent {
                 code: KeyCode::Home,
@@ -5754,6 +5771,45 @@ mod tests {
         t.set_cursor(6);
         t.move_cursor_to_end_of_line(true);
         assert_eq!(t.cursor(), t.text().len());
+    }
+
+    /// Ctrl+Home / Ctrl+PageUp jump to buffer start; Ctrl+End / Ctrl+PageDown
+    /// jump to buffer end — whole multi-line draft, not the current visual row.
+    /// Bare Home/End remain visual-row local.
+    #[test]
+    fn ctrl_home_end_page_move_to_buffer_ends() {
+        let mut t = ta_with("one\ntwo\nthree");
+        let end = t.text().len();
+        assert!(end > 5, "fixture must be multi-line");
+        t.set_cursor(5); // mid "two"
+
+        t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+        assert_eq!(t.cursor(), 0, "Ctrl+Home → buffer start");
+
+        t.input(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+        assert_eq!(t.cursor(), end, "Ctrl+End → buffer end");
+
+        t.set_cursor(5);
+        t.input(KeyEvent::new(KeyCode::PageUp, KeyModifiers::CONTROL));
+        assert_eq!(t.cursor(), 0, "Ctrl+PageUp → buffer start");
+
+        t.input(KeyEvent::new(KeyCode::PageDown, KeyModifiers::CONTROL));
+        assert_eq!(t.cursor(), end, "Ctrl+PageDown → buffer end");
+
+        // Bare Home from end of last line → start of that visual/logical row.
+        t.set_cursor(end);
+        t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        let last_line_start = t.text().rfind('\n').map(|i| i + 1).unwrap_or(0);
+        assert_eq!(
+            t.cursor(),
+            last_line_start,
+            "bare Home stays line-local, not buffer start"
+        );
+
+        t.set_cursor(0);
+        t.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(t.cursor(), 3, "bare End stays first-line end (before \\n)");
+        assert_ne!(t.cursor(), end, "bare End must not jump to buffer end");
     }
 
     #[test]

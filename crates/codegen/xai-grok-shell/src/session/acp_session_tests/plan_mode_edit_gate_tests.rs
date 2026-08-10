@@ -10,6 +10,7 @@ use super::*;
 /// tools (so `${{ tools.by_kind.exit_plan }}` resolves in the rejection
 /// message), with a gateway drain answering session notifications.
 async fn build_gate_actor() -> SessionActor {
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionTool;
     use xai_grok_tools::implementations::grok_build::enter_plan_mode::EnterPlanModeTool;
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeTool;
     use xai_grok_tools::registry::types::ToolConfig;
@@ -24,6 +25,10 @@ async fn build_gate_actor() -> SessionActor {
         ToolConfig::from_id("GrokBuild:search_replace"),
         ToolConfig::for_tool::<EnterPlanModeTool>(),
         ToolConfig::for_tool::<ExitPlanModeTool>(),
+        // Keep ask_user_question registered so prepare can parse a call even
+        // when plan mode would have stripped it from the advertised list —
+        // the hard reject path must still fire.
+        ToolConfig::for_tool::<AskUserQuestionTool>(),
     ])
     .await;
     tokio::task::spawn_local(async move {
@@ -149,6 +154,62 @@ async fn inactive_plan_mode_does_not_gate_edits() {
             assert!(
                 result.is_ok(),
                 "edit outside plan mode must prepare; got {:?}",
+                result.err()
+            );
+        })
+        .await;
+}
+
+fn ask_user_question_call(id: &str) -> ToolCallResponse {
+    ToolCallResponse {
+        id: id.to_string(),
+        kind: "function".to_string(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "ask_user_question",
+            r#"{"questions":[{"question":"Which follow-ups?","options":[{"label":"A","description":"option a"}]}]}"#,
+        ),
+    }
+}
+
+/// Hard block: plan mode Active rejects ask_user_question before the client
+/// questionnaire UI opens (even if the tool is still registered/callable).
+#[tokio::test(flavor = "current_thread")]
+async fn plan_mode_rejects_ask_user_question_before_ui() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = build_gate_actor().await;
+            activate_plan_mode(&actor);
+            let result = prepare(&actor, ask_user_question_call("call_ask")).await;
+            assert!(
+                matches!(result, Err(ToolLoop::Continue)),
+                "ask_user_question must be rejected in plan mode; got {result:?}"
+            );
+            let text = tool_result_text(&actor, "call_ask").await;
+            assert!(
+                text.contains("ask_user_question") && text.contains("plan mode"),
+                "rejection must name the tool and plan mode: {text}"
+            );
+            assert!(
+                text.contains("plan file") || text.contains("exit_plan_mode"),
+                "rejection must steer to plan.md / exit_plan_mode: {text}"
+            );
+        })
+        .await;
+}
+
+/// Outside plan mode, ask_user_question still prepares (non-plan interactive Q&A).
+/// The plan gate must not reject; tool body runs later at dispatch.
+#[tokio::test(flavor = "current_thread")]
+async fn inactive_plan_mode_allows_ask_user_question_prepare() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = build_gate_actor().await;
+            let result = prepare(&actor, ask_user_question_call("call_ask_ok")).await;
+            assert!(
+                result.is_ok(),
+                "ask_user_question outside plan mode must prepare; got {:?}",
                 result.err()
             );
         })

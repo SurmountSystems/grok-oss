@@ -6,6 +6,21 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **Dogfood / next-session gate (2026-08-09; open until install + dogfood done).**
+  Tree work for the plan wave (A/B/C/E chrome, plan Revise, stale plan batch,
+  OAuth 403 bad-credentials, rewind checkpoints, Ctrl+C rewind) is **in FORK**
+  as shipped product. **Operator still needs** install + full quit of old TUIs
+  + reopen `grok-oss` before treating chrome as live. Checklist:
+  [`.agents/reports/d0-dogfood-checklist-2026-08-09.md`](.agents/reports/d0-dogfood-checklist-2026-08-09.md).
+  Handoff: [`FORK.md`](FORK.md) § *Dogfood / next session handoff (2026-08-09)*.
+  **In flight (do not claim shipped):** auto-resume after error terminal on
+  rebuild/reopen (wait for
+  `.agents/reports/impl-rebuild-auto-resume-after-error-2026-08-09.md` or
+  equivalent green). Soft-stop **button** and mid-sample freeze-without-cancel
+  are **not** shipped. Free SuperGrok period C4 stays server ticket (below §4).
+  Post-dogfood process features: agentic fmt/clippy ACP + thoughtful todos
+  (next two Open bullets).
+
 - **Agent process: cargo fmt / post-impl verify via ACP (OPEN — plan thoughtfully later; not this dogfood wave).**
   Operator (2026-08-09): the standing process note that implementers must run
   `cargo fmt` (and clippy + targeted tests) on touched packages **is not
@@ -34,10 +49,26 @@ or code — not only here. Closed campaign history:
 - **Plan approval UI (product chrome shipped → FORK; agent freeform still soft):**
   soft-park **auto-opens** the plan side panel; footer mouse CTAs hit-tested;
   card re-reads live `plan.md`; L1 typing stays modal-free. `/view-plan` still
-  reopens if dismissed. Lasting truth: [`FORK.md`](FORK.md). Joins under
-  `/tmp/grok-join-impl-*plan*`. **Still soft:** agent-written `plan.md` can
-  invent freeform "reply approve / options 1–5" (product chrome does not;
-  process law = product CTAs only). Process: `bug:exit-plan-mode-false-approve`.
+  reopens if dismissed. **Shipped 2026-08-10 (FORK P1–P3 + prior):** sticky
+  `plan_decision_resolved` (no re-arm Approve after one decisive Approve/Quit
+  until a new present); `exit_plan_mode` tool body present-only (not false
+  “auto-approved”); always-approve ≠ plan panel Approve; **empty Enter never
+  approves** (mouse Approve / empty-prompt `a`); present status **Plan ready.
+  Side panel open**; after Revise/Clarify, **Revising plan...** / **Waiting for
+  updated plan...** with no idle CTA re-arm until re-present (honest queue
+  toast when channel closed); revise landing also pushes a human line, clears
+  ghost composer draft, and shows real busy turn chrome (not barren
+  Waiting+Enter:queue); composer caret empty half **text_primary** (not neon
+  green letter ink). Lasting truth: [`FORK.md`](FORK.md). User-guide
+  `19-plan-mode`, `03-keyboard-shortcuts`, `06-theming`,
+  `22-permissions-and-safety`. Reports:
+  [`.agents/reports/impl-p1-plan-decision-surface-2026-08-10.md`](.agents/reports/impl-p1-plan-decision-surface-2026-08-10.md),
+  [`.agents/reports/impl-p2-revise-loop-chrome-2026-08-10.md`](.agents/reports/impl-p2-revise-loop-chrome-2026-08-10.md),
+  [`.agents/reports/impl-p3-green-letter-caret-2026-08-10.md`](.agents/reports/impl-p3-green-letter-caret-2026-08-10.md),
+  [`.agents/reports/impl-p4-docs-fork-survive-2026-08-10.md`](.agents/reports/impl-p4-docs-fork-survive-2026-08-10.md),
+  [`.agents/reports/impl-revise-barren-wait-2026-08-10.md`](.agents/reports/impl-revise-barren-wait-2026-08-10.md).
+  **Still soft:** agent-written `plan.md` can invent freeform "reply approve /
+  options 1–5" (product chrome does not; process law = product CTAs only).
 
 - **Stuck Retrying / network-switch graceful (shipped → FORK; dogfood rebuild):**
   product truth in [`FORK.md`](FORK.md) (StreamResumed soft-reconnect, not
@@ -82,14 +113,17 @@ or code — not only here. Closed campaign history:
 
 2. **Plan approval soft park (side panel auto-open shipped → FORK; freeform soft)**
    **Shipped:** `exit_plan_mode` soft path parks durable approval, keeps draft,
-   **auto-opens** non-capturing plan **side panel** (toast/status name side
-   panel, not a `/view-plan` nudge). L1 stays modal-free (printable → composer).
-   Approve/quit via **mouse footer CTAs**, side panel, status chip; `/view-plan`
-   reopens if dismissed. Force fullscreen: `plan_approval_park = "modal"`.
-   Lasting truth: [`FORK.md`](FORK.md). Design note (historical):
+   **auto-opens** non-capturing plan **side panel** (toast/status **Plan ready.
+   Side panel open**, not a `/view-plan` nudge). L1 stays modal-free (printable
+   → composer). Approve/quit via **mouse footer CTAs**, side panel, status
+   chip; empty Enter never approves; `/view-plan` reopens if dismissed. Force
+   fullscreen: `plan_approval_park = "modal"`. **2026-08-10 also shipped
+   (P1–P3):** present ≠ Approve (honest tool body + shell panel Approve vs
+   no-client messages); sticky no multi-Approve after decide; always-approve is
+   tool permissions only; revise/clarify in-flight status + no idle CTA re-arm;
+   caret empty half `text_primary`. Lasting truth: [`FORK.md`](FORK.md).
+   Design note (historical):
    [`doc/dev/research/plan-modal-softer-park-2026-07-26.md`](doc/dev/research/plan-modal-softer-park-2026-07-26.md).
-   Joins: `/tmp/grok-join-impl-plan-paste-and-auto-open.md`,
-   `/tmp/grok-join-impl-l1-modal-free-plan-2026-07-29.md`.
    **Still soft:** agent-written `plan.md` freeform menus; toast may still
    *feel* modal to some operators. Do not invent a third park mode.
 
@@ -99,7 +133,9 @@ or code — not only here. Closed campaign history:
    focus paint); scrollback card not a fake button menu; empty placeholder not
    a key list; FileBacked panel + soft-park card re-read live `plan.md` (in-place
    card update, no second-card spam). Boards `bug:plan-cta-no-click-buttons`,
-   `bug:plan-approval-stale-snapshot` product side green. Joins under `/tmp/grok-join-impl-*plan*2026-07-29.md`.
+   `bug:plan-approval-stale-snapshot` product side green. Sticky multi-approve,
+   false tool-body auto-approve, empty Enter no-op, revise-loop chrome, caret
+   empty half: green 2026-08-10 (FORK P1–P3).
    **Still open:** agent-written `plan.md` body can still invent freeform chat
    menus; product does not inject that chrome. Do not claim agent ceremony gone.
 
@@ -545,13 +581,21 @@ or code — not only here. Closed campaign history:
      without the console API key being live. **Shipped honesty + chrome:**
      human Console line **Team prepaid remaining**; note
      `NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT`; doctor dogfood block; Work C
-     status compact `intent · N%` for free SuperGrok period; SuperGrok-live
-     footer `Team settlement: prepaid $N · Grok Build class $M` (cold:
-     `Team settlement: loading team prepaid...`); AuthMeta
-     `usage_visible=false` still gates footer while compact intent paints.
+     status compact `free SuperGrok period · N%` (not bare `intent ·`); SuperGrok-live
+     footer: while free SuperGrok period has room, **no** long team prepaid /
+     Grok Build class line (quiet footer; team wallets on `/limits`); after free
+     SuperGrok period is full, optional secondary
+     `not the active spend path: team prepaid remaining $N · Grok Build class $M`
+     (cold: `not the active spend path: loading team prepaid...`). AuthMeta
+     `usage_visible=false` still gates footer while free SuperGrok period compact paints.
+     Prior `Team settlement:` misread as active pay; prior always-on
+     `not the active spend path:` while free SuperGrok period had room was messy
+     (fix 2026-08-09).
      Reports:
+     [`.agents/reports/impl-team-settlement-chrome-vs-limits-2026-08-09.md`](.agents/reports/impl-team-settlement-chrome-vs-limits-2026-08-09.md),
      [`.agents/reports/impl-settlement-pay-path-tracking-gap-2026-08-09.md`](.agents/reports/impl-settlement-pay-path-tracking-gap-2026-08-09.md),
-     [`.agents/reports/impl-work-c-meters-chrome-2026-08-09.md`](.agents/reports/impl-work-c-meters-chrome-2026-08-09.md).
+     [`.agents/reports/impl-work-c-meters-chrome-2026-08-09.md`](.agents/reports/impl-work-c-meters-chrome-2026-08-09.md),
+     [`.agents/reports/impl-status-chrome-messy-team-prepaid-2026-08-09.md`](.agents/reports/impl-status-chrome-messy-team-prepaid-2026-08-09.md).
      **Still soft / not shipped:** machine `payingMeter` field that claims
      which wallet actually debited last request (needs settlement deltas, not
      invented free SuperGrok period %); prepaid remaining **delta** history as

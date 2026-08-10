@@ -62,7 +62,7 @@ Control how entries are displayed in the scrollback.
 | `l` | `Right` | Expand selected entry |
 | `e` | | Toggle fold on selected entry |
 | `⇧E` | | Expand all / collapse all entries |
-| `Ctrl+E` | | Expand/collapse all thinking blocks |
+| `Ctrl+E` | | Expand/collapse all thinking blocks (hidden from the footer when `[ui] always_expand_thinking = true`) |
 | `r` | | Toggle raw markdown on selected entry |
 
 Setting `respect_manual_folds = true` under `[scrollback.scroll]` in
@@ -184,25 +184,19 @@ Over SSH, the remote Grok process usually cannot access the terminal's local X11
 
 Plain `Enter` is **not always "send."** The shortcuts bar footer labels the real outcome (`Enter: send`, `Enter: queue`, or `Enter: interject`) using the same rules as dispatch. Read that label before you type if you are unsure.
 
-While the agent is generating, or while the parent looks idle but background subagents still hold the queue:
+While the **primary** agent turn is generating (thinking, tools, streaming, or a blocked wait):
 
-- **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends, and they deliberately **hold** while:
-  - the agent is **blocked waiting** on background-task output or a foreground subagent, or
-  - **any background subagent is still live** even when the parent looks idle.
+- **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends. They also hold while the agent is **blocked waiting** on background-task output or a foreground subagent (sendable wait). Mid-turn status may show `· N queued` / `· N queued — Enter to interject`.
 
-  Status examples:
-  - Before anything is queued: `N subagent(s) still running · Enter queues`
-  - After items are held: `N subagent(s) still running · M queued — Interject to force`
+  **Background subagents alone do not force queue-only.** When the primary turn is idle, plain `Enter` **sends** a normal main turn even if status shows `N subagent(s) still running`. Children keep running in parallel; the status still-running cue and `[pause]` / `[stop]` stay available.
 
-  Running **monitors** alone do **not** hold the queue (they can run forever). When the last holding subagent finishes, the queue drains automatically.
+  Running **monitors** alone also never force queue (they can run forever).
 - **`Enter` again on the emptied composer** (double-Enter) **soft-interjects** the **top** queued follow-up into the running turn (mid-turn only).
 - The **interject** chord is **soft only** mid-turn: it injects your message into the **current** turn at the next safe point. It **never cancels** the running turn — cancel is **Esc / stop** only:
   - **Non-empty composer** → soft-interject that text into the running turn.
   - **Empty composer** + a queued follow-up → soft-interject the **top** queued follow-up (no need to focus the queue pane). On the queue pane, the same chord (or the **[Interject]** button) soft-interjects the **selected** row (plain prompts only; bash / non-plain stay queued).
-  - **Idle with live background subagents** + held queue (or typed text) → force-start the next turn without waiting for children (nothing to cancel).
-  - **Idle** with nothing held / nothing to interject → toast (never a silent no-op).
+  - **Idle** (including live background subagents) → toast *Nothing running to interject into — press Enter to send* (never a silent no-op). Plain Enter starts a normal main turn.
 - While the agent is **blocked waiting** (on task output or a subagent) **and the queue is empty**, plain `Enter` with text **cancels the blocked wait and runs your message next** (shell auto `sendNow` / cancel-and-send). That is an **intentional unblock**, not soft Interject — soft Interject is for mid-turn steer only; cancel on a normal running turn is still **Esc / stop** only. If anything is already queued, plain Enter appends and holds like a normal mid-turn queue.
-- While the parent is **idle with live background subagents**, plain `Enter` with text **queues and holds** (does not start a conflicting main turn). Use the **interject** chord to force, or wait for children to finish.
 
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|
@@ -331,6 +325,10 @@ Focus prompt:     i, Tab, or Space
 Send:             Enter
 Newline:          Shift+Enter or Alt+Enter
 Multiline:        Ctrl+M (toggle)
+Buffer start:     Ctrl+Home or Ctrl+PageUp (whole draft)
+Buffer end:       Ctrl+End or Ctrl+PageDown (whole draft)
+Line start/end:   Home / End (current visual row only; soft wrap)
+Line (logical):   Ctrl+A / Ctrl+E
 Paste:            Ctrl+V (text, files, screenshots on macOS/Linux)
 Selected text:    Middle click or Shift+Insert (Linux X11/XWayland PRIMARY)
 Paste image:      Alt+V (Windows only — for screenshots / "Copy Image")
@@ -341,6 +339,16 @@ Cancel (running): Ctrl+C (empty prompt; non-empty draft clears first)
 Clear (idle):     Esc Esc within 800ms (non-empty prompt)
 Rewind (idle):    Esc Esc within 800ms (empty prompt + messages)
 ```
+
+> **Composer navigation:** `Ctrl+Home` / `Ctrl+PageUp` move the caret to the
+> **start of the entire draft**; `Ctrl+End` / `Ctrl+PageDown` to the **end**.
+> Bare `Home` / `End` stay on the current visual row (wrapped line). Bare
+> `PageUp` / `PageDown` still scroll conversation scrollback when prompt paging
+> is on (they do not jump the draft). The Human-green software caret reverse-
+> plates the current cell on the solid blink half; empty half keeps normal
+> text colour (`text_primary`) on mid-draft letters (not neon green letter ink).
+> It does **not** paint a solid green `█` block on a mid-draft space (solid
+> block only when the caret is at buffer end).
 
 > **Cmd+A is gated to Ghostty.** Grok's in-app `Cmd+A` handler is only
 > wired up when the detected terminal is Ghostty. Other terminals
@@ -362,13 +370,31 @@ Rewind (idle):    Esc Esc within 800ms (empty prompt + messages)
 > filepath (when known) appears only in the image preview overlay on
 > hover or when the cursor is on/right after the chip.
 
+### Plan approval (side panel open, empty prompt)
+
+Mouse footer / panel CTAs are the primary path. With an **empty** prompt while
+the side panel is open, these keys decide (full detail:
+[Plan mode](19-plan-mode.md#plan-approval)):
+
+```
+Approve:          a          (empty Enter never approves)
+Approve + notes:  A then type + Enter
+Clarify:          ? then type + Enter
+Revise:           s          (or freeform text + Enter)
+Quit plan:        q
+Reopen panel:     /view-plan
+```
+
+Always-approve (`Ctrl+O`) is **tool permissions only** — it does not auto-click
+plan Approve.
+
 ### Always available
 
 ```
 Command palette:  Ctrl+P or ?
 Model picker:     Ctrl+M (from scrollback)
 Cancel:           Ctrl+C (see Escape table)
-Always-approve:   Ctrl+O (toggle YOLO)
+Always-approve:   Ctrl+O (toggle YOLO; not plan Approve)
 New session:      Ctrl+N (press again, then choose normal/worktree)
 Quit:             Ctrl+Q (or Ctrl+D in VSCode)
 ```

@@ -1,6 +1,5 @@
 //! Top-level input routing for [`AgentView`]: `handle_input` fans events
 //! out to the active pane/overlay handlers; pane and input-mode setters.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::bracketed_paste_should_probe;
 #[cfg(test)]
 use super::paste::paste_key_tests;
@@ -1285,10 +1284,17 @@ impl AgentView {
                     self.ephemeral_tip
                         .clear(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY);
                     self.btw_focused = false;
+                    // Path / file:// drops win synchronously (and skip the
+                    // clipboard raster so a Finder icon does not double-attach).
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    // Screenshot / "Copy Image" pasteboards: many terminals
+                    // deliver Ctrl+V as `Event::Paste` (often empty text when
+                    // only a raster is on the board). Probe on every OS —
+                    // Linux was previously skipped and pure clipboard images
+                    // never became `[Image #N]` chips when paste arrived as
+                    // bracketed paste rather than a Ctrl+V key event.
                     let attachment_change_count = if bracketed_paste_should_probe(text) {
                         crate::clipboard::attachment_probe_gate(Some(text))
                     } else {
@@ -1296,7 +1302,6 @@ impl AgentView {
                     };
                     let (outcome, synchronous_text_insertion) =
                         self.insert_bracketed_prompt_text(text);
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if let Some(change_count) = attachment_change_count {
                         self.enqueue_clipboard_attachment_probe(
                             crate::app::actions::ClipboardPasteSource::BracketedInserted {
@@ -1306,8 +1311,6 @@ impl AgentView {
                             change_count,
                         );
                     }
-                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                    let _ = synchronous_text_insertion;
                     outcome
                 } else {
                     let consumed = match self.active_pane {

@@ -163,10 +163,12 @@ Both are real toggles for the permission mode: they stay in the menu, and runnin
 
 | Command | When off | When already on |
 |---|---|---|
-| `/always-approve` | Skip all permission prompts | Back to ask |
+| `/always-approve` | Skip tool permission prompts | Back to ask |
 | `/auto` | Classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
 
 Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Always-approve), `Ctrl+O`, or `/settings`.
+
+**Not plan approval:** `/always-approve` does not auto-approve a soft-parked plan. Plan decisions stay on the plan panel CTAs ([Plan mode](19-plan-mode.md#present-is-not-approval)).
 
 ### `/multiline`
 
@@ -426,13 +428,18 @@ rebuild and from the SpaceXAI auto-updater channel.
 3. Verifies the installed binary's package version + git SHA.
 4. Soft-signals reachable leaders to drain and exit for upgrade (same grace path
    as update relaunch; clients reconnect and reload the session).
-5. Re-execs **this** TUI onto the new binary with the same session id when
+5. Writes a cooperative relaunch request under `$GROK_HOME` and signals **every
+   other live product TUI** registered in `active_sessions` (`SIGUSR1`) so those
+   windows re-exec onto the new binary with the same session (not only the window
+   that typed `/rebuild`). Mid-turn work uses canceled-turn-on-restart resume.
+6. Re-execs **this** TUI onto the new binary with the same session id when
    possible. Mid-turn work is canceled with the normal canceled-turn-on-restart
    resume (re-queue once), not invent success.
 
 CLI equivalent for agents and scripts: `grok-oss rebuild` (and optional
-`--source <dir>`). Standalone other TUIs that were not leaders may still need
-`grok-oss --resume <session-id>`; the rebuild report lists live sessions.
+`--source <dir>`). After a successful rebuild, all active product windows on this
+host should pick up the new binary; the rebuild report lists leaders and peer
+TUI signal outcomes.
 
 See also [Getting Started](01-getting-started.md) install notes and
 `grok-oss update --check` (freshness vs Surmount `main` only; no auto-install).
@@ -575,43 +582,46 @@ included, SuperGrok dollar extras, and console team prepaid stay separate lines.
 The **status bar** (top row, right side next to context tokens) always shows a
 compact meter that matches the **live sampling principal** in Build sessions —
 including team dual-auth SuperGrok and console-live sampling, not only personal
-consumer billing. That compact meter is **spend-order intent chrome** (the same
-order as `/limits` **Active:** / `activeDriver`), not proof of which team wallet
+consumer billing. That compact meter is **spend-order chrome** (the same order
+as `/limits` **Active:** / `activeDriver`), not proof of which team wallet
 settles the bill. Meters stay distinct:
 
-- **SuperGrok live:** `intent · N%` when free SuperGrok period usage is known
-  (true `intent · 0%` is allowed), optionally with a short linear-burn chip when
-  period bounds exist. While billing has not returned a real free SuperGrok
-  period reading, chrome shows `intent · ...%` (not a silent `0%` lie). When free
-  SuperGrok period is full and SuperGrok dollar credits remain, the compact
-  meter switches to `SuperGrok extras · $N`. Background poll keeps refreshing
-  until the free SuperGrok period meter is known, near exhaust, or when
-  OpenRouter / console prepaid is active.
+- **SuperGrok live:** `free SuperGrok period · N%` when free SuperGrok period
+  usage is known (true `free SuperGrok period · 0%` is allowed), optionally with
+  a short linear-burn chip when period bounds exist. While billing has not
+  returned a real free SuperGrok period reading, chrome shows
+  `free SuperGrok period · ...%` (not a silent `0%` lie). When free SuperGrok
+  period is full and SuperGrok dollar credits remain, the compact meter switches
+  to `SuperGrok extras · $N`. Background poll keeps refreshing until the free
+  SuperGrok period meter is known, near exhaust, or when OpenRouter / console
+  prepaid is active.
 - **Console key live:** `console · $N` (team prepaid) or the honest gap strings
   (`no management key`, `no management team id`, `loading team prepaid...`,
   `team prepaid unavailable`). Never free SuperGrok period % as the live spend.
 
 Gateway/chat sessions hide the coding-credits meter. Click that meter to open
 this same `/limits` popup. The prompt footer is a one-line summary for SuperGrok
-warnings and/or **team settlement** context when the consumer billing surface is
-on (personal SuperGrok principal; not team AuthMeta enterprise hide, not API-key
-primary alone):
+warnings and/or **secondary team wallet** context when the consumer billing
+surface is on (personal SuperGrok principal; not team AuthMeta enterprise hide,
+not API-key primary alone):
 
 - **Console live:** `Console key · team prepaid: $N` (or honest gap strings);
   optional `team Grok Build class: $N` when postpaid OAuth class is in cache.
   Under console live, team prepaid is the live console pool.
-- **SuperGrok live + team prepaid and/or Grok Build class known:** free SuperGrok
-  period remaining / SuperGrok dollar credits when those warn, plus a labeled
-  settlement line such as
-  `Team settlement: prepaid $N · Grok Build class $M`. When SuperGrok alone is
-  quiet mid free SuperGrok period, the footer may be only
-  `Team settlement: prepaid $N · Grok Build class $M`. Settlement chips never
-  re-label live sampling as console and never replace free SuperGrok period
-  intent compact chrome while free SuperGrok period has room.
-- **Management cache cold** (key present, cents not yet known): SuperGrok live
-  footer shows `Team settlement: loading team prepaid...` instead of silently
-  omitting the line. Missing management key still keeps SuperGrok-only footers
-  SuperGrok-focused (team honesty stays on `/limits` Balance).
+- **SuperGrok live while free SuperGrok period has room:** footer shows only
+  SuperGrok free-period / SuperGrok dollar credits warnings when those fire.
+  Team prepaid remaining and Grok Build class stay off the prompt footer so they
+  do not dominate next to model name (full team wallets stay on `/limits`).
+  Compact status still names free SuperGrok period.
+- **SuperGrok live after free SuperGrok period is full:** free SuperGrok period
+  remaining / SuperGrok dollar credits when those warn, plus optional secondary
+  team line such as
+  `not the active spend path: team prepaid remaining $N · Grok Build class $M`
+  (or cold management `not the active spend path: loading team prepaid...`).
+  That secondary line never means "you are paying team prepaid now" and never
+  re-labels live sampling as console. Missing management key still keeps
+  SuperGrok-only footers SuperGrok-focused (team honesty stays on `/limits`
+  Balance).
 
 Billing refresh (session start, turn end, `/usage`, force-refresh on `/limits`)
 fills SuperGrok cache and, when configured, Management team prepaid **and**

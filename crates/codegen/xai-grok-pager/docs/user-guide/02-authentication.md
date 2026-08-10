@@ -144,13 +144,15 @@ Meters that stay distinct even when dual SuperGrok share one free-period pool:
 **Burn order (token economy):** free SuperGrok period first while used percent is
 below 100 → then SuperGrok dollar credits (after-burner when free period is full)
 → then console API key. Status compact meter and `/limits` **Active:** line use
-the same rule as **intent chrome** (for example compact `intent · 15%` while free
-SuperGrok period has room). Team prepaid remaining and team Grok Build class
-dollars can still climb under SuperGrok session without free SuperGrok period
-moving; the prompt footer labels those as **Team settlement:** secondary chips,
-not as a replacement for free SuperGrok period intent. That is not "on SuperGrok
-dollar credits" and not a reason to paint `console · $N` while free SuperGrok
-period has room.
+the same spend-order rule (for example compact `free SuperGrok period · 15%`
+while free SuperGrok period has room). Team prepaid remaining and team Grok Build
+class dollars can still climb under SuperGrok session without free SuperGrok
+period moving; while free SuperGrok period has room, the prompt footer stays
+quiet on those team wallets (no long "not the active spend path" team line next
+to model name). After free SuperGrok period is full, secondary team meters may
+appear under **not the active spend path:** so they are not read as SuperGrok
+dollar credits. That is never a reason to paint `console · $N` while free
+SuperGrok period has room.
 
 **If status shows `console · $N` while free SuperGrok period still has room**
 (for example `limits --json` shows SuperGrok live and included used under 100%):
@@ -334,23 +336,27 @@ fills:
 - Footer when **console** is live: `Console key · team prepaid: $N` (optional
   `team Grok Build class: $N` when known). Under console live, team prepaid is
   the live console pool.
-- Footer when **SuperGrok** is live and team prepaid and/or Grok Build class is
-  known: free SuperGrok period remaining / SuperGrok dollar credits when those
-  warn, **plus** labeled settlement such as
-  `Team settlement: prepaid $N · Grok Build class $M` (or a standalone Team
-  settlement chip when SuperGrok alone would be quiet). Team settlement never
-  re-labels live sampling as console and never replaces compact
-  `intent · N%` while free SuperGrok period has room.
+- Footer when **SuperGrok** is live **and free SuperGrok period has room:** only
+  SuperGrok free-period / SuperGrok dollar credits warnings when those fire.
+  Team prepaid remaining and Grok Build class stay off the prompt footer (they
+  live on `/limits`) so they do not dominate next to model name.
+- Footer when **SuperGrok** is live **after free SuperGrok period is full** and
+  team prepaid and/or Grok Build class is known: SuperGrok free-period /
+  SuperGrok dollar credits when those warn, **plus** a secondary team line such
+  as `not the active spend path: team prepaid remaining $N · Grok Build class
+  $M`. That line never re-labels live sampling as console and never means "you
+  are paying team prepaid now."
 - Status compact meter (upper-right): free SuperGrok period paints as
-  `intent · N%` (or SuperGrok extras `$` after free SuperGrok period is full).
-  Team prepaid dollars do not paint there while free SuperGrok period drives.
+  `free SuperGrok period · N%` (or SuperGrok extras `$` after free SuperGrok
+  period is full). Team prepaid dollars do not paint there while free SuperGrok
+  period drives.
 - `/limits` / `grok limits`: `Team prepaid remaining: $N` under **Console API**
   even when `console.isLive` is false (SuperGrok serving). Console team
   **prepaid ledger** is never labeled SuperGrok dollar credits; it may differ
   from dashboard Credits remaining when the UI includes more than prepaid.
 - `grok limits --json`: `console.teamPrepaidUsd` (or `console.teamPrepaidGap`);
   `activeDriver` stays free SuperGrok period / SuperGrok extras / console key
-  (intent only, not team settlement).
+  (spend-order driver only, not secondary team prepaid dollars).
 
 Honest gap copy is **distinct** by what is missing (no invented balance):
 
@@ -358,9 +364,9 @@ Honest gap copy is **distinct** by what is missing (no invented balance):
 |-------|----------------------------------|
 | No management key | **no management key** (always on `/limits` Balance; SuperGrok-only footer stays SuperGrok-focused) |
 | Key set; team id still unknown after fetch | **no management team id** |
-| Key set; fetch in flight / cold | **loading team prepaid...** (SuperGrok live footer: `Team settlement: loading team prepaid...`) |
-| Key + team known; fetch done but no balance | **team prepaid unavailable** (SuperGrok live footer under Team settlement) |
-| Balance known | SuperGrok live: **Team settlement: prepaid $N**; console live: **team prepaid: $N**; `/limits`: **Team prepaid remaining: $N** |
+| Key set; fetch in flight / cold | **loading team prepaid...** on `/limits`; SuperGrok live footer only after free SuperGrok period is full (`not the active spend path: loading team prepaid...`) |
+| Key + team known; fetch done but no balance | **team prepaid unavailable** (SuperGrok live footer under not the active spend path only after free SuperGrok period is full) |
+| Balance known | SuperGrok live after free SuperGrok period full: **not the active spend path: team prepaid remaining $N**; while free SuperGrok period has room: no team $ on footer; console live: **team prepaid: $N**; `/limits`: **Team prepaid remaining: $N** |
 
 `grok limits` also prints a short **Notes** hint when the management key or
 team id is missing (how to configure). SuperGrok $ extras stay SuperGrok-only.
@@ -449,8 +455,8 @@ SuperGrok dollar credits ≠ console team prepaid / console API credits.
    Writes `samples.jsonl`, `fields.jsonl`, and `summary.json` under
    `.agents/reports/limits-multipoll-<utc>/` (override with `--out-dir` or
    `LIMITS_MULTIPOLL_OUT_DIR`). Capture once before a dogfood window and once
-   after so you can compare free SuperGrok period used % and team settlement
-   dollars.
+   after so you can compare free SuperGrok period used % and secondary team
+   prepaid / Grok Build class dollars.
 4. **How to read P1 vs P2:**
    - **P1 path:** process exit and `pathOk` / `pathStatus` in the multipoll
      summary. Path **fail** means console was live primary while free SuperGrok

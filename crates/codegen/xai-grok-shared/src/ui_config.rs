@@ -140,6 +140,11 @@ pub struct UiConfig {
     /// `None` = on (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_thinking_blocks: Option<bool>,
+    /// Keep thinking blocks fully expanded (no collapsed one-liner by default).
+    /// When on, the footer also hides the Ctrl+E expand-thinking affordance.
+    /// `None` = off (client default). Written by the pager's settings modal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_expand_thinking: Option<bool>,
     /// Fold runs of consecutive non-destructive tool calls (reads, searches,
     /// lists) into one transcript row. `None` = on (client default). Written
     /// by the pager's settings modal.
@@ -349,6 +354,7 @@ impl Default for UiConfig {
             keep_text_selection: None,
             selection_highlight_duration_ms: None,
             show_thinking_blocks: None,
+            always_expand_thinking: None,
             group_tool_verbs: None,
             collapsed_edit_blocks: None,
             prompt_suggestions: None,

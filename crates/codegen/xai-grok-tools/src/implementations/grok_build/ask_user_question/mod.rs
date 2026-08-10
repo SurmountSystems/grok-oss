@@ -1,10 +1,10 @@
 //! `AskUserQuestion` tool — new architecture (`Tool` trait).
 //!
 //! Interactive Q&A tool that presents the user with structured questions and
-//! option sets. In plan mode it serves as the **interview mechanism** — the
-//! agent clarifies requirements, disambiguates approaches, and gets user input
-//! on design decisions before finalizing the plan. Outside plan mode it is a
-//! general-purpose tool for gathering user preferences during implementation.
+//! option sets. General-purpose outside planning. **Default ban while planning:**
+//! put open questions in the plan file or freeform chat; do not use this
+//! multi-choice questionnaire for plan clarifications unless the user explicitly
+//! opts into legacy modal plan questions (for example `/plan --legacy`).
 //!
 //! ## How It Works
 //!
@@ -18,14 +18,13 @@
 //!    them back into the conversation as the tool result. This client-side
 //!    round-trip is handled by the orchestration layer, not by this tool.
 //!
-//! ## Plan-Mode Interview Actions
+//! ## Plan-mode client extras (legacy path only)
 //!
-//! When called during plan mode, the client can present two extra buttons:
-//! - **"Respond to agent"** — partial answers, agent reformulates questions
-//! - **"Finish plan interview"** — agent stops asking, proceeds with what it has
-//!
-//! These are client-side behaviors that produce different tool-result strings;
-//! the tool itself is identical in and out of plan mode.
+//! If the tool is still invoked during plan mode (legacy opt-in), the client may
+//! show extra actions such as freeform chat-about-this or skip-interview. Those
+//! are client-side behaviors; the tool itself is identical in and out of plan
+//! mode. Default product + plan-skill policy is not to call this tool for plan
+//! clarifications.
 
 pub mod format;
 pub mod types;
@@ -247,7 +246,8 @@ impl crate::types::tool_metadata::ToolMetadata for AskUserQuestionTool {
         r#"Ask the user one or more multiple-choice questions.
 
 - Every question automatically gets an "Other" choice where the user can type their own answer.
-- Put your recommended option first and append "(Recommended)" to its label."#
+- Put your recommended option first and append "(Recommended)" to its label.
+- Do not use this tool while planning for plan clarifications. Put open questions as plain bullets in the plan file or freeform chat. Only use this tool during plan mode if the user explicitly asked for legacy modal plan questions (for example /plan --legacy)."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -589,6 +589,14 @@ mod tests {
         assert!(desc.contains("Ask the user"));
         assert!(desc.contains("Other"));
         assert!(desc.contains("(Recommended)"));
+        assert!(
+            desc.contains("Do not use this tool while planning"),
+            "description must ban plan-mode questionnaires by default: {desc}"
+        );
+        assert!(
+            desc.contains("--legacy") || desc.contains("legacy"),
+            "description must name the legacy opt-in: {desc}"
+        );
     }
 
     #[test]

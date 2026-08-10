@@ -641,6 +641,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "max_thoughts_width",
             // SHELL-owned show_thinking_blocks (Appearance; live cache).
             "show_thinking_blocks",
+            // SHELL-owned always_expand_thinking (Appearance; live cache;
+            // default OFF — keep thinking fully expanded, hide Ctrl+E).
+            "always_expand_thinking",
             // PAGER-owned respect_manual_folds (Appearance,
             // persisted to pager.toml).
             "respect_manual_folds",

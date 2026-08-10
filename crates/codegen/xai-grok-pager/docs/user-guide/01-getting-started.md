@@ -116,7 +116,7 @@ The `@` operator opens a fuzzy file picker. By default it respects `.gitignore` 
 
 ### Permissions
 
-By default, Grok asks for permission before executing shell commands or editing files. You can approve individually or toggle always-approve mode:
+By default, Grok asks for permission before executing shell commands or editing files. You can approve individually or toggle always-approve mode (skips **tool permission** prompts only — not plan panel Approve; see [Plan mode](19-plan-mode.md#present-is-not-approval)):
 
 - Press `Ctrl+O` to toggle always-approve mode
 - Use the `--yolo` flag at launch: `grok --yolo`

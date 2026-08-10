@@ -163,6 +163,7 @@ impl AgentView {
             unexpected_replay_drops: 0,
             replayed_terminal_prompts: HashSet::new(),
             last_primary_user_turn_completed_in_replay: false,
+            last_primary_user_turn_failed_in_replay: false,
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
@@ -333,6 +334,8 @@ impl AgentView {
             question_scroll_region: None,
             plan_mode_active: false,
             plan_mode_pending: None,
+            plan_decision_resolved: false,
+            plan_feedback_in_flight: None,
             deferred_session_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
@@ -448,6 +451,7 @@ impl AgentView {
         self.session.loading_replay = true;
         self.replayed_terminal_prompts.clear();
         self.last_primary_user_turn_completed_in_replay = false;
+        self.last_primary_user_turn_failed_in_replay = false;
         self.unexpected_replay_drops = 0;
         self.pending_stop_hooks = None;
         self.clear_send_now_expectation();

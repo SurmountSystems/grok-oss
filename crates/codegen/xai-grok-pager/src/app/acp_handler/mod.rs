@@ -419,6 +419,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                         continue;
                                     }
                                     agent.last_primary_user_turn_completed_in_replay = false;
+                                    agent.last_primary_user_turn_failed_in_replay = false;
                                 }
                             }
                         }

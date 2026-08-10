@@ -624,42 +624,15 @@ impl AgentView {
                     //    running turn (buffers shell-side at the next safe point).
                     // 2) Empty composer + a visible follow-up in the queue →
                     //    soft-interject the top row (same as bare empty Enter).
-                    // 3) Idle + background subagents holding the queue → force
-                    //    drain (or enqueue + force drain for non-empty text).
-                    // 4) Idle / nothing to interject → toast (never silent no-op).
+                    // 3) Idle (including live background subagents) → toast;
+                    //    plain Enter already sends a normal main turn.
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();
                     if !text.is_empty() {
                         if !turn_running {
-                            // Parent idle with live background subagents: Enter
-                            // would only queue/hold. Interject chord force-starts
-                            // the turn with this text (no cancel — nothing runs).
-                            if self.holds_queue_for_background() {
-                                if self.paste_probe_in_flight > 0 {
-                                    self.deferred_send = Some(AgentDeferredSend::Interject);
-                                    self.show_toast("Attaching image — interject when ready");
-                                    return InputOutcome::Changed;
-                                }
-                                let images = self.prompt.drain_images();
-                                self.prompt.set_text("");
-                                self.clear_unsent_prompt_draft();
-                                let queue_id = self.session.next_queue_id;
-                                self.session.next_queue_id += 1;
-                                self.session.pending_prompts.push_front(
-                                    crate::app::agent::QueuedPrompt {
-                                        images,
-                                        ..crate::app::agent::QueuedPrompt::plain(
-                                            queue_id,
-                                            text,
-                                            crate::app::agent::QueueEntryKind::Prompt,
-                                        )
-                                    },
-                                );
-                                // Toast only after force-drain succeeds (or reports
-                                // a hard gate like plan approval) — see
-                                // `dispatch_force_drain_queue`.
-                                return InputOutcome::Action(Action::ForceDrainQueue);
-                            }
+                            // Primary idle: Interject is mid-turn only. Live
+                            // background subagents do not change that — Enter
+                            // sends a normal main turn.
                             self.show_toast(
                                 "Nothing running to interject into — press Enter to send",
                             );
@@ -686,13 +659,7 @@ impl AgentView {
                         self.show_toast("Nothing queued to interject");
                         return InputOutcome::Changed;
                     }
-                    // Idle + held for background subagents: force-drain the top
-                    // local row so the chord still works without a running turn.
-                    // Toast is chosen in `dispatch_force_drain_queue` after the
-                    // drain result (success vs plan-approval / other hard gate).
-                    if self.holds_queue_for_background() && self.has_held_user_queue() {
-                        return InputOutcome::Action(Action::ForceDrainQueue);
-                    }
+                    // Primary idle: no soft-interject target. Enter sends.
                     self.show_toast("Nothing running to interject into — press Enter to send");
                     return InputOutcome::Changed;
                 }

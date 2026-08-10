@@ -237,7 +237,11 @@ impl ScrollbackState {
             view_mode: ViewMode::AllTurns,
             last_width: 0,
             layout_cache: None,
-            thinking_display_mode: DisplayMode::Collapsed,
+            thinking_display_mode: if crate::appearance::cache::load_always_expand_thinking() {
+                DisplayMode::Expanded
+            } else {
+                DisplayMode::Collapsed
+            },
             tick: 0,
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
@@ -578,6 +582,15 @@ impl ScrollbackState {
                     .effective_expanded(crate::appearance::cache::load_collapsed_edit_blocks()),
                 edit,
             );
+        }
+
+        // Always-expand-thinking: open new thinking fully (live Truncated default
+        // would hide body until Ctrl+E). Sticky finish mode is Expanded too.
+        if matches!(entry.block, RenderBlock::Thinking(_))
+            && (self.thinking_display_mode == DisplayMode::Expanded
+                || crate::appearance::cache::load_always_expand_thinking())
+        {
+            entry.display_mode = DisplayMode::Expanded;
         }
 
         // Track if this entry is running
@@ -1437,7 +1450,13 @@ impl ScrollbackState {
         if self.entries.contains_key(&id) && !self.flashing.contains(&id) {
             self.flashing.push(id);
         }
-        let thinking_mode = self.thinking_display_mode;
+        // Prefer the always-expand setting over sticky Ctrl+E mode so new
+        // finishes stay open while the preference is on.
+        let thinking_mode = if crate::appearance::cache::load_always_expand_thinking() {
+            DisplayMode::Expanded
+        } else {
+            self.thinking_display_mode
+        };
         let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
         if let Some(entry) = self.get_by_id_mut(id) {
             entry.is_running = false;
@@ -3367,6 +3386,53 @@ mod tests {
             state.get_by_id(id).unwrap().display_mode,
             DisplayMode::Expanded
         );
+    }
+
+    /// Contract: `[ui].always_expand_thinking` keeps streaming + finished
+    /// thinking fully expanded without pressing Ctrl+E.
+    #[test]
+    fn always_expand_thinking_opens_streaming_and_keeps_finish_expanded() {
+        crate::appearance::cache::set_always_expand_thinking(true);
+        let mut state = ScrollbackState::new();
+        let id = state.push_block(RenderBlock::thinking_streaming());
+        state.set_last_running(true);
+        state.push_chunk_to_thinking(id, "deep thoughts");
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Expanded,
+            "streaming thinking must open fully when always_expand_thinking is on"
+        );
+
+        state.finish_running(id);
+
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Expanded,
+            "finished thinking must stay expanded when always_expand_thinking is on"
+        );
+        crate::appearance::cache::set_always_expand_thinking(false);
+    }
+
+    #[test]
+    fn apply_always_expand_thinking_opens_existing_collapsed() {
+        crate::appearance::cache::set_always_expand_thinking(false);
+        let mut state = ScrollbackState::new();
+        let id = state.push_block(RenderBlock::thinking("earlier thoughts"));
+        state.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
+
+        state.apply_always_expand_thinking(true);
+
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
+        // New streaming thought also opens fully via sticky Expanded.
+        let live = state.push_block(RenderBlock::thinking_streaming());
+        assert_eq!(
+            state.get_by_id(live).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
+        state.apply_always_expand_thinking(false);
     }
 
     /// Contract: Ctrl+E / `expand_all_thinking` must expand the *current*

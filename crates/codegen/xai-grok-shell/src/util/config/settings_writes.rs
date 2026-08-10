@@ -223,6 +223,11 @@ pub async fn set_show_thinking_blocks(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.show_thinking_blocks = Some(value)).await
 }
 
+/// Persist `[ui].always_expand_thinking` via `update_config`.
+pub async fn set_always_expand_thinking(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.always_expand_thinking = Some(value)).await
+}
+
 /// Persist `[ui].prompt_suggestions` via `update_config`.
 pub async fn set_prompt_suggestions(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.prompt_suggestions = Some(value)).await

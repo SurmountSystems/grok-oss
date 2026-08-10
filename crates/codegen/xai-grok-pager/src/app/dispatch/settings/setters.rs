@@ -448,6 +448,45 @@ pub(in crate::app::dispatch) fn set_show_thinking_blocks(
     }]
 }
 
+pub(super) fn set_always_expand_thinking_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_always_expand_thinking(new);
+    for agent in app.agents.values_mut() {
+        agent.scrollback.apply_always_expand_thinking(new);
+        for child in agent.subagent_views.values_mut() {
+            child.scrollback.apply_always_expand_thinking(new);
+        }
+    }
+}
+
+/// Keep thinking fully expanded and hide the Ctrl+E footer affordance.
+///
+/// SHELL-OWNED: cache mirror + `[ui].always_expand_thinking` via
+/// `Effect::PersistSetting`. Turning on expands existing thinking now and
+/// sets the sticky finish mode so new thoughts stay open.
+pub(in crate::app::dispatch) fn set_always_expand_thinking(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_always_expand_thinking();
+    if prev == new {
+        return vec![];
+    }
+    set_always_expand_thinking_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "always_expand_thinking",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Always expand thinking", new));
+    vec![Effect::PersistSetting {
+        key: "always_expand_thinking",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 pub(super) fn set_group_tool_verbs_inner(app: &mut AppView, new: bool) {
     crate::appearance::cache::set_group_tool_verbs(new);
     // Expansion ids describe the OLD grouping shape; drop them so stale ids

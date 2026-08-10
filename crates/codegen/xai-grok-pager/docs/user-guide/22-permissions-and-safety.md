@@ -64,7 +64,9 @@ Claude-compatible `defaultMode` in `.claude/settings.json` is also supported (se
 
 ### Always-approve
 
-Skips ordinary permission prompts so tools run without waiting for a click. `deny` rules, hooks, and some shell `ask` rules still apply. Admins can lock the mode off (below).
+Skips ordinary **tool permission** prompts so tools run without waiting for a click. `deny` rules, hooks, and some shell `ask` rules still apply. Admins can lock the mode off (below).
+
+**Always-approve is not plan approval.** When the agent presents a plan (`exit_plan_mode` soft-park / side panel), you still decide with the plan panel CTAs (Approve / Revise / Clarify / Quit). Permission mode never auto-clicks those CTAs. See [Plan mode](19-plan-mode.md#present-is-not-approval).
 
 | Mechanism | Example |
 | --------- | ------- |

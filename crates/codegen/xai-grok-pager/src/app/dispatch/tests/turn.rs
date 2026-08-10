@@ -1789,8 +1789,8 @@ fn successful_turn_with_live_subagents_keeps_cancel_resume_marker() {
             .subagent_sessions
             .insert("live-implementer".into(), info);
         assert!(
-            agent.holds_queue_for_background(),
-            "precondition: live child holds background queue"
+            agent.has_live_background_subagents(),
+            "precondition: live background child still running"
         );
         finalize_cancel_resume_after_successful_turn(
             agent,
@@ -1839,7 +1839,7 @@ fn successful_turn_without_live_subagents_clears_cancel_resume_marker() {
         agent.session.cwd = cwd.clone();
         agent.session.state = AgentState::Idle;
         agent.subagent_sessions.clear();
-        assert!(!agent.holds_queue_for_background());
+        assert!(!agent.has_live_background_subagents());
         finalize_cancel_resume_after_successful_turn(
             agent,
             Some("finished work"),
@@ -2030,8 +2030,8 @@ fn session_loaded_cancel_resume_starts_turn_despite_zombie_subagents() {
         info.finished = false;
         agent.subagent_sessions.insert("zombie-child".into(), info);
         assert!(
-            agent.holds_queue_for_background(),
-            "precondition: unfinished subagent holds the normal queue drain"
+            agent.has_live_background_subagents(),
+            "precondition: unfinished subagent still live after replay seed"
         );
     }
     let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
@@ -2081,8 +2081,8 @@ fn session_loaded_cancel_resume_starts_turn_despite_zombie_subagents() {
         "turn must be running after cancel-resume with zombie children"
     );
     assert!(
-        !agent.holds_queue_for_background(),
-        "cold load must finalize zombie subagents so background hold is cleared"
+        !agent.has_live_background_subagents(),
+        "cold load must finalize zombie subagents so they are no longer live"
     );
     assert!(
         agent
@@ -2435,6 +2435,387 @@ fn session_loaded_user_cancelled_terminal_does_not_history_resume() {
     let _ =
         xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
     xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+}
+
+/// Named contract (dogfood 2026-08-09): last history is error-class turn failure
+/// (`TurnFailed` / durable `stop_reason: error` — Internal error, 403 bad
+/// credentials, failed sampling). No marker. On load / rebuild relaunch must
+/// **auto-resume** the last user prompt (SendPrompt), not sit idle with only
+/// the yellow error lines. Distinct from clean `TurnCompleted` (no re-fire)
+/// and from user cancel without a marker (no history resume).
+#[test]
+fn session_loaded_error_terminal_auto_resumes_without_marker() {
+    use crate::app::actions::TaskResult;
+    use crate::scrollback::block::RenderBlock;
+    use agent_client_protocol as acp;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "load-error-terminal-resume-sess";
+    let cwd = std::path::PathBuf::from("/tmp/load-error-terminal-resume-cwd");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    app.current_ui.resume_canceled_turn_on_restart = Some(true);
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    let last_user = "/implement --effort 2 all remaining residual after rebuild";
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::Idle;
+        agent.session.loading_replay = true;
+        agent.session.pending_prompts.clear();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(last_user));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("working…"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
+                error: "API error (status 403 Forbidden): unauthenticated:bad-credentials".into(),
+                elapsed: Some(std::time::Duration::from_secs(7200)),
+            }));
+        // Durable load shape: error stop_reason sets completed + failed flags
+        // (SessionEvent may also be present from the live push path).
+        agent.last_primary_user_turn_completed_in_replay = true;
+        agent.last_primary_user_turn_failed_in_replay = true;
+        assert!(
+            crate::app::dispatch::session::load::session_last_turn_ended_in_error(agent),
+            "precondition: error terminal is resume evidence"
+        );
+        assert!(
+            !crate::app::dispatch::session::load::session_looks_interrupted_mid_work(agent),
+            "precondition: error is not open mid-work (has terminal)"
+        );
+        assert!(
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .unwrap()
+                .is_none(),
+            "precondition: no marker on disk"
+        );
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new(sid),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    let agent = app.agents.get(&id).unwrap();
+    let toast = agent
+        .toast
+        .as_ref()
+        .map(|(msg, _)| msg.as_str())
+        .unwrap_or("");
+    assert!(
+        toast.contains("Continuing interrupted turn"),
+        "error-terminal load must toast continue; got {toast:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text == last_user
+        )),
+        "error-terminal load must SendPrompt last user text; effects={effects:?}"
+    );
+    assert!(
+        agent.session.state.is_turn_running(),
+        "error-terminal auto-resume must start a turn; state={:?}",
+        agent.session.state
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+}
+
+/// Named contract: durable-only error shape (no SessionEvent in scrollback).
+/// Load replay sets `last_primary_user_turn_failed_in_replay` from
+/// `stop_reason: error` without pushing TurnFailed into scrollback — same as
+/// real `session/load` for updates.jsonl turn_completed.
+#[test]
+fn session_loaded_durable_error_flag_auto_resumes_without_session_event() {
+    use crate::app::actions::TaskResult;
+    use crate::scrollback::block::RenderBlock;
+    use agent_client_protocol as acp;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "load-durable-error-flag-sess";
+    let cwd = std::path::PathBuf::from("/tmp/load-durable-error-flag-cwd");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    app.current_ui.resume_canceled_turn_on_restart = Some(true);
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    let last_user = "Also, one more ask, please... continue residual";
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::Idle;
+        agent.session.loading_replay = true;
+        agent.session.pending_prompts.clear();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(last_user));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "spawning implementer before credentials died",
+        ));
+        // Real load: durable turn_completed stop_reason=error only sets flags;
+        // no SessionEvent terminal block in scrollback.
+        agent
+            .replayed_terminal_prompts
+            .insert("17c185b3-err".into());
+        agent.last_primary_user_turn_completed_in_replay = true;
+        agent.last_primary_user_turn_failed_in_replay = true;
+        assert!(
+            crate::app::dispatch::session::load::session_last_turn_ended_in_error(agent),
+            "precondition: durable failed flag is error evidence"
+        );
+        assert!(
+            !crate::app::dispatch::session::load::session_looks_interrupted_mid_work(agent),
+            "precondition: completed+failed is not open mid-work"
+        );
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new(sid),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text == last_user
+        )),
+        "durable error flag must SendPrompt last user text; effects={effects:?}"
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+}
+
+/// Named contract: marker after error terminal must **not** be dropped as
+/// stale (stale gate is success-only). Rebuild relaunch with leftover eager
+/// marker + error stop_reason must SendPrompt.
+#[test]
+fn session_loaded_marker_after_error_terminal_still_resumes() {
+    use crate::app::actions::TaskResult;
+    use crate::scrollback::block::RenderBlock;
+    use agent_client_protocol as acp;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "load-marker-after-error-sess";
+    let cwd = std::path::PathBuf::from("/tmp/load-marker-after-error-cwd");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    app.current_ui.resume_canceled_turn_on_restart = Some(true);
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    let last_user = "finish multi-track after 403";
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::Idle;
+        agent.session.loading_replay = true;
+        agent.session.pending_prompts.clear();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(last_user));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("partial work"));
+        agent.last_primary_user_turn_completed_in_replay = true;
+        agent.last_primary_user_turn_failed_in_replay = true;
+    }
+    let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+        last_user,
+        Some("pid-error-keep"),
+        "2026-08-09T20:40:55Z",
+    )
+    .expect("marker");
+    xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+        &cwd_str, sid, &marker,
+    )
+    .expect("write marker after error");
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new(sid),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text == last_user
+        )),
+        "marker after error must auto SendPrompt (not stale-dropped); effects={effects:?}"
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+}
+
+/// Dogfood 2026-08-09 evening (bitmagi / iso / surmount-server): live 403
+/// leaves the session **idle in the same process** with yellow TurnFailed +
+/// `canceled_turn_resume.json` still present. Operator "reopen" hits
+/// `focus_if_session_already_open` (no cold `SessionLoaded`). Must still
+/// SendPrompt the last user text. Shape matches durable disk: UUID prompt_id,
+/// agent_result 403 bad-credentials, marker reason user_cancel.
+#[test]
+fn already_open_error_idle_reopen_auto_resumes_without_session_loaded() {
+    use crate::scrollback::block::RenderBlock;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    // Real dogfood session id shape (bitmagi).
+    let sid = "019fbf4b-69bc-7ed2-bd01-66d51b63b664";
+    let cwd = std::path::PathBuf::from("/tmp/already-open-error-idle-cwd");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    app.current_ui.resume_canceled_turn_on_restart = Some(true);
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    let last_user = "/implement --effort 2 residual live-success next depth after iroh peer-path";
+    let prompt_id = "775d081f-368e-4394-99c8-fa570172e80c";
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::Idle;
+        agent.session.loading_replay = false;
+        agent.session.pending_prompts.clear();
+        // Live path after 403: flags are for load replay only; scrollback has
+        // TurnFailed (finalize_turn_from_terminal) and the eager marker file.
+        agent.last_primary_user_turn_completed_in_replay = false;
+        agent.last_primary_user_turn_failed_in_replay = false;
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(last_user));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "working before credentials died",
+        ));
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
+                error: "API error (status 403 Forbidden): unauthenticated:bad-credentials: The OAuth2 access token could not be validated.".into(),
+                elapsed: Some(std::time::Duration::from_secs(1)),
+            }));
+        assert!(
+            crate::app::dispatch::session::load::session_last_turn_ended_in_error(agent),
+            "live TurnFailed must count as error-terminal resume evidence"
+        );
+    }
+    let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+        last_user,
+        Some(prompt_id),
+        "2026-08-09T20:15:53.973660567+00:00",
+    )
+    .expect("marker");
+    xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+        &cwd_str, sid, &marker,
+    )
+    .expect("write dogfood marker");
+
+    // Picker/reopen path: session already in agents → no SessionLoaded.
+    let effects =
+        crate::app::dispatch::session::load::try_auto_resume_error_idle_on_reopen(&mut app, id);
+
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text == last_user
+        )),
+        "already-open error-idle reopen must SendPrompt (not focus-only idle); effects={effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    let toast = agent
+        .toast
+        .as_ref()
+        .map(|(msg, _)| msg.as_str())
+        .unwrap_or("");
+    assert!(
+        toast.contains("Continuing interrupted turn"),
+        "already-open error reopen must toast continue; got {toast:?}"
+    );
+    assert!(
+        agent.session.state.is_turn_running(),
+        "already-open error auto-resume must start a turn; state={:?}",
+        agent.session.state
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+}
+
+/// Clean successful idle reopen must **not** invent auto-resume (focus path).
+#[test]
+fn already_open_clean_idle_reopen_does_not_auto_resume() {
+    use crate::scrollback::block::RenderBlock;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "already-open-clean-idle-sess";
+    let cwd = std::path::PathBuf::from("/tmp/already-open-clean-idle-cwd");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    app.current_ui.resume_canceled_turn_on_restart = Some(true);
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::Idle;
+        agent.session.loading_replay = false;
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("done work"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+                elapsed: Some(std::time::Duration::from_secs(10)),
+            }));
+    }
+
+    let effects =
+        crate::app::dispatch::session::load::try_auto_resume_error_idle_on_reopen(&mut app, id);
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendPrompt { .. })),
+        "clean idle reopen must not SendPrompt; effects={effects:?}"
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
 }
 
 /// Named contract (iso dogfood shape): no marker, **no** unfinished subagent,

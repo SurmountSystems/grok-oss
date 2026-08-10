@@ -299,16 +299,13 @@ To view the available agent types and personas, open the command palette with `C
 
 Subagents appear at the top of the tasks pane in their own collapsible "Subagents" group.
 
-### Queue hold while subagents run
+### Main chat while subagents run
 
-Queued follow-ups **hold** not only when the parent is blocked waiting on a subagent, but also whenever **any background subagent is still live** — even if the parent already looks idle. That keeps typed follow-ups from starting a conflicting main turn while children work.
+Background subagents alone do **not** block or queue-only the main composer.
 
-- **Before you type:** the footer shows `Enter: queue` (not `Enter: send`) while a background subagent hold is active, so you can see that plain Enter will queue rather than start a turn.
-- **Status cue with an empty queue:** e.g. `N subagent(s) still running · Enter queues` (advertises the hold before the first follow-up is queued).
-- **Status cue after items are held:** e.g. `N subagent(s) still running · M queued — Interject to force`.
-- **Interject** (chord or queue row `[Interject]`) force-starts the next parent turn despite live children.
-- When the last holding subagent finishes, the queue drains on its own (no extra keystroke).
-- **Monitors** and long-running background commands alone do **not** hold the queue (they can run indefinitely).
+- **Primary idle + live background subagents:** footer shows `Enter: send`. Plain Enter starts a **normal main turn**; children keep running in parallel. Status may show `N subagent(s) still running` with `[pause]` / `[stop]`, without `Enter queues` or force-drain language.
+- **Primary busy** (thinking, tools, streaming, or a blocked wait): plain Enter **queues** a follow-up; soft **Interject** steers the current turn. Cancel is Esc / stop only.
+- **Monitors** and long-running background commands alone also never force queue-only.
 
 For **annotations that must not become a turn at all**, use [`/note`](04-slash-commands.md#note) instead of typing into the composer or queue. Session notes are operator-local and never drain as prompts.
 
