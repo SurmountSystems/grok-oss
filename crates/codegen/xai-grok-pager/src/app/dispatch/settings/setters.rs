@@ -448,6 +448,45 @@ pub(in crate::app::dispatch) fn set_show_thinking_blocks(
     }]
 }
 
+pub(super) fn set_always_expand_thinking_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_always_expand_thinking(new);
+    for agent in app.agents.values_mut() {
+        agent.scrollback.apply_always_expand_thinking(new);
+        for child in agent.subagent_views.values_mut() {
+            child.scrollback.apply_always_expand_thinking(new);
+        }
+    }
+}
+
+/// Keep thinking fully expanded and hide the Ctrl+E footer affordance.
+///
+/// SHELL-OWNED: cache mirror + `[ui].always_expand_thinking` via
+/// `Effect::PersistSetting`. Turning on expands existing thinking now and
+/// sets the sticky finish mode so new thoughts stay open.
+pub(in crate::app::dispatch) fn set_always_expand_thinking(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_always_expand_thinking();
+    if prev == new {
+        return vec![];
+    }
+    set_always_expand_thinking_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "always_expand_thinking",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Always expand thinking", new));
+    vec![Effect::PersistSetting {
+        key: "always_expand_thinking",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 pub(super) fn set_group_tool_verbs_inner(app: &mut AppView, new: bool) {
     crate::appearance::cache::set_group_tool_verbs(new);
     // Expansion ids describe the OLD grouping shape; drop them so stale ids
@@ -635,6 +674,130 @@ pub(in crate::app::dispatch) fn set_economic_mode(app: &mut AppView, new: bool) 
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]
+}
+
+pub(super) fn set_resume_canceled_turn_on_restart_inner(app: &mut AppView, new: bool) {
+    app.current_ui.resume_canceled_turn_on_restart = Some(new);
+}
+
+/// Continue an interrupted turn once when reopening a session (default on).
+///
+/// Operator-facing name: **continue interrupted turn**. Not `/resume` session pick.
+pub(in crate::app::dispatch) fn set_resume_canceled_turn_on_restart(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.resume_canceled_turn_on_restart_enabled();
+    if prev == new {
+        return vec![];
+    }
+    set_resume_canceled_turn_on_restart_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast(
+        "Continue interrupted turn on restart",
+        new,
+    ));
+    vec![Effect::PersistSetting {
+        key: "resume_canceled_turn_on_restart",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Persist a Token Economy boolean; updates the process live cache immediately
+/// (optimistic) and emits [`Effect::PersistSetting`] for disk.
+pub(in crate::app::dispatch) fn set_token_economy_bool(
+    app: &mut AppView,
+    field: &'static str,
+    new: bool,
+) -> Vec<Effect> {
+    let key = token_economy_setting_key(field);
+    let prev = token_economy_bool_current(field);
+    if prev == new {
+        return vec![];
+    }
+    xai_grok_shell::token_economy::set_token_economy_live_bool(field, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast(&token_economy_label(field), new));
+    vec![Effect::PersistSetting {
+        key,
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Persist a Token Economy integer effort knob; updates the process live cache
+/// immediately (optimistic) and emits [`Effect::PersistSetting`] for disk.
+pub(in crate::app::dispatch) fn set_token_economy_int(
+    app: &mut AppView,
+    field: &'static str,
+    new: i64,
+) -> Vec<Effect> {
+    let key = token_economy_setting_key(field);
+    let prev = token_economy_int_current(field);
+    if prev == new {
+        return vec![];
+    }
+    xai_grok_shell::token_economy::set_token_economy_live_int(field, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("\u{2713} {}: {new}", token_economy_label(field)));
+    vec![Effect::PersistSetting {
+        key,
+        value: crate::settings::SettingValue::Int(new),
+        rollback_value: crate::settings::SettingValue::Int(prev),
+    }]
+}
+
+fn token_economy_setting_key(field: &'static str) -> &'static str {
+    match field {
+        "cap_implement_effort_when_economic" => "token_economy.cap_implement_effort_when_economic",
+        "max_implement_effort" => "token_economy.max_implement_effort",
+        "min_implement_effort" => "token_economy.min_implement_effort",
+        "desired_implement_effort" => "token_economy.desired_implement_effort",
+        "lock_implement_effort" => "token_economy.lock_implement_effort",
+        "show_period_pacing" => "token_economy.show_period_pacing",
+        "local_spend_ledger" => "token_economy.local_spend_ledger",
+        "reconcile_management_usage" => "token_economy.reconcile_management_usage",
+        other => other,
+    }
+}
+
+fn token_economy_label(field: &str) -> String {
+    match field {
+        "cap_implement_effort_when_economic" => {
+            "Cap implement effort when economic mode is on".into()
+        }
+        "max_implement_effort" => "Maximum implement-loop effort".into(),
+        "min_implement_effort" => "Minimum implement-loop effort".into(),
+        "desired_implement_effort" => "Desired implement-loop effort".into(),
+        "lock_implement_effort" => "Lock implement-loop effort".into(),
+        "show_period_pacing" => "Show free SuperGrok period pacing".into(),
+        "local_spend_ledger" => "Local spend ledger".into(),
+        "reconcile_management_usage" => "Reconcile Management usage".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn token_economy_bool_current(field: &str) -> bool {
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    match field {
+        "cap_implement_effort_when_economic" => cfg.cap_implement_effort_when_economic,
+        "show_period_pacing" => cfg.show_period_pacing,
+        "local_spend_ledger" => cfg.local_spend_ledger,
+        "reconcile_management_usage" => cfg.reconcile_management_usage,
+        _ => true,
+    }
+}
+
+fn token_economy_int_current(field: &str) -> i64 {
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    match field {
+        "max_implement_effort" => i64::from(cfg.max_implement_effort),
+        "min_implement_effort" => i64::from(cfg.min_implement_effort),
+        "desired_implement_effort" => i64::from(cfg.desired_implement_effort),
+        "lock_implement_effort" => i64::from(cfg.lock_implement_effort.unwrap_or(0)),
+        _ => 0,
+    }
 }
 
 pub(super) fn set_keep_text_selection_inner(kind: crate::appearance::TextSelection) {

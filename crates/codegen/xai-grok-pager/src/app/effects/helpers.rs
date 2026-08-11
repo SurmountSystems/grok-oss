@@ -11,11 +11,17 @@ use xai_grok_shell::sampling::error::{
 };
 use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::unified_list::ListScope;
-/// Typed progress message for session restore.
+/// Typed progress message for long-running effects (session restore, `/rebuild`).
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
 pub(crate) struct RestoreProgressMsg {
     pub agent_id: AgentId,
     pub message: String,
+    /// When true, update the agent toast / rebuild progress bar (`/rebuild`).
+    /// When false, push a system scrollback block (session restore).
+    pub toast: bool,
+    /// Overall rebuild fraction `0.0..=1.0` when this is a rebuild progress
+    /// sample. `None` for session-restore lines.
+    pub fraction: Option<f32>,
 }
 pub(super) fn log_prompt_result(
     session_id: &acp::SessionId,
@@ -1100,6 +1106,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "always_expand_thinking" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("always_expand_thinking", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_always_expand_thinking(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "group_tool_verbs" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("group_tool_verbs", "Bool", &value));
@@ -1137,6 +1151,117 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("economic_mode", "Bool", &value));
             };
             xai_grok_shell::util::config::set_economic_mode(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "resume_canceled_turn_on_restart" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "resume_canceled_turn_on_restart",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_resume_canceled_turn_on_restart(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.cap_implement_effort_when_economic" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.cap_implement_effort_when_economic",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool(
+                "cap_implement_effort_when_economic",
+                b,
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+        "token_economy.show_period_pacing" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.show_period_pacing",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("show_period_pacing", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.local_spend_ledger" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.local_spend_ledger",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("local_spend_ledger", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.reconcile_management_usage" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.reconcile_management_usage",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("reconcile_management_usage", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.max_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.max_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("max_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.min_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.min_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("min_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.desired_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.desired_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("desired_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.lock_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.lock_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("lock_implement_effort", i)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1509,26 +1634,35 @@ pub(super) fn persist_hint(
 pub(super) fn credit_balance_from_config(
     c: xai_grok_shell::extensions::billing::BillingConfig,
 ) -> crate::views::credit_bar::CreditBalance {
+    // Honest absence (shell SSOT): no percent and no usable limit → unknown,
+    // not a silent 0% for status chrome. Read while `c` is still fully borrowed.
+    let (included_opt, _) =
+        xai_grok_shell::extensions::billing::included_usage_and_period_end(&c);
+    let included_usage_known = included_opt.is_some();
+    let usage_pct = included_opt
+        .map(|pct| pct.clamp(0.0, 100.0))
+        .unwrap_or(0.0);
+    // Capture productUsage Build % before other fields consume `c`.
+    let grok_build_usage_pct =
+        xai_grok_shell::extensions::billing::grok_build_usage_percent(&c);
     let limit = c.monthly_limit.map(|v| v.val).unwrap_or(0);
     let used = c.used.map(|v| v.val).unwrap_or(0);
     let has_credit_pct = c.credit_usage_percent.is_some();
-    let usage_pct = match c.credit_usage_percent {
-        Some(pct) => pct.clamp(0.0, 100.0),
-        None if limit > 0 => (used as f64 / limit as f64 * 100.0).min(100.0),
-        None => 0.0,
-    };
-    let period_end_display = c
+    let period_end_raw = c
         .current_period
         .as_ref()
         .and_then(|p| p.end.clone())
-        .or(c.billing_period_end)
-        .and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local).format("%B %-d, %H:%M").to_string()
-                })
-        });
+        .or(c.billing_period_end);
+    let period_end_at = period_end_raw.as_ref().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    });
+    let period_end_display = period_end_at.map(|dt| {
+        dt.with_timezone(&chrono::Local)
+            .format("%B %-d, %H:%M")
+            .to_string()
+    });
     let on_demand_val = c.on_demand_cap.map(|v| v.val).unwrap_or(0);
     let pay_as_you_go = on_demand_val > 0;
     let on_demand_cap_cents = if on_demand_val > 0 { Some(on_demand_val) } else { None };
@@ -1536,7 +1670,9 @@ pub(super) fn credit_balance_from_config(
         .on_demand_used
         .map(|v| v.val)
         .unwrap_or_else(|| (used - limit).max(0));
-    let effective_usage_pct = if on_demand_val > 0 {
+    let effective_usage_pct = if !included_usage_known {
+        0.0
+    } else if on_demand_val > 0 {
         if usage_pct >= 100.0 {
             (on_demand_used_cents as f64 / on_demand_val as f64 * 100.0).min(100.0)
         } else if has_credit_pct {
@@ -1557,12 +1693,15 @@ pub(super) fn credit_balance_from_config(
         usage_pct,
         effective_usage_pct,
         period_end_display,
+        period_end_at,
         pay_as_you_go,
         on_demand_cap_cents,
         on_demand_used_cents: Some(on_demand_used_cents),
         prepaid_balance_cents: c.prepaid_balance.map(|v| v.val),
         period_type,
         is_unified_billing_user: c.is_unified_billing_user,
+        grok_build_usage_pct,
+        included_usage_known,
     }
 }
 /// Whether the balance carries a non-zero prepaid credit balance (signed cents).
@@ -1587,10 +1726,52 @@ pub(super) async fn fetch_openrouter_credit_balance(
 /// Fetch console team prepaid balance (Management API) when key + team_id are
 /// configured. Returns absolute remaining cents; `None` keeps prior UI cache
 /// and leaves process-cache / honest absence paths alone.
+///
+/// **Process cache policy:** background / silent `FetchBilling` must **not**
+/// call `clear_console_team_billing_meter_caches`. Honor ≤Ns process TTL
+/// ([`crate::limits_cmd::ManagementMeterCachePolicy::HonorProcessTtl`]).
+/// Force-refresh clear is owned by explicit `grok limits` collect and TUI
+/// `/limits` open ([`crate::limits_cmd::management_meter_cache_policy_for_explicit_limits_open`]).
 pub(super) async fn fetch_console_team_prepaid_cents() -> Option<i64> {
     xai_grok_shell::auth::fetch_console_team_prepaid_balance_default()
         .await
         .map(|m| m.balance_cents)
+}
+
+/// Live-call Management team postpaid invoice preview into process cache.
+///
+/// No return value: `/limits` rebuilds from
+/// [`xai_grok_shell::auth::cached_console_team_postpaid_default`]. Process TTL
+/// is honored unless explicit limits open/collect cleared caches first. No-op
+/// when management key is absent (pure gate
+/// [`crate::limits_cmd::should_live_fetch_console_team_postpaid_with_billing`]).
+pub(super) async fn fetch_console_team_postpaid_into_process_cache() {
+    if !crate::limits_cmd::should_live_fetch_console_team_postpaid_with_billing(
+        xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
+    ) {
+        return;
+    }
+    let _ = xai_grok_shell::auth::fetch_console_team_postpaid_preview_default().await;
+}
+
+/// Live-call Management team usage series (POST analytics) into process cache.
+///
+/// No return value: `/limits` rebuilds from
+/// [`xai_grok_shell::auth::cached_console_team_usage_series_default`]. Process
+/// TTL is honored unless explicit limits open/collect cleared caches first.
+/// No-op when management key is absent (pure gate
+/// [`crate::limits_cmd::should_live_fetch_console_team_usage_series_with_billing`]).
+/// Same practical path as prepaid/postpaid on background `FetchBilling`.
+pub(super) async fn fetch_console_team_usage_series_into_process_cache() {
+    if !crate::limits_cmd::should_live_fetch_console_team_usage_series_with_billing(
+        xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
+    ) {
+        return;
+    }
+    let _ = xai_grok_shell::auth::fetch_console_team_usage_series_default(
+        xai_grok_shell::auth::USAGE_SERIES_DEFAULT_DAY_WINDOW,
+    )
+    .await;
 }
 /// Fetch the user's auto top-up rule via the `x.ai/auto-topup-rule` extension.
 /// A transport failure yields [`AutoTopupFetch::Unchanged`] so the caller keeps

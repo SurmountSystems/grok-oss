@@ -7,7 +7,7 @@
 //!
 //! **Retried** until success (default budget: [`DEFAULT_MAX_RETRIES`] =
 //! [`u32::MAX`] — effectively unlimited; set `GROK_MAX_RETRIES` to cap):
-//! - 500, 502, 503, 504, 520 (server errors)
+//! - 500, 502, 503, 504 and Cloudflare edge 52x (520–527, 530) outages
 //! - Connection errors (timeout, refused, reset)
 //! - `EventStreamError` / `StreamError` (mid-stream failures)
 //! - `EmptyResponse` (model returned no content/tool calls)
@@ -33,7 +33,9 @@
 
 use std::time::Duration;
 
-use xai_grok_sampling_types::SamplingError;
+use xai_grok_sampling_types::{
+    SamplingError, is_edge_outage_status, outage_exhausted_user_message,
+};
 
 /// Legacy name: rate-limit retries used to stop early. With unlimited
 /// defaults this matches [`DEFAULT_MAX_RETRIES`] so 429s keep retrying.
@@ -326,23 +328,28 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
         SamplingError::Api {
             status, message, ..
         } => {
-            let status_hint = match status.as_u16() {
+            let code = status.as_u16();
+            // Exhausted (or multi-try) edge outages: plain English, not raw
+            // "API error (status 521 <unknown status code>)" / Internal JSON.
+            if is_edge_outage_status(code) || matches!(code, 502..=504) {
+                if let Some(count) = retry_count {
+                    return outage_exhausted_user_message(*status, count);
+                }
+            }
+            let status_hint = match code {
                 400 => " (bad request - check your input)",
                 401 | 403 => " (authentication issue - check your API key)",
                 404 => " (endpoint not found - check model configuration)",
                 413 => " (request too large - try /compact or start new session)",
                 429 => " (rate limited - please wait and retry)",
                 500 => " (server internal error)",
-                #[allow(clippy::manual_range_patterns)]
-                502 | 503 | 504 => " (server unavailable - please retry)",
+                502..=504 => " (server unavailable - please retry)",
+                c if is_edge_outage_status(c) => " (xAI connection interrupted - please retry)",
                 _ => "",
             };
             format!(
                 "{}API error (HTTP {}{}): {}",
-                retry_prefix,
-                status.as_u16(),
-                status_hint,
-                message
+                retry_prefix, code, status_hint, message
             )
         }
         SamplingError::EventStreamError(msg) => {
@@ -458,6 +465,7 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+    use xai_grok_sampling_types::is_transient_api_status;
 
     fn api_err(status: StatusCode, message: &str) -> SamplingError {
         SamplingError::Api {
@@ -606,6 +614,34 @@ mod tests {
     }
 
     #[test]
+    fn classify_forbidden_bad_credentials_emits_to_session() {
+        let err = api_err(
+            StatusCode::FORBIDDEN,
+            "unauthenticated:bad-credentials: The OAuth2 access token could not be validated.",
+        );
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::EmitToSession(SamplingError::Api {
+                status, message, ..
+            }) => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(message.contains("bad-credentials"));
+            }
+            other => panic!("expected EmitToSession(Api 403 bad-credentials), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_forbidden_policy_is_fatal_not_auth() {
+        let err = api_err(StatusCode::FORBIDDEN, "Content violates usage guidelines.");
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+            }
+            other => panic!("expected Fatal policy 403, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn classify_encrypted_content_emits_to_session() {
         let err = api_err(
             StatusCode::BAD_REQUEST,
@@ -748,6 +784,94 @@ mod tests {
         match classify_error(&err, 4, 5, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::Fatal(SamplingError::Api { .. }) => {}
             other => panic!("expected Fatal, got {other:?}"),
+        }
+    }
+
+    fn api_status_code(code: u16, message: &str) -> SamplingError {
+        api_err(StatusCode::from_u16(code).expect("valid status"), message)
+    }
+
+    /// HTTP 521 (Cloudflare "Web Server Is Down") and sibling edge outages
+    /// soft-retry like 502/503 — not Fatal on first response.
+    #[test]
+    fn classify_521_is_retryable_with_client_rebuild() {
+        let err = api_status_code(521, "origin down");
+        assert!(err.is_retryable());
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { backoff } => {
+                assert!(backoff >= Duration::from_millis(1600));
+            }
+            other => panic!("expected RetryWithClientRebuild for 521, got {other:?}"),
+        }
+        match classify_error(&err, 1, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { .. } => {}
+            other => panic!("expected plain Retry on subsequent 521, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_521_honors_retry_after_when_present() {
+        let err = SamplingError::Api {
+            status: StatusCode::from_u16(521).unwrap(),
+            message: "origin down".into(),
+            model_metadata: None,
+            retry_after_secs: Some(12),
+            should_retry: None,
+        };
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { backoff } => {
+                assert_eq!(backoff, Duration::from_secs(12));
+            }
+            other => panic!("expected Retry-After honored for 521, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_521_exhausted_budget_is_fatal() {
+        let err = api_status_code(521, "origin down");
+        match classify_error(&err, 4, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                assert_eq!(status.as_u16(), 521);
+            }
+            other => panic!("expected Fatal after budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_521_exhausted_is_plain_english() {
+        let err = api_status_code(521, "ignored body");
+        let s = format_sampling_error(&err, Some(3));
+        assert_eq!(
+            s,
+            "xAI connection failed after 3 tries (HTTP 521). Try again shortly."
+        );
+        assert!(!s.contains("unknown status"));
+        assert!(!s.contains("API error"));
+    }
+
+    #[test]
+    fn format_521_without_retry_count_keeps_status_hint() {
+        let err = api_status_code(521, "origin down");
+        let s = format_sampling_error(&err, None);
+        assert!(s.contains("HTTP 521"));
+        assert!(s.contains("xAI connection interrupted") || s.contains("origin down"));
+    }
+
+    #[test]
+    fn cloudflare_edge_range_is_transient() {
+        for code in [520u16, 521, 522, 523, 524, 525, 526, 527, 530] {
+            assert!(
+                is_transient_api_status(code),
+                "{code} should be transient for classify"
+            );
+            let err = api_status_code(code, "edge");
+            assert!(
+                matches!(
+                    classify_error(&err, 0, 3, RATE_LIMIT_RETRY_THRESHOLD),
+                    RetryDecision::RetryWithClientRebuild { .. }
+                ),
+                "classify {code}"
+            );
         }
     }
 

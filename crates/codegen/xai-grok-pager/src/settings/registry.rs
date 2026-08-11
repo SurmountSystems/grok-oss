@@ -679,6 +679,10 @@ pub fn current_value_for(
             crate::appearance::cache::load_show_thinking_blocks(),
         )),
         // Live cache (like `show_thinking_blocks`).
+        "always_expand_thinking" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_always_expand_thinking(),
+        )),
+        // Live cache (like `show_thinking_blocks`).
         "group_tool_verbs" => Some(SettingValue::Bool(
             crate::appearance::cache::load_group_tool_verbs(),
         )),
@@ -697,6 +701,43 @@ pub fn current_value_for(
         "economic_mode" => Some(SettingValue::Bool(
             crate::appearance::cache::load_economic_mode(),
         )),
+        "resume_canceled_turn_on_restart" => Some(SettingValue::Bool(
+            ui.resume_canceled_turn_on_restart_enabled(),
+        )),
+        "token_economy.cap_implement_effort_when_economic" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Bool(cfg.cap_implement_effort_when_economic))
+        }
+        "token_economy.show_period_pacing" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Bool(cfg.show_period_pacing))
+        }
+        "token_economy.local_spend_ledger" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Bool(cfg.local_spend_ledger))
+        }
+        "token_economy.reconcile_management_usage" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Bool(cfg.reconcile_management_usage))
+        }
+        "token_economy.max_implement_effort" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Int(i64::from(cfg.max_implement_effort)))
+        }
+        "token_economy.min_implement_effort" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Int(i64::from(cfg.min_implement_effort)))
+        }
+        "token_economy.desired_implement_effort" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Int(i64::from(cfg.desired_implement_effort)))
+        }
+        "token_economy.lock_implement_effort" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Int(i64::from(
+                cfg.lock_implement_effort.unwrap_or(0),
+            )))
+        }
         "respect_manual_folds" => Some(SettingValue::Bool(pager.respect_manual_folds)),
         // SHELL — canonicalized from `[ui].hunk_tracker_mode`.
         "hunk_tracker_mode" => Some(SettingValue::Enum(canonical_hunk_tracker_mode(
@@ -1155,6 +1196,14 @@ mod tests {
                         "show_thinking_blocks default drifts from UiConfig::default()"
                     );
                 }
+                // always_expand_thinking: Option<bool>; None → false (client default).
+                ("always_expand_thinking", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.always_expand_thinking.unwrap_or(false),
+                        "always_expand_thinking default drifts from UiConfig::default()"
+                    );
+                }
                 // group_tool_verbs: Option<bool>; None → true (client default).
                 ("group_tool_verbs", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -1198,6 +1247,49 @@ mod tests {
                         "economic_mode default drifts from UiConfig::default()"
                     );
                     assert!(*default, "economic_mode must default ON");
+                }
+                ("resume_canceled_turn_on_restart", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.resume_canceled_turn_on_restart.unwrap_or(true),
+                        "resume_canceled_turn_on_restart default drifts from UiConfig"
+                    );
+                    assert!(*default, "resume_canceled_turn_on_restart must default ON");
+                }
+                // Token Economy: defaults anchored on TokenEconomyConfig::default().
+                (
+                    "token_economy.cap_implement_effort_when_economic",
+                    SettingKind::Bool { default },
+                ) => {
+                    assert!(*default);
+                }
+                ("token_economy.show_period_pacing", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.local_spend_ledger", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.reconcile_management_usage", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.max_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 3);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                ("token_economy.min_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 1);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                (
+                    "token_economy.desired_implement_effort",
+                    SettingKind::Int { default, min, max },
+                ) => {
+                    assert_eq!(*default, 2);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                ("token_economy.lock_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 0);
+                    assert_eq!((*min, *max), (0, 5));
                 }
                 ("keep_text_selection", SettingKind::Enum { default, .. }) => {
                     let expected = if ui.keep_text_selection_enabled() {

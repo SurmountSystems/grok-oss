@@ -74,23 +74,24 @@ use super::session::load::{
 use super::session::modal::dispatch_rename_session;
 use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
-    preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
-    set_auto_compact_threshold, set_auto_dark_theme, set_auto_light_theme, set_auto_run_implement,
-    set_auto_update, set_bubble_copy_buttons, set_cancel_subagents_on_turn_cancel,
-    set_collapsed_edit_blocks, set_combine_queued_prompts, set_compact_mode,
-    set_contextual_hint_image_input, set_contextual_hint_plan_mode, set_contextual_hint_send_now,
-    set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap, set_contextual_hint_undo,
-    set_contextual_hint_word_select, set_default_model, set_default_selected_permission,
-    set_display_refresh_auto_cadence, set_economic_mode, set_features_session_recap,
-    set_fork_secondary_model, set_group_tool_verbs, set_hide_header, set_hunk_tracker_mode,
-    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
-    set_notifications_session_recap, set_notifications_session_recap_threshold_secs,
-    set_page_flip_on_send, set_plan_approval_park, set_prompt_suggestions,
-    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
+    preview_auto_light_theme, preview_theme, set_always_expand_thinking,
+    set_ask_user_question_timeout_enabled, set_auto_compact_threshold, set_auto_dark_theme,
+    set_auto_light_theme, set_auto_run_implement, set_auto_update, set_bubble_copy_buttons,
+    set_cancel_subagents_on_turn_cancel, set_collapsed_edit_blocks, set_combine_queued_prompts,
+    set_compact_mode, set_contextual_hint_image_input, set_contextual_hint_plan_mode,
+    set_contextual_hint_send_now, set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap,
+    set_contextual_hint_undo, set_contextual_hint_word_select, set_default_model,
+    set_default_selected_permission, set_display_refresh_auto_cadence, set_economic_mode,
+    set_features_session_recap, set_fork_secondary_model, set_group_tool_verbs, set_hide_header,
+    set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection, set_max_thoughts_width,
+    set_multiline_mode, set_notifications_session_recap,
+    set_notifications_session_recap_threshold_secs, set_page_flip_on_send, set_plan_approval_park,
+    set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
+    set_respect_manual_folds, set_resume_canceled_turn_on_restart, set_screen_mode,
     set_scroll_lines, set_scroll_mode, set_scroll_speed, set_scrub_ascii_punct,
     set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
-    set_voice_stt_language,
+    set_timestamps, set_token_economy_bool, set_token_economy_int, set_vim_mode,
+    set_voice_capture_mode, set_voice_keybind_enabled, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -102,9 +103,9 @@ use super::status::{
     dispatch_clear_completed_todos, dispatch_copy_session_id, dispatch_manage_billing,
     dispatch_open_gboom, dispatch_open_tutorial, dispatch_privacy_banner_accept,
     dispatch_privacy_banner_customize, dispatch_share_session, dispatch_show_context_info,
-    dispatch_show_limits, dispatch_show_privacy_info, dispatch_show_queue,
-    dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
-    dispatch_show_usage, set_coding_data_sharing,
+    dispatch_show_limits, dispatch_show_limits_json, dispatch_show_privacy_info,
+    dispatch_show_queue, dispatch_show_release_notes, dispatch_show_session_info,
+    dispatch_show_spend, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -116,6 +117,7 @@ use super::transcript::{
 use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
     dispatch_demote_to_background, dispatch_kill_bg_task, dispatch_kill_subagent,
+    persist_cancel_resume_on_graceful_quit,
 };
 use super::voice::{dispatch_enable_voice_mode, dispatch_voice_stop, dispatch_voice_toggle};
 use crate::app::actions::{Action, Effect};
@@ -155,6 +157,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => {
+            // SIGTERM / first signal / /exit all land here. Mid-turn: write the
+            // same cancel-resume marker as Esc so reopen can re-queue once.
+            persist_cancel_resume_on_graceful_quit(app);
             if let Some(tx) = &app.voice_cmd_tx {
                 let _ = tx.try_send(xai_grok_voice::VoiceCommand::Shutdown);
             }
@@ -163,10 +168,35 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects
         }
         Action::QuitForUpdate => {
+            persist_cancel_resume_on_graceful_quit(app);
             let mut effects = unregister_all_active_sessions(app);
             app.quit_for_update = true;
             effects.push(Effect::Quit);
             effects
+        }
+        Action::RebuildAndRelaunch => {
+            let ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
+                    fraction: 0.0,
+                    detail: "Starting rebuild".into(),
+                });
+                agent.show_toast_ticks("Rebuild 0%  Starting rebuild", 255);
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Starting /rebuild: resolve source tree, just install, \
+                     soft-relaunch leaders, signal peer TUIs to re-exec, then re-exec this session on the new binary.",
+                    ));
+            }
+            let start_dir =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            vec![Effect::RunRebuild {
+                start_dir,
+                agent_id,
+            }]
         }
         Action::ResumeForeignSession => {
             let Some(hint) = app.take_foreign_resume_hint() else {
@@ -934,6 +964,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::CancelTurn => dispatch_cancel_turn(app),
+        Action::ToggleGlobalPause => super::global_pause::dispatch_toggle_global_pause(app),
+        Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
         Action::KillSubagent(subagent_id) => dispatch_kill_subagent(app, subagent_id),
@@ -954,6 +986,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
         Action::ShowLimits => dispatch_show_limits(app),
+        Action::ShowSpend => dispatch_show_spend(app),
+        Action::ShowLimitsJson => dispatch_show_limits_json(app),
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
@@ -988,11 +1022,15 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetInvertScroll(v) => set_invert_scroll(app, v),
         Action::SetScrollLines(v) => set_scroll_lines(app, v),
         Action::SetShowThinkingBlocks(v) => set_show_thinking_blocks(app, v),
+        Action::SetAlwaysExpandThinking(v) => set_always_expand_thinking(app, v),
         Action::SetGroupToolVerbs(v) => set_group_tool_verbs(app, v),
         Action::SetCollapsedEditBlocks(v) => set_collapsed_edit_blocks(app, v),
         Action::SetPromptSuggestions(v) => set_prompt_suggestions(app, v),
         Action::SetAutoRunImplement(v) => set_auto_run_implement(app, v),
         Action::SetEconomicMode(v) => set_economic_mode(app, v),
+        Action::SetResumeCanceledTurnOnRestart(v) => set_resume_canceled_turn_on_restart(app, v),
+        Action::SetTokenEconomyBool { field, value } => set_token_economy_bool(app, field, value),
+        Action::SetTokenEconomyInt { field, value } => set_token_economy_int(app, field, value),
         Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
         Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
         Action::SetCancelSubagentsOnTurnCancel(s) => set_cancel_subagents_on_turn_cancel(app, s),

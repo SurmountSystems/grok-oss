@@ -9,12 +9,33 @@ pub(super) fn prompt_mode_from_session_mode_id(session_mode_id: &acp::SessionMod
         SessionMode::Default => PromptMode::Agent,
     }
 }
-/// Pass-through twin: no toolset in this build carries a plan-gated tool.
+/// Whether this advertised tool name is the multi-choice questionnaire tool
+/// (`ask_user_question` / Claude alias forms). Plan mode strips these by default.
+pub(super) fn is_plan_mode_blocked_ask_user_tool_name(name: &str) -> bool {
+    matches!(name, "ask_user_question" | "AskUserQuestion" | "AskUser")
+}
+
+/// Filter tools advertised to the model while plan mode is active.
+///
+/// Default product law: do **not** offer `ask_user_question` during plan mode
+/// (put open questions in `plan.md` / freeform chat; present via
+/// `exit_plan_mode`). Soft prompt bans alone are not enough — models still
+/// call the tool when it is in the toolset. Legacy `/plan --legacy` may
+/// re-enable the tool later via an explicit product flag; until then default
+/// plan mode always strips it.
+///
+/// Non-plan turns pass tools through unchanged. Cursor-style tools that are
+/// not the questionnaire stay available (write gate is separate).
 pub(super) fn filter_cursor_tools_by_plan_mode(
     defs: Vec<ToolDefinition>,
-    _plan_active: bool,
+    plan_active: bool,
 ) -> Vec<ToolDefinition> {
-    defs
+    if !plan_active {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|d| !is_plan_mode_blocked_ask_user_tool_name(d.function.name.as_str()))
+        .collect()
 }
 impl SessionActor {
     pub(super) fn apply_prompt_modes_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {

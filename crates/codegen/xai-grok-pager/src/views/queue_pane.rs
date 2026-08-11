@@ -870,8 +870,8 @@ impl QueuePane {
     /// renders a preview overlay showing the full content.
     ///
     /// `show_interject` controls the row `[Interject]` button: mid-turn soft
-    /// interject, **or** idle force-drain while background subagents hold the
-    /// queue. Callers pass `turn_running || holds_queue_for_background()`.
+    /// interject. Callers pass primary `turn_running` (background children
+    /// alone do not force idle Interject chrome).
     pub fn render(
         &mut self,
         area: Rect,
@@ -1669,13 +1669,14 @@ mod tests {
         );
     }
 
-    /// Idle hold for background subagents still shows `[Interject]` so the
-    /// operator can force-drain without a running parent turn.
+    /// When the caller sets `show_interject` (primary turn running), the
+    /// `[Interject]` button paints even if the parent view is otherwise idle
+    /// in tests. Real idle + children passes `show_interject=false`.
     #[test]
-    fn interject_button_renders_when_show_interject_true_while_idle() {
+    fn interject_button_renders_when_show_interject_true() {
         let mut pane = QueuePane::new();
         let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "held while children run"));
+        local.push_back(local_prompt(1, "queued mid-turn follow-up"));
         pane.sync_from_merged(&local, &[], None, None, &Default::default());
         let ids = pane.entry_ids();
         pane.list_state.select_by_id(ids[0]);
@@ -1683,12 +1684,11 @@ mod tests {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        // Caller passes hold-for-background as show_interject even when idle.
         pane.render(area, &mut buf, true, &layout_cfg, None, true);
 
         assert!(
             pane.send_now.rect.is_some(),
-            "[Interject] must render when show_interject (held for background)"
+            "[Interject] must render when show_interject is true"
         );
         assert_eq!(pane.send_now.entry_id, Some(ids[0]));
     }

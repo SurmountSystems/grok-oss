@@ -133,6 +133,12 @@ impl AgentView {
                 {
                     return InputOutcome::Action(Action::DemoteToBackground);
                 }
+                if self.hit_pause_button.contains(mouse.column, mouse.row)
+                    && !self.pos_occluded(mouse.column, mouse.row)
+                {
+                    // Pause is never CancelTurn — always process-level global pause.
+                    return InputOutcome::Action(Action::ToggleGlobalPause);
+                }
                 if self.hit_cancel_button.contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
@@ -1027,6 +1033,7 @@ impl AgentView {
                     .hit_follow_indicator
                     .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cancel_button.update_hover(mouse.column, mouse.row);
+                changed |= self.hit_pause_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_watching_cue.update_hover(mouse.column, mouse.row);
                 changed |= self
@@ -1331,8 +1338,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        let show_interject =
-            agent.session.state.is_turn_running() || agent.holds_queue_for_background();
+        let show_interject = agent.session.state.is_turn_running();
         agent
             .queue
             .render(area, &mut buf, true, &layout_cfg, None, show_interject);
@@ -1460,9 +1466,10 @@ mod tests {
         );
     }
 
-    /// Idle + background hold: `[Interject]` is painted and click force-drains.
+    /// Idle + live background subagents: `[Interject]` is not painted (children
+    /// no longer hold the main queue; Interject is mid-turn only).
     #[test]
-    fn mouse_interject_when_idle_held_by_subagents_force_drains() {
+    fn mouse_interject_not_painted_when_idle_with_live_subagents() {
         use crate::app::agent_view::test_fixtures;
         let mut agent = running_agent_local_only();
         agent.session.state = AgentState::Idle;
@@ -1471,10 +1478,29 @@ mod tests {
             test_fixtures::running_subagent_info("bg-child"),
         );
         let ids = agent.queue.entry_ids();
-        let outcome = click_send_now(&mut agent, ids[0]);
+        agent.queue.list_state.select_by_id(ids[0]);
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        let show_interject = agent.session.state.is_turn_running();
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::ForceDrainQueue)),
-            "held idle Interject click must ForceDrainQueue, got {outcome:?}"
+            !show_interject,
+            "precondition: idle primary does not show Interject"
+        );
+        agent
+            .queue
+            .render(area, &mut buf, true, &layout_cfg, None, show_interject);
+        let mut hit_any = false;
+        for row in area.y..area.y + area.height {
+            for col in area.x..area.x + area.width {
+                if agent.queue.send_now_click(col, row).is_some() {
+                    hit_any = true;
+                }
+            }
+        }
+        assert!(
+            !hit_any,
+            "idle + live children must not paint [Interject] hit targets"
         );
     }
     /// Send-now `[Interject]` on the lone local row while it is being

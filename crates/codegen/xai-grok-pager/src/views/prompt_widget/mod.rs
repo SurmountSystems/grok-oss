@@ -181,10 +181,11 @@ pub struct PromptStyle {
     /// Show the accent line (`┃`) on the left edge of the chrome.
     /// When false the line is hidden and its column reclaimed for content.
     pub show_accent_line: bool,
-    /// Draw the prompt's border box (top `╭─╮` divider, side `│` borders, and
-    /// bottom info divider). Only consulted when `chrome` is true. Defaults to
-    /// `true` (the full-TUI boxed prompt); minimal mode sets it `false` for a
-    /// cleaner, border-less input that still keeps the chrome padding.
+    /// Draw the prompt's border box outline (top `╭─╮`, side `│`, bottom `╰─╯`).
+    /// Only consulted when `chrome` is true. Defaults to `true` (the full-TUI
+    /// boxed prompt). Inline/chromeless embeds and minimal-style surfaces may
+    /// set it `false`; the model · flags info caption still paints when info
+    /// is provided. Plan mode / soft-park / plan panel keep borders **on**.
     pub show_borders: bool,
     /// Session title inlined in the top border (right-aligned, 2-cell inset),
     /// styled like the bottom info line's model name.
@@ -2854,9 +2855,10 @@ impl PromptWidget {
 /// `accent_running` magenta. Prior mistake: caret was painted magenta because
 /// "agent chrome"; the composer is the human input surface → green.
 ///
-/// Blank insertion cell blinks **classic terminal block on/off** of the **same
-/// full-cell rectangle** (the terminal cell itself — not a dimmed solid `█`,
-/// not a short mid-cell outline, not an accent plate with a dark hole):
+/// Blank insertion cell (cursor at buffer end, or a truly empty cell) blinks
+/// **classic terminal block on/off** of the **same full-cell rectangle** (the
+/// terminal cell itself — not a dimmed solid `█`, not a short mid-cell outline,
+/// not an accent plate with a dark hole):
 ///
 /// - **Silhouette** for both phases is the terminal cell. Solid half fills it
 ///   with an accent **background plate** (cell bg always paints full height).
@@ -2868,23 +2870,29 @@ impl PromptWidget {
 ///   [`Modifier::DIM`]. Rejected: `■`/`fg=canvas bg=accent` hole-punch
 ///   (reads as a mini-badge with a void).
 ///
-/// On a cell that already has a visible grapheme (typed text, ghost body, slash
-/// inline suffix) the grapheme is kept and only restyled so the block caret
-/// never eats characters under the cursor: solid = reverse plate; empty =
-/// accent ink on canvas (still no dim-as-blink).
+/// On a cell that already has a visible grapheme (typed text including a
+/// mid-buffer space, ghost body, slash inline suffix) the grapheme is kept
+/// and only restyled so the block caret never eats characters under the
+/// cursor and never drops a solid `█` into the draft when arrowing left over
+/// spaces: solid = reverse plate (Human green bg, canvas ink); empty = normal
+/// text ink on canvas — **not** neon `accent_user` on the letter (that reads
+/// as a second green prompt glyph under DOGE). Mid-buffer spaces use this
+/// path (`allow_block_glyph=false`) so arrow navigation never paints a green
+/// control-looking block mid-line.
 fn paint_composer_box_cursor(
     buf: &mut Buffer,
     cx: u16,
     cy: u16,
     theme: &Theme,
     bg: ratatui::style::Color,
+    allow_block_glyph: bool,
 ) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let filled_phase = crate::glyphs::cursor_box_filled_phase(now_ms);
-    paint_composer_box_cursor_phase(buf, cx, cy, theme, bg, filled_phase);
+    paint_composer_box_cursor_phase(buf, cx, cy, theme, bg, filled_phase, allow_block_glyph);
 }
 
 /// Phase-injected paint path (wall-clock wrapper + unit tests).
@@ -2895,6 +2903,7 @@ fn paint_composer_box_cursor_phase(
     theme: &Theme,
     bg: ratatui::style::Color,
     filled_phase: bool,
+    allow_block_glyph: bool,
 ) {
     // Human input surface → `accent_user` (green under DOGE). Never agent
     // `accent_running` magenta.
@@ -2907,11 +2916,17 @@ fn paint_composer_box_cursor_phase(
     let Some(cell) = buf.cell_mut((cx, cy)) else {
         return;
     };
-    // Treat blank / empty cells as the insertion-point affordance (block on/off).
-    // Any other grapheme stays readable under the block caret.
+    // Insertion-point block on/off only when the caller allows the solid `█`
+    // glyph (cursor at buffer end) or the cell is truly empty. Typed mid-
+    // buffer spaces keep their grapheme and take reverse-plate styling so
+    // Left-arrow never drops a green block character into the draft.
     let blank = {
         let sym = cell.symbol();
-        sym.is_empty() || sym == " " || sym == "\u{00a0}"
+        if allow_block_glyph {
+            sym.is_empty() || sym == " " || sym == "\u{00a0}"
+        } else {
+            sym.is_empty()
+        }
     };
     if blank {
         if filled_phase {
@@ -2925,11 +2940,15 @@ fn paint_composer_box_cursor_phase(
             cell.set_style(Style::default().fg(bg).bg(bg));
         }
     } else if filled_phase {
-        // Classic block: invert — Human accent plate, canvas-coloured ink.
+        // Classic block: invert — Human accent plate, canvas-coloured ink
+        // (readable punched-out letter, not neon green letter ink).
         cell.set_style(Style::default().fg(bg).bg(accent));
     } else {
-        // Empty half on a grapheme: keep canvas bg, Human accent ink (no DIM).
-        cell.set_style(Style::default().fg(accent).bg(bg));
+        // Empty half on a grapheme: normal text ink on canvas. Do **not**
+        // recolor the letter to accent_user — a neon green T under the caret
+        // reads as a second green prompt glyph (dogfood 2026-08-10). Blink is
+        // reverse plate (solid) vs normal text (empty). No DIM.
+        cell.set_style(Style::default().fg(theme.text_primary).bg(bg));
     }
 }
 
@@ -3330,26 +3349,30 @@ impl PromptWidget {
             }
         }
 
-        // Bottom divider: ╰──────────grok-3 · flags──╯
+        // Bottom divider: ╰──────────grok-3 · flags──╯ when outlined.
+        // Plan view / minimal chrome keep the model · flags caption without
+        // the box outline (show_borders false) so status chrome is not lost.
         // Guard on actual allocated height, not requested `info_block`: during
         // resize the layout may squeeze the info block to 0 rows, leaving
         // chunks[2].y past the buffer boundary.
-        if info_block > 0 && style.chrome && style.show_borders && chunks[2].height > 0 {
+        if info_block > 0 && style.chrome && chunks[2].height > 0 {
             let div_y = chunks[2].y;
-            let div_style = Style::default().fg(border_color).bg(bg);
-            let left_x = area.x;
-            let right_x = area.x + area.width.saturating_sub(1);
-            for x in area.x..area.x + area.width {
-                if let Some(cell) = buf.cell_mut((x, div_y)) {
-                    let ch = if x == left_x {
-                        '\u{2570}' // ╰
-                    } else if x == right_x {
-                        '\u{256f}' // ╯
-                    } else {
-                        '\u{2500}' // ─
-                    };
-                    cell.set_char(ch);
-                    cell.set_style(div_style);
+            if style.show_borders {
+                let div_style = Style::default().fg(border_color).bg(bg);
+                let left_x = area.x;
+                let right_x = area.x + area.width.saturating_sub(1);
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell_mut((x, div_y)) {
+                        let ch = if x == left_x {
+                            '\u{2570}' // ╰
+                        } else if x == right_x {
+                            '\u{256f}' // ╯
+                        } else {
+                            '\u{2500}' // ─
+                        };
+                        cell.set_char(ch);
+                        cell.set_style(div_style);
+                    }
                 }
             }
             if let Some(info) = info {
@@ -3417,9 +3440,12 @@ impl PromptWidget {
         // Software Human-green caret: slow solid↔empty block blink
         // (`accent_user`, not agent `accent_running` magenta). Terminal hardware
         // cursor stays hidden so we do not stack two carets; phase is wall-clock
-        // so Slow redraw ticks are enough.
+        // so Slow redraw ticks are enough. Solid `█` only at true buffer end
+        // (insertion blank); mid-draft spaces reverse-plate so Left never
+        // paints a green block glyph into the line.
         let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {
-            paint_composer_box_cursor(buf, cx, cy, &theme, bg);
+            let allow_block_glyph = self.textarea.cursor() == self.textarea.text().len();
+            paint_composer_box_cursor(buf, cx, cy, &theme, bg, allow_block_glyph);
             // Hide the terminal caret — the painted box *is* the cursor.
             None
         } else {

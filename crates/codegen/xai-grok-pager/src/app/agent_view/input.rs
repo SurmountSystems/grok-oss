@@ -1,6 +1,5 @@
 //! Top-level input routing for [`AgentView`]: `handle_input` fans events
 //! out to the active pane/overlay handlers; pane and input-mode setters.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::bracketed_paste_should_probe;
 #[cfg(test)]
 use super::paste::paste_key_tests;
@@ -177,15 +176,16 @@ impl AgentView {
         self.prompt.slash_controller.screen_mode().is_minimal()
     }
     /// Whether a bare Esc pressed right now would reach
-    /// [`Self::try_handle_esc_policy`]'s mid-turn cancel (assuming a turn is
-    /// running — callers gate on that): the hint-bar predicate deciding when
-    /// to advertise `Esc` instead of `Ctrl+C` for CancelTurn. Composed from
-    /// the same predicates input routing uses, so the hint cannot claim Esc
-    /// while a higher-priority consumer (dropdown, search, viewer/modal,
-    /// agents/persona modal, needs-input overlay, queued-prompt or inline
-    /// edit, subagent-view close, selection/link/goal/rewind/btw/jump,
-    /// latent composer mode) would steal the press. Conservative on purpose:
-    /// when false, the registry `Ctrl+C` is shown, which always cancels.
+    /// [`Self::try_handle_esc_policy`]'s mid-turn double-Esc cancel arm
+    /// (assuming a turn is running — callers gate on that): the hint-bar
+    /// predicate deciding when to advertise `Esc` instead of `Ctrl+C` for
+    /// CancelTurn. Composed from the same predicates input routing uses, so
+    /// the hint cannot claim Esc while a higher-priority consumer (dropdown,
+    /// search, viewer/modal, agents/persona modal, needs-input overlay,
+    /// queued-prompt or inline edit, subagent-view close, selection/link/
+    /// goal/rewind/btw/jump, latent composer mode) would steal the press.
+    /// Conservative on purpose: when false, the registry `Ctrl+C` is shown,
+    /// which always cancels.
     /// `esc_owned_before_agent` is the app-level ownership snapshot
     /// (`AppView::esc_owned_before_agent`: voice dictation listening or
     /// pending cold-start, a focused dev tracing pane, the top-level cloud /
@@ -232,9 +232,9 @@ impl AgentView {
     ///
     /// Also gated to an idle agent (`!is_turn_running() && !is_cancelling()`):
     /// while a turn is running or cancelling, Esc must fall through to
-    /// [`Self::try_handle_esc_policy`] (running → cancel in minimal / non-vim
-    /// mode, swallow in vim mode; cancelling → retry CancelTurn), not detach
-    /// to the dashboard. Detach mid-turn stays on
+    /// [`Self::try_handle_esc_policy`] (running → arm double-Esc cancel in
+    /// minimal / non-vim mode, swallow in vim mode; cancelling → retry
+    /// CancelTurn), not detach to the dashboard. Detach mid-turn stays on
     /// Ctrl+\ / Left.
     pub(crate) fn overlay_esc_backs_out_from_prompt(&self) -> bool {
         self.is_empty_focused_prompt()
@@ -896,6 +896,13 @@ impl AgentView {
                     if key!('q', CONTROL).matches(key) {
                         return InputOutcome::Unchanged;
                     }
+                    // Plan open + dual focus (soft-park Prompt, empty line
+                    // comment, freeform notes): arrows / Page keys scroll the
+                    // plan without a second focus click. Only a non-empty
+                    // line-comment draft keeps those keys for caret motion.
+                    if self.plan_viewer_owns_scroll_keys(key) {
+                        return self.handle_line_viewer_key(key);
+                    }
                     if casual_commenting {
                         self.handle_casual_plan_feedback_key(key)
                     } else {
@@ -1277,10 +1284,17 @@ impl AgentView {
                     self.ephemeral_tip
                         .clear(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY);
                     self.btw_focused = false;
+                    // Path / file:// drops win synchronously (and skip the
+                    // clipboard raster so a Finder icon does not double-attach).
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    // Screenshot / "Copy Image" pasteboards: many terminals
+                    // deliver Ctrl+V as `Event::Paste` (often empty text when
+                    // only a raster is on the board). Probe on every OS —
+                    // Linux was previously skipped and pure clipboard images
+                    // never became `[Image #N]` chips when paste arrived as
+                    // bracketed paste rather than a Ctrl+V key event.
                     let attachment_change_count = if bracketed_paste_should_probe(text) {
                         crate::clipboard::attachment_probe_gate(Some(text))
                     } else {
@@ -1288,7 +1302,6 @@ impl AgentView {
                     };
                     let (outcome, synchronous_text_insertion) =
                         self.insert_bracketed_prompt_text(text);
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if let Some(change_count) = attachment_change_count {
                         self.enqueue_clipboard_attachment_probe(
                             crate::app::actions::ClipboardPasteSource::BracketedInserted {
@@ -1298,8 +1311,6 @@ impl AgentView {
                             change_count,
                         );
                     }
-                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                    let _ = synchronous_text_insertion;
                     outcome
                 } else {
                     let consumed = match self.active_pane {
@@ -1484,6 +1495,16 @@ impl AgentView {
                 }
                 if self.session.state.is_cancelling() {
                     return InputOutcome::Action(Action::Quit);
+                }
+                // Work B: idle primary with live standalone subagents still
+                // offers CancelTurn → stop-subagents panel / kill path.
+                let has_running_subagents = self
+                    .subagent_sessions
+                    .values()
+                    .any(|s| s.is_running() && s.workflow_run_id.is_none());
+                if has_running_subagents {
+                    self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
+                    return InputOutcome::Action(Action::CancelTurn);
                 }
                 if crate::app::minimal_mode_active()
                     && self.session.state.is_idle()

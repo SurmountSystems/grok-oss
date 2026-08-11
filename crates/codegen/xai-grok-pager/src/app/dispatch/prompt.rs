@@ -6,8 +6,9 @@ use super::ctx::with_active_agent;
 use super::interject;
 use super::permissions::drain_permission_queue;
 use super::queue::{
-    apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
-    maybe_drain_queue, note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
+    QueueDrain, apply_turn_start_shim, drain_prompt_state_to_last_queued,
+    immediate_server_send_eligible, maybe_drain_queue, note_peek_page_flip, push_server_queue_echo,
+    retire_optimistic_echo,
 };
 use super::router::dispatch;
 use super::session::fork::open_project_question;
@@ -401,6 +402,26 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
     }
 }
 
+/// Immediate ACK when a follow-up is accepted into the queue while the session
+/// is busy (turn running or background-subagent hold). Composer is already
+/// clear; without this the send can feel swallowed when the ephemeral tip is
+/// seen-capped, config-off, or unrenderable.
+fn ack_followup_queued(app: &mut AppView) {
+    let ActiveView::Agent(id) = app.active_view else {
+        return;
+    };
+    if let Some(agent) = app.agents.get_mut(&id) {
+        // P2/Q1: during Revise/Clarify rewrite there is no live plan-feedback
+        // channel. Prefer an honest toast over bare "Queued" so notes do not
+        // feel silently lost into a revise that already unparked.
+        if agent.plan_feedback_in_flight.is_some() {
+            agent.show_toast(crate::views::plan_approval_view::PLAN_FEEDBACK_QUEUE_TOAST);
+        } else {
+            agent.show_toast("Queued");
+        }
+    }
+}
+
 /// Whether submitting `text` may open the project picker. Slash commands,
 /// `exit`/`quit` aliases, and empty input never send a prompt to the agent,
 /// so they must pass through untouched.
@@ -410,6 +431,28 @@ pub(super) fn input_can_trigger_project_picker(text: &str) -> bool {
         && !t.starts_with('/')
         && !t.starts_with('!')
         && !matches!(t, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!")
+}
+
+/// Token Economy: rewrite implement-loop effort on human submit paths.
+///
+/// Toasts once when effort is clamped or desired is injected. Non-implement
+/// text is unchanged. Shared with auto-run via
+/// [`crate::app::auto_implement::apply_implement_effort_for_product`].
+fn apply_implement_effort_on_submit(
+    agent: &mut crate::app::agent_view::AgentView,
+    text: String,
+) -> String {
+    if !crate::app::auto_implement::is_implement_command_sentence(&text)
+        && !xai_grok_shell::token_economy::is_implement_command(&text)
+    {
+        return text;
+    }
+    let economic = crate::appearance::cache::load_economic_mode();
+    let rewrite = crate::app::auto_implement::apply_implement_effort_for_product(&text, economic);
+    if let Some(toast) = rewrite.toast.as_deref() {
+        agent.show_toast(toast);
+    }
+    rewrite.command
 }
 
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume
@@ -476,6 +519,9 @@ pub(super) fn dispatch_send_prompt_inner(
     // Set when a plain prompt is queued while a turn is running (local path);
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
+    // Local path while busy: toast "Queued" after drain if the row is still held
+    // (not when idle-clean drain starts a turn immediately — human rail is enough).
+    let mut ack_queued_after_local = false;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let Some(agent) = app.agents.get_mut(&id) else {
@@ -695,6 +741,8 @@ pub(super) fn dispatch_send_prompt_inner(
                 // Enqueue with display text for scrollback but wire_blocks
                 // for the actual prompt sent to the model. Leading skill
                 // invocation: display_as_skill owns styling (no ranges).
+                // Token Economy: clamp implement-loop effort on display text.
+                let display_text = apply_implement_effort_on_submit(agent, display_text);
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
                 agent
@@ -732,6 +780,8 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
+                // Token Economy: clamp implement-loop effort on human /implement.
+                let pass_text = apply_implement_effort_on_submit(agent, pass_text);
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt
@@ -792,10 +842,12 @@ pub(super) fn dispatch_send_prompt_inner(
             agent.clear_follow_ups();
         }
 
-        // If the user queues a follow-up while a turn is already running, surface
-        // a short tip advertising send-now — plain Enter queues; Enter again on
-        // the emptied composer sends the queued message now (cancel-and-send).
+        // Busy for Enter:queue = primary turn running only. Live background
+        // subagents do not force queue (operator 2026-08-09): primary idle
+        // sends a normal main turn. ACK immediately while primary is busy so
+        // Enter:queue never feels swallowed.
         let queued_while_running = agent.session.state.is_turn_running();
+        let queued_while_busy = queued_while_running;
 
         // Composer-recognized slash tokens at submit time: styles the
         // scrollback echo and rides the wire meta so replay restyles it.
@@ -856,7 +908,10 @@ pub(super) fn dispatch_send_prompt_inner(
             // treat its deltas as ours, not adopt them as another client's turn.
             agent.note_self_originated_prompt(&prompt_id);
 
-            if parked_sendable_wait && !hold_behind_existing_queue {
+            // Empty-held park: cancel-and-send (not a hold). Occupied hold
+            // appends like a normal mid-turn queue.
+            let cancel_and_send = parked_sendable_wait && !hold_behind_existing_queue;
+            if cancel_and_send {
                 agent.arm_send_now_expectation(prompt_id.clone());
                 agent.suppress_parked_marker_on_interject();
             }
@@ -896,8 +951,12 @@ pub(super) fn dispatch_send_prompt_inner(
                 Some(&sid_str),
                 Some(serde_json::json!({ "kind": "prompt", "len": text.len() })),
             );
-            if queued_while_running && !parked_sendable_wait {
-                maybe_show_send_now_tip(app);
+            // Queue path (not cancel-and-send): tip + always toast ACK.
+            if queued_while_busy && !cancel_and_send {
+                if queued_while_running && !parked_sendable_wait {
+                    maybe_show_send_now_tip(app);
+                }
+                ack_followup_queued(app);
             }
             return vec![Effect::SendPrompt {
                 agent_id,
@@ -917,13 +976,13 @@ pub(super) fn dispatch_send_prompt_inner(
             agent.prompt.set_text("");
             agent.clear_unsent_prompt_draft();
         }
-        // Local queue while a turn is running (e.g. images attached): tip after
-        // this branch so the agent mut-borrow is released first.
+        // Mid-turn tip (Enter to interject) only while a turn is running.
         tip_send_now_after_queue = queued_while_running;
+        ack_queued_after_local = queued_while_busy;
     }
 
-    // Mid-turn local queue: advertise send-now via the ephemeral tip (skip during
-    // a sendable wait — the inline hint already says it).
+    // Mid-turn local queue: advertise interject via the ephemeral tip when the
+    // status row is not already showing an "N queued" inline hint.
     if tip_send_now_after_queue {
         let inline_hint_shown = app
             .agents
@@ -959,6 +1018,16 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     effects.extend(drain.effects);
     note_peek_page_flip(app, id, drain.page_flip_entry);
+    // Busy local enqueue that remained held: toast so clear-composer is never silent.
+    if ack_queued_after_local {
+        let still_held = app
+            .agents
+            .get(&id)
+            .is_some_and(|agent| agent.held_queue_count() > 0 || agent.has_held_user_queue());
+        if still_held {
+            ack_followup_queued(app);
+        }
+    }
     effects
 }
 
@@ -1322,6 +1391,14 @@ pub(super) fn handle_prompt_response(
             .current_prompt_id
             .clone()
             .or_else(|| response_pid.clone());
+        // Killall mid-child: keep cancel-resume text across finish_turn so a
+        // successful parent exit with live background subagents can re-arm the
+        // parent implement prompt on disk.
+        let cancel_resume_keep_text = agent
+            .session
+            .prompt_text_for_cancel_resume()
+            .map(str::to_string);
+        let cancel_resume_keep_pid = agent.session.current_prompt_id.clone();
 
         agent.session.finish_turn(&mut agent.scrollback);
 
@@ -1400,6 +1477,9 @@ pub(super) fn handle_prompt_response(
         // drop leftovers with no open response channel. Explicit cancel-turn
         // still hard-wipes (see turn.rs).
         agent.dismiss_plan_approval_after_turn_if_stale();
+        // Plan mode still on, no reverse-request chrome: auto-open review
+        // panel + toast so freeform "waiting on plan panel" is not a dead end.
+        agent.surface_idle_plan_review_if_needed();
 
         agent.cancel_turn_view = None;
         agent.cancel_turn_buttons.clear();
@@ -1597,9 +1677,69 @@ pub(super) fn handle_prompt_response(
             && agent.session.current_prompt_id.is_none()
         {
             crate::app::auto_implement::on_successful_turn_end(agent);
+            // Successful finish: clear marker unless live background subagents
+            // still own incomplete work (implement killall dogfood).
+            super::turn::finalize_cancel_resume_after_successful_turn(
+                agent,
+                cancel_resume_keep_text.as_deref(),
+                cancel_resume_keep_pid.as_deref(),
+            );
+        } else if result.is_err()
+            && !was_cancelling
+            && !rate_limited
+            && !credit_limit_blocked
+            && !free_usage_blocked
+            && agent.session.current_prompt_id.is_none()
+        {
+            // Failed PromptResponse (not rate-limit / credits): ensure a
+            // cancel-resume marker is on disk so reopen / `/rebuild` auto-
+            // resumes even when an older clear-on-error path wiped the eager
+            // turn-start file. History recovery also covers the no-marker
+            // case via `last_primary_user_turn_failed_in_replay` after load
+            // replay of durable `stop_reason: error`.
+            if let Some(text) = cancel_resume_keep_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Some(marker) =
+                    xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+                        text,
+                        cancel_resume_keep_pid.as_deref(),
+                        now,
+                    )
+                {
+                    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+                    if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.as_ref()) {
+                        match xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+                            &cwd, sid, &marker,
+                        ) {
+                            Ok(()) => tracing::info!(
+                                session = %sid,
+                                prompt_len = text.len(),
+                                "canceled_turn_resume: marker written (error terminal PromptResponse)"
+                            ),
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                session = %sid,
+                                "canceled_turn_resume: error-terminal write failed"
+                            ),
+                        }
+                    }
+                }
+            }
         }
 
-        let drain = maybe_drain_queue(agent);
+        // Soft stop: take effect after this top-level turn finishes; hold drain.
+        // Collect toast before releasing the agent borrow.
+        let soft_stop_toast = app.soft_stop.on_top_level_turn_finished();
+        let block_drain = app.soft_stop.blocks_drain() || app.global_work_pause.is_active();
+        let drain = if block_drain {
+            QueueDrain::blocked()
+        } else {
+            maybe_drain_queue(agent)
+        };
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
         let mut effects = drain.effects;
 
@@ -1634,6 +1774,9 @@ pub(super) fn handle_prompt_response(
             agent_id,
             silent: true,
         });
+        if let Some(toast) = soft_stop_toast {
+            agent.show_toast(&toast);
+        }
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
     }

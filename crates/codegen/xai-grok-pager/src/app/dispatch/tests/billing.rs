@@ -52,7 +52,7 @@ fn dispatch_billing(
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance,
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(balance),
             silent,
             subscription_tier,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -61,6 +61,40 @@ fn dispatch_billing(
         }),
         app,
     );
+}
+
+/// Dispatch with full control over SuperGrok three-state + side meters.
+fn dispatch_billing_full(
+    app: &mut AppView,
+    balance: crate::views::credit_bar::CreditBalanceFetch,
+    silent: bool,
+    subscription_tier: Option<String>,
+    autotopup: crate::views::credit_bar::AutoTopupFetch,
+    openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+    console_team_prepaid_cents: Option<i64>,
+) {
+    dispatch(
+        Action::TaskComplete(TaskResult::BillingFetched {
+            agent_id: AgentId(0),
+            balance,
+            silent,
+            subscription_tier,
+            autotopup,
+            openrouter_balance,
+            console_team_prepaid_cents,
+        }),
+        app,
+    );
+}
+
+/// Unknown included meter (placeholder 0.0, not a true wire zero).
+fn test_bal_unknown() -> crate::views::credit_bar::CreditBalance {
+    crate::views::credit_bar::CreditBalance {
+        included_usage_known: false,
+        usage_pct: 0.0,
+        effective_usage_pct: 0.0,
+        ..test_bal(0.0)
+    }
 }
 
 #[test]
@@ -720,6 +754,7 @@ fn billing_fetched_non_silent_pushes_scrollback_message() {
         on_demand_cap_cents: Some(1000),
         on_demand_used_cents: Some(350),
         period_end_display: Some("Jul 1, 00:00".into()),
+        period_end_at: None,
         ..test_bal(75.5)
     };
     dispatch_billing(&mut app, Some(bal), false, None);
@@ -751,6 +786,7 @@ fn usage_billing_console_live_with_prepaid_names_console_team_prepaid() {
         usage_pct: 100.0,
         effective_usage_pct: 100.0,
         period_end_display: Some("Jul 30, 12:00".into()),
+        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
@@ -758,12 +794,14 @@ fn usage_billing_console_live_with_prepaid_names_console_team_prepaid() {
         prepaid_balance_cents: Some(996),
         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
         is_unified_billing_user: None,
+        grok_build_usage_pct: None,
+        included_usage_known: true,
     };
 
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
             silent: false,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -816,18 +854,21 @@ fn usage_billing_console_live_without_prepaid_honest_gap_not_supergrok_extras() 
         usage_pct: 100.0,
         effective_usage_pct: 100.0,
         period_end_display: Some("Jul 30, 12:00".into()),
+        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
         prepaid_balance_cents: Some(996),
         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
         is_unified_billing_user: None,
+        grok_build_usage_pct: None,
+        included_usage_known: true,
     };
 
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
             silent: false,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -927,6 +968,7 @@ fn billing_fetched_propagates_balance_to_agent() {
         on_demand_cap_cents: Some(5000),
         on_demand_used_cents: Some(1200),
         period_end_display: Some("Aug 15, 00:00".into()),
+        period_end_at: None,
         ..test_bal(88.0)
     };
     dispatch_billing(&mut app, Some(bal), true, None);
@@ -959,7 +1001,7 @@ fn billing_fetched_stores_autotopup_on_app_and_agent() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(autotopup),
@@ -990,7 +1032,7 @@ fn billing_fetched_unchanged_autotopup_keeps_cached_rule() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal()),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal())),
             silent: true,
             subscription_tier: None,
             autotopup: resolved,
@@ -1003,7 +1045,7 @@ fn billing_fetched_unchanged_autotopup_keeps_cached_rule() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal()),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal())),
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -1024,10 +1066,12 @@ fn billing_fetched_cleared_autotopup_resets_cache() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(crate::views::credit_bar::CreditBalance {
-                prepaid_balance_cents: Some(1500),
-                ..test_bal(100.0)
-            }),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(
+                crate::views::credit_bar::CreditBalance {
+                    prepaid_balance_cents: Some(1500),
+                    ..test_bal(100.0)
+                },
+            )),
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(
@@ -1047,7 +1091,7 @@ fn billing_fetched_cleared_autotopup_resets_cache() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(test_bal(50.0)),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(test_bal(50.0))),
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Cleared,
@@ -1069,7 +1113,7 @@ fn app_billing_fetched_stores_autotopup() {
     };
     dispatch(
         Action::TaskComplete(TaskResult::AppBillingFetched {
-            balance: Some(bal),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(
                 crate::views::credit_bar::AutoTopupInfo::disabled(),
             ),
@@ -1123,6 +1167,422 @@ fn billing_error_non_silent_pushes_error_message() {
         before + 1,
         "non-silent billing error should push an error message"
     );
+}
+
+// ── Strengthened billing contracts (critic 2026-08-03) ──────────────
+
+/// Named contract: None balance clears SuperGrok on **agent** and app.
+#[test]
+fn billing_fetched_none_clears_agent_and_app_credit_balance() {
+    let mut app = test_app_with_agent();
+    dispatch_billing(&mut app, Some(test_bal(80.0)), true, None);
+    assert!(app.credit_balance.is_some());
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .credit_balance
+            .is_some()
+    );
+    dispatch_billing(&mut app, None, true, None);
+    assert!(
+        app.credit_balance.is_none(),
+        "app SuperGrok cache must clear"
+    );
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .credit_balance
+            .is_none(),
+        "agent SuperGrok cache must clear (footer often reads agent first)"
+    );
+}
+
+/// Named contract: SuperGrok path fail + console prepaid → keep last SuperGrok.
+#[test]
+fn fetch_billing_supergrok_error_with_console_prepaid_keeps_prior_supergrok_balance() {
+    use crate::views::credit_bar::{CreditBalanceFetch, credit_balance_fetch_from_supergrok_path};
+
+    // Pure policy: SuperGrok fail never becomes Resolved(None).
+    assert!(matches!(
+        credit_balance_fetch_from_supergrok_path(false, None),
+        CreditBalanceFetch::Unchanged
+    ));
+    assert!(matches!(
+        credit_balance_fetch_from_supergrok_path(true, None),
+        CreditBalanceFetch::Resolved(None)
+    ));
+
+    let mut app = test_app_with_agent();
+    dispatch_billing(&mut app, Some(test_bal(65.0)), true, None);
+    // SuperGrok fail while console prepaid arrives: Unchanged SuperGrok + side meter.
+    dispatch_billing_full(
+        &mut app,
+        CreditBalanceFetch::Unchanged,
+        true,
+        None,
+        crate::views::credit_bar::AutoTopupFetch::Unchanged,
+        None,
+        Some(9_900),
+    );
+    assert_eq!(
+        app.credit_balance.as_ref().map(|b| b.usage_pct),
+        Some(65.0),
+        "SuperGrok last-good must survive side-meter success"
+    );
+    assert_eq!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .credit_balance
+            .as_ref()
+            .map(|b| b.usage_pct),
+        Some(65.0),
+        "agent SuperGrok must not wipe when console prepaid updates"
+    );
+    assert_eq!(app.console_team_prepaid_cents, Some(9_900));
+    assert!(
+        app.billing_poll_wanted,
+        "console prepaid keeps poll on even when SuperGrok is Unchanged"
+    );
+}
+
+/// Named contract: SuperGrok fail + OpenRouter → keep SuperGrok + poll on.
+#[test]
+fn billing_fetched_supergrok_unchanged_with_openrouter_keeps_prior_and_poll() {
+    use crate::views::credit_bar::{CreditBalanceFetch, OpenRouterCreditBalance};
+
+    let mut app = test_app_with_agent();
+    dispatch_billing(&mut app, Some(test_bal(40.0)), true, None);
+    dispatch_billing_full(
+        &mut app,
+        CreditBalanceFetch::Unchanged,
+        true,
+        None,
+        crate::views::credit_bar::AutoTopupFetch::Unchanged,
+        Some(OpenRouterCreditBalance {
+            balance_cents: 1_250,
+        }),
+        None,
+    );
+    assert_eq!(app.credit_balance.as_ref().map(|b| b.usage_pct), Some(40.0));
+    assert_eq!(
+        app.openrouter_credit_balance
+            .as_ref()
+            .map(|o| o.balance_cents),
+        Some(1_250)
+    );
+    assert!(app.billing_poll_wanted);
+}
+
+/// Named contract: explicit SuperGrok None + console prepaid clears SuperGrok, keeps poll.
+#[test]
+fn billing_fetched_none_with_console_prepaid_keeps_poll() {
+    let mut app = test_app_with_agent();
+    dispatch_billing(&mut app, Some(test_bal(80.0)), true, None);
+    dispatch_billing_full(
+        &mut app,
+        crate::views::credit_bar::CreditBalanceFetch::Resolved(None),
+        true,
+        None,
+        crate::views::credit_bar::AutoTopupFetch::Unchanged,
+        None,
+        Some(500),
+    );
+    assert!(
+        app.credit_balance.is_none(),
+        "explicit no-config clears SuperGrok"
+    );
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .credit_balance
+            .is_none()
+    );
+    assert_eq!(app.console_team_prepaid_cents, Some(500));
+    assert!(
+        app.billing_poll_wanted,
+        "console prepaid must keep billing_poll_wanted"
+    );
+}
+
+/// Named contract: explicit SuperGrok None + OpenRouter clears SuperGrok, keeps poll.
+#[test]
+fn billing_fetched_none_with_openrouter_keeps_poll() {
+    use crate::views::credit_bar::OpenRouterCreditBalance;
+
+    let mut app = test_app_with_agent();
+    dispatch_billing(&mut app, Some(test_bal(80.0)), true, None);
+    dispatch_billing_full(
+        &mut app,
+        crate::views::credit_bar::CreditBalanceFetch::Resolved(None),
+        true,
+        None,
+        crate::views::credit_bar::AutoTopupFetch::Unchanged,
+        Some(OpenRouterCreditBalance { balance_cents: 100 }),
+        None,
+    );
+    assert!(app.credit_balance.is_none());
+    assert!(app.billing_poll_wanted);
+}
+
+/// Named contract: unknown included (placeholder 0) forces poll; summary is not "0%".
+#[test]
+fn billing_fetched_unknown_included_keeps_poll_and_honest_placeholder() {
+    let mut app = test_app_with_agent();
+    assert!(!app.billing_poll_wanted);
+    dispatch_billing(&mut app, Some(test_bal_unknown()), false, None);
+    assert!(
+        app.billing_poll_wanted,
+        "unknown included must force poll (do not stick at fake 0%)"
+    );
+    assert!(
+        app.credit_balance
+            .as_ref()
+            .is_some_and(|b| !b.included_usage_known)
+    );
+    let text = last_system_text(&app, AgentId(0));
+    assert!(
+        text.contains("not yet available"),
+        "unknown included must not claim known 0%: {text}"
+    );
+    assert!(!text.contains("0%"), "got {text}");
+}
+
+/// Named contract: true wire 0% (known) does not force poll; paints 0%.
+#[test]
+fn billing_fetched_true_zero_included_known_does_not_force_poll() {
+    let mut app = test_app_with_agent();
+    app.billing_poll_wanted = true;
+    let bal = test_bal(0.0);
+    assert!(bal.included_usage_known);
+    dispatch_billing(&mut app, Some(bal), false, None);
+    assert!(
+        !app.billing_poll_wanted,
+        "true 0% known and far from exhaust must not force poll"
+    );
+    let text = last_system_text(&app, AgentId(0));
+    assert!(text.contains("0%"), "true zero must paint known 0%: {text}");
+    assert!(
+        !text.contains("not yet available"),
+        "true zero is not the unknown path: {text}"
+    );
+}
+
+/// Named contract: silent BillingError leaves cache, poll, and scrollback alone.
+#[test]
+fn billing_error_silent_preserves_cached_balance_and_poll() {
+    let mut app = test_app_with_agent();
+    dispatch_billing(&mut app, Some(test_bal(72.0)), true, None);
+    app.billing_poll_wanted = true;
+    let before = agent_scrollback_len(&app);
+    dispatch(
+        Action::TaskComplete(TaskResult::BillingError {
+            agent_id: AgentId(0),
+            error: "network timeout".into(),
+            silent: true,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.credit_balance.as_ref().map(|b| b.usage_pct),
+        Some(72.0),
+        "silent error must keep last-good SuperGrok"
+    );
+    assert!(
+        app.billing_poll_wanted,
+        "silent error must not flip poll flag"
+    );
+    assert_eq!(agent_scrollback_len(&app), before);
+}
+
+/// Named contract: None + Cleared autotopup resets rule on app and agent.
+#[test]
+fn billing_fetched_none_with_cleared_autotopup_resets_rule() {
+    let mut app = test_app_with_agent();
+    dispatch_billing_full(
+        &mut app,
+        crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(
+            crate::views::credit_bar::CreditBalance {
+                prepaid_balance_cents: Some(1500),
+                ..test_bal(50.0)
+            },
+        )),
+        true,
+        None,
+        crate::views::credit_bar::AutoTopupFetch::Resolved(
+            crate::views::credit_bar::AutoTopupInfo {
+                enabled: true,
+                topup_amount_cents: Some(2000),
+                max_amount_cents: None,
+            },
+        ),
+        None,
+        None,
+    );
+    assert!(app.auto_topup.is_some());
+    dispatch_billing_full(
+        &mut app,
+        crate::views::credit_bar::CreditBalanceFetch::Resolved(None),
+        true,
+        None,
+        crate::views::credit_bar::AutoTopupFetch::Cleared,
+        None,
+        None,
+    );
+    assert!(app.auto_topup.is_none());
+    assert!(app.agents.get(&AgentId(0)).unwrap().auto_topup.is_none());
+    assert!(app.credit_balance.is_none());
+}
+
+/// Named contract: unknown included must not feed ranking / exhaust side effects.
+#[test]
+fn remember_active_skipped_when_included_usage_unknown() {
+    use crate::views::credit_bar::should_apply_included_usage_side_effects;
+
+    let unknown = test_bal_unknown();
+    assert!(
+        !should_apply_included_usage_side_effects(&unknown),
+        "placeholder 0 + unknown must not feed ranking or exhaust"
+    );
+    let known = test_bal(0.0);
+    assert!(
+        should_apply_included_usage_side_effects(&known),
+        "true known zero may feed ranking/exhaust"
+    );
+    let known_high = test_bal(100.0);
+    assert!(should_apply_included_usage_side_effects(&known_high));
+}
+
+/// Named contract: SuperGrok prepaid extras field stays distinct from console cents.
+#[test]
+fn billing_fetched_console_prepaid_does_not_mutate_supergrok_prepaid_field() {
+    let mut app = test_app_with_agent();
+    let bal = crate::views::credit_bar::CreditBalance {
+        prepaid_balance_cents: Some(996),
+        ..test_bal(55.0)
+    };
+    dispatch_billing_full(
+        &mut app,
+        crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
+        true,
+        None,
+        crate::views::credit_bar::AutoTopupFetch::Unchanged,
+        None,
+        Some(12_500),
+    );
+    assert_eq!(
+        app.credit_balance
+            .as_ref()
+            .and_then(|b| b.prepaid_balance_cents),
+        Some(996),
+        "SuperGrok extras cents stay on CreditBalance"
+    );
+    assert_eq!(
+        app.console_team_prepaid_cents,
+        Some(12_500),
+        "console team prepaid is a separate slot"
+    );
+    // Console cents must not appear as SuperGrok prepaid.
+    assert_ne!(
+        app.credit_balance
+            .as_ref()
+            .and_then(|b| b.prepaid_balance_cents),
+        app.console_team_prepaid_cents
+    );
+}
+
+/// Named contract: None + tier still clears SuperGrok and can update tier.
+#[test]
+fn billing_fetched_none_with_tier_updates_tier_and_clears_balance() {
+    let mut app = test_app_with_agent();
+    dispatch_billing(&mut app, Some(test_bal(80.0)), true, None);
+    dispatch_billing(&mut app, None, true, Some("supergrok_heavy".into()));
+    assert!(app.credit_balance.is_none());
+    assert_eq!(app.subscription_tier.as_deref(), Some("supergrok_heavy"));
+    assert!(!app.billing_poll_wanted);
+}
+
+/// Named contract: AppBillingFetched None clears app SuperGrok cache.
+#[test]
+fn app_billing_fetched_none_clears_app_credit_balance() {
+    let mut app = test_app_with_agent();
+    dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(test_bal(33.0))),
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            openrouter_balance: None,
+            console_team_prepaid_cents: None,
+        }),
+        &mut app,
+    );
+    assert!(app.credit_balance.is_some());
+    dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(None),
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            openrouter_balance: None,
+            console_team_prepaid_cents: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.credit_balance.is_none(),
+        "app path must clear SuperGrok on explicit no-config"
+    );
+}
+
+/// Named contract: AppBillingFetched Unchanged keeps prior SuperGrok (side fail path).
+#[test]
+fn app_billing_fetched_unchanged_keeps_prior_supergrok() {
+    let mut app = test_app_with_agent();
+    dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(test_bal(22.0))),
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            openrouter_balance: None,
+            console_team_prepaid_cents: None,
+        }),
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: crate::views::credit_bar::CreditBalanceFetch::Unchanged,
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            openrouter_balance: None,
+            console_team_prepaid_cents: Some(100),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.credit_balance.as_ref().map(|b| b.usage_pct),
+        Some(22.0),
+        "app Unchanged must not wipe SuperGrok when side meters update"
+    );
+    assert_eq!(app.console_team_prepaid_cents, Some(100));
+}
+
+/// Named contract: unknown included on app path is honest (not known zero).
+#[test]
+fn app_billing_fetched_unknown_included_does_not_invent_known_zero() {
+    let mut app = test_app_with_agent();
+    dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(
+                test_bal_unknown(),
+            )),
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            openrouter_balance: None,
+            console_team_prepaid_cents: None,
+        }),
+        &mut app,
+    );
+    let bal = app.credit_balance.as_ref().expect("Some bal");
+    assert!(!bal.included_usage_known);
+    assert_eq!(bal.usage_pct, 0.0);
+    assert!(!crate::views::credit_bar::should_apply_included_usage_side_effects(bal));
 }
 
 // ── Free-usage paywall tests ────────────────────────────────────────

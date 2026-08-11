@@ -130,6 +130,53 @@ pub(super) fn should_intercept_exit_plan_approval(
     }
     true
 }
+
+/// Client-facing and wire names for the exit-plan-mode gate tool.
+pub(super) fn is_exit_plan_mode_tool_name(name: &str) -> bool {
+    matches!(name, "exit_plan_mode" | "ExitPlanMode")
+}
+
+/// When a multi-tool batch includes both normal tools and `exit_plan_mode`,
+/// split so non-exit tools run to completion first.
+///
+/// Named contract: a same-turn rewrite of session `plan.md` (or any other
+/// co-batched tool) must finish before `exit_plan_mode` parks approval and
+/// re-reads the plan. Otherwise prepare awaits the operator while the write
+/// is only prepared, not dispatched, so the panel and post-approve tool body
+/// freeze the pre-write plan (dogfood 2026-08-09: secrets plan rewritten in
+/// the same turn as exit still presented "Deploy automation").
+///
+/// Returns `Ok((others, exits))` when a split is needed, or `Err(original)`
+/// when the batch is exit-only / has no exit (caller keeps the original order).
+pub(super) fn split_tool_batch_before_exit_plan_mode(
+    tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
+) -> Result<
+    (
+        Vec<crate::sampling::types::ToolCallResponse>,
+        Vec<crate::sampling::types::ToolCallResponse>,
+    ),
+    Vec<crate::sampling::types::ToolCallResponse>,
+> {
+    let has_exit = tool_calls
+        .iter()
+        .any(|c| is_exit_plan_mode_tool_name(&c.function.name));
+    let has_other = tool_calls
+        .iter()
+        .any(|c| !is_exit_plan_mode_tool_name(&c.function.name));
+    if !has_exit || !has_other {
+        return Err(tool_calls);
+    }
+    let mut others = Vec::with_capacity(tool_calls.len());
+    let mut exits = Vec::new();
+    for call in tool_calls {
+        if is_exit_plan_mode_tool_name(&call.function.name) {
+            exits.push(call);
+        } else {
+            others.push(call);
+        }
+    }
+    Ok((others, exits))
+}
 /// Verdict for a tool call evaluated against the plan-mode edit gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlanEditGate {
@@ -138,6 +185,21 @@ pub(super) enum PlanEditGate {
     /// Grok-toolset edit outside the plan file (plan-file-only rule).
     RejectNonPlanFile,
 }
+/// Verdict for `ask_user_question` while plan mode is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlanAskUserGate {
+    /// Execute normally (plan mode inactive, or not the questionnaire tool).
+    Allow,
+    /// Plan mode active: multi-choice questionnaires are hard-blocked.
+    RejectQuestionnaire,
+}
+/// Model-facing rejection when the model still calls `ask_user_question`
+/// during plan mode (tool list should already omit it; this is fail-closed).
+pub(super) const PLAN_MODE_ASK_USER_REJECTED_MESSAGE: &str = "\
+Rejected: multi-choice questionnaires (ask_user_question) are not allowed in plan mode. \
+Put open questions as plain bullets in the plan file or freeform chat, then call \
+exit_plan_mode to present the plan. Do not use the questionnaire interface while planning \
+unless the user explicitly asked for legacy modal plan questions (for example /plan --legacy).";
 /// Gate edit-class tool calls while plan mode is active.
 ///
 /// Plan mode is read-only **in every permission mode, including
@@ -162,7 +224,8 @@ pub(super) enum PlanEditGate {
 /// Non-edit tools (bash, read, grep, MCP, web) are never gated here; they
 /// flow to the normal permission path, where yolo may still auto-approve
 /// them. `enter_plan_mode` / `exit_plan_mode` map to `AccessKind::Read` and
-/// are likewise never gated.
+/// are likewise never gated. Questionnaire blocking is a separate gate
+/// ([`plan_mode_ask_user_gate`]).
 pub(super) fn plan_mode_edit_gate(
     tracker: &crate::session::plan_mode::PlanModeTracker,
     tool_input: &ToolInput,
@@ -177,6 +240,30 @@ pub(super) fn plan_mode_edit_gate(
             PlanEditGate::RejectNonPlanFile
         }
         _ => PlanEditGate::Allow,
+    }
+}
+/// Hard-block `ask_user_question` while plan mode is **Active**.
+///
+/// Soft prompt bans are not enough: if the tool stays in the toolset, models
+/// still open multi-choice questionnaires for plan clarifications. The
+/// advertised tool list already omits it ([`filter_cursor_tools_by_plan_mode`]);
+/// this gate rejects any call that still arrives (stale list, forced call).
+///
+/// Default: reject whenever plan mode is Active. Outside Active (Inactive /
+/// Pending / ExitPending) the tool is allowed so non-plan sessions and
+/// non-plan use keep working. Explicit legacy `/plan --legacy` opt-in is not
+/// wired as a product flag yet; until then default plan mode always fails
+/// closed.
+pub(super) fn plan_mode_ask_user_gate(
+    tracker: &crate::session::plan_mode::PlanModeTracker,
+    tool_input: &ToolInput,
+) -> PlanAskUserGate {
+    if !tracker.is_active() {
+        return PlanAskUserGate::Allow;
+    }
+    match tool_input {
+        ToolInput::AskUserQuestion(_) => PlanAskUserGate::RejectQuestionnaire,
+        _ => PlanAskUserGate::Allow,
     }
 }
 /// Typed view of an `exit_plan_mode` approval decision. The wire type
@@ -224,16 +311,60 @@ fn ext_method_no_client(err: &acp::Error) -> bool {
 /// Model-facing turn injected after a resumed plan is approved.
 const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
     "The user approved the plan. Implement the plan in plan.md.";
+
+/// Mid-turn tool result after a real plan-panel Approve (not soft-park alone,
+/// not always-approve permission mode, not bare `exit_plan_mode` tool success).
+fn approved_exit_plan_tool_message(plan_content: Option<&str>, plan_path_display: &str) -> String {
+    match plan_content {
+        Some(content) if !content.trim().is_empty() => format!(
+            "The user approved the plan via the plan panel CTAs. You can now implement. \
+             Implement the plan file at {plan_path_display}. The plan body below was re-read \
+             from disk at approval time; use it rather than earlier draft plan titles in this \
+             conversation.\n\n## Plan:\n{content}"
+        ),
+        _ => format!(
+            "The user approved exiting plan mode via the plan panel CTAs. \
+             No plan content was found at {plan_path_display} — you can proceed."
+        ),
+    }
+}
+
+/// No interactive client for `x.ai/exit_plan_mode` (headless / SDK). Plan mode
+/// exits with the plan body, but this is **not** a plan-panel Approve click.
+fn no_client_exit_plan_tool_message(plan_content: Option<&str>, plan_path_display: &str) -> String {
+    match plan_content {
+        Some(content) if !content.trim().is_empty() => format!(
+            "No interactive plan panel is available. Plan mode is exiting with the plan at \
+             {plan_path_display}. This is NOT a plan-panel Approve click and not operator \
+             auto-approve from always-approve permission mode. Proceed only when your \
+             environment does not require interactive plan approval.\n\n## Plan:\n{content}"
+        ),
+        _ => format!(
+            "No interactive plan panel is available. Plan mode is exiting; no plan content \
+             was found at {plan_path_display}. This is NOT a plan-panel Approve click."
+        ),
+    }
+}
+
 /// Shared "revise the plan" message for the request-changes outcome, used by
 /// both the mid-turn intercept and the resume re-park.
 fn revise_plan_message(feedback: &str) -> String {
     let feedback = feedback.trim();
     if feedback.is_empty() {
-        "The user wants to revise the plan. \
-         Ask the user what changes they would like to make."
+        // Bare Revise CTA (no freeform): unpark is already done. Do not stall
+        // only on "what should change?" — rewrite from conversation context
+        // when possible, then re-present with exit_plan_mode.
+        "The user clicked Revise without written notes. Stay in plan mode. \
+         Rewrite plan.md based on the conversation and any earlier feedback. \
+         If the needed change is genuinely unclear, ask one short question, \
+         then revise. When the plan is ready, call exit_plan_mode again."
             .to_string()
     } else {
-        format!("The user wants to revise the plan. The user said:\n{feedback}")
+        format!(
+            "The user wants to revise the plan. Stay in plan mode, rewrite \
+             plan.md from their notes, then call exit_plan_mode again.\n\n\
+             The user said:\n{feedback}"
+        )
     }
 }
 /// Shared clarifying-question message for the Questions outcome (not a rewrite).
@@ -309,6 +440,49 @@ impl SessionActor {
         &self,
         tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
     ) -> Result<ToolLoop, acp::Error> {
+        // Same-batch write(plan.md) + exit_plan_mode: run non-exit tools to
+        // completion first so prepare's plan re-read and soft-park see the
+        // rewritten body (not a pre-write snapshot frozen while write sits
+        // only in the prepared queue).
+        let tool_calls = match split_tool_batch_before_exit_plan_mode(tool_calls) {
+            Ok((others, exits)) => {
+                let first = Box::pin(self.execute_tool_calls(others)).await?;
+                match &first {
+                    ToolLoop::Continue => {}
+                    other => {
+                        for call in exits {
+                            let message = match other {
+                                ToolLoop::PermissionReject { .. } => format!(
+                                    "Tool execution cancelled due to earlier permission rejection for tool `{}`",
+                                    call.function.name
+                                ),
+                                ToolLoop::Cancelled => format!(
+                                    "Tool execution cancelled due to earlier user cancellation for tool `{}`",
+                                    call.function.name
+                                ),
+                                ToolLoop::FollowupMessage(_) => format!(
+                                    "Tool execution cancelled due to earlier user followup message for tool `{}`",
+                                    call.function.name
+                                ),
+                                _ => format!(
+                                    "Tool execution cancelled for tool `{}`",
+                                    call.function.name
+                                ),
+                            };
+                            self.chat_state_handle
+                                .push_tool_result(ConversationItem::tool_result(
+                                    call.id.clone(),
+                                    message,
+                                ));
+                        }
+                        return Ok(first);
+                    }
+                }
+                return Box::pin(self.execute_tool_calls(exits)).await;
+            }
+            Err(unchanged) => unchanged,
+        };
+
         if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
             tracing::Span::current().record("model_id", cfg.model.as_str());
         }
@@ -929,7 +1103,31 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
-        let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
+        let (ask_gate, plan_gate) = {
+            let tracker = self.plan_mode.lock();
+            (
+                plan_mode_ask_user_gate(&tracker, &tool_input),
+                plan_mode_edit_gate(&tracker, &tool_input, &access_kind),
+            )
+        };
+        if ask_gate != PlanAskUserGate::Allow {
+            tracing::info_span!(
+                "tool.decision",
+                tool_name = %call.function.name,
+                tool_use_id = %call.id,
+                decision = "deny",
+                source = "plan_mode_ask_user",
+                wait_ms = 0_i64,
+            )
+            .in_scope(|| {});
+            self.handle_tool_not_executed(
+                &call.id,
+                &tool_call_id,
+                PLAN_MODE_ASK_USER_REJECTED_MESSAGE.to_owned(),
+            )
+            .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(
                 "tool.decision",
@@ -1459,12 +1657,68 @@ impl SessionActor {
                         return Ok(Err(ToolLoop::Continue));
                     }
                     PlanApprovalOutcome::Approved => {
-                        tracing::info!("[exit_plan_mode] user approved — executing tool");
+                        // Real panel CTA only. Do not run exit_plan_mode tool body
+                        // (its result is present-only and must not claim approval).
+                        tracing::info!(
+                            "[exit_plan_mode] user approved via plan panel — leaving plan mode"
+                        );
+                        self.leave_plan_mode_to_default();
+                        // Re-read disk at decision time so soft-park rewrites win.
+                        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
+                        let fresh = match tokio::fs::read_to_string(&plan_path).await {
+                            Ok(s) if !s.trim().is_empty() => Some(s),
+                            _ => None,
+                        };
+                        let path_display = plan_path.display().to_string();
+                        let message =
+                            approved_exit_plan_tool_message(fresh.as_deref(), &path_display);
+                        let tool_update = acp::ToolCallUpdate::new(
+                            tool_call_id.clone(),
+                            acp::ToolCallUpdateFields::new()
+                                .status(Some(acp::ToolCallStatus::Completed))
+                                .title(Some("Plan mode exited".to_string()))
+                                .content(Some(vec![acp::ToolCallContent::from(
+                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
+                                )])),
+                        );
+                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                            .await;
+                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                        self.chat_state_handle.push_tool_result(tool_chat);
+                        return Ok(Err(ToolLoop::Continue));
                     }
                 },
                 Err(err) => {
                     if ext_method_no_client(&err) {
-                        tracing::debug!(%err, "exit_plan_mode: no client wired; executing tool");
+                        // Headless / no UI: exit plan mode with honest no-panel
+                        // copy. Never claim plan-panel Approve or always-approve.
+                        tracing::debug!(
+                            %err,
+                            "exit_plan_mode: no client wired; leaving plan mode without panel approve"
+                        );
+                        self.leave_plan_mode_to_default();
+                        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
+                        let fresh = match tokio::fs::read_to_string(&plan_path).await {
+                            Ok(s) if !s.trim().is_empty() => Some(s),
+                            _ => plan_content.clone(),
+                        };
+                        let path_display = plan_path.display().to_string();
+                        let message =
+                            no_client_exit_plan_tool_message(fresh.as_deref(), &path_display);
+                        let tool_update = acp::ToolCallUpdate::new(
+                            tool_call_id.clone(),
+                            acp::ToolCallUpdateFields::new()
+                                .status(Some(acp::ToolCallStatus::Completed))
+                                .title(Some("Plan mode exited".to_string()))
+                                .content(Some(vec![acp::ToolCallContent::from(
+                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
+                                )])),
+                        );
+                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                            .await;
+                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                        self.chat_state_handle.push_tool_result(tool_chat);
+                        return Ok(Err(ToolLoop::Continue));
                     } else {
                         tracing::info!(
                             %err,
@@ -2907,7 +3161,20 @@ mod execute_tool_call_parts_tests {
 }
 #[cfg(test)]
 mod exit_plan_intercept_tests {
-    use super::{PlanFileRead, classify_plan_file_read, should_intercept_exit_plan_approval};
+    use super::{
+        PlanFileRead, classify_plan_file_read, is_exit_plan_mode_tool_name,
+        should_intercept_exit_plan_approval, split_tool_batch_before_exit_plan_mode,
+    };
+    use crate::sampling::types::{ToolCallFunction, ToolCallResponse};
+
+    fn call(id: &str, name: &str) -> ToolCallResponse {
+        ToolCallResponse {
+            id: id.to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunction::new(name, "{}"),
+        }
+    }
+
     #[test]
     fn exit_plan_mode_empty_plan_still_intercepts() {
         assert!(should_intercept_exit_plan_approval(
@@ -2925,6 +3192,52 @@ mod exit_plan_intercept_tests {
             false,
             &PlanFileRead::Present("plan body".into()),
         ));
+    }
+
+    #[test]
+    fn is_exit_plan_mode_tool_name_matches_wire_and_client_ids() {
+        assert!(is_exit_plan_mode_tool_name("exit_plan_mode"));
+        assert!(is_exit_plan_mode_tool_name("ExitPlanMode"));
+        assert!(!is_exit_plan_mode_tool_name("write"));
+        assert!(!is_exit_plan_mode_tool_name("enter_plan_mode"));
+    }
+
+    /// Named contract: same-batch write + exit_plan_mode must run the write
+    /// pass first so park/re-read sees the rewritten plan.md, not a freeze of
+    /// the pre-write body.
+    #[test]
+    fn split_tool_batch_runs_non_exit_before_exit_plan_mode() {
+        let batch = vec![
+            call("w1", "write"),
+            call("t1", "todo_write"),
+            call("e1", "exit_plan_mode"),
+            call("e2", "ExitPlanMode"),
+        ];
+        let (others, exits) =
+            split_tool_batch_before_exit_plan_mode(batch).expect("mixed batch must split");
+        assert_eq!(
+            others
+                .iter()
+                .map(|c| c.function.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["write", "todo_write"]
+        );
+        assert_eq!(
+            exits
+                .iter()
+                .map(|c| c.function.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["exit_plan_mode", "ExitPlanMode"]
+        );
+        assert_eq!(others[0].id, "w1");
+        assert_eq!(exits[0].id, "e1");
+    }
+
+    #[test]
+    fn split_tool_batch_skips_when_exit_only_or_no_exit() {
+        assert!(split_tool_batch_before_exit_plan_mode(vec![call("e", "exit_plan_mode")]).is_err());
+        assert!(split_tool_batch_before_exit_plan_mode(vec![call("w", "write")]).is_err());
+        assert!(split_tool_batch_before_exit_plan_mode(vec![]).is_err());
     }
     #[test]
     fn create_plan_empty_still_intercepts() {
@@ -2996,7 +3309,10 @@ mod exit_plan_intercept_tests {
 }
 #[cfg(test)]
 mod plan_mode_edit_gate_tests {
-    use super::{PlanEditGate, plan_mode_edit_gate};
+    use super::{
+        PLAN_MODE_ASK_USER_REJECTED_MESSAGE, PlanAskUserGate, PlanEditGate,
+        plan_mode_ask_user_gate, plan_mode_edit_gate,
+    };
     use crate::session::plan_mode::PlanModeTracker;
     use xai_grok_tools::types::ToolInput;
     use xai_grok_workspace::permission::AccessKind;
@@ -3010,6 +3326,25 @@ mod plan_mode_edit_gate_tests {
     }
     fn gate(tracker: &PlanModeTracker, input: &ToolInput) -> PlanEditGate {
         plan_mode_edit_gate(tracker, input, &AccessKind::from(input))
+    }
+    fn ask_user_input() -> ToolInput {
+        use xai_grok_tools::implementations::grok_build::ask_user_question::{
+            AskUserQuestionInput, Question, QuestionOption,
+        };
+        ToolInput::AskUserQuestion(AskUserQuestionInput {
+            questions: vec![Question {
+                question: "Which follow-ups?".into(),
+                options: vec![QuestionOption {
+                    label: "A".into(),
+                    description: "option a".into(),
+                    preview: None,
+                    id: None,
+                }],
+                multi_select: None,
+                id: None,
+            }],
+            use_id_keyed_format: false,
+        })
     }
     fn search_replace(path: &str) -> ToolInput {
         use xai_grok_tools::implementations::grok_build::search_replace::SearchReplaceInput;
@@ -3109,12 +3444,57 @@ mod plan_mode_edit_gate_tests {
             "Pending means the model has no plan-mode instructions yet — don't gate"
         );
     }
+    /// Active plan mode hard-rejects ask_user_question (fail-closed even if
+    /// the tool somehow remains in the model tool list).
+    #[test]
+    fn active_plan_mode_rejects_ask_user_question() {
+        let t = active_tracker();
+        assert_eq!(
+            plan_mode_ask_user_gate(&t, &ask_user_input()),
+            PlanAskUserGate::RejectQuestionnaire
+        );
+        assert!(
+            PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("ask_user_question"),
+            "rejection must name the blocked tool"
+        );
+        assert!(
+            PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("plan file")
+                || PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("exit_plan_mode"),
+            "rejection must steer to plan.md / exit_plan_mode"
+        );
+    }
+    /// Outside Active plan mode, ask_user_question stays available (non-plan
+    /// sessions and general interactive Q&A).
+    #[test]
+    fn inactive_or_pending_allows_ask_user_question() {
+        let inactive = PlanModeTracker::new(std::path::PathBuf::from("/tmp/gate-session"));
+        assert_eq!(
+            plan_mode_ask_user_gate(&inactive, &ask_user_input()),
+            PlanAskUserGate::Allow
+        );
+        let mut pending = PlanModeTracker::new(std::path::PathBuf::from("/tmp/gate-session"));
+        assert!(pending.enter_pending());
+        assert_eq!(
+            plan_mode_ask_user_gate(&pending, &ask_user_input()),
+            PlanAskUserGate::Allow
+        );
+    }
+    /// Non-questionnaire tools are not blocked by the ask-user gate.
+    #[test]
+    fn ask_user_gate_does_not_block_other_tools() {
+        let t = active_tracker();
+        assert_eq!(
+            plan_mode_ask_user_gate(&t, &search_replace("/tmp/src/main.rs")),
+            PlanAskUserGate::Allow
+        );
+    }
 }
 #[cfg(test)]
 mod plan_approval_helper_tests {
     use super::{
-        PlanApprovalOutcome, ResumeAction, ext_method_no_client, questions_plan_message,
-        resume_action_for, revise_plan_message,
+        PlanApprovalOutcome, ResumeAction, approved_exit_plan_tool_message, ext_method_no_client,
+        no_client_exit_plan_tool_message, questions_plan_message, resume_action_for,
+        revise_plan_message,
     };
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
     fn resp(outcome: &str) -> ExitPlanModeExtResponse {
@@ -3158,11 +3538,32 @@ mod plan_approval_helper_tests {
     }
     #[test]
     fn revise_plan_message_includes_feedback_when_present() {
-        assert!(revise_plan_message("").contains("Ask the user what changes"));
-        assert!(revise_plan_message("   ").contains("Ask the user what changes"));
+        // Bare Revise (empty freeform): push rewrite + re-present, not stall-only ask.
+        let empty = revise_plan_message("");
+        assert!(
+            empty.contains("clicked Revise") || empty.contains("without written notes"),
+            "empty revise must name bare Revise CTA: {empty}"
+        );
+        assert!(
+            empty.contains("Rewrite plan.md") || empty.contains("rewrite plan.md"),
+            "empty revise must push a plan rewrite: {empty}"
+        );
+        assert!(
+            empty.contains("exit_plan_mode again"),
+            "empty revise must re-present via exit_plan_mode: {empty}"
+        );
+        let blank = revise_plan_message("   ");
+        assert!(
+            blank.contains("exit_plan_mode again"),
+            "whitespace-only freeform is empty revise: {blank}"
+        );
         let with = revise_plan_message("use async");
         assert!(with.contains("The user said:"));
         assert!(with.contains("use async"));
+        assert!(
+            with.contains("exit_plan_mode again"),
+            "feedback revise must still re-present: {with}"
+        );
     }
     #[test]
     fn questions_plan_message_is_not_revise_and_forbids_rewrite() {
@@ -3210,6 +3611,61 @@ mod plan_approval_helper_tests {
             }
             other => panic!("expected StayAndAnswer, got {other:?}"),
         }
+    }
+
+    /// Named contract: only a real plan-panel Approve may tell the model to
+    /// implement. Bare soft-park / tool present language must not appear here.
+    #[test]
+    fn approved_exit_plan_message_names_panel_cta_and_embeds_body() {
+        let msg = approved_exit_plan_tool_message(Some("# Plan\nstep A\n"), "/tmp/s/plan.md");
+        assert!(
+            msg.contains("via the plan panel CTAs"),
+            "must name real panel Approve: {msg}"
+        );
+        assert!(
+            msg.contains("You can now implement") || msg.contains("implement"),
+            "must allow implement after real approve: {msg}"
+        );
+        assert!(msg.contains("step A"), "must embed re-read body: {msg}");
+        assert!(
+            msg.contains("re-read from disk at approval time"),
+            "must name post-approve disk re-read: {msg}"
+        );
+        assert!(
+            !msg.contains("NOT operator approval"),
+            "approved path must not use present-only copy: {msg}"
+        );
+    }
+
+    #[test]
+    fn approved_exit_plan_message_empty_plan_still_names_panel() {
+        let msg = approved_exit_plan_tool_message(None, "/tmp/s/plan.md");
+        assert!(msg.contains("via the plan panel CTAs"), "{msg}");
+        assert!(
+            msg.contains("No plan content") || msg.contains("no plan content"),
+            "{msg}"
+        );
+    }
+
+    /// Named contract: no-client / headless must not claim plan-panel Approve
+    /// or always-approve auto-approve.
+    #[test]
+    fn no_client_exit_plan_message_does_not_claim_panel_approve() {
+        let msg = no_client_exit_plan_tool_message(Some("# P\nok\n"), "/tmp/s/plan.md");
+        let lower = msg.to_lowercase();
+        assert!(
+            lower.contains("not a plan-panel approve") || lower.contains("not a plan panel"),
+            "must deny panel approve: {msg}"
+        );
+        assert!(
+            !lower.contains("has been approved") && !lower.contains("you can now start coding"),
+            "must not use false-approve tool copy: {msg}"
+        );
+        assert!(
+            lower.contains("always-approve") || lower.contains("permission mode"),
+            "must clarify always-approve is not plan approve: {msg}"
+        );
+        assert!(msg.contains("ok"), "must still embed plan: {msg}");
     }
 }
 #[cfg(test)]

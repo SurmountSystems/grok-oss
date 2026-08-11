@@ -19,7 +19,8 @@ You can use it interactively as a full-screen TUI, run it headlessly for scripti
 
 ```bash
 # From a clone of SurmountSystems/grok-oss
-cargo install --path crates/codegen/xai-grok-pager-bin --locked --force
+just install
+# or: cargo install --path crates/codegen/xai-grok-pager-bin --locked --force
 grok-oss --version
 ```
 
@@ -45,11 +46,22 @@ Verify Grok OSS:
 grok-oss --version
 ```
 
-Update to the latest version at any time:
+Keep Grok OSS current from a local checkout:
 
 ```bash
-grok update
+# In the TUI (rebuild + soft-relaunch live leaders + re-exec this session)
+/rebuild
+
+# Or CLI (same install + leader signal; no self re-exec)
+grok-oss rebuild
+
+# Freshness only (no install): compare this build to Surmount main
+grok-oss update --check
 ```
+
+Grok OSS does **not** auto-download SpaceXAI binaries. Prefer `/rebuild` or
+`just install` over `curl https://x.ai/cli/install.sh` (that installs upstream
+**`grok`**).
 
 ---
 
@@ -104,7 +116,7 @@ The `@` operator opens a fuzzy file picker. By default it respects `.gitignore` 
 
 ### Permissions
 
-By default, Grok asks for permission before executing shell commands or editing files. You can approve individually or toggle always-approve mode:
+By default, Grok asks for permission before executing shell commands or editing files. You can approve individually or toggle always-approve mode (skips **tool permission** prompts only — not plan panel Approve; see [Plan mode](19-plan-mode.md#present-is-not-approval)):
 
 - Press `Ctrl+O` to toggle always-approve mode
 - Use the `--yolo` flag at launch: `grok --yolo`

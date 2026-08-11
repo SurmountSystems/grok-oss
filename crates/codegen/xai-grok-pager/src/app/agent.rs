@@ -44,7 +44,7 @@ impl QueueEntryKind {
 ///
 /// Stored session-locally so the operator can leave notes while a turn,
 /// plan approval, or background subagent is running without hijacking the
-/// agent queue. Does not replace on-disk L2 join notes for agents.
+/// agent queue. Does not replace short on-disk L2 reports for agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionNote {
     /// Monotonic ID unique within this session. Never reused.
@@ -819,6 +819,14 @@ pub struct AgentSession {
     /// the input box if the user cancels before any response arrives.
     /// `None` for skill-injected prompts (cannot be reversed) and bash/cron.
     pub in_flight_prompt: Option<InFlightPrompt>,
+    /// User prompt text for durable cancel-resume across the **whole** turn.
+    ///
+    /// Set at send/drain time (including skill display text). Survives the
+    /// first-activity clear of [`Self::in_flight_prompt`] (that field is only
+    /// for pristine composer rewind). Cleared on turn start/finish. Used by
+    /// graceful Quit / SIGTERM / `killall` and Esc cancel so mid-tool or
+    /// mid-subagent death still leaves `canceled_turn_resume.json`.
+    pub cancel_resume_prompt_text: Option<String>,
     /// Prompt held across auto-compact for reauth resubmit after `/login`.
     /// `in_flight_prompt` is cleared on compact start so cancel cannot rewind.
     pub compact_held_prompt: Option<InFlightPrompt>,
@@ -902,6 +910,8 @@ impl AgentSession {
     pub fn start_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.tracker.finish_turn(scrollback);
         self.compact_held_prompt = None;
+        self.cancel_resume_prompt_text = None;
+        self.clear_process_shutdown_cancel_resume_arm_if_ours();
         self.tracker.set_session_cwd(&self.cwd);
         self.tracker.expect_user_echo();
         self.state = AgentState::TurnRunning;
@@ -918,8 +928,80 @@ impl AgentSession {
         self.credit_limit_blocked = false;
         self.free_usage_blocked = false;
         self.in_flight_prompt = None;
+        self.cancel_resume_prompt_text = None;
         self.compact_held_prompt = None;
         self.current_prompt_id = None;
+        self.clear_process_shutdown_cancel_resume_arm_if_ours();
+    }
+    /// Record non-empty user/display text for cancel-resume on process death
+    /// or Esc cancel after first activity. Empty / whitespace is ignored.
+    ///
+    /// Also **persists** `canceled_turn_resume.json` immediately (eager active
+    /// turn sidecar) so `killall` / SIGTERM races that never run the async
+    /// signal task still leave a resumeable prompt for the next session open.
+    pub fn note_cancel_resume_prompt_text(&mut self, text: &str) {
+        let t = text.trim();
+        if t.is_empty() {
+            return;
+        }
+        self.cancel_resume_prompt_text = Some(t.to_string());
+        self.publish_process_shutdown_cancel_resume_arm();
+    }
+    /// Best-effort prompt text for durable cancel-resume: whole-turn stash,
+    /// then rewind stash, then compact-held (auto-compact window).
+    pub fn prompt_text_for_cancel_resume(&self) -> Option<&str> {
+        self.cancel_resume_prompt_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                self.in_flight_prompt
+                    .as_ref()
+                    .map(|p| p.text.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+            })
+            .or_else(|| {
+                self.compact_held_prompt
+                    .as_ref()
+                    .map(|p| p.text.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+            })
+    }
+    /// Publish this session's cancel-resume payload for signal hard-exit paths
+    /// **and** write the durable marker now. No-op without session id or prompt.
+    ///
+    /// Eager disk write is required for dogfood `killall grok-oss`: both the
+    /// TUI client and the leader binary share the name; SIGTERM can race the
+    /// async signal task / event loop. A marker written at turn start still
+    /// auto-resumes on next open when config allows.
+    pub fn publish_process_shutdown_cancel_resume_arm(&self) {
+        let Some(text) = self.prompt_text_for_cancel_resume() else {
+            return;
+        };
+        let Some(sid) = self.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        xai_grok_shell::session::canceled_turn_resume::arm_and_persist_process_shutdown_cancel_resume(
+            xai_grok_shell::session::canceled_turn_resume::ProcessShutdownResumeArm {
+                cwd: self.cwd.to_string_lossy().into_owned(),
+                session_id: sid,
+                prompt_text: text.to_string(),
+                prompt_id: self.current_prompt_id.clone(),
+            },
+        );
+    }
+    /// Clear process-level signal arm when this session leaves a resumable turn.
+    pub fn clear_process_shutdown_cancel_resume_arm_if_ours(&self) {
+        let Some(sid) = self.session_id.as_ref().map(|s| s.0.as_ref()) else {
+            return;
+        };
+        if xai_grok_shell::session::canceled_turn_resume::process_shutdown_cancel_resume_arm()
+            .is_some_and(|a| a.session_id == sid)
+        {
+            xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+        }
     }
     /// Whether any background task is still running (vs. completed/failed).
     /// Used to defer the automatic away-recap: a running task can wake the
@@ -1208,6 +1290,7 @@ mod tests {
             bg_tool_call_to_task: HashMap::new(),
             scheduled_tasks: HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,

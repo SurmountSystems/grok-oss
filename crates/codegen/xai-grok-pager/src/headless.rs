@@ -822,6 +822,8 @@ fn headless_materialize_ctx(
         } else {
             crate::app::session_startup::TitleResolution::Allowed
         },
+        // Headless single-turn stays a fresh session unless -c/--resume is set.
+        auto_resume_last_for_cwd: false,
     }
 }
 
@@ -1004,7 +1006,7 @@ pub async fn run_single_turn(
     let restore_code = options.restore_code.then_some(true);
     let t_session = Instant::now();
     let opened = match materialized {
-        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None).await,
+        MaterializedStartup::NewAuto { .. } => open_session(&acp_tx, &cwd, None, None).await,
         MaterializedStartup::NewWithId { session_id } => {
             open_session_with_id(&acp_tx, &cwd, &session_id).await
         }

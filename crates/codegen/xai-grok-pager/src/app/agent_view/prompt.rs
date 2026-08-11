@@ -624,42 +624,15 @@ impl AgentView {
                     //    running turn (buffers shell-side at the next safe point).
                     // 2) Empty composer + a visible follow-up in the queue →
                     //    soft-interject the top row (same as bare empty Enter).
-                    // 3) Idle + background subagents holding the queue → force
-                    //    drain (or enqueue + force drain for non-empty text).
-                    // 4) Idle / nothing to interject → toast (never silent no-op).
+                    // 3) Idle (including live background subagents) → toast;
+                    //    plain Enter already sends a normal main turn.
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();
                     if !text.is_empty() {
                         if !turn_running {
-                            // Parent idle with live background subagents: Enter
-                            // would only queue/hold. Interject chord force-starts
-                            // the turn with this text (no cancel — nothing runs).
-                            if self.holds_queue_for_background() {
-                                if self.paste_probe_in_flight > 0 {
-                                    self.deferred_send = Some(AgentDeferredSend::Interject);
-                                    self.show_toast("Attaching image — interject when ready");
-                                    return InputOutcome::Changed;
-                                }
-                                let images = self.prompt.drain_images();
-                                self.prompt.set_text("");
-                                self.clear_unsent_prompt_draft();
-                                let queue_id = self.session.next_queue_id;
-                                self.session.next_queue_id += 1;
-                                self.session.pending_prompts.push_front(
-                                    crate::app::agent::QueuedPrompt {
-                                        images,
-                                        ..crate::app::agent::QueuedPrompt::plain(
-                                            queue_id,
-                                            text,
-                                            crate::app::agent::QueueEntryKind::Prompt,
-                                        )
-                                    },
-                                );
-                                // Toast only after force-drain succeeds (or reports
-                                // a hard gate like plan approval) — see
-                                // `dispatch_force_drain_queue`.
-                                return InputOutcome::Action(Action::ForceDrainQueue);
-                            }
+                            // Primary idle: Interject is mid-turn only. Live
+                            // background subagents do not change that — Enter
+                            // sends a normal main turn.
                             self.show_toast(
                                 "Nothing running to interject into — press Enter to send",
                             );
@@ -686,13 +659,7 @@ impl AgentView {
                         self.show_toast("Nothing queued to interject");
                         return InputOutcome::Changed;
                     }
-                    // Idle + held for background subagents: force-drain the top
-                    // local row so the chord still works without a running turn.
-                    // Toast is chosen in `dispatch_force_drain_queue` after the
-                    // drain result (success vs plan-approval / other hard gate).
-                    if self.holds_queue_for_background() && self.has_held_user_queue() {
-                        return InputOutcome::Action(Action::ForceDrainQueue);
-                    }
+                    // Primary idle: no soft-interject target. Enter sends.
                     self.show_toast("Nothing running to interject into — press Enter to send");
                     return InputOutcome::Changed;
                 }
@@ -860,15 +827,28 @@ impl AgentView {
         {
             return Some(InputOutcome::Changed);
         }
-        // Mid-turn (minimal / non-vim): cancel immediately from prompt or
-        // scrollback, even with a draft. Also — in every mode — while already
-        // cancelling, so a lost cancel notification is re-sent (Ctrl+C
-        // escalates to Quit instead). Push the grace deadline out so an Esc
-        // mash past the cancel cannot silently arm the rewind picker below.
-        if self.session.state.is_turn_running() || self.session.state.is_cancelling() {
+        // While already cancelling: re-send cancel in every mode (lost ack).
+        // Ctrl+C escalates to Quit instead. Push the post-cancel grace so an
+        // Esc mash cannot silently arm the rewind picker after the turn goes
+        // idle. Does not use double-Esc arming — the user already committed.
+        if self.session.state.is_cancelling() {
             self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Action(Action::CancelTurn));
+        }
+        // Mid-turn (minimal / non-vim): arm double-Esc cancel confirm from
+        // prompt or scrollback, even with a draft (the draft is preserved,
+        // unlike Ctrl+C's clear-first gesture). First press is harmless so
+        // Esc that only closed a modal/dropdown cannot also cancel. Second
+        // Esc within the confirm window fires CancelTurn (AppView installs
+        // the pending and sets cancel_trigger_hint + rewind grace on fire).
+        if self.session.state.is_turn_running() {
+            return Some(InputOutcome::ArmPending {
+                action: Action::CancelTurn,
+                shortcut: crate::input::key::KeyShortcut::from(*key),
+                label: Some("cancel"),
+                ttl: crate::app::app_view::esc_double_press_ttl(),
+            });
         }
 
         // The two idle arms split on pane ownership. CLEAR mutates the composer

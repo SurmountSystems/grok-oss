@@ -53,20 +53,11 @@ pub fn media_open_button_col(content_width: u16, is_video: bool) -> u16 {
     content_width.saturating_sub(label_w) / 2
 }
 
-/// Width reserved for the timestamp on message blocks.
+/// Width reserved for the timestamp (+ bubble ⧉ when both on) on message blocks.
 ///
-/// Matches the constant in `EntryRenderer::timestamp_reserved()`.
+/// Matches `EntryRenderer::timestamp_reserved()` / `message_right_chrome_reserve`.
 fn timestamp_reserved_for_block(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    if appearance.show_timestamps
-        && matches!(
-            block,
-            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-        )
-    {
-        10
-    } else {
-        0
-    }
+    crate::scrollback::wrappers::message_right_chrome_reserve(block, appearance)
 }
 
 /// A reusable scratch buffer for rendering clipped entries.
@@ -2265,8 +2256,9 @@ mod tests {
     }
 
     /// Message-style blocks (`AgentMessage`, `UserPrompt`, `Btw`)
-    /// reserve 10 columns on the right for the timestamp overlay, so their cached
-    /// output is wrapped at `content_area.width - 10`, not `content_area.width`.
+    /// reserve right columns for the timestamp overlay (plus bubble ⧉ trailing
+    /// inset when both chrome features are on), so their cached output is
+    /// wrapped at `content_area.width - reserve`, not `content_area.width`.
     ///
     /// `VisibleBlockGeometry.content_width` must report the same reduced width
     /// that was used to populate the cache; otherwise any code that re-derives
@@ -2275,9 +2267,18 @@ mod tests {
     /// slice the wrong content for the clipboard.
     #[test]
     fn message_block_content_width_subtracts_timestamp_reservation() {
-        // Picked so the message wraps to a different line count at
-        // `content_width - 10` than at `content_width`. With viewport=30
-        // and chrome=4, pane_content_width=26 and per-block content_width=16.
+        // Picked so the message wraps to a different line count at the reduced
+        // width than at full content_width. Default appearance has timestamps
+        // + bubble_copy both on → 10 + 2 trailing inset.
+        let appearance = AppearanceConfig::default();
+        let sample_block = RenderBlock::agent_message("x");
+        let reserve =
+            crate::scrollback::wrappers::message_right_chrome_reserve(&sample_block, &appearance);
+        assert!(
+            reserve >= 10,
+            "message chrome reserve must at least cover short timestamp"
+        );
+
         let entries = vec![make_markdown_entry(
             "hello world foo bar baz qux quux corge grault garply waldo",
         )];
@@ -2288,8 +2289,8 @@ mod tests {
         let block = &result.selection_model.visible_blocks[0];
         assert_eq!(
             block.content_width,
-            pane_content_width.saturating_sub(10),
-            "AgentMessage should reserve 10 cols for the timestamp"
+            pane_content_width.saturating_sub(reserve),
+            "AgentMessage should reserve {reserve} cols for timestamp (+ bubble copy when on)"
         );
 
         // The lines registered in the resolved model came from the cached

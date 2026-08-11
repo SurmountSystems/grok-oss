@@ -369,6 +369,7 @@ pub(crate) async fn run_request_task(
                         doom_max_retries,
                         &error,
                         &config,
+                        Some(backoff),
                     );
                     if sleep_or_cancel(backoff, &cancel_token).await {
                         continue;
@@ -527,24 +528,27 @@ async fn apply_retry_decision(
     // another key with balance is configured. Rotate before classify so we
     // do not surface a billing failure while failover keys remain.
     // Credit-worded 429 is also is_rate_limited(); credit path runs first.
-    if err.is_credit_exhausted()
-        && let Some(hop_reason) = try_rotate_to_failover_key(
+    // Console team credit/spend death: reinject SuperGrok recovery (clears
+    // preemptive included-full memo once) so free SuperGrok period can hop.
+    if err.is_credit_exhausted() {
+        crate::prefer_live_primary::ensure_supergrok_recovery_after_console_credit_exhaust(config);
+        if let Some(hop_reason) = try_rotate_to_failover_key(
             config,
             client,
             crate::exhausted_identity::HopCause::CreditExhausted,
-        )
-    {
-        *retry_count += 1;
-        emit_retrying_with_reason(
-            event_tx,
-            request_id,
-            *retry_count,
-            max_retries,
-            err,
-            config,
-            hop_reason,
-        );
-        return true;
+        ) {
+            *retry_count += 1;
+            emit_retrying_with_reason(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                hop_reason,
+            );
+            return true;
+        }
     }
 
     // Plain HTTP 429: hop to the next configured identity first (when any),
@@ -609,7 +613,15 @@ async fn apply_retry_decision(
     match decision {
         RetryDecision::Retry { backoff } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                Some(backoff),
+            );
             if sleep_for_retry(config, err, backoff, cancel_token).await {
                 true
             } else {
@@ -619,7 +631,15 @@ async fn apply_retry_decision(
         }
         RetryDecision::RetryWithBackoff { backoff, .. } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                Some(backoff),
+            );
             if sleep_for_retry(config, err, backoff, cancel_token).await {
                 true
             } else {
@@ -636,12 +656,28 @@ async fn apply_retry_decision(
                 return false;
             }
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                None,
+            );
             true
         }
         RetryDecision::RetryWithClientRebuild { backoff } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                Some(backoff),
+            );
             if !sleep_for_retry(config, err, backoff, cancel_token).await {
                 handle_cancellation(event_tx, request_id, completion_tx);
                 return false;
@@ -1050,6 +1086,10 @@ fn emit_failed(
 /// Short footer-safe reason for transport failures. Full Display often starts
 /// with `reqwest error stream: Transport error: error…` and the TUI 45-char
 /// clip left bare `error`. Prefer a stable human label; keep detail in logs.
+///
+/// Network-switch / connectivity dogfood: prefer plain "timed out" /
+/// "connection interrupted" over opaque reqwest templates so the status line
+/// reads as recovery, not a freeze.
 fn retry_footer_reason(err: &SamplingError) -> String {
     match err {
         SamplingError::EventStreamError(msg)
@@ -1060,10 +1100,31 @@ fn retry_footer_reason(err: &SamplingError) -> String {
         SamplingError::EventStreamError(_) | SamplingError::StreamError { .. } => {
             "connection interrupted".into()
         }
-        SamplingError::Http(e) if e.is_timeout() => "request timed out".into(),
+        // Plain "timed out" (not "request timed out") — pairs with
+        // "· next try in Ns" backoff suffix on the status line.
+        SamplingError::Http(e) if e.is_timeout() => "timed out".into(),
         SamplingError::Http(e) if e.is_connect() => "connection failed".into(),
         SamplingError::Http(_) => "connection interrupted".into(),
+        // Cloudflare 52x / gateway outages: short chrome, not full Display.
+        SamplingError::Api { status, .. }
+            if xai_grok_sampling_types::is_edge_outage_status(status.as_u16())
+                || matches!(status.as_u16(), 502..=504) =>
+        {
+            format!("xAI unavailable (HTTP {})", status.as_u16())
+        }
         other => other.to_string(),
+    }
+}
+
+/// Append a short backoff hint for non-rate-limit retries (Esc still cancels
+/// the wait via `sleep_for_retry`). Rate limits use their own shared-wait copy.
+fn with_backoff_hint(reason: String, backoff: Option<Duration>) -> String {
+    match backoff {
+        Some(b) if !b.is_zero() => {
+            let secs = b.as_secs().max(1);
+            format!("{reason} · next try in {secs}s")
+        }
+        _ => reason,
     }
 }
 
@@ -1074,6 +1135,7 @@ fn emit_retrying(
     max_retries: u32,
     err: &SamplingError,
     config: &SamplerConfig,
+    backoff: Option<Duration>,
 ) {
     let info = SamplingErrorInfo::from(err);
     // Full chain stays on the error / telemetry; footer gets a short label.
@@ -1088,6 +1150,8 @@ fn emit_retrying(
         } else {
             reason = format!("{reason} · coordinating with other grok-oss sessions");
         }
+    } else {
+        reason = with_backoff_hint(reason, backoff);
     }
     tracing::debug!(
         full_error = %err,
@@ -1328,6 +1392,31 @@ mod tests {
             "timed out waiting for response headers after 120s".into(),
         );
         assert_eq!(retry_footer_reason(&headers), "response headers timed out");
+    }
+
+    /// Contract: transport retries append a plain backoff hint so the status
+    /// line reads "timed out · next try in 2s" during network recovery.
+    #[test]
+    fn retry_footer_backoff_hint_appends_next_try_in() {
+        assert_eq!(
+            with_backoff_hint("timed out".into(), Some(Duration::from_secs(2))),
+            "timed out · next try in 2s"
+        );
+        assert_eq!(
+            with_backoff_hint(
+                "connection interrupted".into(),
+                Some(Duration::from_millis(500))
+            ),
+            "connection interrupted · next try in 1s"
+        );
+        assert_eq!(
+            with_backoff_hint("connection interrupted".into(), None),
+            "connection interrupted"
+        );
+        assert_eq!(
+            with_backoff_hint("connection interrupted".into(), Some(Duration::ZERO)),
+            "connection interrupted"
+        );
     }
 
     /// Attempt number only advances on failure classify, not on stream start.
@@ -1958,6 +2047,27 @@ mod tests {
             // Session memo untouched by console success clear.
             assert!(crate::exhausted_identity::is_exhausted(&session_fp));
         });
+    }
+
+    /// Network/outage (HTTP 521) must not look like credit exhaust — hop path
+    /// in `apply_retry_decision` only runs for `is_credit_exhausted` / 429.
+    #[test]
+    fn http_521_is_not_credit_or_rate_limit_hop() {
+        let err = SamplingError::Api {
+            status: reqwest::StatusCode::from_u16(521).unwrap(),
+            message: xai_grok_sampling_types::status_user_message(
+                reqwest::StatusCode::from_u16(521).unwrap(),
+            ),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_retryable(), "521 soft-retries same identity");
+        assert!(
+            !err.is_credit_exhausted(),
+            "outage ≠ allowance full / credits"
+        );
+        assert!(!err.is_rate_limited(), "521 is not plain 429 throttle");
     }
 
     /// Rate-limit switch reuses rotate mechanics but does **not** memoize the

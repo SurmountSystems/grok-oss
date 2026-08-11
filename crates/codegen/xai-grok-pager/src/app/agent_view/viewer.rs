@@ -96,11 +96,10 @@ impl AgentView {
         };
         if viewer.fullscreen {
             viewer.fullscreen = false;
-            // Restore side panel for plan approval; file previews fall back
-            // to the centered popup (`side_panel` already false).
-            if viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
-                && self.plan_approval_view.is_some()
-            {
+            // Restore side panel for any plan preview (casual `/view-plan` and
+            // approval). File previews fall back to the centered popup
+            // (`side_panel` already false).
+            if viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview {
                 viewer.side_panel = true;
             }
         } else {
@@ -211,7 +210,9 @@ impl AgentView {
                 return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
             }
             if key!('s').matches(key) {
-                return self.focus_plan_prompt(PlanPromptIntent::Revise);
+                // Immediate revise (not focus-only). Bare `s` re-setting the
+                // default Revise intent left the panel stuck with Enter:approve.
+                return self.request_plan_revise();
             }
             if key!('?').matches(key) {
                 return self.focus_plan_prompt(PlanPromptIntent::Questions);
@@ -320,6 +321,14 @@ impl AgentView {
         }
         if key!(Esc).matches(key) || key!('q').matches(key) || key!('c', CONTROL).matches(key) {
             if in_plan_approval {
+                // Ctrl+C must reach the plan feedback path: empty composer
+                // abandons (like panel `q` / soft-park mouse Quit); non-empty
+                // clears the draft. Do not no-op swallow — dogfood soft-park
+                // left operators stuck. Esc / leftover bare `q` stay no-op
+                // here (Esc is focus step-back above; empty `q` is a CTA).
+                if key!('c', CONTROL).matches(key) {
+                    return self.handle_plan_feedback_key(key);
+                }
                 return InputOutcome::Changed;
             }
             // In the plan viewer, Esc first clears visual selection / search
@@ -536,7 +545,9 @@ impl AgentView {
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        return self.focus_plan_prompt(PlanPromptIntent::Revise);
+                        // Panel footer Revise: submit immediately (same as
+                        // soft-park mouse / empty-prompt `s`).
+                        return self.request_plan_revise();
                     }
                     return self.send_casual_plan_comments();
                 }
@@ -842,7 +853,9 @@ impl AgentView {
             return;
         }
 
-        let btn_base = Style::default().fg(theme.selection_border);
+        // Secondary chrome (timestamps, draft/plan ⧉): theme.gray, yellow on
+        // DOGE informational chrome, not bright white selection_border.
+        let btn_base = Style::default().fg(theme.gray);
         let btn_hover = Style::default().fg(theme.text_primary);
         let icon = crate::glyphs::copy_icon();
         // Mirror prompt top-bar gate: need room for the glyph inside content.
@@ -873,7 +886,10 @@ impl AgentView {
                 if area.height == 0 {
                     return None;
                 }
-                // Top row, right edge (1 cell for ⧉).
+                // Top row, absolute content right edge (1 cell for ⧉).
+                // When timestamps share this row, EntryRenderer leaves
+                // BUBBLE_COPY_TRAILING_INSET columns free at this edge so ⧉
+                // does not paint over the time/date (overlap, not truncation).
                 let x = area.x + area.width.saturating_sub(1);
                 let y = area.y;
                 Some((idx, Rect::new(x, y, 1, 1)))
@@ -971,7 +987,8 @@ impl AgentView {
         let sel = &selection_box.inner_area;
         let right_x = sel.x + sel.width.saturating_sub(1);
 
-        let btn_base = Style::default().fg(theme.selection_border);
+        // Same secondary chrome as always-on bubble ⧉ / timestamps (theme.gray).
+        let btn_base = Style::default().fg(theme.gray);
         let btn_hover = Style::default().fg(theme.text_primary);
 
         // Build button array based on capabilities.
@@ -1197,7 +1214,6 @@ mod bubble_copy_tests {
     use super::*;
     use crate::app::actions::Action;
     use crate::app::agent_view::test_fixtures::make_agent;
-    use crate::app::app_view::InputOutcome;
     use crate::scrollback::block::RenderBlock;
     use crate::scrollback::text_selection::{ResolvedSelectionModel, VisibleBlockGeometry};
     use crate::theme::Theme;
@@ -1260,6 +1276,53 @@ mod bubble_copy_tests {
                 "⧉ must paint at hit rect"
             );
         }
+    }
+
+    /// Named contract: idle always-on ⧉ uses secondary chrome (`theme.gray`),
+    /// matching timestamps and draft/plan copy, not bright white
+    /// `selection_border` / `text_primary` (power/theme note on DOGE).
+    #[test]
+    fn bubble_copy_idle_uses_secondary_gray_not_white_border() {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("hello user"));
+        // Hermetic palette: DOGE maps gray → yellow, selection_border → white.
+        let theme = Theme::doge();
+        agent.last_scrollback_selection_model = ResolvedSelectionModel {
+            visible_blocks: vec![geom(0, 1)],
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        agent.hovered_bubble_copy = None;
+        agent.render_bubble_copy_buttons(&mut buf, &theme);
+
+        assert_eq!(agent.bubble_copy_hits.len(), 1);
+        let (_, r) = agent.bubble_copy_hits[0];
+        let cell = buf.cell((r.x, r.y)).expect("⧉ cell");
+        assert_eq!(
+            cell.fg, theme.gray,
+            "idle ⧉ must use secondary chrome gray (yellow on DOGE)"
+        );
+        assert_ne!(
+            cell.fg, theme.selection_border,
+            "idle ⧉ must not use bright white selection_border"
+        );
+        assert_ne!(
+            cell.fg, theme.text_primary,
+            "idle ⧉ must not use primary text white"
+        );
+
+        // Hover still brightens to primary for discoverability.
+        agent.hovered_bubble_copy = Some(0);
+        let mut buf_h = Buffer::empty(area);
+        agent.render_bubble_copy_buttons(&mut buf_h, &theme);
+        let cell_h = buf_h.cell((r.x, r.y)).expect("hovered ⧉ cell");
+        assert_eq!(
+            cell_h.fg, theme.text_primary,
+            "hovered ⧉ brightens to text_primary"
+        );
     }
 
     /// Named contract: tool / thinking rows do not get always-on bubble ⧉.
@@ -1538,6 +1601,133 @@ mod bubble_copy_tests {
             action,
             Some(Action::CopyEntryContent { idx: i }) if i == idx
         ));
-        let _ = InputOutcome::Action(action.unwrap());
+    }
+
+    /// Named contract: always-on bubble ⧉ must not cover the message timestamp
+    /// (time + date). Root cause was overlap at the content right edge, not
+    /// day-format truncation.
+    #[test]
+    fn bubble_copy_does_not_overlap_timestamp() {
+        use crate::render::Renderable;
+        use crate::scrollback::layout::HorizontalLayout;
+        use crate::scrollback::wrappers::{
+            BUBBLE_COPY_TRAILING_INSET, EntryRenderer, bubble_copy_trailing_inset,
+        };
+
+        let mut agent = make_agent();
+        // Default appearance: timestamps + bubble_copy both on.
+        let appearance = agent.scrollback.appearance().clone();
+        assert!(appearance.show_timestamps, "timestamps must be on");
+        assert!(
+            appearance.scrollback.display.bubble_copy_buttons,
+            "bubble_copy_buttons must be on"
+        );
+
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("hello agent body"));
+        let entry = agent.scrollback.entry(0).expect("agent entry").clone();
+        let created = entry.created_at.expect("message has created_at");
+
+        let theme = Theme::current();
+        let width: u16 = 80;
+        let renderer = EntryRenderer::new(&entry, &theme).with_appearance(appearance.clone());
+        let height = renderer.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        // Content geometry matching EntryRenderer layout.
+        let layout = HorizontalLayout::new(area, &appearance.scrollback.layout);
+        let content = layout.content;
+        assert!(
+            bubble_copy_trailing_inset(&entry.block, &appearance) == BUBBLE_COPY_TRAILING_INSET,
+            "both chrome features must reserve trailing inset for ⧉"
+        );
+
+        // Paint always-on bubble ⧉ into the same buffer (production order).
+        agent.last_scrollback_selection_model = ResolvedSelectionModel {
+            visible_blocks: vec![VisibleBlockGeometry {
+                entry_idx: 0,
+                area,
+                content_area: content,
+                selection_area: area,
+                content_width: content.width,
+                top_clipped: false,
+                bottom_clipped: false,
+                drag_startable: true,
+            }],
+            ..Default::default()
+        };
+        agent.render_bubble_copy_buttons(&mut buf, &theme);
+
+        assert_eq!(agent.bubble_copy_hits.len(), 1);
+        let (_, hit) = agent.bubble_copy_hits[0];
+        let icon = crate::glyphs::copy_icon();
+        assert_eq!(
+            buf.cell((hit.x, hit.y)).map(|c| c.symbol()),
+            Some(icon),
+            "⧉ must still paint"
+        );
+        // ⧉ lives on the absolute content right edge.
+        assert_eq!(
+            hit.x,
+            content.x + content.width - 1,
+            "⧉ stays at content right edge"
+        );
+
+        // Short timestamp (no hover) must be fully readable left of the inset.
+        let expected = created.format("%-I:%M %p").to_string();
+        let ts_width = expected.len() as u16;
+        let ts_zone_right = content.x + content.width - BUBBLE_COPY_TRAILING_INSET;
+        let ts_x = ts_zone_right - ts_width;
+        let mut rendered = String::new();
+        for x in ts_x..ts_x + ts_width {
+            rendered.push_str(buf.cell((x, content.y)).map(|c| c.symbol()).unwrap_or(""));
+        }
+        assert_eq!(
+            rendered, expected,
+            "full short timestamp must survive bubble ⧉ paint (overlap fix)"
+        );
+
+        // No timestamp cell may hold the copy glyph.
+        for x in ts_x..ts_x + ts_width {
+            let sym = buf.cell((x, content.y)).map(|c| c.symbol()).unwrap_or("");
+            assert_ne!(
+                sym, icon,
+                "⧉ must not sit on timestamp cell x={x} (got {sym:?})"
+            );
+        }
+
+        // Gap cell between timestamp zone and ⧉ must not be a timestamp digit.
+        let gap_x = content.x + content.width - BUBBLE_COPY_TRAILING_INSET;
+        assert_ne!(
+            gap_x, hit.x,
+            "gap and ⧉ are distinct cells when trailing inset is 2"
+        );
+
+        // Expanded hover format also ends left of the inset (not under ⧉).
+        let hover_x = ts_zone_right.saturating_sub(3);
+        let renderer_h = EntryRenderer::new(&entry, &theme)
+            .with_appearance(appearance.clone())
+            .with_mouse_pos(Some((hover_x, content.y)));
+        let mut buf_h = Buffer::empty(area);
+        renderer_h.render(area, &mut buf_h);
+        agent.render_bubble_copy_buttons(&mut buf_h, &theme);
+        let expanded = created.format("%H:%M:%S | %b %d").to_string();
+        let exp_w = expanded.len() as u16;
+        let exp_x = ts_zone_right - exp_w;
+        let mut exp_rendered = String::new();
+        for x in exp_x..exp_x + exp_w {
+            exp_rendered.push_str(buf_h.cell((x, content.y)).map(|c| c.symbol()).unwrap_or(""));
+        }
+        assert_eq!(
+            exp_rendered, expanded,
+            "expanded timestamp (time | date) must be fully readable with ⧉ present"
+        );
+        for x in exp_x..exp_x + exp_w {
+            let sym = buf_h.cell((x, content.y)).map(|c| c.symbol()).unwrap_or("");
+            assert_ne!(sym, icon, "⧉ must not cover expanded timestamp at x={x}");
+        }
     }
 }

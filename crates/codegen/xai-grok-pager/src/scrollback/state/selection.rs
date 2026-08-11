@@ -614,6 +614,28 @@ impl ScrollbackState {
         }
     }
 
+    /// Apply the always-expand-thinking preference to sticky finish mode and,
+    /// when enabling, open every existing thinking block now.
+    ///
+    /// Turning off only resets sticky finish mode to Collapsed; existing
+    /// blocks keep their current open/closed state until the user folds them.
+    pub fn apply_always_expand_thinking(&mut self, always: bool) {
+        if always {
+            self.thinking_display_mode = DisplayMode::Expanded;
+            let any_not_expanded = self.entries.values().any(|entry| {
+                matches!(entry.block, RenderBlock::Thinking(_))
+                    && entry.block.is_foldable()
+                    && entry.display_mode != DisplayMode::Expanded
+            });
+            // expand_all_thinking toggles; only call when something needs open.
+            if any_not_expanded {
+                self.expand_all_thinking();
+            }
+        } else {
+            self.thinking_display_mode = DisplayMode::Collapsed;
+        }
+    }
+
     /// Returns "expand thinking" or "collapse thinking" based on current state.
     ///
     /// Uses the same logic as `expand_all_thinking`: if ANY thinking block is

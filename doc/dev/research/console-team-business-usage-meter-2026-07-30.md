@@ -107,15 +107,21 @@ Third-party notes (e.g. CodexBar docs) also read prepaid balance from the Manage
 | `POST …/billing/teams/{team_id}/usage` series | **Not wired** (documented; ship only if dogfood needs charts) |
 | Soft `/usage` under console live | **Shipped** — names console team prepaid / honest gap; does not sell SuperGrok session billing as live console spend (join `/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`) |
 | Prepaid cache freshness | Known UX: ≤60s process TTL + last-good on fetch miss/error (poll does not bust cache) |
-| Live dogfood | **Operator** — real management key + real `team_id` |
+| Live dogfood | **Operator** — real management key (+ team id pin or auto-discovery) |
+| `XAI_MANAGEMENT_API_KEY` / `XAI_MANAGEMENT_TEAM_ID` env | **Shipped** (resolve after config, before store / for team pin) |
+| Auto team id via `GET /auth/management-keys/validation` | **Shipped** when key present and team id unset |
+| `grok login --management-key` | **Shipped** — secret store + optional validation print of team id |
+| Setup notes on `grok limits` when gap | **Shipped** — points at Management Keys + login/config, not SuperGrok extras |
 
 Joins (ship evidence):
 `/tmp/grok-join-impl-mgmt-key-team-fetch-2026-07-30.md`,
 `/tmp/grok-join-impl-console-meter-tui-2026-07-30.md`,
-`/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`.
+`/tmp/grok-join-impl-usage-console-honesty-0c6a7911.md`,
+`/tmp/grok-join-impl-console-business-balance.md`.
 User-guide: `02-authentication`, `04-slash-commands` `/limits`.
 
 Do **not** re-claim load-only stub / no HTTP / no keyring for management prepaid.
+Do **not** claim inference `XAI_API_KEY` can return console.x.ai business remaining.
 
 ## `team_id` sources (do not assume equality)
 
@@ -149,7 +155,13 @@ Do **not** re-claim load-only stub / no HTTP / no keyring for management prepaid
 
 - `POST …/usage` time series for chart-class token/spend rows (group by description, sum `usd`, day buckets). Only if dogfood needs charts.
 - Operator live dogfood with real management key + team_id.
-- Soft polish: prepaid cents refresh ≤60s TTL + last-good on error (documented known UX).
+- Soft polish **shipped (2026-08-02):** Management billing process cache ≤60s
+  (`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`, prepaid alias kept) for TUI
+  background polls; app last-good cents on fetch `None`. Explicit `grok
+  limits` collect busts prepaid+postpaid process caches (FetchBilling does
+  not). `/limits` honesty when prepaid $ shown: process-cache lag + UI
+  last-good can outlive TTL; `grok limits` forces fresh Management fetch.
+  Join: `.agents/joins/impl-prepaid-cache-ttl-polish-2026-08-02.md`.
 
 ### Blocked / out of scope for this research
 
@@ -157,6 +169,31 @@ Do **not** re-claim load-only stub / no HTTP / no keyring for management prepaid
 - Inventing GET series endpoints not in docs
 - Treating SuperGrok Business OIDC as console team prepaid
 - Claiming full Business Usage **charts** done (core prepaid balance is shipped; series is not)
+
+## Grok Business **licenses** Usage (messages / conversations) — research pin (2026-08-04)
+
+**Question:** Is there a public Management (or other) API for Platforms → Grok
+Business → **licenses** Usage charts (messages, conversations, active users)?
+
+**Answer (public docs only; accessed 2026-08-04):**
+
+| Source | Finding |
+|--------|---------|
+| [Management API overview](https://docs.x.ai/developers/rest-api-reference/management) | Management key + team-scoped billing routes |
+| [Billing Management](https://docs.x.ai/developers/rest-api-reference/management/billing) | Prepaid balance, postpaid preview/limits, invoices, **POST usage analytics (USD sum by description)** |
+| Console browser UI | `…/grok-business/usage` (session cookie) is a separate product surface |
+
+**No public API** for license seat **message / conversation counts** or active
+license users was found in the Management billing reference. Product must
+**not** invent a client or scrape console.x.ai HTML.
+
+**Product non-goal:** make license charts non-zero via CLI SuperGrok dogfood.
+Success for team visibility = SuperGrok meters + Management prepaid / postpaid
+/ USD series, not Platforms → Grok Business licenses.
+
+**Naming trap:** residual "console Grok Business Usage **class**" (Half B) means
+team API prepaid / postpaid / USD series. The dropdown **Grok Business**
+licenses page is a different product (seat messages/conversations).
 
 ## Suggested product constants (for implementer)
 

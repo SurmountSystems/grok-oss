@@ -51,6 +51,32 @@ pub fn resolve_show_thinking_blocks(
     )
 }
 
+/// Env override for always-expanded thinking blocks in the TUI.
+pub const ENV_ALWAYS_EXPAND_THINKING: &str = "GROK_ALWAYS_EXPAND_THINKING";
+
+#[cfg(test)]
+static ALWAYS_EXPAND_THINKING_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Resolve whether thinking blocks stay fully expanded by default.
+///
+/// Precedence: requirements > env (`GROK_ALWAYS_EXPAND_THINKING`) >
+/// `[ui] always_expand_thinking` > managed > default `false` (no remote tier).
+pub fn resolve_always_expand_thinking(
+    requirements: Option<&TomlValue>,
+    user: Option<&TomlValue>,
+    managed: Option<&TomlValue>,
+) -> crate::agent::config::Resolved<bool> {
+    resolve_ui_bool(
+        ENV_ALWAYS_EXPAND_THINKING,
+        "always_expand_thinking",
+        false,
+        requirements,
+        user,
+        managed,
+        None,
+    )
+}
+
 /// Env override for grouping consecutive non-destructive tool calls in the TUI.
 pub const ENV_GROUP_TOOL_VERBS: &str = "GROK_GROUP_TOOL_VERBS";
 
@@ -255,6 +281,52 @@ mod show_thinking_blocks_tests {
         let r = resolve_show_thinking_blocks(None, None, Some(&off), Some(&remote(Some(true))));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::ManagedConfig);
+    }
+}
+
+#[cfg(test)]
+mod always_expand_thinking_tests {
+    use super::*;
+    use crate::agent::config::ConfigSource;
+
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        let g = super::ALWAYS_EXPAND_THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var(ENV_ALWAYS_EXPAND_THINKING) };
+        g
+    }
+
+    fn toml_ui(v: bool) -> TomlValue {
+        toml::from_str(&format!("[ui]\nalways_expand_thinking = {v}\n")).unwrap()
+    }
+
+    #[test]
+    fn defaults_off_when_nothing_set() {
+        let _g = guard();
+        let r = resolve_always_expand_thinking(None, None, None);
+        assert!(!r.value, "always expand thinking must default OFF");
+        assert_eq!(r.source, ConfigSource::Default);
+    }
+
+    #[test]
+    fn user_config_turns_it_on() {
+        let _g = guard();
+        let on = toml_ui(true);
+        let r = resolve_always_expand_thinking(None, Some(&on), None);
+        assert!(r.value);
+        assert_eq!(r.source, ConfigSource::Config);
+    }
+
+    #[test]
+    fn env_overrides_config() {
+        let _g = guard();
+        unsafe { std::env::set_var(ENV_ALWAYS_EXPAND_THINKING, "1") };
+        let off = toml_ui(false);
+        let r = resolve_always_expand_thinking(None, Some(&off), None);
+        assert!(r.value, "env must override config");
+        assert_eq!(r.source, ConfigSource::Env);
+        unsafe { std::env::remove_var(ENV_ALWAYS_EXPAND_THINKING) };
     }
 }
 

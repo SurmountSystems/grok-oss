@@ -39,7 +39,7 @@ use xai_grok_shell::agent::app::{run_headless, run_leader, run_stdio_agent};
 use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::leader::{
     ClientCapabilities, ClientMode, ControlCommand, LeaderCapabilities, LeaderDescriptor,
-    LeaderRegistration, LeaderTarget, leader_is_older_than,
+    LeaderRegistration, LeaderTarget,
 };
 use xai_grok_shell::leader::{
     ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
@@ -1842,6 +1842,11 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Doctor(_) => {
                 unreachable!("doctor was consumed before runtime startup")
             }
+            Command::Limits(limits_args) => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return xai_grok_pager::limits_cmd::run(limits_args).await;
+            }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 xai_grok_shell::inspect::inspect(&cwd, json).await?;
@@ -1924,6 +1929,11 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Memory(memory_args) => {
                 return xai_grok_pager::memory_cmd::run(memory_args);
             }
+            Command::Rebuild { source } => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return run_rebuild_command(source).await;
+            }
             Command::Update {
                 check,
                 json,
@@ -1952,6 +1962,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 device_auth,
                 openrouter,
                 api_key,
+                management_key,
                 list_api_keys,
                 devbox,
             } => {
@@ -1961,6 +1972,17 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 if list_api_keys {
                     xai_grok_shell::auth::run_list_console_api_keys(&grok_home)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    xai_grok_shell::instrumentation::finalize_and_exit(0);
+                }
+                // Management API key (console team prepaid / Business Usage) —
+                // distinct store from inference XAI_API_KEY / SuperGrok OAuth.
+                if management_key.is_some() {
+                    let key =
+                        xai_grok_shell::auth::materialize_cli_api_key(management_key.as_deref())
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    xai_grok_shell::auth::run_management_key_login(&grok_home, key.as_deref())
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    println!();
                     xai_grok_shell::instrumentation::finalize_and_exit(0);
                 }
                 // OpenRouter and console key paths: one materialize gate so
@@ -2305,7 +2327,20 @@ async fn run_update_command(
         )
         .await?;
         if let Some(installed_version) = installed {
-            signal_leaders_to_relaunch(&installed_version).await;
+            let outcomes =
+                xai_grok_shell::leader::signal_leaders_to_relaunch(&installed_version).await;
+            for o in outcomes {
+                if let xai_grok_shell::leader::LeaderRelaunchOutcome::Relaunching {
+                    from_version,
+                    to_version,
+                    ..
+                } = o
+                {
+                    eprintln!(
+                        "  ↻ Relaunching shared session (leader {from_version} → {to_version})…"
+                    );
+                }
+            }
         }
         return Ok(());
     }
@@ -2324,70 +2359,29 @@ async fn run_update_command(
     println!("{}", xai_grok_update::how_to_update_message());
     Ok(())
 }
-/// After a successful `grok update`, ask any running leader on this machine that
-/// is older than `installed_version` to relaunch onto the new binary (bounded
-/// grace; running sessions close and reconnect via `session/load`).
-///
-/// Best-effort and non-fatal: discovery/connect/control failures are logged and
-/// skipped. The leader re-checks the directional version guard authoritatively;
-/// the pager-side `live_info` check just avoids connecting to newer leaders.
-async fn signal_leaders_to_relaunch(installed_version: &str) {
-    for d in xai_grok_shell::leader::discover_leaders().await {
-        if d.classification != xai_grok_shell::leader::LeaderDiscoveryState::Reachable {
-            continue;
-        }
-        let Some(socket_path) = d.socket_path.clone() else {
-            continue;
-        };
-        if let Some(ref live) = d.live_info
-            && !leader_is_older_than(&live.leader_binary_version, installed_version)
-        {
-            continue;
-        }
-        let client = match xai_grok_shell::leader::LeaderClient::connect(
-            socket_path,
-            "grok-pager-update",
-            ClientMode::Stdio,
-            ClientCapabilities::default(),
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::debug!(error = %e, "Could not connect to leader to signal relaunch");
-                continue;
-            }
-        };
-        if !client.registration().supports_relaunch() {
-            client.cancel();
-            continue;
-        }
-        match client
-            .send_control(ControlCommand::RelaunchForUpdate {
-                to_version: installed_version.to_string(),
-            })
-            .await
-        {
-            Ok(Ok(xai_grok_shell::leader::ControlPayload::Relaunching {
-                from_version,
-                to_version,
-                ..
-            })) => {
-                eprintln!("  ↻ Relaunching shared session (leader {from_version} → {to_version})…");
-            }
-            Ok(Ok(xai_grok_shell::leader::ControlPayload::RelaunchDeclined { reason })) => {
-                tracing::debug!(%reason, "Leader declined relaunch");
-            }
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                tracing::debug!(error = %e.message, "Leader relaunch control error");
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "Leader relaunch ack not received (leader may be exiting)");
-            }
-        }
-        client.cancel();
+
+/// CLI entry for `grok-oss rebuild`: same core as `/rebuild` without self re-exec.
+async fn run_rebuild_command(source: Option<std::path::PathBuf>) -> Result<()> {
+    let start = source.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+    println!("Rebuilding grok-oss from source (this may take several minutes)...");
+    println!("  start dir: {}", start.display());
+    // Capture install stdio (never inherit): weighted progress bar on stderr.
+    let report = xai_grok_update::rebuild_and_relaunch_with_progress(&start, |ev| {
+        use std::io::Write;
+        let line = xai_grok_update::format_rebuild_cli_progress(ev.fraction, &ev.detail, 24);
+        // Carriage return rewrite keeps a single progress row on terminals.
+        let mut err = std::io::stderr();
+        let _ = write!(err, "\r\x1b[2K{line}");
+        let _ = err.flush();
+    })
+    .await?;
+    eprintln!();
+    for line in &report.summary_lines {
+        println!("{line}");
     }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {

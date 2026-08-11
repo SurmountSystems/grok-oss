@@ -89,6 +89,7 @@ fn status_user_message_matrix() {
         (503, "temporarily unavailable"),
         (504, "temporarily unavailable"),
         (520, "timed out"),
+        (521, "origin down"),
         (524, "timed out"),
         (500, "Something went wrong on the server"),
         (400, "Request failed"),
@@ -104,6 +105,24 @@ fn status_user_message_matrix() {
             "status {code}: expected HTTP code in {msg:?}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_521_html_is_retryable_and_labeled() {
+    let html = r#"<!DOCTYPE html><html><body>Web server is down</body></html>"#;
+    let err = stream_err(521, html).await;
+    let s = err.to_string();
+    assert!(err.is_retryable(), "521 must soft-retry: {s}");
+    assert!(!s.contains("unknown status"), "Display must name 521: {s}");
+    assert!(s.contains("521"));
+    assert!(
+        s.contains("Web Server Is Down") || s.contains("origin down") || s.contains("unreachable"),
+        "expected known outage copy: {s}"
+    );
+    assert!(
+        !err.is_credit_exhausted(),
+        "521 is network outage, not credit exhaust"
+    );
 }
 
 #[test]

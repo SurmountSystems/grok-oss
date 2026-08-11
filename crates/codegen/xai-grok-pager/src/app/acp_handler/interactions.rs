@@ -233,6 +233,10 @@ pub(super) fn handle_exit_plan_mode(
     } else {
         agent.latest_inline_plan_content = None;
     }
+    // New soft-park present re-arms decision CTAs after a prior Approve/Quit
+    // and clears Revise/Clarify in-flight suppress so CTAs arm once.
+    agent.plan_decision_resolved = false;
+    agent.plan_feedback_in_flight = None;
     agent.plan_approval_view = Some(state);
 
     agent.casual_commenting_range = None;

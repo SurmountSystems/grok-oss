@@ -346,6 +346,69 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
     );
     assert!(!app.agents[&id].session.model_switch_pending);
 }
+/// Resume-canceled-on-restart: default on, flip off emits PersistSetting
+/// with correct key/value/rollback, and live UiConfig updates immediately.
+#[test]
+fn set_resume_canceled_turn_on_restart_persists_and_updates_ui() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    assert!(
+        app.current_ui.resume_canceled_turn_on_restart_enabled(),
+        "default must be on"
+    );
+    let effects = dispatch(Action::SetResumeCanceledTurnOnRestart(false), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "resume_canceled_turn_on_restart");
+            assert_eq!(value, &SettingValue::Bool(false));
+            assert_eq!(rollback_value, &SettingValue::Bool(true));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert!(!app.current_ui.resume_canceled_turn_on_restart_enabled());
+    // Idempotent when already off.
+    let again = dispatch(Action::SetResumeCanceledTurnOnRestart(false), &mut app);
+    assert!(again.is_empty());
+    // Restore on.
+    let on = dispatch(Action::SetResumeCanceledTurnOnRestart(true), &mut app);
+    assert_eq!(on.len(), 1);
+    assert!(app.current_ui.resume_canceled_turn_on_restart_enabled());
+}
+
+/// Token Economy bool from Settings emits PersistSetting under the dotted key.
+#[test]
+fn set_token_economy_bool_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SetTokenEconomyBool {
+            field: "show_period_pacing",
+            value: false,
+        },
+        &mut app,
+    );
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "token_economy.show_period_pacing");
+            assert_eq!(value, &SettingValue::Bool(false));
+            // Rollback is the prior disk value (defaults true when unset).
+            assert_eq!(rollback_value, &SettingValue::Bool(true));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+}
+
 /// `set_compact_mode(app, new)` emits exactly one
 /// `Effect::PersistSetting` with the correct payload — `value`
 /// matches `new`, `rollback_value` matches the prior cache value.
@@ -945,6 +1008,10 @@ fn dispatch_open_reset_confirm_no_op_in_release_when_no_settings_modal() {
 fn every_setting_has_action_for_reset_arm() {
     use crate::settings::current_value_for;
     with_theme_test_env(|| {
+        // Pin Token Economy live cache to product defaults so a developer
+        // `$GROK_HOME` (e.g. min_implement_effort = 2) cannot poison the
+        // move-away → reset round-trip.
+        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
         let reg = crate::settings::SettingsRegistry::defaults();
         for meta in reg.all() {
             if matches!(meta.kind, crate::settings::SettingKind::Group { .. }) {
@@ -1559,6 +1626,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "show_thinking_blocks" => {
             let _ = dispatch(Action::SetShowThinkingBlocks(true), app);
         }
+        "always_expand_thinking" => {
+            let _ = dispatch(Action::SetAlwaysExpandThinking(true), app);
+        }
         "group_tool_verbs" => {
             let _ = dispatch(Action::SetGroupToolVerbs(false), app);
         }
@@ -1573,6 +1643,81 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "economic_mode" => {
             let _ = dispatch(Action::SetEconomicMode(false), app);
+        }
+        "resume_canceled_turn_on_restart" => {
+            let _ = dispatch(Action::SetResumeCanceledTurnOnRestart(false), app);
+        }
+        "token_economy.cap_implement_effort_when_economic" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "cap_implement_effort_when_economic",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.show_period_pacing" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "show_period_pacing",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.local_spend_ledger" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "local_spend_ledger",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.reconcile_management_usage" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "reconcile_management_usage",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.max_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "max_implement_effort",
+                    value: 5,
+                },
+                app,
+            );
+        }
+        "token_economy.min_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "min_implement_effort",
+                    value: 2,
+                },
+                app,
+            );
+        }
+        "token_economy.desired_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "desired_implement_effort",
+                    value: 3,
+                },
+                app,
+            );
+        }
+        "token_economy.lock_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "lock_implement_effort",
+                    value: 2,
+                },
+                app,
+            );
         }
         "respect_manual_folds" => {
             let _ = dispatch(
@@ -1737,6 +1882,7 @@ fn set_simple_mode_propagates_to_every_agent() {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2181,6 +2327,55 @@ fn set_show_thinking_blocks_applies_persists_and_rolls_back() {
         crate::appearance::cache::load_show_thinking_blocks(),
         "rollback must restore cache",
     );
+}
+#[test]
+fn set_always_expand_thinking_applies_persists_and_rolls_back() {
+    crate::appearance::cache::set_always_expand_thinking(false);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PersistSetting {
+                key: "always_expand_thinking",
+                value: crate::settings::SettingValue::Bool(true),
+                rollback_value: crate::settings::SettingValue::Bool(false),
+            }]
+        ),
+        "expected exactly one PersistSetting effect, got {effects:?}",
+    );
+    assert!(crate::appearance::cache::load_always_expand_thinking());
+    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
+    assert!(effects.is_empty(), "redundant set must be a no-op");
+    let _ = apply_setting_rollback(
+        &mut app,
+        "always_expand_thinking",
+        &crate::settings::SettingValue::Bool(false),
+    );
+    assert!(
+        !crate::appearance::cache::load_always_expand_thinking(),
+        "rollback must restore cache",
+    );
+}
+#[test]
+fn set_always_expand_thinking_expands_existing_thinking() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::types::DisplayMode;
+    crate::appearance::cache::set_always_expand_thinking(false);
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::thinking("collapsed-until-setting"));
+    agent.scrollback.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
+    let _ = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
+    assert_eq!(
+        agent.scrollback.get_by_id(id).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "turning always_expand_thinking on must expand existing thinking"
+    );
+    crate::appearance::cache::set_always_expand_thinking(false);
 }
 #[test]
 fn set_group_tool_verbs_applies_persists_and_rolls_back() {

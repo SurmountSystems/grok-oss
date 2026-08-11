@@ -187,7 +187,7 @@ pub(super) struct QueueDrain {
 }
 
 impl QueueDrain {
-    fn blocked() -> Self {
+    pub(crate) fn blocked() -> Self {
         Self {
             effects: Vec::new(),
             page_flip_entry: None,
@@ -244,13 +244,10 @@ fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -
         log_blocked("loading_replay", sid);
         return QueueDrain::blocked();
     }
-    // Parent looks idle but background subagents are still live: hold the
-    // pending-prompt queue so typed Enter does not start a conflicting main
-    // turn. Send-now uses `force_drain_queue_past_background` to bypass.
-    if !bypass_background_hold && agent.holds_queue_for_background() {
-        log_blocked("background_subagents_live", sid);
-        return QueueDrain::blocked();
-    }
+    // Background subagents alone do not hold drain (operator 2026-08-09):
+    // primary idle → queue may start a normal main turn while children run.
+    // `bypass_background_hold` remains for ForceDrainQueue / legacy call sites.
+    let _ = bypass_background_hold;
     // Server-owned next turn: a non-running server row (including this
     // client's own in-flight send-now echo) drains shell-side — the
     // `queue/changed(running_prompt_id)` adoption starts it. Draining a LOCAL
@@ -387,6 +384,9 @@ fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -
                 let id = agent.scrollback.push_block(block);
                 (agent.scrollback.len().saturating_sub(1), id, vec![id])
             };
+            // Whole-turn cancel-resume text (SIGTERM / killall / Esc after first
+            // activity). Skill display text counts; rewind stash below does not.
+            agent.session.note_cancel_resume_prompt_text(&queued.text);
             // Stash for cancel-with-restore. Only plain (non-skill) prompts
             // can be reversed back into the input box.
             if queued.wire_blocks.is_none() {
@@ -604,7 +604,8 @@ pub(crate) fn shim_renders_own_user_block(kind: &str, text: Option<&str>) -> boo
 
 /// Trailing turn-starting `UserPrompt` matching `text`, scanning back past
 /// turn-boundary chrome (`SessionEvent`/`System`); any content block ends the
-/// scan. Interjection bubbles are never claimable.
+/// scan. Interjection bubbles are never claimable here (see
+/// [`trailing_interjection_matching`] for interject-fallback adoption).
 fn trailing_user_prompt_matching(
     agent: &AgentView,
     text: &str,
@@ -613,6 +614,32 @@ fn trailing_user_prompt_matching(
         let entry = agent.scrollback.entry(idx)?;
         match &entry.block {
             RenderBlock::UserPrompt(ub) if ub.text == text && !ub.is_interjection => {
+                return Some((idx, entry.id));
+            }
+            RenderBlock::SessionEvent(_) | RenderBlock::System(_) => continue,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Prompt-id prefix the shell uses when a mid-turn interjection misses its
+/// turn and is converted into a standalone prompt (see shell
+/// `INTERJECT_FALLBACK_PROMPT_PREFIX`). Every pane already painted the text
+/// from `x.ai/session/interjection`; the turn-start shim must reuse that
+/// bubble rather than push a second green human rail.
+const INTERJECT_FALLBACK_PROMPT_PREFIX: &str = "interject-fallback-";
+
+/// Trailing interjection bubble matching `text` (same scan rules as
+/// [`trailing_user_prompt_matching`], but only `is_interjection` blocks).
+fn trailing_interjection_matching(
+    agent: &AgentView,
+    text: &str,
+) -> Option<(usize, crate::scrollback::EntryId)> {
+    for idx in (0..agent.scrollback.len()).rev() {
+        let entry = agent.scrollback.entry(idx)?;
+        match &entry.block {
+            RenderBlock::UserPrompt(ub) if ub.text == text && ub.is_interjection => {
                 return Some((idx, entry.id));
             }
             RenderBlock::SessionEvent(_) | RenderBlock::System(_) => continue,
@@ -870,10 +897,11 @@ pub(crate) fn apply_turn_start_shim(
     let page_flip_entry = if let Some(segments) = multi_segments {
         let (prompt_idx, first_id, last_id, all_ids) =
             paint_or_reuse_combined_user_bubbles(agent, &segments);
+        let restore = text
+            .clone()
+            .unwrap_or_else(|| xai_prompt_queue::join_texts(segments.iter().map(String::as_str)));
+        agent.session.note_cancel_resume_prompt_text(&restore);
         if rewindable {
-            let restore = text.clone().unwrap_or_else(|| {
-                xai_prompt_queue::join_texts(segments.iter().map(String::as_str))
-            });
             let earlier = all_ids.into_iter().filter(|id| *id != last_id).collect();
             // An adopted turn arrives with text only, never the original
             // attachments, so a Ctrl+C rewind restores just the joined text.
@@ -929,32 +957,58 @@ pub(crate) fn apply_turn_start_shim(
                 Some((agent.scrollback.index_of_id(id)?, id))
             },
         );
-        let already_painted = map_painted.or_else(|| {
-            text.as_deref()
-                .and_then(|t| trailing_user_prompt_matching(agent, t))
-                // Never claim a block owned by another pending send-now.
-                .filter(|(_, id)| !agent.send_now_painted_blocks.values().any(|(v, _)| v == id))
-        });
+        let already_painted = map_painted
+            .or_else(|| {
+                text.as_deref()
+                    .and_then(|t| trailing_user_prompt_matching(agent, t))
+                    // Never claim a block owned by another pending send-now.
+                    .filter(|(_, id)| !agent.send_now_painted_blocks.values().any(|(v, _)| v == id))
+            })
+            .or_else(|| {
+                // Stranded / idle interjections become `interject-fallback-*` turns.
+                // Live paint already happened via optimistic local push and/or
+                // `x.ai/session/interjection` (flagged `is_interjection`). The
+                // normal trailing match skips those on purpose (so a mid-turn
+                // steer is not stolen by the next real turn). Claim them only for
+                // this shell prefix so we do not paint a second identical green
+                // human rail when the fallback turn starts.
+                if !prompt_id.starts_with(INTERJECT_FALLBACK_PROMPT_PREFIX) {
+                    return None;
+                }
+                text.as_deref()
+                    .and_then(|t| trailing_interjection_matching(agent, t))
+                    .filter(|(_, id)| !agent.send_now_painted_blocks.values().any(|(v, _)| v == id))
+            });
         let (prompt_idx, prompt_entry_id) = if let Some(found) = already_painted {
             found
         } else {
             let id = agent.scrollback.push_block(block);
             (agent.scrollback.len().saturating_sub(1), id)
         };
-        if rewindable && let Some(text) = text {
+        if let Some(text) = text {
             // The rewind restore must match the on-screen (possibly edited)
             // block text, not the adoption's stale mirror text.
             let restore_text = match agent.scrollback.entry(prompt_idx).map(|e| &e.block) {
                 Some(RenderBlock::UserPrompt(ub)) if ub.text != text => ub.text.clone(),
                 _ => text,
             };
-            agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
-                text: restore_text,
-                images: Vec::new(),
-                scrollback_entry: prompt_entry_id,
-                combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
-            });
+            agent.session.note_cancel_resume_prompt_text(&restore_text);
+            if rewindable {
+                agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+                    text: restore_text,
+                    images: Vec::new(),
+                    scrollback_entry: prompt_entry_id,
+                    combined_scrollback_entries: Vec::new(),
+                    chip_elements: Vec::new(),
+                });
+            }
+        }
+        // Interject-fallback turns persist the user echo without a live
+        // broadcast (shell `UserEchoMode::PersistOnly`). `start_turn` armed
+        // `expect_user_echo`; clear it so a stuck skip does not swallow the
+        // next real turn's echo.
+        if prompt_id.starts_with(INTERJECT_FALLBACK_PROMPT_PREFIX) {
+            agent.session.tracker.clear_user_echo_skip();
         }
         if skip_entry_top {
             // Send-now: follow at the tail; never entry-top jump.
@@ -1013,6 +1067,14 @@ pub(crate) fn note_peek_page_flip(
 
 /// Drain the next queued prompt and, when that page-flips under a lease, note it.
 pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    // Fearless global pause: hold every session's queue until resume.
+    if app.global_work_pause.is_active() {
+        return vec![];
+    }
+    // Soft stop holding: current turn finished; do not start further queue items.
+    if app.soft_stop.blocks_drain() {
+        return vec![];
+    }
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
@@ -1028,6 +1090,15 @@ pub(crate) fn force_drain_queue_past_background_and_note_peek(
     app: &mut AppView,
     agent_id: AgentId,
 ) -> Vec<Effect> {
+    if app.global_work_pause.is_active() {
+        return vec![];
+    }
+    // Explicit send-now while soft-stop holds: release the hold (user intent
+    // to start work) then drain.
+    if app.soft_stop.is_holding() {
+        let _ = app.soft_stop.toggle();
+        app.show_toast("Soft stop cleared for send-now");
+    }
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
@@ -1041,6 +1112,9 @@ pub(crate) fn force_drain_queue_past_background_and_note_peek(
 /// Try to drain the next queued prompt (triggered after editing completes).
 pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
     if app.reconnect_pending {
+        return vec![];
+    }
+    if app.global_work_pause.is_active() {
         return vec![];
     }
     let ActiveView::Agent(id) = app.active_view else {
@@ -1753,6 +1827,83 @@ mod tests {
             RenderBlock::UserPrompt(ub) => assert_eq!(ub.text, "/deslop"),
             other => panic!("expected user prompt, got {other:?}"),
         }
+    }
+
+    /// Regression (dogfood): soft interject / queue interject paints once via
+    /// `x.ai/session/interjection` (or optimistic local push). When the
+    /// interjection misses the running turn and the shell converts it to an
+    /// `interject-fallback-*` prompt, the turn-start shim must reuse that
+    /// interjection bubble — not push a second identical green human rail.
+    #[test]
+    fn shim_reuses_interjection_bubble_for_interject_fallback_turn() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let text = "Also it appears we've had a regression [Image #1]";
+        // Live paint already happened (dispatch_interject and/or broadcast).
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt(text));
+        let before = agent.scrollback.len();
+        agent.note_self_originated_prompt("interject-fallback-019e24b7-test");
+        apply_turn_start_shim(
+            agent,
+            "interject-fallback-019e24b7-test".into(),
+            Some(text.into()),
+            "prompt",
+            None,
+        );
+        assert_eq!(
+            agent.scrollback.len(),
+            before,
+            "interject-fallback adoption must not paint a second user bubble"
+        );
+        assert_eq!(
+            user_prompt_count(agent, text),
+            1,
+            "exactly one human rail for the interjected text"
+        );
+        assert!(
+            !agent.session.tracker.expects_user_echo(),
+            "fallback has no live user-echo; skip must not stick for the next turn"
+        );
+        let last = agent.scrollback.entry(before - 1).expect("trailing entry");
+        match &last.block {
+            RenderBlock::UserPrompt(ub) => {
+                assert_eq!(ub.text, text);
+                assert!(
+                    ub.is_interjection,
+                    "reused bubble keeps interjection flag (shell numbering)"
+                );
+            }
+            other => panic!("expected user prompt, got {other:?}"),
+        }
+    }
+
+    /// A normal (non-fallback) turn must not steal a trailing mid-turn
+    /// interjection bubble that happens to share the same text.
+    #[test]
+    fn shim_does_not_claim_interjection_for_ordinary_prompt_id() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let text = "same text";
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt(text));
+        let before = agent.scrollback.len();
+        agent.note_self_originated_prompt("ordinary-prompt-id");
+        apply_turn_start_shim(
+            agent,
+            "ordinary-prompt-id".into(),
+            Some(text.into()),
+            "prompt",
+            None,
+        );
+        assert_eq!(
+            agent.scrollback.len(),
+            before + 1,
+            "ordinary adoption must still paint its own turn-start bubble"
+        );
+        assert_eq!(user_prompt_count(agent, text), 2);
     }
 
     #[test]
@@ -2923,7 +3074,7 @@ mod tests {
             },
             tx,
         ));
-        assert!(agent.holds_queue_for_background());
+        assert!(agent.has_live_background_subagents());
         assert!(agent.plan_approval_view.is_some());
 
         let effects = dispatch(Action::ForceDrainQueue, &mut app);
@@ -2940,21 +3091,19 @@ mod tests {
         );
     }
 
-    /// Idle parent + live background subagent: local queue holds (does not start
-    /// a conflicting main turn). Send-now / force drain still goes through.
+    /// Named contract: primary idle + live background subagent does **not**
+    /// hold the local queue. Drain starts a normal main turn; children run
+    /// in parallel (operator 2026-08-09).
     #[test]
-    fn background_subagent_holds_queue_while_parent_idle() {
-        use crate::app::agent::AgentState;
-
+    fn background_subagents_do_not_hold_queue_while_parent_idle() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         enqueue_local(&mut app, id, "follow-up while children run");
 
         let agent = app.agents.get_mut(&id).unwrap();
         assert!(agent.session.state.is_idle());
-        // Without children, idle drain starts the turn immediately.
         assert!(
-            !agent.holds_queue_for_background(),
+            !agent.has_live_background_subagents(),
             "predicate false with no live children"
         );
 
@@ -2964,42 +3113,27 @@ mod tests {
             info
         });
         assert!(
-            agent.holds_queue_for_background(),
-            "live standalone subagent holds the queue"
+            agent.has_live_background_subagents(),
+            "live standalone subagent is still detected"
         );
         assert_eq!(
             agent.held_queue_count(),
-            1,
-            "held row feeds the still-running cue"
+            0,
+            "idle + children is not a held-queue status state"
         );
 
         let effects = maybe_drain_queue(agent).effects;
         assert!(
-            effects.is_empty(),
-            "auto drain must hold while background subagents live, got {effects:?}"
-        );
-        assert_eq!(
-            agent.session.pending_prompts.len(),
-            1,
-            "follow-up stays queued"
-        );
-        assert!(
-            matches!(agent.session.state, AgentState::Idle),
-            "parent stays idle"
-        );
-
-        // Force path (send-now while idle) bypasses the hold.
-        let effects = force_drain_queue_past_background(agent).effects;
-        assert!(
             matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
-            "force drain must start the turn despite live children, got {effects:?}"
+            "auto drain must start the turn while background subagents live, got {effects:?}"
         );
         assert!(agent.session.pending_prompts.is_empty());
     }
 
-    /// ForceDrainQueue action toasts success only when the turn actually starts.
+    /// ForceDrainQueue still drains when idle + children (legacy force path;
+    /// same outcome as normal drain now that children do not hold).
     #[test]
-    fn force_drain_dispatch_toasts_starting_despite_subagents() {
+    fn force_drain_dispatch_starts_while_subagents_live() {
         use crate::app::agent::AgentState;
 
         let mut app = test_app_with_agent();
@@ -3011,7 +3145,7 @@ mod tests {
         info.is_background = true;
         agent.subagent_sessions.insert("bg-child".into(), info);
         assert!(matches!(agent.session.state, AgentState::Idle));
-        assert!(agent.holds_queue_for_background());
+        assert!(agent.has_live_background_subagents());
 
         let effects = dispatch(Action::ForceDrainQueue, &mut app);
         assert!(
@@ -3025,45 +3159,7 @@ mod tests {
         );
     }
 
-    /// When the last background subagent finishes, the hold lifts so a later
-    /// drain can start the queued turn.
-    #[test]
-    fn background_subagent_hold_lifts_when_children_finish() {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        enqueue_local(&mut app, id, "run after children");
-
-        let agent = app.agents.get_mut(&id).unwrap();
-        let mut info = running_subagent_info("bg-child");
-        info.is_background = true;
-        agent.subagent_sessions.insert("bg-child".into(), info);
-
-        assert!(maybe_drain_queue(agent).effects.is_empty());
-        assert_eq!(agent.session.pending_prompts.len(), 1);
-
-        agent
-            .subagent_sessions
-            .get_mut("bg-child")
-            .unwrap()
-            .finished = true;
-        assert!(
-            !agent.holds_queue_for_background(),
-            "finished children no longer hold"
-        );
-        assert_eq!(
-            agent.held_queue_count(),
-            0,
-            "held-count drops when the hold lifts"
-        );
-
-        let effects = maybe_drain_queue(agent).effects;
-        assert!(
-            matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
-            "queue drains once children finish, got {effects:?}"
-        );
-    }
-
-    /// Running monitors alone do **not** hold the queue (they can run forever).
+    /// Running monitors alone never held the queue (they can run forever).
     #[test]
     fn monitors_alone_do_not_hold_queue() {
         let mut app = test_app_with_agent();
@@ -3096,8 +3192,8 @@ mod tests {
             },
         );
         assert!(
-            !agent.holds_queue_for_background(),
-            "monitors are not part of the subagent hold"
+            !agent.has_live_background_subagents(),
+            "monitors are not background subagents"
         );
         let effects = maybe_drain_queue(agent).effects;
         assert!(

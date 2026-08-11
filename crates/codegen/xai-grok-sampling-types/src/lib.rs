@@ -21,7 +21,10 @@ pub use self::doom_loop::{
 };
 pub use self::error::{
     EmptyReason, EmptyResponseContext, ResponseModelMetadata, Result, SamplingError,
-    is_context_length_error, status_user_message, user_facing_api_error_message,
+    credit_exhausted_user_message, format_http_status, http_status_label, is_context_length_error,
+    is_credentials_rejected_message, is_credit_exhausted_message, is_edge_outage_status,
+    is_transient_api_status, outage_exhausted_user_message, status_user_message,
+    strip_api_error_status_prefix, user_facing_api_error_message,
 };
 pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,

@@ -241,7 +241,32 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             ..
         } => {
             if agent.session.loading_replay {
-                agent.replayed_terminal_prompts.insert(prompt_id);
+                agent.replayed_terminal_prompts.insert(prompt_id.clone());
+                // Primary user turns only. Synthetic wake terminals
+                // (subagent-completed-*, task-completed-*, …) must not mark
+                // the parent open-turn as finished — killall mid-wait leaves
+                // those children complete while the parent turn has no
+                // durable terminal.
+                //
+                // Do **not** set the completed flag for `cancelled` stop
+                // reasons: Esc/user-cancel leaves `canceled_turn_resume.json`
+                // on purpose, and session load must still auto-resume that
+                // marker. Treating cancel as "primary completed" made clean
+                // success and cancel look the same, so a stale-marker gate
+                // would either re-fire completed turns or drop cancel resume.
+                // Success / error / rate_limit / end_turn all count as a
+                // finished primary turn for open-turn mid-work recovery.
+                // `error` also sets the failed flag so reopen / rebuild
+                // auto-resumes that prompt (not silent idle after Internal
+                // error / 403 turn failure).
+                if matches!(
+                    xai_grok_shell::session::PromptOrigin::from_prompt_id(&prompt_id),
+                    xai_grok_shell::session::PromptOrigin::User
+                ) && stop_reason != "cancelled"
+                {
+                    agent.last_primary_user_turn_completed_in_replay = true;
+                    agent.last_primary_user_turn_failed_in_replay = stop_reason == "error";
+                }
                 false
             } else if is_wake_prompt(&prompt_id) {
                 if agent.session.state.is_busy() {
@@ -381,6 +406,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 user_model_preference: None,
                 deferred_model_switch: None,
                 in_flight_prompt: None,
+                cancel_resume_prompt_text: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
@@ -622,14 +648,32 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             if !resuming {
                 agent.maybe_push_parked_marker();
             }
-            // Queue may have been holding for live background subagents while
-            // the parent looked idle. Once the last child finishes, try drain
-            // so queued follow-ups start without another keystroke. Deferred
-            // past this match so `agent`'s mut borrow of `app` is released.
+            // Parent PromptResponse success keeps cancel-resume while children
+            // still run (killall mid-child dogfood). When the **last** child
+            // finishes and the parent is idle, drop that kept marker so a later
+            // idle `/rebuild` / reopen does not re-fire the completed parent
+            // prompt.
+            if !resuming && agent.session.state.is_idle() && !agent.has_live_background_subagents()
+            {
+                if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) {
+                    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+                    let _ =
+                        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+                            &cwd, &sid,
+                        );
+                    tracing::info!(
+                        session = %sid,
+                        "canceled_turn_resume: cleared after last background subagent finished"
+                    );
+                }
+            }
+            // If anything is still local-pending while idle (e.g. other gates
+            // had blocked drain), try again after the last child finishes.
+            // Background children alone no longer hold the queue.
             try_drain_after_subagent_finish = !resuming
                 && agent.session.state.is_idle()
                 && !agent.session.pending_prompts.is_empty()
-                && !agent.holds_queue_for_background();
+                && !agent.has_live_background_subagents();
             true
         }
         XaiSessionUpdate::HookAnnotation { message } => {
@@ -1292,11 +1336,29 @@ pub(super) fn apply_retry_state(
                 reason: reason.clone(),
             }));
         }
-        // Live stream after a retry: drop sticky Retrying chrome immediately.
-        // Without this, attempt N freezes for the whole next TTFB/stream window.
-        RetryState::StreamResumed => {
-            session.set_retry_activity(None);
-        }
+        // Live stream after a retry: soft-reconnect chrome, not a hard clear.
+        // Hard clear made the footer fall through to zombie "Waiting for
+        // response…" for the entire headers/TTFB window (up to ~120s) when the
+        // network was still bad after a timeout retry. Keep the retry family
+        // with reason "reconnecting" until real stream content arrives
+        // (`handle_update` clears `retry_activity`) or the next Retrying/
+        // Exhausted/Failed. First stream (no prior Retrying) stays clear.
+        RetryState::StreamResumed => match session.tracker.activity() {
+            Some(TurnActivity::Retrying {
+                attempt,
+                max_retries,
+                ..
+            }) => {
+                session.set_retry_activity(Some(TurnActivity::Retrying {
+                    attempt,
+                    max_retries,
+                    reason: "reconnecting".into(),
+                }));
+            }
+            _ => {
+                session.set_retry_activity(None);
+            }
+        },
         RetryState::Exhausted {
             attempts,
             reason,
@@ -1413,6 +1475,11 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
             plan_active = now_active,
             "Plan mode state updated (from CurrentModeUpdate)"
         );
+    }
+    // Leaving plan mode: drop local idle decision park (no reverse-request).
+    // Live soft-park reverse-request stays until the operator answers.
+    if was_active && !now_active {
+        agent.clear_local_idle_plan_decision_if_any();
     }
     true
 }

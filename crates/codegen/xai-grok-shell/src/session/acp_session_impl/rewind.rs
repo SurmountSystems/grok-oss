@@ -416,8 +416,9 @@ impl SessionActor {
                             prompt_text: None,
                             error: Some(format!(
                                 "Cannot rewind to prompt #{} — compaction checkpoint data is \
-                                 unavailable ({e}). Try rewinding to a prompt after the \
-                                 compaction point instead.",
+                                 unavailable ({e}). Auto-compact may have erased the history \
+                                 needed for this target; try a prompt after a later successful \
+                                 compaction, or continue without rewind.",
                                 target_index,
                             )),
                         });

@@ -329,14 +329,48 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             openrouter_balance,
             console_team_prepaid_cents,
         } => {
-            if let Some(bal) = balance.as_ref() {
-                let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                let _ = xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(
-                    bal.usage_pct,
-                    &grok_home,
-                );
+            use crate::views::credit_bar::{
+                CreditBalanceFetch, should_apply_included_usage_side_effects,
+            };
+            // SuperGrok three-state (same as agent BillingFetched).
+            match &balance {
+                CreditBalanceFetch::Resolved(bal) => {
+                    app.credit_balance = bal.clone();
+                }
+                CreditBalanceFetch::Unchanged => {}
             }
-            app.credit_balance = balance;
+            // Same memo + meter identity path as agent BillingFetched: period
+            // reset (free SuperGrok period used percent drops below 100) must
+            // clear out-of-allowance memo and re-label SuperGrok when session is
+            // preferred (not preferred_method=api_key). Only known included
+            // readings feed exhaust (never placeholder 0 with unknown flag).
+            let exhaust_action = match app.credit_balance.as_ref() {
+                Some(bal) if should_apply_included_usage_side_effects(bal) => {
+                    let grok_home = xai_grok_shell::util::grok_home::grok_home();
+                    xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(
+                        bal.usage_pct,
+                        &grok_home,
+                    )
+                }
+                _ => xai_grok_shell::auth::AllowanceExhaustAction::None,
+            };
+            let marked = matches!(
+                exhaust_action,
+                xai_grok_shell::auth::AllowanceExhaustAction::Marked
+            );
+            let cleared = matches!(
+                exhaust_action,
+                xai_grok_shell::auth::AllowanceExhaustAction::Cleared
+            );
+            if let Some(kind) = crate::views::credit_bar::sampling_identity_after_allowance_sync(
+                marked,
+                cleared,
+                app.is_api_key_auth,
+            ) {
+                for agent in app.agents.values_mut() {
+                    agent.sampling_identity = kind;
+                }
+            }
             apply_auto_topup(&mut app.auto_topup, &autotopup);
             if let Some(or) = openrouter_balance {
                 app.openrouter_credit_balance = Some(or);
@@ -457,6 +491,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && !defer_to_open_reload_window(agent, agent_id, "SessionRestoreProgress")
             {
                 agent.scrollback.push_block(RenderBlock::system(message));
+            }
+            vec![]
+        }
+        // Mid-rebuild: progress bar + sticky stage text. Never scrollback-spam
+        // every Compiling line; raw cargo already captured off the TTY.
+        TaskResult::RebuildProgress {
+            agent_id,
+            message,
+            fraction,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                let fraction = xai_grok_update::clamp_rebuild_fraction(fraction);
+                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
+                    fraction,
+                    detail: message.clone(),
+                });
+                // Keep a long-lived toast so status chrome still shows the stage
+                // if the bar row is tight; ticks high enough for multi-minute builds.
+                agent.show_toast_ticks(
+                    &format!("Rebuild {:3.0}%  {message}", fraction * 100.0),
+                    255,
+                );
             }
             vec![]
         }
@@ -674,6 +730,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             };
             deliver_doctor_message(app, target.agent_id, message);
             vec![]
+        }
+        TaskResult::RebuildDone { agent_id, result } => {
+            super::rebuild::handle_rebuild_done(app, agent_id, result)
         }
         TaskResult::AnnouncementsHiddenPersisted { result } => {
             if let Err(e) = result {

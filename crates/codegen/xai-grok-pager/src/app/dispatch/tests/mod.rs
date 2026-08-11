@@ -3,6 +3,7 @@ mod auth;
 mod billing;
 mod cta_e2e;
 mod dashboard;
+mod global_pause;
 mod jump;
 mod modes;
 mod notes;
@@ -12,6 +13,7 @@ mod rewind;
 mod router;
 mod session;
 mod settings;
+mod soft_stop;
 mod status;
 mod task_result;
 mod transcript;
@@ -78,6 +80,8 @@ fn test_app() -> AppView {
         active_view: ActiveView::Welcome,
         auth_return_view: None,
         agents: IndexMap::new(),
+        global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
+        soft_stop: crate::app::soft_stop::SoftStop::new(),
         next_agent_id: 0,
         models: ModelState::default(),
         registry: crate::actions::ActionRegistry::defaults(),
@@ -236,6 +240,7 @@ fn test_app() -> AppView {
         foreign_resume_launch_generation: 0,
         foreign_resume_launch: None,
         quit_for_update: false,
+        rebuild_relaunch: None,
         relaunch: None,
         import_claude_modal: None,
         welcome_doc_viewer: None,
@@ -321,6 +326,7 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         bg_tool_call_to_task: std::collections::HashMap::new(),
         scheduled_tasks: std::collections::HashMap::new(),
         in_flight_prompt: None,
+        cancel_resume_prompt_text: None,
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
@@ -569,6 +575,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -715,6 +722,7 @@ fn two_agent_app_with_bg_task() -> AppView {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -1016,11 +1024,14 @@ fn test_bal(usage_pct: f64) -> crate::views::credit_bar::CreditBalance {
         usage_pct,
         effective_usage_pct: usage_pct,
         period_end_display: None,
+        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
         prepaid_balance_cents: None,
         period_type: None,
         is_unified_billing_user: None,
+        grok_build_usage_pct: None,
+        included_usage_known: true,
     }
 }

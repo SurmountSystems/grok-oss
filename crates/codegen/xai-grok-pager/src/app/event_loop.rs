@@ -64,6 +64,8 @@ pub(crate) struct RunResult {
     /// When set, the process should re-exec into the other screen mode after
     /// terminal restore. See `/minimal` and `/fullscreen`.
     pub relaunch: Option<super::app_view::ScreenModeRelaunch>,
+    /// When set, re-exec the newly installed binary after `/rebuild`.
+    pub rebuild_relaunch: Option<super::app_view::RebuildRelaunch>,
 }
 
 /// In-flight reconnect re-initialization, tied to the agents whose reload
@@ -1114,6 +1116,14 @@ pub(crate) async fn run(
         )
         .value,
     );
+    crate::appearance::cache::set_always_expand_thinking(
+        xai_grok_shell::util::config::resolve_always_expand_thinking(
+            requirements.as_ref(),
+            user_config.as_ref(),
+            managed_config.as_ref(),
+        )
+        .value,
+    );
     crate::appearance::cache::set_group_tool_verbs(
         xai_grok_shell::util::config::resolve_group_tool_verbs(
             requirements.as_ref(),
@@ -1631,7 +1641,15 @@ pub(crate) async fn run(
                 git_ref: args.worktree_ref.clone(),
             })
         }
-        MaterializedStartup::Resume { session_id, .. } => {
+        MaterializedStartup::Resume {
+            session_id,
+            other_conversation_relative,
+            ..
+        } => {
+            // Default open: when other conversations exist, toast next-oldest age.
+            if let Some(rel) = other_conversation_relative {
+                app.show_toast(&crate::app::session_startup::format_other_conversations_toast(rel));
+            }
             // CLI resume has no roster entry: `chat_kind` on LoadSession is the
             // conversation-entry bit only (false here). Process-wide `--chat`
             // still stamps kind=chat via SessionFlags.chat_mode in the load
@@ -1666,14 +1684,24 @@ pub(crate) async fn run(
             parent_cwd: parent_cwd.clone().or(session_cwd.clone()),
             new_session_id: new_session_id.clone(),
         }),
-        MaterializedStartup::NewAuto if args.worktree.is_some() => {
+        MaterializedStartup::NewAuto { .. } if args.worktree.is_some() => {
             Some(Action::NewWorktreeSession {
                 load_session_id: None,
                 label: args.worktree.as_ref().filter(|s| !s.is_empty()).cloned(),
                 git_ref: args.worktree_ref.clone(),
             })
         }
-        MaterializedStartup::NewAuto => None,
+        MaterializedStartup::NewAuto { new_folder_notice } => {
+            // Soft yellow informational banner (not an error): empty workspace.
+            if *new_folder_notice {
+                app.startup_warnings.push(crate::startup::StartupWarning {
+                    severity: crate::startup::WarningSeverity::Warning,
+                    message: crate::app::session_startup::new_folder_startup_message().to_string(),
+                    action: None,
+                });
+            }
+            None
+        }
     };
 
     if let Some(action) = startup_action {
@@ -2041,13 +2069,28 @@ pub(crate) async fn run(
             // Leader disconnect: the bridge fires cancel when the IPC
             // channel closes.  Without this arm the loop would hang
             // because AppView holds the client-side tx, keeping acp_rx open.
+            //
+            // Biased order puts this above quit_notify. During `/rebuild`,
+            // leaders get RelaunchForUpdate and may drop IPC while peers also
+            // receive SIGUSR1. If we break here without arming re-exec, peers
+            // quit and never come back on the new binary.
             _ = connection_cancel.cancelled() => {
+                let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+                    &mut app,
+                    dispatch::rebuild::PeerRebuildExitReason::LeaderDisconnect,
+                );
                 break;
             }
 
             // Graceful-quit request from the signal handler. Kept high in the
             // biased order so a SIGTERM quit isn't starved by an ACP firehose.
+            // SIGUSR1 peer-rebuild sets a flag first; arm re-exec before Quit so
+            // all product windows pick up the new binary after `/rebuild`.
             _ = quit_notify.notified() => {
+                let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+                    &mut app,
+                    dispatch::rebuild::PeerRebuildExitReason::SignalOrFlag,
+                );
                 let effs = dispatch::dispatch(Action::Quit, &mut app);
                 let _ = process_effects(effs, &mut tasks, &mut app, &progress_tx);
                 break;
@@ -2152,9 +2195,17 @@ pub(crate) async fn run(
             }
 
             Some(msg) = progress_rx.recv() => {
-                let result = TaskResult::SessionRestoreProgress {
-                    agent_id: msg.agent_id,
-                    message: msg.message,
+                let result = if msg.toast {
+                    TaskResult::RebuildProgress {
+                        agent_id: msg.agent_id,
+                        message: msg.message,
+                        fraction: msg.fraction.unwrap_or(0.0),
+                    }
+                } else {
+                    TaskResult::SessionRestoreProgress {
+                        agent_id: msg.agent_id,
+                        message: msg.message,
+                    }
                 };
                 let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
                 if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
@@ -2286,6 +2337,16 @@ pub(crate) async fn run(
                     }
                     presenter.request(false);
                 } else if app.tick() {
+                    presenter.request(false);
+                }
+                // Tick may queue effects (e.g. /limits countdown hit zero →
+                // silent billing refresh). Drain them here so they fire without
+                // waiting for the next keystroke.
+                if !app.pending_effects.is_empty() {
+                    let effs = std::mem::take(&mut app.pending_effects);
+                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
                     presenter.request(false);
                 }
                 // Keep ticking as long as there are running animations
@@ -2783,6 +2844,13 @@ pub(crate) async fn run(
 
     app.notification_service.shutdown();
 
+    // Final safety net: drain a leftover SIGUSR1 flag if an exit path forgot
+    // to arm (must not opportunistic-arm on plain /exit).
+    let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+        &mut app,
+        dispatch::rebuild::PeerRebuildExitReason::SignalOrFlag,
+    );
+
     Ok(make_run_result(&app))
 }
 
@@ -3009,6 +3077,7 @@ fn make_run_result(app: &AppView) -> RunResult {
         exit_info,
         quit_for_update: app.quit_for_update,
         relaunch: app.relaunch.clone(),
+        rebuild_relaunch: app.rebuild_relaunch.clone(),
     }
 }
 

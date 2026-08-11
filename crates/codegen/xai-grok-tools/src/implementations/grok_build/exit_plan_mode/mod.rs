@@ -63,9 +63,12 @@ impl crate::types::tool_metadata::ToolMetadata for ExitPlanModeTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"Exit plan mode and present your plan to the user.
+        r#"Exit plan mode and present your plan to the user for review.
 
-Use this after you have finished writing your plan to the plan file in plan mode."#
+Use this after you have finished writing your plan to the plan file in plan mode.
+Tool success means the plan was presented (soft-park / panel), not that the operator
+approved it. Do not implement until a real plan panel decision (Approve / Revise /
+Clarify / Quit) or an explicit freeform approve."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -163,10 +166,22 @@ impl xai_tool_runtime::Tool for ExitPlanModeTool {
             Some(content) => {
                 tracing::info!(
                     plan_chars = content.len(),
-                    "Exiting plan mode with plan content"
+                    "Presenting plan for operator review (not approval)"
                 );
 
-                let message = "Your plan has been approved. You can now start coding.".to_owned();
+                // Body is always re-read from disk in this tool run. This tool
+                // result is presentation only: shell intercept + plan panel CTAs
+                // own real approval. Never claim "approved" / "start coding"
+                // here (dogfood false auto-approve). Never teach freeform chat
+                // approve (product CTAs only).
+                let message = format!(
+                    "Plan presented for operator review at {plan_file_path}. \
+                     This tool result is NOT operator approval — do not implement yet. \
+                     Wait for a real plan panel decision (Approve / Revise / Clarify / Quit). \
+                     Do not treat freeform chat or always-approve permission mode as plan \
+                     approval. The plan body below was re-read from disk at present time; \
+                     prefer it over earlier draft plan titles."
+                );
 
                 Ok(ExitPlanModeOutput::PlanReady {
                     message,
@@ -175,12 +190,14 @@ impl xai_tool_runtime::Tool for ExitPlanModeTool {
                 })
             }
             None => {
-                tracing::info!("Exiting plan mode with empty/missing plan file");
+                tracing::info!("Presenting empty/missing plan file for operator review");
 
                 Ok(ExitPlanModeOutput::EmptyPlan {
-                    message:
-                        "Plan mode exit approved. No plan content was found — you can proceed."
-                            .to_string(),
+                    message: format!(
+                        "Plan presented for operator review at {plan_file_path}, but no plan \
+                         content was found. This tool result is NOT operator approval — do not \
+                         implement yet. Wait for a real plan panel decision."
+                    ),
                     plan_file_path,
                 })
             }
@@ -256,15 +273,97 @@ mod tests {
                 ref plan_content,
                 ref plan_file_path,
             } => {
-                assert!(message.contains("plan has been approved"));
-                assert!(message.contains("start coding"));
+                assert!(
+                    message.contains("NOT operator approval")
+                        || message.contains("not operator approval"),
+                    "tool must not claim approval; got {message:?}"
+                );
+                assert!(
+                    !message.to_lowercase().contains("has been approved"),
+                    "tool must not claim plan approved: {message:?}"
+                );
+                assert!(
+                    !message.to_lowercase().contains("start coding"),
+                    "tool must not tell model to start coding: {message:?}"
+                );
+                assert!(
+                    message.contains("re-read from disk at present time"),
+                    "agent handoff must name disk re-read; got {message:?}"
+                );
                 assert!(plan_content.contains("Do thing A"));
                 assert!(plan_content.contains("Do thing B"));
                 // Cwd fallback now displays the resolved absolute path (shared resolver).
                 assert!(plan_file_path.ends_with(".grok/plan.md"));
+                assert!(
+                    message.contains(plan_file_path.as_str()) || message.contains(".grok/plan.md"),
+                    "message must point at plan file path; got {message:?}"
+                );
             }
             other => panic!("Expected PlanReady, got {:?}", other),
         }
+    }
+
+    /// Named contract: tool body is read at run time (present). A rewrite of
+    /// plan.md between an earlier park snapshot and tool execution must surface
+    /// the new body in the model-facing result, not a frozen A.
+    #[tokio::test]
+    async fn exit_plan_mode_reads_current_disk_not_earlier_draft() {
+        let tmp = TempDir::new().unwrap();
+        let plan_dir = tmp.path().join(".grok");
+        std::fs::create_dir_all(&plan_dir).unwrap();
+        let plan_path = plan_dir.join("plan.md");
+        std::fs::write(&plan_path, "# Plan A\nold_token_economy_marker\n").unwrap();
+
+        // Simulate rewrite while approval was parked (before tool runs).
+        std::fs::write(&plan_path, "# Plan B\nsurmount_team_usage_first\n").unwrap();
+
+        let resources = resources_with_cwd(tmp.path());
+        let shared = resources.into_shared();
+        let tool = ExitPlanModeTool;
+
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx_with_call_id(shared, "test-call"),
+            ExitPlanModeInput {},
+        )
+        .await
+        .unwrap();
+
+        match &result {
+            ExitPlanModeOutput::PlanReady {
+                plan_content,
+                message,
+                ..
+            } => {
+                assert!(
+                    plan_content.contains("surmount_team_usage_first"),
+                    "tool must re-read disk B at run time; got {plan_content:?}"
+                );
+                assert!(
+                    !plan_content.contains("old_token_economy_marker"),
+                    "tool must not return frozen draft A; got {plan_content:?}"
+                );
+                assert!(
+                    message.contains("re-read from disk at present time"),
+                    "model must be told body is present-time disk; got {message:?}"
+                );
+                assert!(
+                    !message.to_lowercase().contains("approved"),
+                    "present-time re-read must not claim approval: {message:?}"
+                );
+            }
+            other => panic!("Expected PlanReady, got {other:?}"),
+        }
+        let prompt: ToolOutput = result.into();
+        let text = prompt.to_prompt_format();
+        assert!(
+            text.contains("surmount_team_usage_first"),
+            "model prompt must embed current disk plan; got {text:?}"
+        );
+        assert!(
+            !text.contains("old_token_economy_marker"),
+            "model prompt must not embed frozen draft A; got {text:?}"
+        );
     }
 
     #[tokio::test]
@@ -288,9 +387,16 @@ mod tests {
 
         match result {
             ExitPlanModeOutput::EmptyPlan { ref message, .. } => {
-                assert!(message.contains("Plan mode exit approved"));
-                assert!(message.contains("No plan content was found"));
-                assert!(message.contains("you can proceed"));
+                assert!(
+                    message.contains("NOT operator approval")
+                        || message.contains("not operator approval"),
+                    "empty plan must not claim approval: {message:?}"
+                );
+                assert!(
+                    !message.to_lowercase().contains("exit approved"),
+                    "must not say exit approved: {message:?}"
+                );
+                assert!(message.contains("no plan content") || message.contains("No plan content"));
             }
             other => panic!("Expected EmptyPlan, got {:?}", other),
         }
@@ -314,12 +420,68 @@ mod tests {
 
         match result {
             ExitPlanModeOutput::EmptyPlan { ref message, .. } => {
-                assert!(message.contains("Plan mode exit approved"));
-                assert!(message.contains("No plan content was found"));
-                assert!(message.contains("you can proceed"));
+                assert!(
+                    message.contains("NOT operator approval")
+                        || message.contains("not operator approval"),
+                    "missing plan must not claim approval: {message:?}"
+                );
+                assert!(
+                    !message.to_lowercase().contains("exit approved"),
+                    "must not say exit approved: {message:?}"
+                );
             }
             other => panic!("Expected EmptyPlan, got {:?}", other),
         }
+    }
+
+    /// Named contract: bare tool success must never teach the model that the
+    /// operator approved (dogfood: false "Plan auto-approved" after soft-park).
+    #[tokio::test]
+    async fn exit_plan_mode_tool_result_does_not_claim_operator_approval() {
+        let tmp = TempDir::new().unwrap();
+        let plan_dir = tmp.path().join(".grok");
+        std::fs::create_dir_all(&plan_dir).unwrap();
+        std::fs::write(plan_dir.join("plan.md"), "# Plan\nstep\n").unwrap();
+
+        let resources = resources_with_cwd(tmp.path());
+        let shared = resources.into_shared();
+        let result = xai_tool_runtime::Tool::run(
+            &ExitPlanModeTool,
+            test_ctx_with_call_id(shared, "t-no-approve"),
+            ExitPlanModeInput {},
+        )
+        .await
+        .unwrap();
+
+        let output: ToolOutput = result.into();
+        let prompt = output.to_prompt_format();
+        let lower = prompt.to_lowercase();
+        assert!(
+            lower.contains("not operator approval") || lower.contains("not operator approve"),
+            "must state present ≠ approve: {prompt:?}"
+        );
+        assert!(
+            !lower.contains("has been approved")
+                && !lower.contains("plan mode exit approved")
+                && !lower.contains("you can now start coding"),
+            "must not claim approval or start coding: {prompt:?}"
+        );
+        assert!(
+            lower.contains("plan panel decision") || lower.contains("approve / revise"),
+            "must point at plan panel CTAs: {prompt:?}"
+        );
+        assert!(
+            !lower.contains("explicit freeform approve"),
+            "must not teach freeform chat approve: {prompt:?}"
+        );
+        assert!(
+            lower.contains("always-approve") || lower.contains("permission mode"),
+            "must separate always-approve permission mode from plan Approve: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("step"),
+            "must still embed plan body: {prompt:?}"
+        );
     }
 
     #[tokio::test]
@@ -394,8 +556,13 @@ mod tests {
 
         let output: ToolOutput = result.into();
         let prompt = output.to_prompt_format();
-        assert!(prompt.contains("plan has been approved"));
+        assert!(
+            prompt.contains("NOT operator approval") || prompt.contains("not operator approval"),
+            "prompt must not claim approval: {prompt:?}"
+        );
+        assert!(!prompt.to_lowercase().contains("has been approved"));
         assert!(prompt.contains("saved at:"));
+        assert!(prompt.contains("re-read from disk at present time"));
         assert!(prompt.contains("Step 1"));
         assert!(prompt.contains("Step 2"));
         assert!(prompt.contains(".grok/plan.md"));

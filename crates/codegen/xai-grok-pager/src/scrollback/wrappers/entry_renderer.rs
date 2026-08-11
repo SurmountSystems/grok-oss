@@ -20,6 +20,56 @@ use crate::theme::{self, Theme};
 /// ~0.15 gives a nice smooth wave that travels the block in ~40 ticks.
 const WAVE_SPEED: f32 = 0.15;
 
+/// Columns reserved for the short timestamp overlay (`  12:30 PM` max).
+pub const TIMESTAMP_SHORT_RESERVE: u16 = 10;
+
+/// Extra right-edge columns when always-on bubble ⧉ shares a message row
+/// with the timestamp: one gap cell + one ⧉ cell. Keeps short and expanded
+/// timestamps fully readable (⧉ stays at the content right edge).
+pub const BUBBLE_COPY_TRAILING_INSET: u16 = 2;
+
+/// Whether this block type shows a right-edge timestamp overlay.
+pub fn block_shows_timestamp(block: &RenderBlock) -> bool {
+    matches!(
+        block,
+        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+    )
+}
+
+/// Whether this block type gets always-on bubble ⧉ chrome.
+pub fn block_shows_bubble_copy(block: &RenderBlock) -> bool {
+    matches!(
+        block,
+        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_)
+    )
+}
+
+/// Columns from the content right edge reserved for bubble ⧉ (+ gap) when
+/// both timestamp and bubble copy paint on the same row. Zero otherwise.
+///
+/// Layout when non-zero (right edge of content):
+/// `[timestamp zone (TIMESTAMP_SHORT_RESERVE)][gap][⧉]`
+pub fn bubble_copy_trailing_inset(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
+    if appearance.show_timestamps
+        && appearance.scrollback.display.bubble_copy_buttons
+        && block_shows_timestamp(block)
+        && block_shows_bubble_copy(block)
+    {
+        BUBBLE_COPY_TRAILING_INSET
+    } else {
+        0
+    }
+}
+
+/// Right-side content columns reserved so message text does not wrap under
+/// the timestamp overlay (and, when bubble ⧉ is also on, under that chrome).
+pub fn message_right_chrome_reserve(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
+    if !appearance.show_timestamps || !block_shows_timestamp(block) {
+        return 0;
+    }
+    TIMESTAMP_SHORT_RESERVE + bubble_copy_trailing_inset(block, appearance)
+}
+
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
@@ -334,22 +384,16 @@ impl<'a> EntryRenderer<'a> {
     /// and mid-turn interjections) but NOT for thinking traces, tool calls, or
     /// system messages.
     fn should_show_timestamp(&self) -> bool {
-        matches!(
-            self.entry.block,
-            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-        )
+        block_shows_timestamp(&self.entry.block)
     }
 
     /// Width reserved for the timestamp on the right side of content lines.
     ///
     /// When > 0, content is wrapped at `content_width - reserved` so text
-    /// never collides with the timestamp overlay.
+    /// never collides with the timestamp overlay (or always-on bubble ⧉ when
+    /// that chrome shares the row).
     fn timestamp_reserved(&self) -> u16 {
-        if self.appearance.show_timestamps && self.should_show_timestamp() {
-            10 // max short format: "  12:30 PM"
-        } else {
-            0
-        }
+        message_right_chrome_reserve(&self.entry.block, &self.appearance)
     }
 
     fn accent(&self, content_width: u16) -> Option<AccentStyle> {
@@ -939,6 +983,11 @@ impl Renderable for EntryRenderer<'_> {
         // Short format (h:mm AM/PM) by default; expands to full format
         // (HH:mm:ss | MMM DD) when the mouse hovers over the timestamp area.
         // Gated on appearance.show_timestamps (toggled via /timestamps).
+        //
+        // When always-on bubble ⧉ is also on for this block, leave
+        // BUBBLE_COPY_TRAILING_INSET columns at the absolute right edge so
+        // the copy control does not paint over the time/date (overlap, not
+        // truncation).
         if self.appearance.show_timestamps
             && content_skip == 0
             && !output.is_empty()
@@ -946,12 +995,16 @@ impl Renderable for EntryRenderer<'_> {
             && let Some(ts) = self.entry.created_at
         {
             let first_content_y = content_area.y + if vpad_top_visible { 1 } else { 0 };
-            // Check if mouse is hovering the timestamp zone (rightmost 10 cols
-            // of the first content row).
+            let copy_inset = bubble_copy_trailing_inset(&self.entry.block, &self.appearance);
+            let content_right = content_area.x + content_area.width;
+            // Timestamp zone is the short-reserve band immediately left of any
+            // bubble-copy inset (not the ⧉ / gap cells themselves).
+            let ts_zone_right = content_right.saturating_sub(copy_inset);
+            let ts_zone_left = ts_zone_right.saturating_sub(TIMESTAMP_SHORT_RESERVE);
+            // Check if mouse is hovering the timestamp zone on the first
+            // content row.
             let ts_hovered = self.mouse_pos.is_some_and(|(mx, my)| {
-                my == first_content_y
-                    && mx >= content_area.x + content_area.width.saturating_sub(10)
-                    && mx < content_area.x + content_area.width
+                my == first_content_y && mx >= ts_zone_left && mx < ts_zone_right
             });
             let ts_str = if ts_hovered {
                 ts.format("  %H:%M:%S | %b %d").to_string()
@@ -959,8 +1012,9 @@ impl Renderable for EntryRenderer<'_> {
                 ts.format("  %-I:%M %p").to_string()
             };
             let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1 && first_content_y < max_row {
-                let ts_x = content_area.x + content_area.width - ts_width;
+            if content_area.width > ts_width + 1 + copy_inset && first_content_y < max_row {
+                // Right-align to the end of the timestamp zone (left of ⧉).
+                let ts_x = ts_zone_right.saturating_sub(ts_width);
                 let ts_style = Style::default().fg(self.theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
             }
@@ -1193,6 +1247,24 @@ mod tests {
         text.contains("AM") || text.contains("PM")
     }
 
+    /// Content exclusive right edge for default layout (pad_right=2 → last
+    /// content cell at width-3; exclusive end width-2).
+    fn content_right_exclusive(width: u16) -> u16 {
+        width - 2
+    }
+
+    /// Expected left x of a right-aligned timestamp string under default
+    /// appearance (timestamps + bubble_copy both on → trailing inset).
+    fn expected_ts_x(
+        width: u16,
+        ts_width: u16,
+        appearance: &AppearanceConfig,
+        block: &RenderBlock,
+    ) -> u16 {
+        let copy_inset = bubble_copy_trailing_inset(block, appearance);
+        content_right_exclusive(width).saturating_sub(copy_inset + ts_width)
+    }
+
     #[test]
     fn test_timestamp_short_format_for_user_prompt() {
         let theme = Theme::current();
@@ -1209,7 +1281,7 @@ mod tests {
         // UserPrompt has vpad=true, first content row is y=1.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
         let content_row = 1u16;
 
         let rendered = collect_row_symbols(&buf, content_row, ts_x, ts_x + ts_width);
@@ -1234,7 +1306,7 @@ mod tests {
         // AgentMessage has vpad=false, first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1250,8 +1322,8 @@ mod tests {
         let width: u16 = 80;
 
         // AgentMessage has no vpad → first content row at y=0.
-        // Hover the rightmost 10 cols of that row to trigger expansion.
-        let hover_x = width - 2 - 5; // inside the timestamp zone
+        // Hover inside the timestamp zone (left of bubble-copy trailing inset).
+        let hover_x = width - 2 - 5; // still inside ts zone with default inset
         let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((hover_x, 0)));
 
         let height = renderer.desired_height(width);
@@ -1268,7 +1340,7 @@ mod tests {
             .format("%H:%M:%S | %b %d")
             .to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1495,7 +1567,7 @@ mod tests {
         // AgentMessage has no vpad → first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
             rendered, expected,
@@ -1525,9 +1597,16 @@ mod tests {
         let mut buf = Buffer::empty(area);
         renderer.render(area, &mut buf);
 
-        // Gutter cell carries the block background, proving the block fill
-        // (not the bg_base clear) owns it. UserPrompt has vpad → content on row 1.
-        let gutter_x = gutter_band(&renderer, width).start + 2;
+        // Sample the trailing gap cell left of the bubble-copy edge (never
+        // overwritten by the right-aligned timestamp string). UserPrompt has
+        // vpad → content on row 1.
+        let content_right = gutter_band(&renderer, width).end;
+        let inset = bubble_copy_trailing_inset(&entry.block, &renderer.appearance);
+        let gutter_x = if inset > 0 {
+            content_right - inset // gap cell; ⧉ is content_right - 1
+        } else {
+            gutter_band(&renderer, width).start
+        };
         let gutter_cell = buf.cell((gutter_x, 1)).unwrap();
         assert_eq!(
             gutter_cell.bg, theme.bg_light,

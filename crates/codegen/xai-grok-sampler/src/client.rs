@@ -25,9 +25,17 @@ use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_err
 use xai_grok_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
     ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
-    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
-    rs,
+    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event,
+    is_credentials_rejected_message, messages, rs,
 };
+
+/// HTTP 403 with a credentials-rejected body is the same class as 401:
+/// invalid/unvalidated OAuth or API token. Map to [`SamplingError::Auth`]
+/// so the session can refresh once and the pager can show re-auth instead
+/// of Internal error JSON. Bare policy 403 must not match.
+fn is_forbidden_credentials_rejection(status: reqwest::StatusCode, message: &str) -> bool {
+    status == reqwest::StatusCode::FORBIDDEN && is_credentials_rejected_message(message)
+}
 
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
 
@@ -946,6 +954,12 @@ impl SamplingClient {
                 )));
             }
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                self.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected): {message}"
+                )));
+            }
             return Err(SamplingError::Api {
                 status,
                 message,
@@ -1096,6 +1110,16 @@ impl SamplingClient {
 
             let bytes = response.bytes().await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                span.record("error", "forbidden credentials rejected");
+                self.record_401_attribution(
+                    crate::attribution::SamplingConsumer::ChatCompletionsStream,
+                );
+                let endpoint = self.endpoint("chat/completions");
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected) from {endpoint}: {message}"
+                )));
+            }
             span.record("error", message.as_str());
             tracing::error!(
                 status = %status,
@@ -1291,6 +1315,13 @@ impl SamplingClient {
             }
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                self.record_401_attribution(crate::attribution::SamplingConsumer::Responses);
+                let endpoint = self.endpoint("responses");
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected) from {endpoint}: {message}"
+                )));
+            }
             tracing::warn!(
                 status = %status,
                 error_message = %message,
@@ -1450,6 +1481,14 @@ impl SamplingClient {
             let should_retry = extract_should_retry(response.headers());
             let bytes = response.bytes().await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                span.record("error", "forbidden credentials rejected");
+                self.record_401_attribution(crate::attribution::SamplingConsumer::ResponsesStream);
+                let endpoint = self.endpoint("responses");
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected) from {endpoint}: {message}"
+                )));
+            }
             span.record("error", message.as_str());
             tracing::error!(
                 status = %status,
@@ -1628,6 +1667,13 @@ impl SamplingClient {
             }
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                self.record_401_attribution(crate::attribution::SamplingConsumer::Messages);
+                let endpoint = self.endpoint("messages");
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected) from {endpoint}: {message}"
+                )));
+            }
             tracing::warn!(
                 status = %status,
                 error_message = %message,
@@ -1748,6 +1794,14 @@ impl SamplingClient {
             let should_retry = extract_should_retry(response.headers());
             let bytes = response.bytes().await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                span.record("error", "forbidden credentials rejected");
+                self.record_401_attribution(crate::attribution::SamplingConsumer::MessagesStream);
+                let endpoint = self.endpoint("messages");
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected) from {endpoint}: {message}"
+                )));
+            }
             span.record("error", message.as_str());
             tracing::error!(
                 status = %status,

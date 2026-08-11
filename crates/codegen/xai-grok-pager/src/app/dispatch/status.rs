@@ -250,13 +250,22 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
 
 /// `/limits` — SuperGrok included / dollar extras / console path detail.
 ///
-/// Pure view of the cached billing snapshot + live sampling identity.
+/// Opens a **dismissible popup modal** (not a scrollback dump) from the last
+/// good snapshot, then force-busts Management prepaid+postpaid+usage-series
+/// process caches (when a management key is present) and silent-`FetchBilling`
+/// so live meters match CLI `grok limits`. Background turn-end polls still
+/// honor ≤60s TTL (including usage series). While open, the modal ticks a
+/// d/h/m/s countdown and re-samples billing when the countdown hits zero
+/// (HonorProcessTtl, not another force-bust).
+///
 /// When two SuperGrok principals exist in `auth.json`, stacks dual rows
 /// (active principal gets the polled billing cache; siblings honest absence
 /// unless process-local included billing was remembered for them).
 /// Console team prepaid cents come from agent/app cache or Management process
 /// cache; missing → honest not-configured / loading / unavailable (never a soft
 /// "no $ meter yet" placeholder). Empty SuperGrok cache → "no data yet".
+/// Warm usage series (OAuth / Grok Build class window) attaches from process
+/// cache when FetchBilling or CLI collect has filled it.
 pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -264,8 +273,6 @@ pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
     if !app.agents.contains_key(&id) {
         return vec![];
     }
-    // Clone cache so we can mutably push to scrollback without dual borrows.
-    // Prefer agent-scoped cache (mirrors footer); fall back to app-level.
     let (balance, autotopup, live, console_prepaid) = {
         let agent = app.agents.get(&id).expect("checked contains_key");
         let balance = agent
@@ -281,10 +288,10 @@ pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
     };
     let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
     let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
-    let configured = has_mgmt_key && has_mgmt_team;
-    // Distinct missing key vs missing team vs loading (gap ignored when cents known).
+    let console_key_available =
+        xai_grok_shell::auth::console_inference_key_present_default() || live.is_console();
+    // Distinct missing key vs loading vs post-fetch gaps (ignored when cents known).
     let prepaid_gap = if console_prepaid.is_some() {
-        // Display uses cents; gap is unused. Harmless default.
         crate::views::credit_bar::ConsoleTeamPrepaidGap::Loading
     } else {
         crate::views::credit_bar::ConsoleTeamPrepaidGap::from_management_config(
@@ -298,21 +305,274 @@ pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
         live,
         console_prepaid,
         prepaid_gap,
+        console_key_available,
     );
-    let text = crate::views::limits_snapshot::format_limits_detail(&snap);
+    // Dual SuperGrok: any principal still missing included meters → silent
+    // refresh (sibling poll fills process cache). Unified fill may already
+    // paint the shared pool on cold siblings; only fetch when a row is still empty.
+    let needs_sibling_billing = !snap.extra_principals.is_empty()
+        && (snap.primary.included.is_none()
+            || snap.extra_principals.iter().any(|p| p.included.is_none()));
+
     if let Some(agent) = app.agents.get_mut(&id) {
-        agent.scrollback.push_block(RenderBlock::system(text));
+        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+            state: Box::new(crate::views::limits_modal::LimitsModalState::new(snap)),
+        });
     }
-    // When Management credentials exist but cents are still cold, kick a silent
-    // billing refresh so the next `/limits` / footer can show prepaid.
+    // Explicit `/limits` open: same force class as CLI `grok limits` collect.
+    // Bust Management prepaid+postpaid+usage-series process caches when key
+    // present, then always silent-FetchBilling so live prepaid (+ postpaid
+    // and usage series into process cache) follows. Background turn-end
+    // FetchBilling still honors TTL.
+    let policy = crate::limits_cmd::management_meter_cache_policy_for_explicit_limits_open();
+    if crate::limits_cmd::should_clear_management_meter_caches(policy, has_mgmt_key) {
+        xai_grok_shell::auth::clear_console_team_billing_meter_caches();
+    }
     let mut effects = Vec::new();
-    if console_prepaid.is_none() && configured {
+    if crate::limits_cmd::should_queue_silent_billing_on_explicit_limits(
+        has_mgmt_key,
+        needs_sibling_billing,
+    ) {
         effects.push(Effect::FetchBilling {
             agent_id: id,
             silent: true,
         });
     }
     effects
+}
+
+/// `/spend` — double-entry local vs Management spend books into scrollback.
+pub(super) fn dispatch_show_spend(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.agents.contains_key(&id) {
+        return vec![];
+    }
+
+    let (balance, live) = {
+        let agent = app.agents.get(&id).expect("checked contains_key");
+        let balance = agent
+            .credit_balance
+            .clone()
+            .or_else(|| app.credit_balance.clone());
+        (balance, agent.sampling_identity)
+    };
+
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    let mut remote = xai_grok_shell::token_economy::RemoteBookSummary::default();
+    let has_mgmt = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
+    if !has_mgmt || !cfg.reconcile_management_usage {
+        remote.remote_unavailable = true;
+        if !has_mgmt {
+            remote.remote_setup_note = Some(
+                "No management key on file. Local book and free SuperGrok period context still work."
+                    .into(),
+            );
+        }
+    } else if let Some(store) = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg) {
+        if let Ok(Some(sample)) =
+            xai_grok_shell::token_economy::latest_remote_sample(&store, "management_usage_series")
+        {
+            remote.api_class_usd = sample.payload.get("api_class_usd").and_then(|v| v.as_f64());
+            remote.oauth_class_usd = sample
+                .payload
+                .get("oauth_class_usd")
+                .and_then(|v| v.as_f64());
+            if let (Some(s), Some(e)) = (sample.window_start, sample.window_end) {
+                remote.window_label = Some(format!("{s} → {e}"));
+            }
+        }
+        if let Some(cents) = xai_grok_shell::auth::cached_console_team_prepaid_cents_default() {
+            remote.prepaid_remaining_cents = Some(cents);
+            let payload = serde_json::json!({ "prepaid_remaining_cents": cents });
+            let _ = xai_grok_shell::token_economy::try_insert_remote_meter_sample(
+                &store,
+                "management_prepaid",
+                None,
+                None,
+                &payload,
+            );
+        }
+        if let Some(pp) = xai_grok_shell::auth::cached_console_team_postpaid_default() {
+            remote.postpaid_api_class_cents = Some(pp.api_class_cents);
+            remote.postpaid_oauth_class_cents = Some(pp.oauth_class_cents);
+            let payload = serde_json::json!({
+                "api_class_cents": pp.api_class_cents,
+                "oauth_class_cents": pp.oauth_class_cents,
+            });
+            let _ = xai_grok_shell::token_economy::try_insert_remote_meter_sample(
+                &store,
+                "management_postpaid",
+                None,
+                None,
+                &payload,
+            );
+        }
+    }
+
+    let mut supergrok = xai_grok_shell::token_economy::SuperGrokPeriodContext::default();
+    if let Some(bal) = &balance {
+        supergrok.usage_pct = Some(bal.usage_pct);
+        supergrok.period_label = Some(bal.usage_label().to_lowercase());
+        supergrok.pacing_sentence = bal.pacing_sentence(live, chrono::Utc::now());
+    }
+
+    // /spend: refresh local book from session usage.jsonl, then summarize.
+    let report = xai_grok_shell::token_economy::build_double_entry_report_with_options(
+        &cfg, remote, supergrok, true,
+    );
+    // Persist a reconciliation_run row when DB is available (fail-open).
+    if let Some(store) = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg) {
+        let notes = xai_grok_shell::token_economy::gap_honesty_line(&report.local, &report.remote);
+        let _ = xai_grok_shell::token_economy::insert_reconciliation_run(
+            &store,
+            "local_window",
+            "local_window",
+            &report.local,
+            report
+                .remote
+                .api_class_usd
+                .map(|u| (u * 100.0).round() as i64),
+            report
+                .remote
+                .oauth_class_usd
+                .map(|u| (u * 100.0).round() as i64),
+            &notes,
+        );
+    }
+
+    let body = xai_grok_shell::token_economy::format_double_entry_report(&report);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::system(body));
+    }
+    vec![]
+}
+
+/// `/limits --json` — same cache snapshot as the modal, as pretty JSON in
+/// conversation scrollback (schema matches `grok limits --json`). No modal.
+///
+/// When `CreditBalance.grok_build_usage_pct` was set by FetchBilling (wire
+/// `productUsage`), the JSON includes `grokBuildUsagePct` on that principal —
+/// same field as live `grok limits --json` collect. Sibling process-cache rows
+/// stay without Build % until a full credits poll observes it.
+pub(super) fn dispatch_show_limits_json(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.agents.contains_key(&id) {
+        return vec![];
+    }
+    let Some(snap) = rebuild_limits_snapshot_for_agent(app, id) else {
+        return vec![];
+    };
+    let report = crate::limits_cmd::report_from_snapshot(&snap, Vec::new());
+    let json = match crate::limits_cmd::format_limits_json_pretty(&report) {
+        Ok(s) => s,
+        Err(e) => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Failed to format limits JSON: {e}"
+                )));
+            }
+            return vec![];
+        }
+    };
+    // Fenced so chat is readable; body is the same JSON as CLI --json.
+    let text = format!("```json\n{}\n```", json.trim_end());
+    if let Some(agent) = app.agents.get_mut(&id) {
+        // Bypass modal; commit into transcript both human and agent can see.
+        agent.active_modal = None;
+        agent.scrollback.push_block(RenderBlock::system(text));
+    }
+    // Same force-refresh + silent FetchBilling policy as modal open.
+    let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
+    let needs_sibling_billing = !snap.extra_principals.is_empty()
+        && (snap.primary.included.is_none()
+            || snap.extra_principals.iter().any(|p| p.included.is_none()));
+    let policy = crate::limits_cmd::management_meter_cache_policy_for_explicit_limits_open();
+    if crate::limits_cmd::should_clear_management_meter_caches(policy, has_mgmt_key) {
+        xai_grok_shell::auth::clear_console_team_billing_meter_caches();
+    }
+    let mut effects = Vec::new();
+    if crate::limits_cmd::should_queue_silent_billing_on_explicit_limits(
+        has_mgmt_key,
+        needs_sibling_billing,
+    ) {
+        effects.push(Effect::FetchBilling {
+            agent_id: id,
+            silent: true,
+        });
+    }
+    effects
+}
+
+/// Rebuild limits snapshot from current caches (for open modal refresh).
+pub(super) fn rebuild_limits_snapshot_for_agent(
+    app: &AppView,
+    agent_id: crate::app::agent::AgentId,
+) -> Option<crate::views::limits_snapshot::LimitsSnapshot> {
+    let agent = app.agents.get(&agent_id)?;
+    let balance = agent
+        .credit_balance
+        .as_ref()
+        .or(app.credit_balance.as_ref());
+    let autotopup = agent.auto_topup.as_ref().or(app.auto_topup.as_ref());
+    let console_prepaid = agent
+        .console_team_prepaid_cents
+        .or(app.console_team_prepaid_cents)
+        .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+    let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
+    let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
+    let console_key_available = xai_grok_shell::auth::console_inference_key_present_default()
+        || agent.sampling_identity.is_console();
+    let prepaid_gap = if console_prepaid.is_some() {
+        crate::views::credit_bar::ConsoleTeamPrepaidGap::Loading
+    } else {
+        crate::views::credit_bar::ConsoleTeamPrepaidGap::from_management_config(
+            has_mgmt_key,
+            has_mgmt_team,
+        )
+    };
+    Some(build_limits_snapshot(
+        balance,
+        autotopup,
+        agent.sampling_identity,
+        console_prepaid,
+        prepaid_gap,
+        console_key_available,
+    ))
+}
+
+/// Attach Management postpaid preview and usage series from process cache when
+/// warm (CLI `limits`, explicit `/limits` FetchBilling live-fill, or prior
+/// background poll). Distinct from prepaid remaining and from free SuperGrok
+/// period %. Does not invent $.
+fn attach_console_postpaid_from_cache(
+    snap: crate::views::limits_snapshot::LimitsSnapshot,
+) -> crate::views::limits_snapshot::LimitsSnapshot {
+    use crate::views::limits_snapshot::{
+        ConsoleTeamPostpaidGap, ConsoleTeamPostpaidMeter, ConsoleTeamUsageSeriesSummary,
+    };
+
+    let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
+    let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
+    let postpaid = xai_grok_shell::auth::cached_console_team_postpaid_default()
+        .map(|m| ConsoleTeamPostpaidMeter::from_preview(&m));
+    let gap = if postpaid.is_some() {
+        ConsoleTeamPostpaidGap::Unavailable // unused when meter present
+    } else {
+        ConsoleTeamPostpaidGap::after_billing_fetch(has_mgmt_key, has_mgmt_team)
+    };
+    let usage_series = xai_grok_shell::auth::cached_console_team_usage_series_default(
+        xai_grok_shell::auth::USAGE_SERIES_DEFAULT_DAY_WINDOW,
+    )
+    .map(|s| ConsoleTeamUsageSeriesSummary::from_series(&s));
+    snap.with_console_postpaid(postpaid)
+        .with_console_postpaid_gap(gap)
+        .with_console_usage_series(usage_series)
 }
 
 /// Build `/limits` view-model: dual SuperGrok rows when multi-principal store.
@@ -322,6 +582,7 @@ fn build_limits_snapshot(
     live: crate::views::credit_bar::SamplingIdentityKind,
     console_team_prepaid_cents: Option<i64>,
     console_team_prepaid_gap: crate::views::credit_bar::ConsoleTeamPrepaidGap,
+    console_key_available: bool,
 ) -> crate::views::limits_snapshot::LimitsSnapshot {
     use crate::views::limits_snapshot::{LimitsSnapshot, PrincipalLimitsInput};
     use xai_grok_shell::auth::{
@@ -338,11 +599,14 @@ fn build_limits_snapshot(
         // Single principal (or none): keep classic single SuperGrok section.
         let mut snap = LimitsSnapshot::from_billing(balance, autotopup, live)
             .with_console_balance_cents(console_team_prepaid_cents)
-            .with_console_prepaid_gap(console_team_prepaid_gap);
+            .with_console_prepaid_gap(console_team_prepaid_gap)
+            .with_console_key_available(console_key_available);
         if listings.len() == 1 && !live.is_console() {
             snap.live_principal_label = Some(listings[0].role_label.to_string());
         }
-        return snap;
+        return crate::limits_cmd::attach_flat_poll_from_history(
+            attach_console_postpaid_from_cache(snap),
+        );
     }
 
     let active_id = active_supergrok_identity_id(&home);
@@ -364,40 +628,70 @@ fn build_limits_snapshot(
             };
             let is_active = active_id.as_deref() == Some(p.identity_id.as_str());
             // Active principal: use pager credit cache (full meters).
-            // Others: only included % / reset from process billing memory when
-            // present; no inventing dollar extras from the active poll
-            // (`included_billing_only` keeps extras as honest absence).
+            // Others: process billing memory for this identity only (included %
+            // + prepaidBalance when the sibling credits poll observed it).
+            // Never copy active CreditBalance onto a sibling identity.
             let (bal, topup, included_billing_only) = if is_active {
                 (balance.cloned(), autotopup.cloned(), false)
             } else if let Some(fields) = billing_by_id.get(&p.identity_id) {
                 // Per-slot process cache only — never reuse active CreditBalance.
                 // Date format matches credit_balance_from_config (`%B`, full month)
                 // so dual rows do not look like two different clocks (Aug vs August).
-                (
-                    fields
-                        .usage_pct
-                        .map(|pct| crate::views::credit_bar::CreditBalance {
-                            usage_pct: pct,
-                            effective_usage_pct: pct,
-                            period_end_display: fields.reset_at.map(|dt| {
-                                dt.with_timezone(&chrono::Local)
-                                    .format("%B %-d, %H:%M")
-                                    .to_string()
-                            }),
-                            pay_as_you_go: false,
-                            on_demand_cap_cents: None,
-                            on_demand_used_cents: None,
-                            prepaid_balance_cents: None,
-                            // Plumb period_type so copy says "weekly"/"monthly"
-                            // instead of bare "Included allowance".
-                            period_type: fields.period_type.clone(),
-                            is_unified_billing_user: None,
+                // prepaid_balance_cents from sibling poll = Extra Usage Credits
+                // for that principal (or shared pool under unified billing).
+                let bal = fields.usage_pct.map(|pct| {
+                    crate::views::credit_bar::CreditBalance {
+                        usage_pct: pct,
+                        effective_usage_pct: pct,
+                        period_end_display: fields.reset_at.map(|dt| {
+                            dt.with_timezone(&chrono::Local)
+                                .format("%B %-d, %H:%M")
+                                .to_string()
                         }),
-                    None,
-                    true,
-                )
+                        period_end_at: fields.reset_at,
+                        pay_as_you_go: false,
+                        on_demand_cap_cents: None,
+                        on_demand_used_cents: None,
+                        // Sibling credits poll prepaidBalance → Extra Usage Credits.
+                        prepaid_balance_cents: fields.prepaid_balance_cents,
+                        // Plumb period_type so copy says "weekly"/"monthly"
+                        // instead of bare "Included allowance".
+                        period_type: fields.period_type.clone(),
+                        is_unified_billing_user: None,
+                        // Sibling process cache Build productUsage when
+                        // remember_supergrok_build_usage ran on sibling poll.
+                        grok_build_usage_pct: fields.grok_build_usage_pct,
+                        included_usage_known: true,
+                    }
+                });
+                // included_billing_only when we never saw prepaid on this slot
+                // (honest "no data yet" unless unified fill shares the pool).
+                let included_only = fields.prepaid_balance_cents.is_none();
+                (bal, None, included_only)
             } else {
-                (None, None, false)
+                // Never-polled sibling: included-only absence (not "none on file"
+                // for dollar extras). Unified fill + silent FetchBilling fill later.
+                (None, None, true)
+            };
+            let outcome = xai_grok_shell::auth::supergrok_billing_poll_outcome(&p.identity_id);
+            let (poll_succeeded, poll_error_class) = match outcome.kind {
+                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::Ok => (Some(true), None),
+                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::AuthFailed => {
+                    (Some(false), Some("auth"))
+                }
+                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::OtherFailed => {
+                    (Some(false), outcome.error_class)
+                }
+                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::Never => {
+                    if bal.is_some() && !included_billing_only {
+                        (Some(true), None)
+                    } else if bal.is_some() {
+                        // Process-cache sibling reading.
+                        (Some(true), None)
+                    } else {
+                        (Some(false), None)
+                    }
+                }
             };
             PrincipalLimitsInput {
                 label: principal_limits_label(role),
@@ -405,6 +699,8 @@ fn build_limits_snapshot(
                 balance: bal,
                 autotopup: topup,
                 included_billing_only,
+                poll_succeeded,
+                poll_error_class,
             }
         })
         .collect();
@@ -420,9 +716,12 @@ fn build_limits_snapshot(
         })
     };
 
-    LimitsSnapshot::from_principals(&inputs, live, live_role)
-        .with_console_balance_cents(console_team_prepaid_cents)
-        .with_console_prepaid_gap(console_team_prepaid_gap)
+    crate::limits_cmd::attach_flat_poll_from_history(attach_console_postpaid_from_cache(
+        LimitsSnapshot::from_principals(&inputs, live, live_role)
+            .with_console_balance_cents(console_team_prepaid_cents)
+            .with_console_prepaid_gap(console_team_prepaid_gap)
+            .with_console_key_available(console_key_available),
+    ))
 }
 
 /// `/usage` — session token/cost, then consumer credits when visible.

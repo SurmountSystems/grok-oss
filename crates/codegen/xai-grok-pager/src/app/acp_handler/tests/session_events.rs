@@ -150,18 +150,19 @@
         );
     }
 
-    /// Contract: once the next sample stream is open after a retry, chrome must
-    /// leave `TurnActivity::Retrying` so the footer does not freeze on
-    /// "Retrying (attempt 1)" across a live post-retry stream / TTFB window.
+    /// Contract: after a timeout/transport retry, StreamResumed must keep soft
+    /// reconnect chrome (not fall through to zombie "Waiting for response…")
+    /// for the post-retry headers/TTFB window. Real stream content still
+    /// clears via `handle_update` → `retry_activity = None`.
     #[test]
-    fn retry_chrome_clears_when_retry_stream_starts() {
+    fn retry_chrome_soft_reconnects_when_retry_stream_starts() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Retrying {
                 attempt: 1,
                 max_retries: u32::MAX,
-                reason: "connection interrupted".into(),
+                reason: "timed out · next try in 2s".into(),
             },
             &mut session,
             &mut scrollback,
@@ -173,12 +174,32 @@
         }
 
         apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
+        match session.tracker.activity() {
+            Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries,
+                reason,
+            }) => {
+                assert_eq!(max_retries, u32::MAX);
+                assert_eq!(
+                    reason, "reconnecting",
+                    "StreamResumed after Retrying must soft-reconnect, not hard-clear"
+                );
+            }
+            other => panic!("expected soft reconnect Retrying, got {other:?}"),
+        }
+    }
+
+    /// Contract: StreamResumed with no prior Retrying (first stream open) does
+    /// not invent retry chrome.
+    #[test]
+    fn stream_resumed_without_prior_retry_clears_activity() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
         assert!(
-            !matches!(
-                session.tracker.activity(),
-                Some(TurnActivity::Retrying { .. })
-            ),
-            "StreamResumed must clear sticky Retrying chrome, got {:?}",
+            session.tracker.activity().is_none(),
+            "first-stream StreamResumed must not invent Retrying chrome, got {:?}",
             session.tracker.activity()
         );
     }
@@ -574,6 +595,16 @@
             "Unauthorized (401) from https://proxy/v1/responses"
         ));
         assert!(is_reauthable_failure(None, "Unauthorized (401)"));
+        // Gateway may return invalid OAuth as HTTP 403 bad-credentials.
+        assert!(is_reauthable_failure(
+            Some("api"),
+            "API error (status 403 Forbidden): unauthenticated:bad-credentials: \
+             The OAuth2 access token could not be validated."
+        ));
+        assert!(is_reauthable_failure(
+            None,
+            "unauthenticated:bad-credentials: The OAuth2 access token could not be validated."
+        ));
         // legacy_auth carries its own migration guidance — excluded.
         assert!(!is_reauthable_failure(
             Some("legacy_auth"),
@@ -585,6 +616,11 @@
             "internal server error"
         ));
         assert!(!is_reauthable_failure(Some("api"), "model not found"));
+        // Bare policy 403 is not re-authable.
+        assert!(!is_reauthable_failure(
+            Some("api"),
+            "Content violates usage guidelines."
+        ));
     }
 
     /// A 401 with `error_type == "auth"` surfaces the actionable re-auth
@@ -657,6 +693,32 @@
             last_session_event(&scrollback),
             Some(SessionEvent::ReAuthRequired)
         ));
+    }
+
+    /// Dogfood: 403 bad-credentials with error_type "api" must still push
+    /// ReAuthRequired (not raw Retry failed / Internal error JSON).
+    #[test]
+    fn apply_retry_state_403_bad_credentials_prompts_reauth() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: "API error (status 403 Forbidden): unauthenticated:bad-credentials: \
+                          The OAuth2 access token could not be validated."
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert!(
+            matches!(
+                last_session_event(&scrollback),
+                Some(SessionEvent::ReAuthRequired)
+            ),
+            "403 bad-credentials must surface re-auth, not Retry failed dump"
+        );
     }
 
     /// Legacy WebLogin auth keeps its verbose message (with `grok logout` /

@@ -1,24 +1,24 @@
 //! Settings UI: command palette, settings modal, toggles, resets, and rollback.
 
 use super::setters::{
-    pr13_effective_default, set_ask_user_question_timeout_enabled_inner,
-    set_auto_compact_threshold_percent_inner, set_auto_compact_threshold_tokens_inner,
-    set_auto_dark_theme_inner, set_auto_light_theme_inner, set_auto_run_implement_inner,
-    set_auto_update_inner, set_bubble_copy_buttons_inner, set_collapsed_edit_blocks_inner,
-    set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
-    set_contextual_hint_inner, set_default_model_inner, set_default_selected_permission_inner,
-    set_display_refresh_auto_cadence_inner, set_economic_mode_inner,
-    set_features_session_recap_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
-    set_hide_header_inner, set_hunk_tracker_mode_inner, set_invert_scroll_inner,
-    set_keep_text_selection_inner, set_max_thoughts_width_inner, set_multiline_mode,
-    set_notifications_session_recap_inner, set_notifications_session_recap_threshold_secs_inner,
-    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
-    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
-    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
-    set_scrub_ascii_punct_inner, set_show_thinking_blocks_inner, set_show_tips_inner,
-    set_simple_mode_inner, set_theme_inner, set_timeline_inner, set_timestamps,
-    set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
-    set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
+    pr13_effective_default, set_always_expand_thinking_inner,
+    set_ask_user_question_timeout_enabled_inner, set_auto_compact_threshold_percent_inner,
+    set_auto_compact_threshold_tokens_inner, set_auto_dark_theme_inner, set_auto_light_theme_inner,
+    set_auto_run_implement_inner, set_auto_update_inner, set_bubble_copy_buttons_inner,
+    set_collapsed_edit_blocks_inner, set_combine_queued_prompts_inner, set_compact_mode,
+    set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
+    set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
+    set_economic_mode_inner, set_features_session_recap_inner, set_fork_secondary_model_inner,
+    set_group_tool_verbs_inner, set_hide_header_inner, set_hunk_tracker_mode_inner,
+    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
+    set_multiline_mode, set_notifications_session_recap_inner,
+    set_notifications_session_recap_threshold_secs_inner, set_page_flip_on_send_inner,
+    set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
+    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
+    set_scroll_mode_inner, set_scroll_speed_inner, set_scrub_ascii_punct_inner,
+    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
+    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
+    set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -822,6 +822,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("invert_scroll", SettingValue::Bool(b)) => Some(Action::SetInvertScroll(*b)),
         ("scroll_lines", SettingValue::Int(v)) => Some(Action::SetScrollLines(*v)),
         ("show_thinking_blocks", SettingValue::Bool(b)) => Some(Action::SetShowThinkingBlocks(*b)),
+        ("always_expand_thinking", SettingValue::Bool(b)) => {
+            Some(Action::SetAlwaysExpandThinking(*b))
+        }
         ("group_tool_verbs", SettingValue::Bool(b)) => Some(Action::SetGroupToolVerbs(*b)),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
             Some(Action::SetCollapsedEditBlocks(*b))
@@ -829,6 +832,57 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("prompt_suggestions", SettingValue::Bool(b)) => Some(Action::SetPromptSuggestions(*b)),
         ("auto_run_implement", SettingValue::Bool(b)) => Some(Action::SetAutoRunImplement(*b)),
         ("economic_mode", SettingValue::Bool(b)) => Some(Action::SetEconomicMode(*b)),
+        ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
+            Some(Action::SetResumeCanceledTurnOnRestart(*b))
+        }
+        ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(b)) => {
+            Some(Action::SetTokenEconomyBool {
+                field: "cap_implement_effort_when_economic",
+                value: *b,
+            })
+        }
+        ("token_economy.show_period_pacing", SettingValue::Bool(b)) => {
+            Some(Action::SetTokenEconomyBool {
+                field: "show_period_pacing",
+                value: *b,
+            })
+        }
+        ("token_economy.local_spend_ledger", SettingValue::Bool(b)) => {
+            Some(Action::SetTokenEconomyBool {
+                field: "local_spend_ledger",
+                value: *b,
+            })
+        }
+        ("token_economy.reconcile_management_usage", SettingValue::Bool(b)) => {
+            Some(Action::SetTokenEconomyBool {
+                field: "reconcile_management_usage",
+                value: *b,
+            })
+        }
+        ("token_economy.max_implement_effort", SettingValue::Int(i)) => {
+            Some(Action::SetTokenEconomyInt {
+                field: "max_implement_effort",
+                value: *i,
+            })
+        }
+        ("token_economy.min_implement_effort", SettingValue::Int(i)) => {
+            Some(Action::SetTokenEconomyInt {
+                field: "min_implement_effort",
+                value: *i,
+            })
+        }
+        ("token_economy.desired_implement_effort", SettingValue::Int(i)) => {
+            Some(Action::SetTokenEconomyInt {
+                field: "desired_implement_effort",
+                value: *i,
+            })
+        }
+        ("token_economy.lock_implement_effort", SettingValue::Int(i)) => {
+            Some(Action::SetTokenEconomyInt {
+                field: "lock_implement_effort",
+                value: *i,
+            })
+        }
         ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
         ("bubble_copy_buttons", SettingValue::Bool(b)) => Some(Action::SetBubbleCopyButtons(*b)),
         ("cancel_subagents_on_turn_cancel", SettingValue::Enum(s)) => {
@@ -1195,6 +1249,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             }
         }
         ("show_thinking_blocks", SettingValue::Bool(b)) => set_show_thinking_blocks_inner(app, *b),
+        ("always_expand_thinking", SettingValue::Bool(b)) => {
+            set_always_expand_thinking_inner(app, *b)
+        }
         ("group_tool_verbs", SettingValue::Bool(b)) => set_group_tool_verbs_inner(app, *b),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
             set_collapsed_edit_blocks_inner(app, *b)
@@ -1202,6 +1259,43 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
         ("auto_run_implement", SettingValue::Bool(b)) => set_auto_run_implement_inner(app, *b),
         ("economic_mode", SettingValue::Bool(b)) => set_economic_mode_inner(app, *b),
+        ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
+            super::setters::set_resume_canceled_turn_on_restart_inner(app, *b)
+        }
+        // Token Economy: restore process live cache (optimistic mirror).
+        ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(b)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_bool(
+                "cap_implement_effort_when_economic",
+                *b,
+            );
+        }
+        ("token_economy.show_period_pacing", SettingValue::Bool(b)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_bool("show_period_pacing", *b);
+        }
+        ("token_economy.local_spend_ledger", SettingValue::Bool(b)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_bool("local_spend_ledger", *b);
+        }
+        ("token_economy.reconcile_management_usage", SettingValue::Bool(b)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_bool(
+                "reconcile_management_usage",
+                *b,
+            );
+        }
+        ("token_economy.max_implement_effort", SettingValue::Int(i)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_int("max_implement_effort", *i);
+        }
+        ("token_economy.min_implement_effort", SettingValue::Int(i)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_int("min_implement_effort", *i);
+        }
+        ("token_economy.desired_implement_effort", SettingValue::Int(i)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_int(
+                "desired_implement_effort",
+                *i,
+            );
+        }
+        ("token_economy.lock_implement_effort", SettingValue::Int(i)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_int("lock_implement_effort", *i);
+        }
         // keep_text_selection: restore the cache mirror to the canonical value.
         ("keep_text_selection", SettingValue::Enum(s)) => {
             if let Some(kind) = crate::appearance::TextSelection::from_canonical(s) {

@@ -299,14 +299,13 @@ To view the available agent types and personas, open the command palette with `C
 
 Subagents appear at the top of the tasks pane in their own collapsible "Subagents" group.
 
-### Queue hold while subagents run
+### Main chat while subagents run
 
-Queued follow-ups **hold** not only when the parent is blocked waiting on a subagent, but also whenever **any background subagent is still live** — even if the parent already looks idle. That keeps typed follow-ups from starting a conflicting main turn while children work.
+Background subagents alone do **not** block or queue-only the main composer.
 
-- Status cue: e.g. `N subagent(s) still running · M queued — Interject to force`.
-- **Interject** (chord or queue row `[Interject]`) force-starts the next parent turn despite live children.
-- When the last holding subagent finishes, the queue drains on its own (no extra keystroke).
-- **Monitors** and long-running background commands alone do **not** hold the queue (they can run indefinitely).
+- **Primary idle + live background subagents:** footer shows `Enter: send`. Plain Enter starts a **normal main turn**; children keep running in parallel. Status may show `N subagent(s) still running` with `[pause]` / `[stop]`, without `Enter queues` or force-drain language.
+- **Primary busy** (thinking, tools, streaming, or a blocked wait): plain Enter **queues** a follow-up; soft **Interject** steers the current turn. Cancel is Esc / stop only.
+- **Monitors** and long-running background commands alone also never force queue-only.
 
 For **annotations that must not become a turn at all**, use [`/note`](04-slash-commands.md#note) instead of typing into the composer or queue. Session notes are operator-local and never drain as prompts.
 
@@ -365,7 +364,7 @@ The parent session’s context is expensive. Filling it with logs, greps, and lo
 
 ### Parent coordinates; children do the heavy work
 
-- **Parent keeps:** goals, spawn/wait, short on-disk join notes, status to you.
+- **Parent keeps:** goals, spawn/wait, short on-disk reports, status to you.
 - **Children own:** multi-file search, CI log fetch, root-cause reads, implementation, and review loops.
 - Prefer **tight prompts** (goal, paths, acceptance, where to write a short summary). Prefer **short returns** (verdict, paths, residuals) over pasting whole transcripts into the parent.
 
@@ -381,7 +380,7 @@ On a **CI failure**, **regression**, or **multi-file diagnosis**, the parent’s
 
 **Failure mode to avoid:** parent greps docs + fetches logs + finds the test file, *then* spawns. That already burned the parent context. Spawn first; children own fetch/read/fix.
 
-### Join on disk
+### Write a short report on disk
 
 Children write short summary or review files. The parent reads those only — not full child transcripts and not whole hot modules after a summary already named the set. After compaction, reseed from on-disk artifacts rather than re-exploring from zero.
 
@@ -395,7 +394,7 @@ Treat the parent as a **coordinator budget**, not a place to hoard tool output. 
 
 ### Parallelism without waste
 
-Spawn for **independent**, **disjoint** scopes when the join is cheap. Do not fan out many identical explores over the same files, or spawn for pure status checks with no real work. Cap concurrent children when scopes would otherwise overlap.
+Spawn for **independent**, **disjoint** scopes when combining results is cheap. Do not fan out many identical explores over the same files, or spawn for pure status checks with no real work. Cap concurrent children when scopes would otherwise overlap.
 
 Skills and project agent rules (for example `AGENTS.md` in a repo, or your host agent config) may pin a stricter “hard stop” for operators — this section is the product-facing summary those rules link to.
 

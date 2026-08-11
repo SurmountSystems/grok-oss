@@ -446,7 +446,28 @@ impl SessionActor {
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
+            // Free SuperGrok period dual-identity rank must drive SessionToken
+            // bearer. Without this, sticky AuthManager Team base keeps sampling
+            // business JWT while rank preferred personal free SuperGrok period.
+            if am.grok_com_config().auto_use_included_limits {
+                let _ = am.align_to_ranked_free_period_primary();
+            }
             let _ = am.auth().await;
+            // Path-trace every SessionToken reconstruct: principal_type + team_id
+            // prove which SuperGrok identity is wire-active (User/personal vs
+            // Team/business) without dumping the JWT. Dogfood for free SuperGrok
+            // period debit needs this next to flat creditUsagePercent evidence.
+            if let Some(trace) = am.session_wire_bearer_trace() {
+                tracing::info!(
+                    ?trace,
+                    "auth: SessionToken wire bearer for free SuperGrok period path"
+                );
+                xai_grok_telemetry::unified_log::info(
+                    "auth: SessionToken wire bearer for free SuperGrok period path",
+                    None,
+                    Some(trace),
+                );
+            }
         }
         let api_key = if use_bearer_resolver {
             self.auth_manager
@@ -877,7 +898,29 @@ impl SessionActor {
                 return Ok(SamplerFailureRecovery::CompactAndResubmit);
             }
         }
-        let detailed_message = error.message.clone();
+        // Edge / gateway outages: plain English for RetryFailed + ACP data,
+        // not raw "API error (status 521 <unknown status code>)" Internal JSON.
+        // Team credit / monthly spending limit 403: same plain-English path
+        // (not Internal error JSON envelope).
+        let detailed_message = match error.status_code {
+            Some(code)
+                if xai_grok_sampling_types::is_edge_outage_status(code)
+                    || matches!(code, 502..=504) =>
+            {
+                let status =
+                    reqwest::StatusCode::from_u16(code).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+                xai_grok_sampling_types::outage_exhausted_user_message(status, 1)
+            }
+            Some(code)
+                if matches!(code, 402 | 403 | 429 | 400)
+                    && xai_grok_sampling_types::is_credit_exhausted_message(&error.message) =>
+            {
+                xai_grok_sampling_types::credit_exhausted_user_message(&error.message)
+            }
+            _ => error.message.clone(),
+        };
+        let credit_exhausted_terminal = matches!(error.status_code, Some(402 | 403 | 429 | 400))
+            && xai_grok_sampling_types::is_credit_exhausted_message(&error.message);
         if matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
             && error.message.contains("encrypted_content")
@@ -1137,6 +1180,11 @@ impl SessionActor {
             },
         ))
         .await;
+        // Credit-exhausted team 403: plain string data (operator-readable), not
+        // `{"message":"API error (status …)","http_status":403}` envelope only.
+        if credit_exhausted_terminal {
+            return Err(acp::Error::internal_error().data(detailed_message));
+        }
         Err(
             acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
                 detailed_message,
@@ -1161,6 +1209,35 @@ impl SessionActor {
         self: &Arc<Self>,
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
+        // Free SuperGrok period debit unproven (flat poll): default **allows**
+        // turns (dogfood). Opt-in hard block via
+        // [auth] allow_spend_when_free_period_debit_unproven = false.
+        // Honesty: warn when unproven with headroom even when not blocking.
+        let unproven_guard = crate::auth::evaluate_free_period_unproven_spend_guard();
+        if unproven_guard.honesty_unproven_allowed() {
+            tracing::warn!(
+                target: "auth.free_period_unproven_guard",
+                allow = unproven_guard.allow_spend_when_unproven,
+                unproven = unproven_guard.flat_poll_unproven,
+                headroom = unproven_guard.free_period_has_headroom,
+                "free SuperGrok period limits not debiting (flat poll); turns allowed by default; team settlement can still move"
+            );
+        }
+        if let Some(msg) = unproven_guard.block_message() {
+            tracing::warn!(
+                target: "auth.free_period_unproven_guard",
+                allow = unproven_guard.allow_spend_when_unproven,
+                unproven = unproven_guard.flat_poll_unproven,
+                headroom = unproven_guard.free_period_has_headroom,
+                "blocking sampler turn (opt-in hard block): free SuperGrok period debit unproven"
+            );
+            // Product message as primary ACP message so the UI does not show
+            // "Internal error: …" for this intentional operator gate.
+            return Err(acp::Error::new(
+                i32::from(acp::Error::internal_error().code),
+                msg,
+            ));
+        }
         self.prepare_sampler_for_turn().await;
         let stream_drained_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();

@@ -40,6 +40,8 @@ pub enum Action {
     Quit,
     /// Restart the binary to pick up a downloaded update.
     QuitForUpdate,
+    /// Rebuild grok-oss from source and soft-relaunch live instances (`/rebuild`).
+    RebuildAndRelaunch,
     /// Resume the recent foreign session offered on the launch welcome screen.
     ResumeForeignSession,
     /// Re-exec into the other screen mode (`true` = minimal).
@@ -416,6 +418,10 @@ pub enum Action {
     },
     /// Cancel the currently running turn.
     CancelTurn,
+    /// Pause or resume all in-process agent work (Ctrl+Shift+Space).
+    ToggleGlobalPause,
+    /// Soft stop: finish current turn then hold the queue (Ctrl+Shift+S).
+    ToggleSoftStop,
     /// User confirmed a cancel-turn choice from the panel.
     CancelTurnChoice(crate::views::modal::CancelTurnChoice),
     /// Kill a background task by task_id.
@@ -497,6 +503,10 @@ pub enum Action {
     /// process-wide cache mirror and persists to `[ui].show_thinking_blocks`
     /// via `Effect::PersistSetting`.
     SetShowThinkingBlocks(bool),
+    /// Keep thinking blocks fully expanded and hide the Ctrl+E footer hint.
+    /// SHELL-owned: process-wide cache + `[ui].always_expand_thinking` via
+    /// `Effect::PersistSetting`.
+    SetAlwaysExpandThinking(bool),
     /// Set whether runs of consecutive non-destructive tool calls and
     /// subagent rows are grouped into one row. SHELL-owned: updates the
     /// process-wide cache mirror and persists to `[ui].group_tool_verbs`
@@ -520,6 +530,19 @@ pub enum Action {
     /// process-wide cache + `[ui].economic_mode`. New sessions seed from this;
     /// use `/economic-mode` for the current conversation.
     SetEconomicMode(bool),
+    /// Resume an explicitly canceled turn once when reopening the session.
+    /// SHELL-owned: `[ui].resume_canceled_turn_on_restart` (default on).
+    SetResumeCanceledTurnOnRestart(bool),
+    /// Token Economy bool under `[token_economy]` (field name is the TOML key).
+    SetTokenEconomyBool {
+        field: &'static str,
+        value: bool,
+    },
+    /// Token Economy integer under `[token_economy]` (effort 0–5; lock 0 = unlocked).
+    SetTokenEconomyInt {
+        field: &'static str,
+        value: i64,
+    },
     /// Set `[scrollback.scroll].respect_manual_folds`. PAGER-owned:
     /// live-applied via `AppView::set_appearance` and persisted to
     /// pager.toml via `Effect::PersistSetting`.
@@ -721,8 +744,13 @@ pub enum Action {
     /// `/usage` — session token/cost, plus consumer credits when visible.
     ShowUsage,
     /// `/limits` — SuperGrok included / dollar extras / console path detail
-    /// from cached billing (not session token ledger).
+    /// from cached billing (not session token ledger). Opens dismissible modal.
     ShowLimits,
+    /// `/spend` — double-entry local vs Management spend books (Token Economy).
+    ShowSpend,
+    /// `/limits --json` — same meters as [`ShowLimits`] / `grok limits --json`,
+    /// printed as pretty JSON into conversation scrollback (no modal).
+    ShowLimitsJson,
     /// `/usage manage` — open consumer billing (no-op if surface hidden).
     ManageBilling,
     /// Commit a read-only list of the queued prompts as a system block
@@ -2195,6 +2223,13 @@ pub enum Effect {
         target: DoctorFixTarget,
         plan: Box<crate::diagnostics::FixPlan>,
     },
+    /// `/rebuild`: install from source, signal leaders, report (async).
+    RunRebuild {
+        /// Directory to walk up for the source tree (usually process cwd).
+        start_dir: std::path::PathBuf,
+        /// Agent that invoked `/rebuild` (scrollback + toast target).
+        agent_id: AgentId,
+    },
 }
 /// Outcome of an `x.ai/subagent/cancel` request, telling dispatch whether the
 /// pager must finalize the subagent row itself.
@@ -2380,6 +2415,14 @@ pub enum TaskResult {
     SessionRestoreProgress {
         agent_id: AgentId,
         message: String,
+    },
+    /// Mid-`/rebuild` weighted progress for the progress bar (never raw cargo
+    /// on the PTY).
+    RebuildProgress {
+        agent_id: AgentId,
+        message: String,
+        /// Overall rebuild fraction `0.0..=1.0`.
+        fraction: f32,
     },
     /// Prompt response received (turn ended).
     PromptResponse {
@@ -2835,7 +2878,9 @@ pub enum TaskResult {
     /// Billing data fetched from the agent.
     BillingFetched {
         agent_id: AgentId,
-        balance: Option<crate::views::credit_bar::CreditBalance>,
+        /// SuperGrok three-state: `Resolved(None)` clears SuperGrok cache;
+        /// `Unchanged` keeps last-known SuperGrok when that path failed.
+        balance: crate::views::credit_bar::CreditBalanceFetch,
         /// When true, update `credit_balance` silently (no scrollback message).
         silent: bool,
         /// Subscription tier piggybacked from remote settings.
@@ -2850,7 +2895,8 @@ pub enum TaskResult {
     },
     /// App-level billing data (welcome screen).
     AppBillingFetched {
-        balance: Option<crate::views::credit_bar::CreditBalance>,
+        /// SuperGrok three-state (same policy as [`Self::BillingFetched`]).
+        balance: crate::views::credit_bar::CreditBalanceFetch,
         autotopup: crate::views::credit_bar::AutoTopupFetch,
         /// OpenRouter account credits when a key is available (`None` = keep cache).
         openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
@@ -2933,6 +2979,11 @@ pub enum TaskResult {
     DoctorFixApplied {
         target: DoctorFixTarget,
         result: Result<crate::diagnostics::FixOutcome, String>,
+    },
+    /// `/rebuild` finished (success or install/signal failure message).
+    RebuildDone {
+        agent_id: AgentId,
+        result: Result<Box<xai_grok_update::RebuildReport>, String>,
     },
 }
 #[cfg(test)]

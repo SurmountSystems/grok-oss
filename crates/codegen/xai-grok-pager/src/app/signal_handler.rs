@@ -48,6 +48,16 @@ pub(crate) fn set_quit_notify(notify: std::sync::Arc<tokio::sync::Notify>) {
     *QUIT_NOTIFY.lock() = Some(notify);
 }
 
+/// Set when `SIGUSR1` asks this TUI to re-exec onto a newly installed binary
+/// (peer of a `/rebuild` / `grok-oss rebuild` on another process). The event
+/// loop reads the rebuild request file and arms `rebuild_relaunch` before quit.
+static PEER_REBUILD_RELAUNCH: AtomicBool = AtomicBool::new(false);
+
+/// Consume the peer-rebuild flag (true once after `SIGUSR1` until taken).
+pub(crate) fn take_peer_rebuild_relaunch() -> bool {
+    PEER_REBUILD_RELAUNCH.swap(false, Ordering::AcqRel)
+}
+
 /// Whether the TUI currently owns the terminal. Set by [`install`], cleared
 /// by [`mark_restored`] or by [`shutdown_with_terminal_restore`] after
 /// teardown completes. The SIGPIPE path (SIG_IGN, no handler) does not
@@ -81,6 +91,19 @@ pub(crate) fn mark_restored() {
 }
 
 fn spawn_async_signal_task() {
+    // Cooperative rebuild peer path: SIGUSR1 does not count as the first
+    // terminate signal (so a later SIGTERM can still force-exit). It arms
+    // peer re-exec and notifies the same graceful quit as SIGTERM.
+    #[cfg(unix)]
+    tokio::spawn(async {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigusr1 = signal(SignalKind::user_defined1()).ok();
+        loop {
+            recv_optional_unix_signal(&mut sigusr1).await;
+            request_peer_rebuild_relaunch();
+        }
+    });
+
     tokio::spawn(async {
         #[cfg(unix)]
         {
@@ -126,6 +149,25 @@ fn spawn_async_signal_task() {
             }
         }
     });
+}
+
+/// `SIGUSR1` from `/rebuild` on another process: arm peer re-exec and quit
+/// gracefully so this TTY keeps the same session on the new binary.
+fn request_peer_rebuild_relaunch() {
+    PEER_REBUILD_RELAUNCH.store(true, Ordering::Release);
+    // Mid-turn: leave cancel-resume on disk so reopen re-queues once if re-exec
+    // fails and the operator opens the session cold.
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::write_armed_process_shutdown_cancel_resume();
+    let notify = QUIT_NOTIFY.lock().clone();
+    if TERMINAL_OWNED.load(Ordering::Acquire)
+        && let Some(n) = notify
+    {
+        n.notify_one();
+    }
+    // If the event loop is not registered (or terminal already restored), do
+    // not hard-exit: a bare SIGUSR1 without a live TUI is a no-op for process
+    // lifetime. Leaders and headless use RelaunchForUpdate / their own paths.
 }
 
 /// Wait for the next SIGINT/SIGTERM/SIGHUP and map it to its exit code.
@@ -193,6 +235,12 @@ define_recv_optional_windows_signal!(
 /// still owns the terminal; otherwise hard-exit (agent mode, or a signal after
 /// teardown already started).
 fn request_graceful_or_exit(code: i32) {
+    // Write cancel-resume **before** notify / hard-exit. Mid-turn killall is
+    // one SIGTERM; if the event loop is wedged or a second signal force-exits
+    // before Action::Quit, the armed prompt text must already be on disk.
+    // Best-effort; idle / unarmed turns leave no marker.
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::write_armed_process_shutdown_cancel_resume();
     let notify = QUIT_NOTIFY.lock().clone();
     if TERMINAL_OWNED.load(Ordering::Acquire)
         && let Some(n) = notify
@@ -211,6 +259,10 @@ fn request_graceful_or_exit(code: i32) {
 /// before the signal can still land after our teardown writes -- the writer
 /// thread is not reachable from here without a deadlock risk.
 fn shutdown_with_terminal_restore(exit_code: i32) -> ! {
+    // Second signal / hard path: still attempt cancel-resume write (no-op if
+    // first signal already wrote, or no arm). SIGKILL cannot reach here.
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::write_armed_process_shutdown_cancel_resume();
     // The graceful quit (or a prior teardown) already restored the terminal;
     // skip teardown and just flush telemetry before exiting.
     if !TERMINAL_OWNED.load(Ordering::Acquire) {

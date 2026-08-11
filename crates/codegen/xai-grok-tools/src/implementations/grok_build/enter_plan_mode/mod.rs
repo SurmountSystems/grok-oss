@@ -428,7 +428,7 @@ mod tests {
             "expected not-ready status: {prompt}"
         );
         assert!(
-            prompt.contains("5. Write your plan to the plan file above"),
+            prompt.contains("4. Write your plan to the plan file above"),
             "expected constant write-plan step: {prompt}"
         );
     }
@@ -491,10 +491,14 @@ mod tests {
             "expected empty plan status: {prompt}"
         );
         assert!(prompt.contains("exit_plan_mode"));
-        assert!(prompt.contains("ask_user_question"));
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
         assert!(
-            prompt.contains("6. When ready, use exit_plan_mode to present your plan to the user")
+            prompt.contains("do not use ask_user_question multi-choice questionnaires"),
+            "plan mode must ban questionnaire clarifications: {prompt}"
+        );
+        assert!(!prompt.contains("Use ask_user_question if you need"));
+        assert!(prompt.contains("4. Write your plan to the plan file above"));
+        assert!(
+            prompt.contains("5. When ready, use exit_plan_mode to present your plan to the user")
         );
         assert!(
             !prompt.contains("create it at that path first if needed"),

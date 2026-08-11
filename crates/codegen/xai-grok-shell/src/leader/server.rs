@@ -2788,6 +2788,62 @@ mod tests {
             Ok(ControlPayload::RelaunchDeclined { .. })
         ));
     }
+
+    /// Same package version + different git SHA (local rebuild) must accept.
+    #[test]
+    fn decide_relaunch_accepts_same_semver_newer_git_sha() {
+        let temp = TempDir::new().unwrap();
+        let sock = temp.path().join("leader.sock");
+        let control_state = LeaderServerControlState::new(LeaderServerMetadata {
+            pid: std::process::id(),
+            socket_path: sock.clone(),
+            lock_path: sock.with_extension("lock"),
+            ws_url_suffix: String::new(),
+            leader_binary_version: "0.1.100 (aaaaaaaaaaaa)".to_string(),
+        });
+        let relaunching = AtomicBool::new(false);
+        assert!(matches!(
+            decide_relaunch_for_update(
+                &control_state,
+                "0.1.100 (bbbbbbbbbbbb)".to_string(),
+                &relaunching
+            ),
+            Ok(ControlPayload::Relaunching { .. })
+        ));
+        assert!(relaunching.load(Ordering::SeqCst));
+        // Equal SHA after accept is already in progress → declined.
+        assert!(matches!(
+            decide_relaunch_for_update(
+                &control_state,
+                "0.1.100 (bbbbbbbbbbbb)".to_string(),
+                &relaunching
+            ),
+            Ok(ControlPayload::RelaunchDeclined { .. })
+        ));
+    }
+
+    #[test]
+    fn decide_relaunch_declines_equal_git_sha_identity() {
+        let temp = TempDir::new().unwrap();
+        let sock = temp.path().join("leader.sock");
+        let control_state = LeaderServerControlState::new(LeaderServerMetadata {
+            pid: std::process::id(),
+            socket_path: sock.clone(),
+            lock_path: sock.with_extension("lock"),
+            ws_url_suffix: String::new(),
+            leader_binary_version: "0.1.100 (aaaaaaaaaaaa)".to_string(),
+        });
+        let relaunching = AtomicBool::new(false);
+        assert!(matches!(
+            decide_relaunch_for_update(
+                &control_state,
+                "0.1.100 (aaaaaaaaaaaa)".to_string(),
+                &relaunching
+            ),
+            Ok(ControlPayload::RelaunchDeclined { .. })
+        ));
+        assert!(!relaunching.load(Ordering::SeqCst));
+    }
     #[derive(Debug)]
     struct TestAuth;
     impl AuthProvider for TestAuth {

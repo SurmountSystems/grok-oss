@@ -143,6 +143,9 @@ pub struct VideoGenClient {
     writer: super::storage::SessionFileWriter,
     zdr_video_output_s3: Option<ZdrVideoOutputS3Config>,
     api_key_provider: Option<SharedApiKeyProvider>,
+    /// Static config bearer for rate-limit keying when the dynamic provider
+    /// is empty (matches default Authorization on the HTTP client).
+    fallback_api_key: String,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
     /// Video Generation API emits an `auth_401_attribution` event with
     /// `consumer` of `"VideoGen.start"` (start request) or
@@ -229,6 +232,7 @@ impl VideoGenClient {
                 .map(|c| (**c).clone())
                 .filter(ZdrVideoOutputS3Config::is_valid),
             api_key_provider,
+            fallback_api_key: api_key.clone(),
             attribution_callback: None,
             tier_restricted: *tier_restricted,
         })
@@ -253,6 +257,14 @@ impl VideoGenClient {
 
     async fn current_bearer(&self) -> Option<String> {
         crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
+    }
+
+    async fn rate_limit_bearer(&self) -> Option<String> {
+        match self.current_bearer().await {
+            Some(k) if !k.trim().is_empty() => Some(k),
+            _ if !self.fallback_api_key.trim().is_empty() => Some(self.fallback_api_key.clone()),
+            _ => None,
+        }
     }
 
     fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
@@ -292,7 +304,16 @@ impl VideoGenClient {
             }),
         };
 
+        // Shared multi-process cooldowns for Imagine video (separate RPS bucket).
+        // Docs: https://docs.x.ai/developers/rate-limits (accessed: 2026-08-03)
         let sent_bearer = self.current_bearer().await;
+        let rate_bearer = self.rate_limit_bearer().await;
+        let rate_key = crate::shared_http_rate_limit::video_provider_key(
+            &self.base_url,
+            rate_bearer.as_deref(),
+        );
+        crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
+
         let mut req = self
             .http
             .post(&start_url)
@@ -313,9 +334,20 @@ impl VideoGenClient {
             self.record_401_attribution(ToolConsumer::VideoGenStart, sent_bearer.as_deref());
         }
         if !status.is_success() {
+            crate::shared_http_rate_limit::observe_http_rate_limit(
+                &rate_key,
+                status.as_u16(),
+                response.headers(),
+                "Imagine video generation rate limit",
+            );
             let body = response.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(200).collect();
             tracing::warn!(http_status = %status, "Video generation API error: {truncated}");
+            if status.as_u16() == 429 {
+                return Err(xai_tool_runtime::ToolError::rate_limited(format!(
+                    "Video generation rate limited (HTTP {status}): {truncated}"
+                )));
+            }
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
                 format!("Video generation failed with HTTP {status}: {truncated}"),
@@ -367,6 +399,13 @@ impl VideoGenClient {
             }
 
             let poll_sent_bearer = self.current_bearer().await;
+            let poll_rate_bearer = self.rate_limit_bearer().await;
+            let poll_rate_key = crate::shared_http_rate_limit::video_provider_key(
+                &self.base_url,
+                poll_rate_bearer.as_deref(),
+            );
+            crate::shared_http_rate_limit::wait_before_http(&poll_rate_key).await;
+
             let mut poll_req = self.http.get(&poll_url).timeout(poll_timeout);
             if let Some(ref key) = poll_sent_bearer {
                 poll_req = poll_req.header(AUTHORIZATION, format!("Bearer {key}"));
@@ -386,8 +425,19 @@ impl VideoGenClient {
                 );
             }
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
+                crate::shared_http_rate_limit::observe_http_rate_limit(
+                    &poll_rate_key,
+                    poll_status.as_u16(),
+                    poll_response.headers(),
+                    "Imagine video poll rate limit",
+                );
                 let body = poll_response.text().await.unwrap_or_default();
                 let truncated: String = body.chars().take(200).collect();
+                if poll_status.as_u16() == 429 {
+                    return Err(xai_tool_runtime::ToolError::rate_limited(format!(
+                        "Video poll rate limited (HTTP {poll_status}): {truncated}"
+                    )));
+                }
                 return Err(xai_tool_runtime::ToolError::new(
                     xai_tool_runtime::ToolErrorKind::Custom,
                     format!("Video poll failed with HTTP {poll_status}: {truncated}"),

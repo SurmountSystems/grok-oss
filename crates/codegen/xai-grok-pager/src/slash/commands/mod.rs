@@ -50,6 +50,7 @@ pub mod plan;
 pub mod plugin;
 pub mod privacy;
 pub mod queue;
+pub mod rebuild;
 pub mod recap;
 pub mod release_notes;
 pub mod remember;
@@ -62,6 +63,7 @@ pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
+pub mod spend;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -130,6 +132,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
+        Arc::new(rebuild::RebuildCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(imagine::ImagineCommand),
@@ -146,6 +149,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(import_claude::ImportClaudeCommand),
         Arc::new(usage::UsageCommand),
         Arc::new(limits::LimitsCommand),
+        Arc::new(spend::SpendCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
         Arc::new(clear_completed_todos::ClearCompletedTodosCommand),
@@ -276,6 +280,7 @@ mod tests {
             "debug",
             "docs",
             "doctor",
+            "double-entry",
             "edit-prompt",
             "econ",
             "economic",
@@ -300,6 +305,7 @@ mod tests {
             "imagine-video",
             "import-claude",
             "jump",
+            "ledger",
             "limits",
             "login",
             "logout",
@@ -327,6 +333,7 @@ mod tests {
             "queue",
             "quit",
             "recap",
+            "rebuild",
             "release-notes",
             "remember",
             "rename",
@@ -340,6 +347,7 @@ mod tests {
             "share",
             "show-plan",
             "skills",
+            "spend",
             "summarize",
             "tasks",
             "terminal-check",

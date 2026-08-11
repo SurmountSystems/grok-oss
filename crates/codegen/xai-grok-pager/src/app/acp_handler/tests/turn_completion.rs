@@ -1173,3 +1173,184 @@
         );
     }
 
+    /// Dogfood 2026-08-09 evening: durable load ends with primary-user
+    /// `turn_completed` `stop_reason: error` (403 bad-credentials / Internal
+    /// error). No cancel-resume marker required. Wire path must set the failed
+    /// flag during `loading_replay`, then `SessionLoaded` must SendPrompt the
+    /// last user text (auto-resume). Does **not** hand-set
+    /// `last_primary_user_turn_failed_in_replay` — that was the prior-test gap.
+    #[test]
+    fn session_loaded_wire_error_turn_completed_auto_resumes_without_marker() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+        use crate::scrollback::block::RenderBlock;
+
+        let sid = "load-wire-error-403-sess";
+        let mut app = make_app_with_agent(sid);
+        let id = AgentId(0);
+        let cwd = std::path::PathBuf::from("/tmp/load-wire-error-403-cwd");
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        let last_user = "/implement --effort 2 residual after 403 bad-credentials";
+        // UUID shape matches durable updates.jsonl primary-user prompt_ids.
+        let prompt_id = "775d081f-368e-4394-99c8-fa570172e80c";
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent
+                .scrollback
+                .push_block(RenderBlock::user_prompt(last_user));
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message("working before credentials died"));
+            // Explicitly leave flags false — only the wire turn_completed may set them.
+            agent.last_primary_user_turn_completed_in_replay = false;
+            agent.last_primary_user_turn_failed_in_replay = false;
+        }
+
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif(sid, prompt_id, "error", true),
+            &mut app,
+        );
+
+        {
+            let agent = app.agents.get(&id).unwrap();
+            assert!(
+                agent.last_primary_user_turn_completed_in_replay,
+                "wire error turn_completed must mark primary completed in replay"
+            );
+            assert!(
+                agent.last_primary_user_turn_failed_in_replay,
+                "wire error turn_completed must set failed flag (dogfood evidence)"
+            );
+            assert!(
+                xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(
+                    &cwd_str, sid
+                )
+                .unwrap()
+                .is_none(),
+                "precondition: no marker"
+            );
+        }
+
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id: id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+            }),
+            &mut app,
+        );
+
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SendPrompt { text, .. } if text == last_user
+            )),
+            "wire error load must SendPrompt last user text; effects={effects:?}"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(msg, _)| msg.as_str())
+            .unwrap_or("");
+        assert!(
+            toast.contains("Continuing interrupted turn"),
+            "error-terminal wire load must toast continue; got {toast:?}"
+        );
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
+    /// Same wire path as dogfood sessions that still have a leftover
+    /// `canceled_turn_resume.json` after error (eager turn-start marker kept).
+    /// Must not drop as stale success; must SendPrompt.
+    #[test]
+    fn session_loaded_wire_error_with_marker_still_auto_resumes() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+        use crate::scrollback::block::RenderBlock;
+
+        let sid = "load-wire-error-marker-sess";
+        let mut app = make_app_with_agent(sid);
+        let id = AgentId(0);
+        let cwd = std::path::PathBuf::from("/tmp/load-wire-error-marker-cwd");
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        let last_user = "Also continue residual after Internal error";
+        let prompt_id = "17c185b3-caab-4da6-bbe6-a3885a38a4a4";
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent
+                .scrollback
+                .push_block(RenderBlock::user_prompt(last_user));
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message("partial before 403"));
+            agent.last_primary_user_turn_completed_in_replay = false;
+            agent.last_primary_user_turn_failed_in_replay = false;
+        }
+        let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+            last_user,
+            Some(prompt_id),
+            "2026-08-09T20:40:55Z",
+        )
+        .expect("marker");
+        xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+            &cwd_str, sid, &marker,
+        )
+        .expect("write marker");
+
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif(sid, prompt_id, "error", true),
+            &mut app,
+        );
+
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id: id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+            }),
+            &mut app,
+        );
+
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SendPrompt { text, .. } if text == last_user
+            )),
+            "wire error + marker must SendPrompt (not stale-dropped); effects={effects:?}"
+        );
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+

@@ -870,6 +870,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
         }
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
+        "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
@@ -883,6 +884,23 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
         "economic_mode" => Some(Action::SetEconomicMode(new)),
+        "resume_canceled_turn_on_restart" => Some(Action::SetResumeCanceledTurnOnRestart(new)),
+        "token_economy.cap_implement_effort_when_economic" => Some(Action::SetTokenEconomyBool {
+            field: "cap_implement_effort_when_economic",
+            value: new,
+        }),
+        "token_economy.show_period_pacing" => Some(Action::SetTokenEconomyBool {
+            field: "show_period_pacing",
+            value: new,
+        }),
+        "token_economy.local_spend_ledger" => Some(Action::SetTokenEconomyBool {
+            field: "local_spend_ledger",
+            value: new,
+        }),
+        "token_economy.reconcile_management_usage" => Some(Action::SetTokenEconomyBool {
+            field: "reconcile_management_usage",
+            value: new,
+        }),
         "notifications.session_recap" => Some(Action::SetNotificationsSessionRecap(new)),
         "features.session_recap" => Some(Action::SetFeaturesSessionRecap(new)),
         "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
@@ -1026,6 +1044,22 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "notifications.session_recap_threshold_secs" => {
             Some(Action::SetNotificationsSessionRecapThresholdSecs(value))
         }
+        "token_economy.max_implement_effort" => Some(Action::SetTokenEconomyInt {
+            field: "max_implement_effort",
+            value,
+        }),
+        "token_economy.min_implement_effort" => Some(Action::SetTokenEconomyInt {
+            field: "min_implement_effort",
+            value,
+        }),
+        "token_economy.desired_implement_effort" => Some(Action::SetTokenEconomyInt {
+            field: "desired_implement_effort",
+            value,
+        }),
+        "token_economy.lock_implement_effort" => Some(Action::SetTokenEconomyInt {
+            field: "lock_implement_effort",
+            value,
+        }),
         _ => None,
     }
 }

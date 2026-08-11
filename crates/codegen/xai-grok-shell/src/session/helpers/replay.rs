@@ -124,6 +124,27 @@ pub fn replay_to_prompt(
     state.flush_pending_user();
     state.flush_pending_agent();
 
+    // If we saw post-target-boundary compaction markers but never successfully
+    // loaded the latest one needed for this target, fail soft. Intermediate
+    // missing files are skipped during the walk so a later good checkpoint can
+    // still reconstruct; only the covering checkpoint is required.
+    if let Some(needed) = state.max_post_checkpoint_index {
+        let loaded_ok = state.checkpoint_active && state.checkpoint_prompt_index >= needed;
+        if !loaded_ok {
+            let path = state
+                .max_post_checkpoint_path
+                .unwrap_or_else(|| "compaction_checkpoints/<unknown>.json".to_string());
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Compaction checkpoint file missing: {path}. \
+                     Auto-compact removed the history needed to rewind to this prompt. \
+                     Try a prompt after a later successful compaction, or continue without rewind."
+                ),
+            ));
+        }
+    }
+
     // After processing the entire file, the conversation may extend beyond
     // the target. `target_prompt_index` means "rewind to before prompt N",
     // so keep prompts 0..N-1 (N prompts total).
@@ -218,6 +239,16 @@ struct ReplayState {
 
     /// The original User(user_info) text from before the first compaction.
     original_user_info: Option<String>,
+
+    /// Highest `prompt_index_at_compaction` among checkpoints where
+    /// `target >= prompt_index_at_compaction` (a post-boundary load is needed).
+    /// Used at end-of-replay to fail only when the *covering* file is missing,
+    /// not when an earlier intermediate file is gone.
+    max_post_checkpoint_index: Option<usize>,
+
+    /// Display path of the checkpoint at [`Self::max_post_checkpoint_index`]
+    /// (for the soft-fail error message).
+    max_post_checkpoint_path: Option<String>,
 }
 
 impl ReplayState {
@@ -236,6 +267,21 @@ impl ReplayState {
             checkpoint_base_len: 0,
             checkpoint_prompt_index: 0,
             original_user_info: None,
+            max_post_checkpoint_index: None,
+            max_post_checkpoint_path: None,
+        }
+    }
+
+    /// Record a post-boundary checkpoint index/path so end-of-replay can require
+    /// that the latest covering file actually loaded.
+    fn note_post_checkpoint(&mut self, info: &CompactionCheckpointInfo, checkpoint_path: &Path) {
+        let idx = info.prompt_index_at_compaction;
+        let is_new_max = self
+            .max_post_checkpoint_index
+            .is_none_or(|prev| idx >= prev);
+        if is_new_max {
+            self.max_post_checkpoint_index = Some(idx);
+            self.max_post_checkpoint_path = Some(checkpoint_path.display().to_string());
         }
     }
 
@@ -286,27 +332,22 @@ impl ReplayState {
     ) -> io::Result<ReplayAction> {
         if self.target < info.prompt_index_at_compaction {
             // Target is before this compaction — don't load the compacted
-            // history (we'll reconstruct from raw updates). But the
-            // checkpoint is still required for original_user_info — the
-            // historical User(user_info) that the model saw for these
-            // pre-compaction turns. Without it we'd use the post-compaction
-            // rebuilt user_info, which is wrong data.
+            // history (we'll reconstruct from raw updates). Prefer
+            // original_user_info from the checkpoint when present; if the
+            // file is gone, continue without it rather than blocking rewind
+            // of pre-compact prompts that still exist as raw updates.
             let checkpoint_path = session_dir.join(&info.checkpoint_file);
             let bytes = match std::fs::read(&checkpoint_path) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    tracing::error!(
+                    tracing::warn!(
                         path = %checkpoint_path.display(),
-                        "Compaction checkpoint file missing, cannot restore original user_info"
+                        target = self.target,
+                        checkpoint_at = info.prompt_index_at_compaction,
+                        "Compaction checkpoint file missing while rewinding before \
+                         that boundary; continuing without original_user_info from it"
                     );
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "Compaction checkpoint file missing: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
+                    return Ok(ReplayAction::Continue);
                 }
                 Err(e) => return Err(e),
             };
@@ -317,19 +358,13 @@ impl ReplayState {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
+                    tracing::warn!(
                         ?e,
                         path = %checkpoint_path.display(),
-                        "Compaction checkpoint file corrupt, cannot restore original user_info"
+                        "Compaction checkpoint file corrupt while rewinding before \
+                         that boundary; continuing without original_user_info from it"
                     );
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "Compaction checkpoint file corrupt: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
+                    return Ok(ReplayAction::Continue);
                 }
             }
             tracing::debug!(
@@ -340,40 +375,36 @@ impl ReplayState {
             Ok(ReplayAction::Continue)
         } else {
             let checkpoint_path = session_dir.join(&info.checkpoint_file);
+            // Track every post-boundary marker so end-of-replay can require
+            // the *latest* covering file. Intermediate missing files skip
+            // here; only a still-missing covering file fails the rewind.
+            self.note_post_checkpoint(info, &checkpoint_path);
+
             let bytes = match std::fs::read(&checkpoint_path) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    tracing::error!(
+                    tracing::warn!(
                         path = %checkpoint_path.display(),
-                        "Compaction checkpoint file missing, cannot reconstruct conversation"
+                        target = self.target,
+                        checkpoint_at = info.prompt_index_at_compaction,
+                        "Compaction checkpoint file missing; skipping intermediate \
+                         marker (a later checkpoint may still cover the target)"
                     );
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "Compaction checkpoint file missing: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
+                    return Ok(ReplayAction::Continue);
                 }
                 Err(e) => return Err(e),
             };
             let file: CompactionCheckpointFile = match serde_json::from_slice(&bytes) {
                 Ok(f) => f,
                 Err(e) => {
-                    tracing::error!(
+                    tracing::warn!(
                         ?e,
                         path = %checkpoint_path.display(),
-                        "Compaction checkpoint file corrupt, cannot reconstruct conversation"
+                        checkpoint_at = info.prompt_index_at_compaction,
+                        "Compaction checkpoint file corrupt; skipping intermediate \
+                         marker (a later checkpoint may still cover the target)"
                     );
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "Compaction checkpoint file corrupt: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
+                    return Ok(ReplayAction::Continue);
                 }
             };
 
@@ -1252,5 +1283,133 @@ mod tests {
         assert_eq!(result.conversation.len(), 2);
         assert_eq!(result.conversation[0].text_content(), "sys");
         assert_eq!(result.conversation[1].text_content(), "summary2");
+    }
+
+    /// Named contract: a missing *intermediate* compaction checkpoint file must
+    /// not block rewind when a later checkpoint on disk still covers the target.
+    ///
+    /// Operator bug (dragon-npu): first marker's file was gone, later checkpoints
+    /// existed, but replay hard-failed at the first missing file so every
+    /// post-compaction rewind failed (including prompt #385 with a good file at 386).
+    #[test]
+    fn replay_skips_missing_intermediate_checkpoint_when_later_covers_target() {
+        let tmp = TempDir::new().unwrap();
+
+        // Intentionally do NOT write ckpt_early — only the later file exists.
+        write_checkpoint_file(
+            tmp.path(),
+            "ckpt_late",
+            4,
+            vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("summary_late"),
+            ],
+        );
+
+        let updates = vec![
+            make_user_update_pi("s1", "P0", 0),
+            make_agent_update("s1", "R0"),
+            make_user_update_pi("s1", "P1", 1),
+            make_agent_update("s1", "R1"),
+            // Marker for a missing intermediate file (at prompt 2).
+            make_checkpoint("ckpt_early", 2, None),
+            make_user_update_pi("s1", "P2", 2),
+            make_agent_update("s1", "R2"),
+            make_user_update_pi("s1", "P3", 3),
+            make_agent_update("s1", "R3"),
+            make_checkpoint("ckpt_late", 4, None),
+            make_user_update_pi("s1", "P4", 4),
+            make_agent_update("s1", "R4"),
+            make_user_update_pi("s1", "P5", 5),
+            make_agent_update("s1", "R5"),
+        ];
+
+        let updates_path = tmp.path().join("updates.jsonl");
+        let mut content = Vec::new();
+        for u in &updates {
+            let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(u).unwrap();
+            let mut line = serde_json::to_vec(&envelope).unwrap();
+            line.push(b'\n');
+            content.extend(line);
+        }
+        std::fs::write(&updates_path, content).unwrap();
+
+        // Target 5: needs latest checkpoint at 4. Early marker at 2 is missing
+        // on disk but must be skipped so ckpt_late can reconstruct.
+        let result = replay_to_prompt(&updates_path, tmp.path(), 5)
+            .expect("replay must succeed when a later checkpoint covers the target");
+
+        let texts: Vec<String> = result
+            .conversation
+            .iter()
+            .map(|c| c.text_content())
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "summary_late"),
+            "must load the later compacted summary, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "P4"),
+            "must keep post-late prompt P4, got {texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t == "P0" || t == "P1" || t == "P2" || t == "P3"),
+            "pre-late raw prompts must not leak once late checkpoint loads: {texts:?}"
+        );
+        assert_eq!(result.prompt_index_reached, 5);
+        assert_eq!(result.last_compaction_prompt_index, Some(4));
+    }
+
+    /// Named contract: when the *latest* checkpoint needed for the target is
+    /// missing, fail soft with a clear unavailable message (no panic).
+    #[test]
+    fn replay_fails_when_latest_needed_checkpoint_file_missing() {
+        let tmp = TempDir::new().unwrap();
+
+        // Early file present; the later one (needed for target 5) is missing.
+        write_checkpoint_file(
+            tmp.path(),
+            "ckpt_early",
+            2,
+            vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("summary_early"),
+            ],
+        );
+
+        let updates = vec![
+            make_user_update_pi("s1", "P0", 0),
+            make_agent_update("s1", "R0"),
+            make_checkpoint("ckpt_early", 2, None),
+            make_user_update_pi("s1", "P2", 2),
+            make_agent_update("s1", "R2"),
+            make_checkpoint("ckpt_late", 4, None),
+            make_user_update_pi("s1", "P4", 4),
+            make_agent_update("s1", "R4"),
+            make_user_update_pi("s1", "P5", 5),
+        ];
+
+        let updates_path = tmp.path().join("updates.jsonl");
+        let mut content = Vec::new();
+        for u in &updates {
+            let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(u).unwrap();
+            let mut line = serde_json::to_vec(&envelope).unwrap();
+            line.push(b'\n');
+            content.extend(line);
+        }
+        std::fs::write(&updates_path, content).unwrap();
+
+        let err = replay_to_prompt(&updates_path, tmp.path(), 5)
+            .expect_err("must fail when the latest needed checkpoint file is missing");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("compaction checkpoint")
+                || msg.contains("Compaction checkpoint")
+                || msg.contains("checkpoint"),
+            "error must name the missing compaction checkpoint: {msg}"
+        );
     }
 }

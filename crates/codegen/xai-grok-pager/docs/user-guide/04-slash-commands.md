@@ -37,8 +37,15 @@ Percent thresholds apply to the *effective* window — with **Economic mode** on
 ### `/economic-mode`
 
 Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing.
-Default **on** for new sessions (`[ui] economic_mode`). Soft-caps context only;
-does not rewrite explicit `/implement --effort`.
+Default **on** for new sessions (`[ui] economic_mode`). Soft-caps the context
+window for compaction and the context bar.
+
+Token Economy may rewrite **implement-loop effort** (skill reviewer fan-out
+1–5, not model reasoning effort) on `/implement`: optional **lock** and
+**min floor** always apply when set; economic mode + cap master still own the
+hard ceiling (default **3**) and desired inject when missing (default **2**).
+Toasts fire when the product rewrites effort. See
+[Configuration → Token Economy](05-configuration.md#token-economy).
 
 ```
 /economic-mode              # toggle this conversation
@@ -156,10 +163,12 @@ Both are real toggles for the permission mode: they stay in the menu, and runnin
 
 | Command | When off | When already on |
 |---|---|---|
-| `/always-approve` | Skip all permission prompts | Back to ask |
+| `/always-approve` | Skip tool permission prompts | Back to ask |
 | `/auto` | Classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
 
 Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Always-approve), `Ctrl+O`, or `/settings`.
+
+**Not plan approval:** `/always-approve` does not auto-approve a soft-parked plan. Plan decisions stay on the plan panel CTAs ([Plan mode](19-plan-mode.md#present-is-not-approval)).
 
 ### `/multiline`
 
@@ -388,7 +397,7 @@ Leave a **mid-session operator note** that is **not** a pending main-turn prompt
 ```
 
 - Stores the note on the **current session only** (id, time, text, optional trailing `#tags`).
-- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for on-disk join notes that agents write for other agents.
+- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for short on-disk reports that agents write for other agents.
 - Bare `/note` (or alias `/notes`) lists notes as a system block. `/tasks` also shows a count when notes exist.
 - Full TUI confirms a save with a toast; minimal mode writes a short system line.
 
@@ -405,6 +414,35 @@ Check the current session for terminal, clipboard, color, input, notification, a
 The dual-auth block also lists SuperGrok principal(s) (role + fingerprint only
 when two logins are stored) and console key fingerprints. See
 [Authentication → Two SuperGrok logins](02-authentication.md#two-supergrok-logins-personal--business).
+
+### `/rebuild`
+
+Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances
+on this machine (same user and `GROK_HOME`). Distinct from worktree database
+rebuild and from the SpaceXAI auto-updater channel.
+
+1. Walks up from the process working directory to find a Grok OSS source tree
+   (`justfile` + `crates/codegen/xai-grok-pager-bin`).
+2. Runs `just install` (or fixed `cargo build` + install when `just` is missing)
+   into `${CARGO_HOME:-~/.cargo}/bin/grok-oss`.
+3. Verifies the installed binary's package version + git SHA.
+4. Soft-signals reachable leaders to drain and exit for upgrade (same grace path
+   as update relaunch; clients reconnect and reload the session).
+5. Writes a cooperative relaunch request under `$GROK_HOME` and signals **every
+   other live product TUI** registered in `active_sessions` (`SIGUSR1`) so those
+   windows re-exec onto the new binary with the same session (not only the window
+   that typed `/rebuild`). Mid-turn work uses canceled-turn-on-restart resume.
+6. Re-execs **this** TUI onto the new binary with the same session id when
+   possible. Mid-turn work is canceled with the normal canceled-turn-on-restart
+   resume (re-queue once), not invent success.
+
+CLI equivalent for agents and scripts: `grok-oss rebuild` (and optional
+`--source <dir>`). After a successful rebuild, all active product windows on this
+host should pick up the new binary; the rebuild report lists leaders and peer
+TUI signal outcomes.
+
+See also [Getting Started](01-getting-started.md) install notes and
+`grok-oss update --check` (freshness vs Surmount `main` only; no auto-install).
 
 ### `/release-notes`
 
@@ -467,24 +505,72 @@ Log out and return to the login screen.
 View **session** token/cost totals, then SuperGrok billing when the consumer
 surface is visible. Alias: `/cost`.
 
+When free SuperGrok **billing period** bounds are known, also shows **linear-burn
+pacing**: whether free SuperGrok period used % is ahead of or behind linear burn
+for the period (never as dollars). When live sampling is a console key, SuperGrok
+pacing is labeled as not the live principal. Full double-entry books are on
+`/spend` and a section of `/limits`.
+
 ```
 /usage
 /usage manage
 ```
 
+### `/spend`
+
+**Token Economy double-entry:** local calculated spend (from session `usage.jsonl`
+ingested into `$GROK_HOME/grok_oss.db`) side by side with remote Management
+samples (team prepaid / postpaid / usage series when a management key is
+available). Shows gap honesty when local cost ticks are missing so USD gap is
+not comparable. Meters stay distinct (free SuperGrok period % ≠ SuperGrok top-up
+$ ≠ console team prepaid ≠ API vs OAuth class). Aliases: `/double-entry`,
+`/ledger`.
+
+```
+/spend
+```
+
 ### `/limits`
 
-Detail view of spend meters from cached billing (not session tokens). Keeps
-each meter distinct:
+Opens a **dismissible popup** (Esc to close) with spend meters from cached
+billing (not session tokens). Does not dump a static block into the chat.
+While the popup is open, **Resets in: Xd Yh Zm Ws** ticks live; when the
+countdown hits zero, billing re-fetches so meters continue after period reset.
+Keeps each meter distinct:
 
-- SuperGrok **included** weekly/monthly allowance (used % · remaining % · next reset)
+- SuperGrok **included** weekly/monthly allowance (used % · remaining % · next reset · live countdown)
+- Free SuperGrok period **linear-burn pacing** when period bounds exist
+  (ahead/behind linear burn; omit when bounds missing; console-live honesty)
 - SuperGrok **dollar extras** (prepaid session balance; separate from included)
-- **Console team prepaid** (Management API balance when a management key and
-  `management_team_id` are configured; otherwise distinct honest gaps:
+- **Console API key** — `Requests: console` when the console chat key is
+  handling requests, `Requests: SuperGrok` when that key is on file but
+  SuperGrok is handling requests, or `no key` when no console chat/API key
+  exists. Key presence is implicit when a request path is shown; a key on file
+  never looks missing just because SuperGrok is live.
+- **Console team prepaid** (Management API balance when a **management** key and
+  `management_team_id` / `XAI_MANAGEMENT_TEAM_ID` are set, or team id is
+  discovered from the management key). Shown under **Console API** even when
+  SuperGrok is live (`console.isLive` false). Otherwise distinct honest gaps:
   `no management key`, `no management team id`, `loading team prepaid...`, or
-  `team prepaid unavailable`). This is **not** SuperGrok extras and **not** a
-  Business SuperGrok OIDC login.
+  `team prepaid unavailable`. Store the key with `grok login --management-key`
+  (or `XAI_MANAGEMENT_API_KEY`). The management key is **not** the same as the
+  console inference API key and is **not** part of the Key line above. This is
+  **not** SuperGrok extras and **not** a Business SuperGrok OIDC login.
   Setup: [Authentication → Console team prepaid](02-authentication.md#console-team-prepaid-management-api).
+- **Team postpaid** (OAuth vs API class) and **usage series** day window when
+  Management credentials work. Dollar class only, not license message counts.
+  Series refreshes on the same path as prepaid/postpaid: TUI `/limits` open,
+  background billing refresh (about every 60s soft cache), and `grok limits`.
+  When OAuth / **Grok Build class** is known and positive, that line is near the
+  top of the Console block (dogfood settlement proof), still separate from team
+  prepaid **Balance**.
+- Honesty notes include: SuperGrok included % is a poll reading (not proven burn);
+  the console **Platforms → Grok Business licenses** page (messages /
+  conversations) is **not dogfood proof** (zeros expected for CLI SuperGrok).
+  Real burn is **team Usage** dollars (browser team Usage / spend / Grok Build)
+  and Management postpaid / series plus SuperGrok meters.
+- A short **double-entry spend** section (local book vs remote); full view is
+  `/spend`.
 
 When **two SuperGrok principals** are stored (personal + Business), `/limits`
 stacks a section per principal (for example `SuperGrok (personal)` and
@@ -493,17 +579,101 @@ console key) is active when known. The non-active sibling may show **no data
 yet** until its billing pool has been polled. Personal included, Business
 included, SuperGrok dollar extras, and console team prepaid stay separate lines.
 
-The **status bar** shows a compact always-on meter when billing data is known
-(`Credits used: N%` on SuperGrok, or `console · $N` / honest gap on a console
-key). Click that meter to open this same `/limits` detail. The prompt footer
-stays a one-line warning summary when usage is high (console live shows
-`Console key · team prepaid: $N` when known, else the honest gap strings above).
-Billing refresh (session start, turn end, `/usage`) fills SuperGrok cache and,
-when configured, Management team prepaid.
+The **status bar** (top row, right side next to context tokens) always shows a
+compact meter that matches the **live sampling principal** in Build sessions —
+including team dual-auth SuperGrok and console-live sampling, not only personal
+consumer billing. That compact meter is **spend-order chrome** (the same order
+as `/limits` **Active:** / `activeDriver`), not proof of which team wallet
+settles the bill. Meters stay distinct:
+
+- **SuperGrok live:** `free SuperGrok period · N%` when free SuperGrok period
+  usage is known (true `free SuperGrok period · 0%` is allowed), optionally with
+  a short linear-burn chip when period bounds exist. While billing has not
+  returned a real free SuperGrok period reading, chrome shows
+  `free SuperGrok period · ...%` (not a silent `0%` lie). When free SuperGrok
+  period is full and SuperGrok dollar credits remain, the compact meter switches
+  to `SuperGrok extras · $N`. Background poll keeps refreshing until the free
+  SuperGrok period meter is known, near exhaust, or when OpenRouter / console
+  prepaid is active.
+- **Console key live:** `console · $N` (team prepaid) or the honest gap strings
+  (`no management key`, `no management team id`, `loading team prepaid...`,
+  `team prepaid unavailable`). Never free SuperGrok period % as the live spend.
+
+Gateway/chat sessions hide the coding-credits meter. Click that meter to open
+this same `/limits` popup. The prompt footer is a one-line summary for SuperGrok
+warnings and/or **secondary team wallet** context when the consumer billing
+surface is on (personal SuperGrok principal; not team AuthMeta enterprise hide,
+not API-key primary alone):
+
+- **Console live:** `Console key · team prepaid: $N` (or honest gap strings);
+  optional `team Grok Build class: $N` when postpaid OAuth class is in cache.
+  Under console live, team prepaid is the live console pool.
+- **SuperGrok live while free SuperGrok period has room:** footer shows only
+  SuperGrok free-period / SuperGrok dollar credits warnings when those fire.
+  Team prepaid remaining and Grok Build class stay off the prompt footer so they
+  do not dominate next to model name (full team wallets stay on `/limits`).
+  Compact status still names free SuperGrok period.
+- **SuperGrok live after free SuperGrok period is full:** free SuperGrok period
+  remaining / SuperGrok dollar credits when those warn, plus optional secondary
+  team line such as
+  `not the active spend path: team prepaid remaining $N · Grok Build class $M`
+  (or cold management `not the active spend path: loading team prepaid...`).
+  That secondary line never means "you are paying team prepaid now" and never
+  re-labels live sampling as console. Missing management key still keeps
+  SuperGrok-only footers SuperGrok-focused (team honesty stays on `/limits`
+  Balance).
+
+Billing refresh (session start, turn end, `/usage`, force-refresh on `/limits`)
+fills SuperGrok cache and, when configured, Management team prepaid **and**
+postpaid into process cache regardless of which principal is live.
 
 ```
 /limits
+/limits --json
 ```
+
+**`/limits --json`** skips the popup and prints the same machine-readable
+JSON as CLI `grok limits --json` into the **conversation transcript** (pretty
+JSON in a fenced code block). Both you and the agent can see it in session
+history. Fields include `schemaVersion`, `liveSampling`, **`activeDriver`**
+(`supergrok_free_period` | `supergrok_extras` | `console_key`), SuperGrok
+principal meters, and console team prepaid (no secrets).
+
+Human `/limits` and `grok limits` lead with **Live sampling** then **Active:**
+(free SuperGrok period | SuperGrok extras | console key), matching status
+compact chrome under Design A. Free SuperGrok period always comes before
+SuperGrok dollar extras and console credits while free period has headroom.
+
+Outside the TUI, agents and scripts can query the same meters (live sampling
+principal + SuperGrok included % / dollar extras + console team prepaid when
+configured) without pasting a screenshot:
+
+```bash
+grok limits           # human multi-line report (includes Active: driver)
+grok limits --json    # machine-readable JSON (schemaVersion 1; no secrets)
+grok limits multipoll # N samples + P1 path / P2 free SuperGrok period series
+just limits-multipoll # same harness via just (see Authentication checklist)
+```
+
+**`grok limits multipoll`** takes several live `limits --json` samples (default
+2, default **30s** sleep between sample ends so the flat-poll detector can
+see a ≥30s wall window). It writes `samples.jsonl`, `fields.jsonl`, and
+`summary.json` under `.agents/reports/limits-multipoll-<utc>/` (or
+`--out-dir`). Plain summary on stdout names **P1 path** (OK or fail) and
+**P2 free SuperGrok period limits** (flat / stepped / insufficient). Exit is
+**0** when the path is OK; exit is **non-zero only on path failure** (for
+example console live while free SuperGrok period limits still have room).
+Free SuperGrok period staying flat (for example 6%) is **measurement only**
+and does **not** fail the process by itself. That is not proof the client left
+free SuperGrok period limits; it is ticket evidence that free-period debit is
+still unproven on the server.
+
+Desired spend order while free SuperGrok period limits still have room: stay
+on SuperGrok session (free SuperGrok period limits first, then SuperGrok
+dollar credits, then console team prepaid / console API credits). Never invent
+free SuperGrok period used % on the client.
+
+Full operator checklist: [Authentication → Token economy proof checklist](02-authentication.md#token-economy-proof-checklist).
 
 ### `/privacy`
 

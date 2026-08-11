@@ -31,15 +31,21 @@ pub mod leader;
 pub mod managed_config;
 pub mod mcp_doctor;
 pub use xai_grok_models as models;
+/// Uniquely grok-oss durable store (`$GROK_HOME/grok_oss.db`).
+pub mod grok_oss;
 pub mod plugin;
 pub mod relay;
 pub mod remote;
 pub mod sampling;
 pub mod session;
+/// Multi-process HTTP cooldowns for SuperGrok billing + Management API.
+pub mod shared_http_rate_limit;
 pub mod terminal;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tier;
+/// Token Economy: implement effort policy, period pacing, double-entry ledger.
+pub mod token_economy;
 pub mod tools;
 pub mod trace_classifier;
 pub mod upload;

@@ -50,14 +50,15 @@ fn default_team_oauth2_scopes() -> Vec<String> {
 /// not method values. Unset keeps multi-method fallthrough.
 /// Config-toml only — not remote settings, settings UI, or env.
 ///
-/// Wire values match ordinary grok: `api_key` / `oauth` (and aliases). `auto`
-/// is **not** accepted here so shared configs stay compatible.
+/// Wire values are stock-compatible only: `api_key` and `oidc`. No serde
+/// aliases (`oauth`, `api`, …) so shared configs work with ordinary grok when
+/// debugging. `auto` is **not** a method value (use `auto_use_included_limits`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferredAuthMethod {
     /// `XAI_API_KEY` / auth.json `xai::api_key` / per-model BYOK (`xai.api_key`).
     ApiKey,
     /// SuperGrok OIDC / OAuth2 session (`cached_token`, interactive login).
-    /// Canonical serde name is `oauth`; `oidc` still deserializes.
+    /// Canonical wire name is `oidc` (matches [`super::model::AuthMode`]).
     Oidc,
 }
 
@@ -65,7 +66,7 @@ impl Serialize for PreferredAuthMethod {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(match self {
             Self::ApiKey => "api_key",
-            Self::Oidc => "oauth",
+            Self::Oidc => "oidc",
         })
     }
 }
@@ -74,11 +75,11 @@ impl<'de> Deserialize<'de> for PreferredAuthMethod {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
-            "api_key" | "console_api_key" | "api" | "key" => Ok(Self::ApiKey),
-            "oauth" | "oidc" | "oauth_token" => Ok(Self::Oidc),
+            "api_key" => Ok(Self::ApiKey),
+            "oidc" => Ok(Self::Oidc),
             other => Err(serde::de::Error::unknown_variant(
                 other,
-                &["api_key", "oauth", "oidc"],
+                &["api_key", "oidc"],
             )),
         }
     }
@@ -116,27 +117,65 @@ pub struct GrokComConfig {
     /// equal this. Put in `requirements.toml` to enforce as non-overridable policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_login_team_uuid: Option<ForceLoginTeam>,
-    /// Pin automatic auth to `api_key` or `oauth`/`oidc`. When set and that
-    /// method is unavailable, auth fails (no fallthrough). Unset keeps
-    /// multi-method fallthrough. Config.toml only (`[auth] preferred_method`).
+    /// Pin automatic auth to `api_key` or `oidc`. When set and that method is
+    /// unavailable, auth fails (no fallthrough). Unset keeps multi-method
+    /// fallthrough. Config.toml only (`[auth] preferred_method`).
     /// Not for SuperGrok multi-identity ranking — use [`Self::auto_use_included_limits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_method: Option<PreferredAuthMethod>,
-    /// Prefer **included** SuperGrok limits (personal and/or Business) before
-    /// SuperGrok dollar extras / console API $. When multi-identity exists,
-    /// see both pools' headroom and rank among included pools (sooner reset
-    /// is a ranking heuristic, not the feature name). Exhausted included
-    /// pool fails over to another with included headroom, then console.
-    /// Independent of [`Self::preferred_method`] so ordinary `oauth` /
+    /// Prefer the free SuperGrok allowance for the current billing period
+    /// (personal and/or Business) before SuperGrok dollar top-ups and the
+    /// console API key. When multi-identity exists, rank SuperGrok logins by
+    /// free-period headroom (sooner reset is a ranking heuristic, not the
+    /// feature name). Exhausted free period on one login fails over to another
+    /// with free period left, then SuperGrok top-up dollars, then console.
+    /// Independent of [`Self::preferred_method`] so ordinary `oidc` /
     /// `api_key` pins stay compatible with stock grok. Config.toml only
-    /// (`[auth] auto_use_included_limits`). Default false.
+    /// (`[auth] auto_use_included_limits`). **Default true** for new/empty
+    /// config (missing key). Explicit `false` in an existing file is preserved.
     /// Serde alias `prefer_sooner_reset` accepted for one-release dogfood.
     #[serde(
-        default,
+        default = "default_auto_use_included_limits",
         alias = "prefer_sooner_reset",
-        skip_serializing_if = "std::ops::Not::not"
+        skip_serializing_if = "auto_use_included_limits_is_default_true"
     )]
     pub auto_use_included_limits: bool,
+    /// When free SuperGrok period limits still have room (used % below 100) but
+    /// multipoll / poll history marks free SuperGrok period debit **unproven**
+    /// (`flatPollUnprovenDebit`), the product still **allows** sampler turns by
+    /// default so dogfood is not hard-stopped by unproven server debit (C4).
+    /// Honesty notes on `/limits`, doctor dual-auth status, and multipoll still
+    /// name the flat free SuperGrok period and that team settlement can move.
+    /// Set **false** only to **opt into a hard block** of new turns under that
+    /// state. Config.toml: `[auth] allow_spend_when_free_period_debit_unproven`.
+    /// Env: `GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN` (truthy = allow,
+    /// falsy when set = block; unset uses config / default **true**).
+    #[serde(
+        default = "default_allow_spend_when_free_period_debit_unproven",
+        skip_serializing_if = "allow_spend_when_free_period_debit_unproven_is_default_true"
+    )]
+    pub allow_spend_when_free_period_debit_unproven: bool,
+}
+
+/// Default for [`GrokComConfig::auto_use_included_limits`]: prefer free SuperGrok
+/// period allowance before the console API key on new/empty config.
+pub const fn default_auto_use_included_limits() -> bool {
+    true
+}
+
+fn auto_use_included_limits_is_default_true(value: &bool) -> bool {
+    *value
+}
+
+/// Default for [`GrokComConfig::allow_spend_when_free_period_debit_unproven`]:
+/// allow sampler turns under unproven free SuperGrok period debit (dogfood;
+/// hard block is opt-in via `false`).
+pub const fn default_allow_spend_when_free_period_debit_unproven() -> bool {
+    true
+}
+
+fn allow_spend_when_free_period_debit_unproven_is_default_true(value: &bool) -> bool {
+    *value
 }
 /// Team login restriction. TOML string or array; an empty array fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,7 +386,9 @@ impl Default for GrokComConfig {
                 .map(|v| env_flag_enabled(&v)),
             force_login_team_uuid: None,
             preferred_method: None,
-            auto_use_included_limits: false,
+            auto_use_included_limits: default_auto_use_included_limits(),
+            allow_spend_when_free_period_debit_unproven:
+                default_allow_spend_when_free_period_debit_unproven(),
         }
     }
 }
@@ -475,42 +516,43 @@ mod tests {
     }
 
     #[test]
-    fn preferred_method_accepts_aliases_not_auto() {
-        let cases: &[(&str, PreferredAuthMethod)] = &[
-            ("api_key", PreferredAuthMethod::ApiKey),
-            ("console_api_key", PreferredAuthMethod::ApiKey),
-            ("api", PreferredAuthMethod::ApiKey),
-            ("key", PreferredAuthMethod::ApiKey),
-            ("oidc", PreferredAuthMethod::Oidc),
-            ("oauth", PreferredAuthMethod::Oidc),
-            ("oauth_token", PreferredAuthMethod::Oidc),
-        ];
-        for (raw, expect) in cases {
-            let toml = format!("preferred_method = \"{raw}\"");
-            let cfg: GrokComConfig =
-                toml::from_str(&toml).unwrap_or_else(|e| panic!("parse {raw:?}: {e}"));
-            assert_eq!(cfg.preferred_method, Some(*expect), "raw={raw}");
+    fn preferred_method_rejects_aliases_and_auto() {
+        // Stock-compatible wire only: api_key / oidc. Aliases (oauth, api, …)
+        // and auto must fail so shared configs stay debuggable with ordinary grok.
+        for bad in [
+            "oauth",
+            "oauth_token",
+            "console_api_key",
+            "api",
+            "key",
+            "auto",
+        ] {
+            let toml = format!("preferred_method = \"{bad}\"");
+            let err = toml::from_str::<GrokComConfig>(&toml).unwrap_err();
+            assert!(
+                err.to_string().contains(bad) || err.to_string().contains("unknown"),
+                "expected reject for {bad}: {err}"
+            );
         }
-        // `auto` is not a preferred_method value (use auto_use_included_limits).
-        let err = toml::from_str::<GrokComConfig>("preferred_method = \"auto\"").unwrap_err();
-        assert!(
-            err.to_string().contains("auto") || err.to_string().contains("unknown"),
-            "expected reject auto: {err}"
-        );
     }
 
     #[test]
-    fn preferred_method_oauth_round_trips_as_oauth() {
-        let oauth: PreferredAuthMethod = serde_json::from_str("\"oauth\"").expect("oauth");
-        assert_eq!(oauth, PreferredAuthMethod::Oidc);
-        let ser = serde_json::to_string(&oauth).expect("ser oauth");
-        assert_eq!(ser, "\"oauth\"", "canonical serialize is oauth not oidc");
+    fn preferred_method_oidc_round_trips_as_oidc() {
         let oidc: PreferredAuthMethod = serde_json::from_str("\"oidc\"").expect("oidc");
         assert_eq!(oidc, PreferredAuthMethod::Oidc);
         assert_eq!(
             serde_json::to_string(&oidc).expect("ser"),
-            "\"oauth\"",
-            "oidc deserializes but serializes as oauth"
+            "\"oidc\"",
+            "canonical serialize is oidc not oauth"
+        );
+        let api_key: PreferredAuthMethod = serde_json::from_str("\"api_key\"").expect("api_key");
+        assert_eq!(api_key, PreferredAuthMethod::ApiKey);
+        assert_eq!(serde_json::to_string(&api_key).expect("ser"), "\"api_key\"");
+        // Former alias "oauth" must not deserialize.
+        let err = serde_json::from_str::<PreferredAuthMethod>("\"oauth\"").unwrap_err();
+        assert!(
+            err.to_string().contains("oauth") || err.to_string().contains("unknown"),
+            "expected reject oauth: {err}"
         );
     }
 
@@ -525,12 +567,120 @@ mod tests {
         .expect("parse");
         assert_eq!(cfg.preferred_method, Some(PreferredAuthMethod::Oidc));
         assert!(cfg.auto_use_included_limits);
+        // New/empty config: prefer free SuperGrok period allowance by default.
         let cfg: GrokComConfig = toml::from_str("").expect("empty");
-        assert!(!cfg.auto_use_included_limits);
+        assert!(
+            cfg.auto_use_included_limits,
+            "empty/new config defaults auto_use_included_limits to true"
+        );
+        assert!(
+            cfg.allow_spend_when_free_period_debit_unproven,
+            "empty config defaults allow_spend_when_free_period_debit_unproven to true (allow; hard block is opt-in)"
+        );
         let cfg: GrokComConfig =
             toml::from_str("auto_use_included_limits = true").expect("flag only");
         assert!(cfg.auto_use_included_limits);
         assert_eq!(cfg.preferred_method, None);
+        // Explicit false in an existing file must stay false.
+        let cfg: GrokComConfig =
+            toml::from_str("auto_use_included_limits = false").expect("flag false");
+        assert!(
+            !cfg.auto_use_included_limits,
+            "explicit false must be preserved"
+        );
+    }
+
+    #[test]
+    fn allow_spend_when_free_period_debit_unproven_default_true_opt_in_block_false() {
+        assert!(default_allow_spend_when_free_period_debit_unproven());
+        let empty: GrokComConfig = toml::from_str("").expect("empty");
+        assert!(empty.allow_spend_when_free_period_debit_unproven);
+        let on: GrokComConfig =
+            toml::from_str("allow_spend_when_free_period_debit_unproven = true").expect("true");
+        assert!(on.allow_spend_when_free_period_debit_unproven);
+        let off: GrokComConfig =
+            toml::from_str("allow_spend_when_free_period_debit_unproven = false").expect("false");
+        assert!(!off.allow_spend_when_free_period_debit_unproven);
+        // Default true omits the key on serialize; explicit false is written.
+        let on_ser = GrokComConfig {
+            allow_spend_when_free_period_debit_unproven: true,
+            ..GrokComConfig::default()
+        };
+        let on_toml = toml::to_string(&on_ser).expect("ser on");
+        assert!(
+            !on_toml.contains("allow_spend_when_free_period_debit_unproven"),
+            "default true should omit key: {on_toml}"
+        );
+        let off_ser = GrokComConfig {
+            allow_spend_when_free_period_debit_unproven: false,
+            ..GrokComConfig::default()
+        };
+        let off_toml = toml::to_string(&off_ser).expect("ser off");
+        assert!(
+            off_toml.contains("allow_spend_when_free_period_debit_unproven = false")
+                || off_toml.contains("allow_spend_when_free_period_debit_unproven=false"),
+            "explicit false (opt-in hard block) must round-trip: {off_toml}"
+        );
+    }
+
+    /// Named contract (Item 1): new empty home prefers free SuperGrok period
+    /// allowance; explicit false stays off; api_key pin still forces console
+    /// ranking off regardless of the flag default.
+    #[test]
+    fn auto_use_included_limits_new_install_default_true_preserves_false() {
+        assert!(
+            default_auto_use_included_limits(),
+            "const default must be true for new installs"
+        );
+        assert!(
+            GrokComConfig::default().auto_use_included_limits,
+            "Default::default() must prefer free SuperGrok period allowance"
+        );
+        let empty: GrokComConfig = toml::from_str("").expect("empty");
+        assert!(empty.auto_use_included_limits);
+        let off: GrokComConfig = toml::from_str("auto_use_included_limits = false").expect("false");
+        assert!(!off.auto_use_included_limits);
+        // preferred_method=api_key still blocks auto rank even when flag is on.
+        assert!(
+            !crate::auth::preferred_uses_supergrok_auto_rank(
+                true,
+                Some(PreferredAuthMethod::ApiKey)
+            ),
+            "api_key pin forces console even when auto_use_included_limits is true"
+        );
+        assert!(
+            crate::auth::preferred_uses_supergrok_auto_rank(true, None),
+            "default (no preferred_method) + flag on uses SuperGrok free-period rank"
+        );
+        assert!(
+            !crate::auth::preferred_uses_supergrok_auto_rank(false, None),
+            "explicit false turns off free-period-first ranking"
+        );
+    }
+
+    #[test]
+    fn auto_use_included_limits_serializes_false_omits_default_true() {
+        let on = GrokComConfig {
+            auto_use_included_limits: true,
+            ..GrokComConfig::default()
+        };
+        let on_toml = toml::to_string(&on).expect("ser on");
+        assert!(
+            !on_toml.contains("auto_use_included_limits"),
+            "default true should omit the key on serialize so re-load stays true: {on_toml}"
+        );
+        let off = GrokComConfig {
+            auto_use_included_limits: false,
+            ..GrokComConfig::default()
+        };
+        let off_toml = toml::to_string(&off).expect("ser off");
+        assert!(
+            off_toml.contains("auto_use_included_limits = false")
+                || off_toml.contains("auto_use_included_limits=false"),
+            "explicit false must round-trip in file so old homes stay off: {off_toml}"
+        );
+        let reloaded: GrokComConfig = toml::from_str(&off_toml).expect("reload false");
+        assert!(!reloaded.auto_use_included_limits);
     }
 
     #[test]

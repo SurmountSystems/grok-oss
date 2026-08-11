@@ -256,9 +256,11 @@ async fn real_exit_plan_mode_disconnect_keeps_awaiting_persisted() {
         .await;
 }
 
-/// Headless / no UI client wired: the reverse-request can't be delivered, so
-/// `exit_plan_mode` falls through and executes (original behavior) — verified by
-/// `prepare_tool_call` returning a prepared call rather than Cancelled.
+/// Headless / no UI client wired: reverse-request enqueue fails ("unable to
+/// send"). Product leaves plan mode with an honest no-panel tool result — not
+/// a plan-panel Approve click, not always-approve plan auto-approve, and not
+/// a fall-through that runs the bare `exit_plan_mode` tool body (that body is
+/// present-only and must not claim approval).
 #[tokio::test(flavor = "current_thread")]
 async fn real_exit_plan_mode_no_client_executes_tool() {
     let local = tokio::task::LocalSet::new();
@@ -288,10 +290,55 @@ async fn real_exit_plan_mode_no_client_executes_tool() {
                 .prepare_tool_call(call, &mut deferred)
                 .await
                 .expect("prepare_tool_call should not error");
-            // Headless: the tool is prepared (it will execute and exit plan mode).
+            // Headless intercept completes in prepare (no tool body fall-through).
+            match outcome {
+                Err(ToolLoop::Continue) => {}
+                other => panic!(
+                    "headless exit_plan_mode must complete as ToolLoop::Continue \
+                     (honest no-client leave), got {other:?}"
+                ),
+            }
             assert!(
-                outcome.is_ok(),
-                "headless exit_plan_mode should fall through to execute the tool"
+                !actor.plan_mode.lock().is_active(),
+                "no-client path must leave plan mode"
+            );
+            assert!(
+                !actor.plan_mode.lock().is_awaiting_plan_approval(),
+                "no-client leave must clear awaiting_plan_approval"
+            );
+
+            let conv = actor.chat_state_handle.get_conversation().await;
+            let exit_text = conv
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    xai_grok_sampling_types::ConversationItem::ToolResult(tr)
+                        if tr.tool_call_id == "call-exit-headless" =>
+                    {
+                        Some(tr.content.to_string())
+                    }
+                    _ => None,
+                })
+                .expect("no-client path must push a tool_result");
+            assert!(
+                exit_text.contains("No interactive plan panel"),
+                "message must name the no-panel path: {exit_text:?}"
+            );
+            assert!(
+                exit_text.contains("NOT a plan-panel Approve"),
+                "message must deny plan-panel Approve: {exit_text:?}"
+            );
+            assert!(
+                !exit_text.to_lowercase().contains("has been approved"),
+                "must not claim operator approval: {exit_text:?}"
+            );
+            assert!(
+                !exit_text.to_lowercase().contains("start coding"),
+                "must not tell the model to start coding from present alone: {exit_text:?}"
+            );
+            assert!(
+                exit_text.contains("# Plan") || exit_text.contains("step 1"),
+                "no-client message should embed plan body when present: {exit_text:?}"
             );
         })
         .await;
@@ -471,6 +518,121 @@ async fn resume_no_plan_md_clears_flag_without_request() {
             assert!(
                 gateway_rx.try_recv().is_err(),
                 "no reverse-request should be sent when plan.md is missing"
+            );
+        })
+        .await;
+}
+
+/// Named contract (dogfood 2026-08-09): same-turn rewrite of session `plan.md`
+/// plus `exit_plan_mode` must return the **post-write** body. Without ordering,
+/// prepare parks/re-reads while the co-batched write is only prepared, so the
+/// tool result freezes plan A ("Deploy automation") after the agent already
+/// wrote plan B (secrets).
+#[tokio::test(flavor = "current_thread")]
+async fn same_batch_plan_write_before_exit_plan_mode_returns_new_body() {
+    use xai_grok_tools::implementations::grok_build::enter_plan_mode::EnterPlanModeTool;
+    use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeTool;
+    use xai_grok_tools::registry::types::ToolConfig;
+    use xai_grok_tools::types::resources::PlanFilePath;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            // Headless: no client (drop gateway) so exit falls through without
+            // waiting on approve — still must see the co-batched write first.
+            let (actor, gateway_rx, _persistence_rx) = actor_with_channels().await;
+            drop(gateway_rx);
+
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                ToolConfig::from_id("GrokBuild:read_file"),
+                ToolConfig::from_id("GrokBuild:search_replace"),
+                ToolConfig::for_tool::<EnterPlanModeTool>(),
+                ToolConfig::for_tool::<ExitPlanModeTool>(),
+            ])
+            .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let plan_path = dir.path().join("plan.md");
+            let content_a = "# Plan A\nold_token_economy_marker\n";
+            let content_b = "# Plan B\nsurmount_team_usage_first\n";
+            std::fs::write(&plan_path, content_a).unwrap();
+            {
+                let mut tracker = actor.plan_mode.lock();
+                *tracker =
+                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+                tracker.activate_from_tool();
+            }
+            actor
+                .agent
+                .borrow()
+                .tool_bridge()
+                .update_resource(PlanFilePath(plan_path.clone()))
+                .await;
+
+            actor
+                .workspace_ops
+                .bind_local_session(
+                    &actor.session_id_string(),
+                    actor.tool_context.cwd.as_path().to_path_buf(),
+                    actor.tool_context.hunk_tracker_handle.clone(),
+                    actor.agent.borrow().tool_bridge().toolset(),
+                    None,
+                )
+                .expect("bind_local_session");
+
+            // search_replace needs skip_read or a prior read; use empty
+            // old_string only works for new files. Replace the full A body.
+            let write_args = serde_json::json!({
+                "file_path": plan_path.to_string_lossy(),
+                "old_string": content_a,
+                "new_string": content_b,
+            })
+            .to_string();
+            let write_call = crate::sampling::types::ToolCallResponse {
+                id: "call-write-plan".to_string(),
+                kind: "function".to_string(),
+                function: crate::sampling::types::ToolCallFunction::new(
+                    "search_replace",
+                    write_args,
+                ),
+            };
+            let exit_call = crate::sampling::types::ToolCallResponse {
+                id: "call-exit-after-write".to_string(),
+                kind: "function".to_string(),
+                function: crate::sampling::types::ToolCallFunction::new("exit_plan_mode", "{}"),
+            };
+
+            actor
+                .execute_tool_calls(vec![write_call, exit_call])
+                .await
+                .expect("execute_tool_calls");
+
+            let on_disk = std::fs::read_to_string(&plan_path).expect("plan.md readable");
+            assert!(
+                on_disk.contains("surmount_team_usage_first"),
+                "co-batched write must land plan B on disk; got {on_disk:?}"
+            );
+
+            let conv = actor.chat_state_handle.get_conversation().await;
+            let exit_text = conv
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    xai_grok_sampling_types::ConversationItem::ToolResult(tr)
+                        if tr.tool_call_id == "call-exit-after-write" =>
+                    {
+                        Some(tr.content.to_string())
+                    }
+                    _ => None,
+                })
+                .expect("exit_plan_mode tool_result present");
+            assert!(
+                exit_text.contains("surmount_team_usage_first"),
+                "exit_plan_mode must re-read post-write plan B; got {exit_text:?}"
+            );
+            assert!(
+                !exit_text.contains("old_token_economy_marker"),
+                "exit_plan_mode must not embed frozen plan A; got {exit_text:?}"
             );
         })
         .await;

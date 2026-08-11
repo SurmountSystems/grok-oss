@@ -50,6 +50,8 @@ default_selected_permission = "always_allow_all_sessions" # preselected row on t
 remember_tool_approvals = false        # show per-command "Always allow" options on permission prompts;
                                        # grants are remembered per project (default: false); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
+always_expand_thinking = false         # keep thinking fully expanded (default: false); when
+                                       # true, also hides the Ctrl+E expand-thinking footer hint
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # — and finished thoughts among them — into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
@@ -67,12 +69,34 @@ auto_run_implement = true              # after a successful turn, auto-queue a f
                                        # /implement block (token through EOF) from a follow-up or
                                        # trailing residual (default: true)
 economic_mode = true                   # soft-cap effective context at 200k (Grok 4.5 price cliff)
-                                       # for compaction / context bar (default: true). Does not
-                                       # rewrite explicit /implement --effort.
+                                       # for compaction / context bar (default: true).
+                                       # When on, also enables Token Economy implement-effort
+                                       # caps unless [token_economy] turns them off (see below).
                                        # Override one conversation with /economic-mode
+resume_canceled_turn_on_restart = true # continue interrupted turn: when reopening a session that has
+                                       # a cancel-resume marker (Esc/stop, graceful SIGTERM/Quit
+                                       # mid-turn, /rebuild mid-turn), re-queue that work once with a
+                                       # toast ("Continuing interrupted turn..."). Default on. Not the
+                                       # /resume session picker. Finished work is never invented.
+                                       # SIGKILL cannot write a marker. Settings → Session. Distinct
+                                       # from soft stop and pause.
 hide_header = false                    # hide in-app status / welcome / dashboard headers only
                                        # (default: false). Not the desktop/terminal window title.
                                        # Window titles: [ui.notifications.title] enabled (default true).
+
+# Token Economy (implement effort, period pacing, double-entry spend books).
+# Durable books live in $GROK_HOME/grok_oss.db (uniquely grok-oss; not session trees).
+# All of these knobs are also in Settings → Agent & Approval (alongside Economic mode).
+[token_economy]
+cap_implement_effort_when_economic = true  # with [ui] economic_mode: ceiling + desired inject
+max_implement_effort = 3                   # hard ceiling 1–5 when economic caps are active (default 3)
+min_implement_effort = 1                   # floor always applied (default 1). Set 2 for always-a-reviewer.
+# lock_implement_effort = 0                # 0 / omit = unlocked; 1–5 forces that effort always
+desired_implement_effort = 2               # inject when missing under economic caps; must be ≤ max
+show_period_pacing = true                  # free SuperGrok period linear-burn chrome
+local_spend_ledger = true                  # ingest usage.jsonl into grok_oss.db
+reconcile_management_usage = true          # remote Management book + /spend reconcile
+# grok_oss_database_path = ""              # override; empty → $GROK_HOME/grok_oss.db
 
 [features]
 telemetry = false                      # anonymous usage telemetry
@@ -107,6 +131,59 @@ load_envrc = true                      # load .envrc environment variables
 [tools]
 respect_gitignore = false              # default: false; set true to make every tool skip gitignored files
 ```
+
+#### Token Economy
+
+Token Economy is the Surmount product surface for **spend brakes and books**:
+
+| Knob | Default | Role |
+|------|---------|------|
+| `[ui] economic_mode` | true | Soft-cap effective context at 200k (price cliff). Also gates implement-effort **ceiling** and **desired inject** when the cap master below is true. Live in **Settings**. |
+| `[ui] resume_canceled_turn_on_restart` | true | **Continue interrupted turn:** re-queue a mid-turn interrupted by Esc/stop, graceful process quit (SIGTERM/`killall`), or `/rebuild` cancel once when reopening the same session. Toast: “Continuing interrupted turn...”. Not the `/resume` session picker. SIGKILL cannot leave a marker. Live in **Settings → Session**. |
+| `cap_implement_effort_when_economic` | true | Master for economic ceiling + desired inject on implement-loop effort. Live in **Settings**. |
+| `max_implement_effort` | 3 | Hard ceiling (1–5) when economic caps are active. |
+| `min_implement_effort` | 1 | Floor (1–5). **Always** applied (not economic-only). Raise if the prompt is below this. Default 1 keeps current behavior; set **2** so every implement run has at least one reviewer. |
+| `lock_implement_effort` | unset / 0 | When **1–5**, always force that exact effort (ignores prompt and desired). `0` or omit = unlocked. Config validation requires `min ≤ lock ≤ max`. |
+| `desired_implement_effort` | 2 | Injected when auto-run or product paths would omit `--effort` **and** economic caps are active. Must be ≤ max. Ignored when lock is set. |
+| `show_period_pacing` | true | Free SuperGrok **billing period** linear-burn chrome on credit/status, `/limits`, `/usage`. |
+| `local_spend_ledger` | true | Ingest session `usage.jsonl` into the local book. |
+| `reconcile_management_usage` | true | Remote Management samples + reconcile UI when a management key is resolvable. |
+| `grok_oss_database_path` | empty | Empty → **`$GROK_HOME/grok_oss.db`**. Advanced override only. |
+
+**Implement effort** here means the implement skill integer **1–5** (reviewer fan-out), not model reasoning effort. Applies to auto-run `/implement` and human slash `/implement`.
+
+**Application order** (product rewrites the command string and may toast):
+
+1. If `lock_implement_effort` is set (1–5) → start from that value (ignore prompt effort and desired).
+2. Else: missing effort → inject `desired_implement_effort` when economic mode is on and the cap master is true; present effort stays as written.
+3. Apply floor `min_implement_effort` (raise if below). Always. If effort is still missing and min is above 1, inject the floor.
+4. If economic mode is on and the cap master is true → apply ceiling `max_implement_effort` (lower if above).
+
+Validation at config load: each set effort field is in 1–5; `min ≤ max`; `desired ≤ max`; if lock is set, `min ≤ lock ≤ max`. Invalid lock above max is rejected at load (prefer fixing config over silent clamp). At runtime, if max is lowered mid-session without re-validation, the economic ceiling still applies after lock.
+
+**Example — always at least one reviewer, still allow higher effort under the economic ceiling:**
+
+```toml
+[token_economy]
+min_implement_effort = 2
+# leave lock unset; economic max 3 still caps over-ceiling prompts
+```
+
+**Example — always exactly effort 2 (ignore agent `--effort` lines):**
+
+```toml
+[token_economy]
+lock_implement_effort = 2
+min_implement_effort = 2
+```
+
+**Pacing** compares free SuperGrok period **used percent** to time elapsed through the billing period. Copy says “ahead of / behind **linear burn**” so it cannot be read as a score. Missing period bounds → omit pacing. Never shown as dollars. When the live principal is a console key, SuperGrok pacing is labeled as not the live principal.
+
+**Double-entry** (`/spend`, and a section on `/limits`): local book (calculated costs from `usage.jsonl`) vs remote Management samples. Gap honesty when local cost is missing. Meters stay distinct.
+
+**`grok_oss.db`:** uniquely grok-oss durable state under `$GROK_HOME` (Token Economy tables first). Not session SQLite; session trees stay directory + jsonl. Fail-open under multiproc lock; no secrets stored.
+
+Slash cross-links: `/economic-mode`, `/limits`, `/usage`, `/spend`.
 
 #### Input mode
 

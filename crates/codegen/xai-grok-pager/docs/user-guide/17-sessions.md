@@ -36,7 +36,49 @@ Grok stores each session in its own directory, grouped by working directory. It 
   feedback.jsonl          # user feedback and ratings
   compaction_checkpoints/ # saved state from compaction (manual or auto)
   subagents/              # per-subagent metadata (meta.json); the child sessions live in the normal sessions tree
+  unsent_prompt_draft     # durable unsent composer text (not submitted history)
+  canceled_turn_resume.json  # optional: mid-turn cancel/quit marker (prompt text + id) for auto-continue
 ```
+
+### Continue interrupted turn on restart
+
+This is **not** the `/resume` session picker. `/resume` (and `-c` / `--resume`)
+picks which saved conversation to open. **Continue interrupted turn** is what
+happens **inside** a reopened session when the last top-level turn was cut
+short mid-work.
+
+When a mid-turn is interrupted in a cancel-resumable way, Grok may write
+`canceled_turn_resume.json` with the in-flight prompt identity (not secrets).
+On the next open of that same session, if **`[ui] resume_canceled_turn_on_restart`**
+is on (default **true**, Settings → Session → **Continue interrupted turn on
+restart**), Grok re-queues that prompt **once**, shows **“Continuing
+interrupted turn...”**, and clears the marker.
+
+**Writes the marker:**
+
+- **When a turn starts** (eager active-turn sidecar): the user/display prompt is
+  written to disk as soon as the turn drains, so a hard `killall grok-oss` race
+  that never reaches the signal handler still leaves a resumeable file
+- Explicit user cancel (Esc / stop), including after the model has already
+  started tools or subagents (not only pristine pre-activity cancel)
+- Graceful process quit while a turn is running: SIGTERM (including default
+  `killall grok-oss`), SIGHUP, first signal → Quit, `/exit`, and similar
+  controlled shutdown paths. Whole-turn prompt text survives first server
+  activity; the first signal also flushes the in-process arm
+- `/rebuild` mid-turn cancel before self re-exec
+
+**Does not keep / invent the marker:**
+
+- Clean success or turns that finished without cancel (successful finish
+  **clears** any leftover marker)
+- Fearless global pause (`Ctrl+Shift+Space` or status-row `[pause]` / `[resume]`) — in-process stash only (not a durable cancel-resume marker)
+- Soft stop (`Ctrl+Shift+S` only; no status-row button) — holds the queue after the current turn
+- **SIGKILL** (`kill -9` / `killall -9`) before any turn-start write — no
+  userspace code runs; if the turn already started, the eager marker still
+  continues that interrupted turn on next open
+
+- **Does not** invent work that finished successfully or was never interrupted.
+- A later **successful** turn clears any leftover marker.
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
 
@@ -61,9 +103,24 @@ That operator clear is durable (board + badge update). Pane `h` only hides done 
 
 ## Starting and Ending Sessions
 
+### Opening a folder (default)
+
+When you launch `grok` (or open a project folder) with no resume flags, Grok
+loads the **most recent conversation for that workspace** by last activity.
+
+- If **other** conversations exist in the same folder, a short toast notes that
+  the next most recent one was N minutes, hours, or days ago (so you know the
+  rest of history is still available via `/resume`).
+- If this is a **new folder** with no prior conversations, the welcome screen
+  shows a soft yellow informational note that this is a fresh workspace (not an
+  error). Start typing or use the welcome menu as usual.
+
+Headless one-shot runs and `--worktree` still start a fresh session unless you
+pass `-c` / `--resume`. Explicit `/new` always starts a new conversation.
+
 ### New Session
 
-The TUI creates a new session each time you launch. To explicitly start fresh mid-session:
+To start fresh mid-session (or from the welcome screen):
 
 ```
 /new
@@ -109,11 +166,14 @@ grok --resume <session-id-or-title>
 
 A value that is not a session ID is matched against session titles for the current directory, ignoring letter case (a simple lowercase comparison) — handy after `/rename`. If several sessions share the title, a single manually renamed session wins over auto-generated duplicates; otherwise the command errors and lists the matching IDs. UUID-shaped values are always treated as session IDs, never titles. Scripts should prefer IDs.
 
-Run `grok --resume` without a value to resume the most recent session for the current directory.
+Run `grok --resume` without a value (or `grok -c`) to resume the most recent session for the current directory. Bare `grok` does the same for interactive TUI opens (see [Opening a folder](#opening-a-folder-default)).
 
 ### From the Welcome Screen
 
-When you launch `grok`, the welcome screen lists recent sessions for the current directory. Select one to resume it.
+When a workspace has **no** prior conversations, launch lands on the welcome
+screen (with the new-folder note above). When conversations already exist,
+launch resumes the latest one; open `/resume` or the welcome menu (via `/home`)
+to pick an older session.
 
 ---
 

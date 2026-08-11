@@ -476,6 +476,112 @@ async fn team_login_then_personal_keeps_both_principals() {
     );
 }
 
+/// Dual SuperGrok sticky Team base (last business login) for free SuperGrok
+/// period rank tests. Personal user_id lex-wins on equal headroom.
+fn dual_supergrok_sticky_team_store(base_scope: &str) -> (GrokAuth, GrokAuth, AuthStore) {
+    let personal = GrokAuth {
+        key: "tok-personal-free-period".into(),
+        auth_mode: AuthMode::Oidc,
+        principal_type: Some("User".into()),
+        principal_id: Some("536d3388-0735-4e09-bf46-a33da0ed54aa".into()),
+        team_id: Some("58c5f686-4270-4d6d-9c3b-df44559f8457".into()),
+        user_id: "58c5f686-4270-4d6d-9c3b-df44559f8457".into(),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    };
+    let team = GrokAuth {
+        key: "tok-business-team-base".into(),
+        auth_mode: AuthMode::Oidc,
+        principal_type: Some("Team".into()),
+        principal_id: Some("61fab250-b2c1-40cf-b5b8-628e673a2eeb".into()),
+        team_id: Some("61fab250-b2c1-40cf-b5b8-628e673a2eeb".into()),
+        user_id: "user-on-team".into(),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    };
+    let mut map = AuthStore::default();
+    upsert_supergrok_session(&mut map, base_scope, personal.clone());
+    upsert_supergrok_session(&mut map, base_scope, team.clone());
+    (personal, team, map)
+}
+
+/// Named contract: sticky Team base must align to free SuperGrok period ranked
+/// primary (personal wins on equal headroom + lex identity_id) so SessionToken
+/// sampling does not burn team OAuth while free SuperGrok period sits idle.
+#[test]
+fn align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal() {
+    let dir = tempfile::tempdir().unwrap();
+    // auto_use off so AuthManager::new does not auto-align; we test explicit align.
+    let mut cfg = GrokComConfig::default();
+    cfg.auto_use_included_limits = false;
+    let base_scope = cfg.auth_scope();
+    let (_personal, _team, map) = dual_supergrok_sticky_team_store(&base_scope);
+    write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
+    assert_eq!(
+        mgr.current_wire_valid().map(|a| a.key),
+        Some("tok-business-team-base".into()),
+        "precondition: sticky base is Team when auto_use_included_limits is false"
+    );
+
+    let switched = mgr.align_to_ranked_free_period_primary();
+    assert!(
+        switched,
+        "equal free SuperGrok period headroom must realign sticky Team base"
+    );
+    assert_eq!(
+        mgr.current_wire_valid().map(|a| a.key),
+        Some("tok-personal-free-period".into()),
+        "SessionToken bearer must be free SuperGrok period ranked personal primary"
+    );
+    let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
+    assert_eq!(
+        store.get(&base_scope).map(|a| a.key.as_str()),
+        Some("tok-personal-free-period"),
+        "disk base scope must match ranked free SuperGrok period primary"
+    );
+    // No-op when already aligned.
+    assert!(!mgr.align_to_ranked_free_period_primary());
+    let trace = mgr
+        .session_wire_bearer_trace()
+        .expect("wire bearer after align");
+    assert_eq!(trace["principal_type"], "User");
+    assert_eq!(trace["team_id"], "58c5f686-4270-4d6d-9c3b-df44559f8457");
+}
+
+/// Named contract: with `[auth] auto_use_included_limits = true` (default),
+/// AuthManager::new must load free SuperGrok period ranked primary, not leave
+/// sticky Team base wire-active until the first SessionToken reconstruct.
+#[test]
+fn auth_manager_new_auto_use_aligns_sticky_team_base_to_ranked_free_period_primary() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    assert!(
+        cfg.auto_use_included_limits,
+        "default must prefer free SuperGrok period limits"
+    );
+    let base_scope = cfg.auth_scope();
+    let (_personal, _team, map) = dual_supergrok_sticky_team_store(&base_scope);
+    write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
+    assert_eq!(
+        mgr.current_wire_valid().map(|a| a.key),
+        Some("tok-personal-free-period".into()),
+        "AuthManager::new with auto_use must wire free SuperGrok period ranked personal primary, not sticky Team"
+    );
+    let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
+    assert_eq!(
+        store.get(&base_scope).map(|a| a.key.as_str()),
+        Some("tok-personal-free-period"),
+        "disk base after new must match ranked free SuperGrok period primary"
+    );
+    let trace = mgr
+        .session_wire_bearer_trace()
+        .expect("wire bearer after new");
+    assert_eq!(trace["principal_type"], "User");
+    assert_eq!(trace["team_id"], "58c5f686-4270-4d6d-9c3b-df44559f8457");
+}
+
 /// Regression test: clear() must only remove the current scope, not the
 /// legacy scope. Previously, logging in with OAuth would also delete the
 /// legacy `https://accounts.x.ai/sign-in` entry from auth.json.
