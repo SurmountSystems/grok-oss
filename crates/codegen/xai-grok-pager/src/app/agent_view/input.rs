@@ -796,6 +796,13 @@ impl AgentView {
                     if let Some(outcome) = self.try_plan_overlay_agent_action(key, registry, true) {
                         return outcome;
                     }
+                    // Plan open + dual focus (soft-park Prompt, empty line
+                    // comment, freeform notes): arrows / Page keys scroll the
+                    // plan without a second focus click. Only a non-empty
+                    // line-comment draft keeps those keys for caret motion.
+                    if self.plan_viewer_owns_scroll_keys(key) {
+                        return self.handle_line_viewer_key(key);
+                    }
                     if casual_commenting {
                         self.handle_casual_plan_feedback_key(key)
                     } else {
@@ -1199,6 +1206,8 @@ impl AgentView {
                     self.ephemeral_tip
                         .clear(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY);
                     self.btw_focused = false;
+                    // Path / file:// drops win synchronously (and skip the
+                    // clipboard raster so a Finder icon does not double-attach).
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
@@ -1430,6 +1439,16 @@ impl AgentView {
                 }
                 if self.any_cancel_pending() {
                     return InputOutcome::Action(Action::Quit);
+                }
+                // Work B: idle primary with live standalone subagents still
+                // offers CancelTurn → stop-subagents panel / kill path.
+                let has_running_subagents = self
+                    .subagent_sessions
+                    .values()
+                    .any(|s| s.is_running() && s.workflow_run_id.is_none());
+                if has_running_subagents {
+                    self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
+                    return InputOutcome::Action(Action::CancelTurn);
                 }
                 if crate::app::minimal_mode_active()
                     && self.session.state.is_idle()

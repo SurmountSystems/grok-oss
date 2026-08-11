@@ -790,6 +790,20 @@ impl AgentView {
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Changed);
         }
+        // Mid-turn (minimal / non-vim): arm double-Esc cancel confirm from
+        // prompt or scrollback, even with a draft (the draft is preserved,
+        // unlike Ctrl+C's clear-first gesture). First press is harmless so
+        // Esc that only closed a modal/dropdown cannot also cancel. Second
+        // Esc within the confirm window fires CancelTurn (AppView installs
+        // the pending and sets cancel_trigger_hint + rewind grace on fire).
+        if self.session.state.is_turn_running() {
+            return Some(InputOutcome::ArmPending {
+                action: Action::CancelTurn,
+                shortcut: crate::input::key::KeyShortcut::from(*key),
+                label: Some("cancel"),
+                ttl: crate::app::app_view::esc_double_press_ttl(),
+            });
+        }
 
         // CLEAR mutates the composer (drops text/image chips), so it fires only while the PROMPT pane owns keys
         // Clearing a draft the reader has scrolled past would be a surprising cross-pane side effect

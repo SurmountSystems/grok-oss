@@ -326,6 +326,10 @@ pub enum ActiveModal {
         /// It keeps stale results from populating a different note's review modal.
         rewrite_nonce: u64,
     },
+    /// `/limits` spend meters popup (live countdown; not a scrollback dump).
+    Limits {
+        state: Box<crate::views::limits_modal::LimitsModalState>,
+    },
 }
 /// Snapshot of the command palette state, saved when opening an arg picker and restored on Esc.
 #[derive(Debug, Clone)]

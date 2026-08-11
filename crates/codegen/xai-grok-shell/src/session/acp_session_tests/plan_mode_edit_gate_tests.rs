@@ -1,6 +1,7 @@
 use super::support::*;
 use super::*;
 async fn build_gate_actor() -> SessionActor {
+    use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionTool;
     use xai_grok_tools::implementations::grok_build::enter_plan_mode::EnterPlanModeTool;
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeTool;
     use xai_grok_tools::registry::types::ToolConfig;
@@ -15,6 +16,10 @@ async fn build_gate_actor() -> SessionActor {
         ToolConfig::from_id("GrokBuild:search_replace"),
         ToolConfig::for_tool::<EnterPlanModeTool>(),
         ToolConfig::for_tool::<ExitPlanModeTool>(),
+        // Keep ask_user_question registered so prepare can parse a call even
+        // when plan mode would have stripped it from the advertised list —
+        // the hard reject path must still fire.
+        ToolConfig::for_tool::<AskUserQuestionTool>(),
     ])
     .await;
     tokio::task::spawn_local(async move {

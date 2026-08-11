@@ -147,7 +147,9 @@ pub enum SamplingError {
     Http(reqwest::Error),
     #[error("{prefix}{0}", prefix = SERIALIZATION_DISPLAY_PREFIX)]
     Serialization(serde_json::Error),
-    #[error("API error (status {status}): {message}")]
+    /// `status` is formatted via [`format_http_status`] so Cloudflare edge
+    /// codes (521, …) never render as `<unknown status code>`.
+    #[error("API error (status {}): {message}", format_http_status(*status))]
     Api {
         status: StatusCode,
         message: String,
@@ -641,6 +643,69 @@ pub fn parse_error_code(bytes: &[u8]) -> Option<ApiErrorCode> {
 /// Max chars of a structured (JSON) error message shown to users.
 pub const MAX_USER_ERROR_BODY_CHARS: usize = 280;
 
+/// Known status phrases for non-IANA / Cloudflare edge codes that
+/// [`StatusCode::canonical_reason`] does not know. Used so Display never
+/// prints `<unknown status code>` for these outages.
+///
+/// See [Cloudflare HTTP status codes](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/)
+/// (accessed: 2026-08-04).
+pub fn http_status_label(code: u16) -> Option<&'static str> {
+    match code {
+        520 => Some("Web Server Returned an Unknown Error"),
+        521 => Some("Web Server Is Down"),
+        522 => Some("Connection Timed Out"),
+        523 => Some("Origin Is Unreachable"),
+        524 => Some("A Timeout Occurred"),
+        525 => Some("SSL Handshake Failed"),
+        526 => Some("Invalid SSL Certificate"),
+        527 => Some("Railgun Error"),
+        530 => Some("Origin DNS Error"),
+        _ => None,
+    }
+}
+
+/// Format an HTTP status for user-facing Display.
+///
+/// Prefers the IANA reason phrase, then our Cloudflare edge map, then the
+/// bare code. Never emits `<unknown status code>`.
+pub fn format_http_status(status: StatusCode) -> String {
+    let code = status.as_u16();
+    if let Some(reason) = status.canonical_reason() {
+        format!("{code} {reason}")
+    } else if let Some(label) = http_status_label(code) {
+        format!("{code} {label}")
+    } else {
+        format!("{code}")
+    }
+}
+
+/// Transient API / gateway statuses worth retrying with backoff.
+///
+/// Includes 429, common 5xx gateways, and Cloudflare edge 52x outage codes
+/// (origin down, connect fail, timeout, …). Not every 5xx: 501 Not Implemented
+/// stays non-retryable.
+pub fn is_transient_api_status(code: u16) -> bool {
+    matches!(code, 429 | 500 | 502..=504 | 520..=527 | 530)
+}
+
+/// True when the status is a Cloudflare-style origin/edge outage (52x), not
+/// a normal app 5xx. Used for operator messaging.
+pub fn is_edge_outage_status(code: u16) -> bool {
+    matches!(code, 520..=527 | 530)
+}
+
+/// Plain-English terminal copy when retries on a connection/outage status
+/// are exhausted (or the failure is surfaced after soft retries).
+///
+/// Prefer this over raw `API error (status …)` / Internal error JSON for
+/// operator-facing toasts and RetryFailed chrome.
+pub fn outage_exhausted_user_message(status: StatusCode, attempts: u32) -> String {
+    let code = status.as_u16();
+    let tries = attempts.max(1);
+    let try_word = if tries == 1 { "try" } else { "tries" };
+    format!("xAI connection failed after {tries} {try_word} (HTTP {code}). Try again shortly.")
+}
+
 /// Short status-based copy when the body is not a structured JSON error.
 ///
 /// Edge proxies (Cloudflare 52x, 502/503/504) return HTML pages; we never sniff body text, so only the HTTP status drives this fallback.
@@ -748,6 +813,23 @@ pub fn is_retryable_api_status(status: StatusCode) -> bool {
     RetryPolicy::edge_client().should_retry(status.as_u16())
 }
 
+/// True when the error body says the **credentials themselves** were rejected
+/// (invalid / unvalidated OAuth or API token), not a policy or credit denial.
+///
+/// xAI / cli-chat-proxy sometimes returns this on **HTTP 403** (not only 401),
+/// e.g. `unauthenticated:bad-credentials: The OAuth2 access token could not be
+/// validated.` Bare "403 Forbidden" and content-safety / ZDR bodies must not
+/// match. Prefer this over status alone so policy 403s stay non-auth.
+pub fn is_credentials_rejected_message(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("bad-credentials")
+        || m.contains("bad_credentials")
+        || m.contains("oauth2 access token could not be validated")
+        || m.contains("access token could not be validated")
+        || m.contains("unauthenticated:bad-credentials")
+        || m.contains("unauthenticated: bad-credentials")
+}
+
 /// Credit / spending-limit wording shared by xAI Build, OpenRouter, SuperGrok
 /// Heavy subscription caps, and proxies.
 ///
@@ -785,6 +867,46 @@ fn is_credit_exhausted_status_and_message(status: u16, message: &str) -> bool {
     }
     is_credit_exhausted_message(message) && status != 401
 }
+
+/// Strip the [`SamplingError::Api`] Display wrap
+/// (`API error (status 403 Forbidden): ...`) so terminal copy is the body only.
+pub fn strip_api_error_status_prefix(raw: &str) -> &str {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix("API error (status ")
+        && let Some(idx) = rest.find("): ")
+    {
+        return rest[idx + 3..].trim();
+    }
+    s
+}
+
+/// Plain American English for team credit / monthly spending-limit failures.
+///
+/// Prefer the upstream team sentence when present. Never invent Internal error
+/// JSON. Operators get admin guidance (add credits / raise monthly spend limit)
+/// without confusing free SuperGrok period with console team credits.
+pub fn credit_exhausted_user_message(raw: &str) -> String {
+    let body = strip_api_error_status_prefix(raw).trim();
+    if body.is_empty() {
+        return TEAM_CREDIT_FALLBACK.to_string();
+    }
+    // Upstream already names team credits / monthly spending limit.
+    let lower = body.to_ascii_lowercase();
+    if lower.contains("monthly spending limit")
+        || lower.contains("used all available credits")
+        || (lower.contains("team") && lower.contains("credit"))
+    {
+        return body.to_string();
+    }
+    if is_credit_exhausted_message(body) {
+        // Short bodies ("out of credits") get a plain admin line.
+        return format!("{body}. {TEAM_CREDIT_FALLBACK}");
+    }
+    body.to_string()
+}
+
+const TEAM_CREDIT_FALLBACK: &str = "Your team has either used all available credits or \
+reached its monthly spending limit. Add credits or raise the monthly spend limit on console.x.ai.";
 
 /// Decide whether a [`reqwest::Error`] is worth retrying.
 pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
@@ -1382,6 +1504,49 @@ mod tests {
         );
     }
 
+    /// Dogfood 2026-08-09: gateway returned HTTP 403 with
+    /// `unauthenticated:bad-credentials` / OAuth token validation failure.
+    /// That is credential rejection, not policy — classify as auth so the
+    /// session can refresh or show re-auth instead of Internal error JSON.
+    #[test]
+    fn forbidden_bad_credentials_is_auth_error() {
+        let body = "unauthenticated:bad-credentials: The OAuth2 access token \
+                    could not be validated.";
+        assert!(
+            is_credentials_rejected_message(body),
+            "body classifier must match dogfood wording"
+        );
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: body.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            err.is_auth_error(),
+            "403 + bad-credentials must be auth for refresh / re-auth UX"
+        );
+        assert!(
+            !err.is_credit_exhausted(),
+            "bad-credentials is not team credits"
+        );
+
+        // Bare 403 / policy still non-auth.
+        assert!(!is_credentials_rejected_message("Forbidden"));
+        assert!(!is_credentials_rejected_message(
+            "Content violates usage guidelines."
+        ));
+        let policy = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!policy.is_auth_error());
+    }
+
     #[test]
     fn unauthorized_is_auth_error() {
         let err = SamplingError::Api {
@@ -1565,6 +1730,63 @@ mod tests {
         assert!(
             !guidelines.is_credit_exhausted(),
             "usage guidelines is not a credit/usage-limit cap"
+        );
+    }
+
+    /// Exact console team dogfood body (2026-08-05): credits **or** monthly
+    /// spending limit under HTTP 403 must classify as credit-exhausted hop.
+    #[test]
+    fn credit_exhausted_detects_console_team_monthly_spending_limit_403() {
+        let team_body = "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either \
+            used all available credits or reached its monthly spending limit. \
+            Please contact your team admin to purchase more credits or raise \
+            the spending limit.";
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: team_body.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            err.is_credit_exhausted(),
+            "console team credits/monthly spending limit 403 must hop as credit-exhausted"
+        );
+        assert!(!err.is_auth_error());
+
+        // Bare 403 / usage guidelines still false (policy / ZDR).
+        let bare = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Forbidden".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!bare.is_credit_exhausted());
+        let guidelines = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!guidelines.is_credit_exhausted());
+
+        // Plain terminal copy strips Display wrap and keeps the team sentence.
+        let wrapped = format!("API error (status 403 Forbidden): {team_body}");
+        let plain = credit_exhausted_user_message(&wrapped);
+        assert!(
+            plain.contains("used all available credits")
+                || plain.contains("monthly spending limit"),
+            "plain copy must keep team sentence: {plain}"
+        );
+        assert!(
+            !plain.contains("API error (status"),
+            "must not keep Display status prefix: {plain}"
+        );
+        assert!(
+            !plain.contains("Internal error"),
+            "must not invent Internal error chrome: {plain}"
         );
     }
 

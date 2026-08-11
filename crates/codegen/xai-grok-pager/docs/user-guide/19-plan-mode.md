@@ -10,7 +10,7 @@ When plan mode is active, the agent:
 
 1. Reads and searches the codebase to understand existing patterns and architecture
 2. Designs an implementation approach and writes it to the plan file
-3. May use `ask_user_question` to clarify specific questions
+3. Puts open questions as plain bullets in the plan file or freeform chat (not multi-choice `ask_user_question` questionnaires)
 4. Calls `exit_plan_mode` to present the plan for your approval
 
 Plan mode is read-only except for the plan file: plan-file edits (`plan.md` in the session directory) are auto-approved, and edits to any other file are rejected outright — the tool call fails with a short message naming the plan file as the only editable path. This holds in every permission mode, including always-approve. Separating planning from implementation lets you review and correct the approach before any code is written.
@@ -64,14 +64,31 @@ The plan file contains:
 
 ## Plan Approval
 
-When the agent finishes planning, it calls the `exit_plan_mode` tool. By default the TUI **soft-parks** the plan and **auto-opens the side panel**:
+### Present is not approval
 
-- Toast + status chip (“Plan ready. Side panel open”) without a fullscreen takeover
+When the agent finishes planning, it calls the `exit_plan_mode` tool. That call **presents** the plan for review. It is **not** operator approval.
+
+| What happened | What it means |
+| ------------- | ------------- |
+| Agent tool `exit_plan_mode` succeeded; toast/status says “Plan ready…” | Plan is **parked for review**. Do **not** treat this as Approve. The model is told the same: present only, wait for a real panel decision. |
+| You click **Approve** (or Approve w/ comment) on the plan panel / soft-park strip | **Real approval.** Plan mode leaves; implement may start. The model hears that you approved **via the plan panel CTAs**. |
+| Footer shows `always-approve` (permission mode) | Skips **tool permission** prompts only. It does **not** auto-click plan panel Approve. You still use the plan CTAs. |
+| Headless / no interactive client | No plan panel. Plan mode may exit with an honest “no interactive panel” message. That is **not** the same as a panel Approve click. |
+
+**Never** approve by freeform chat (“reply approve / revise / abandon”). Real decisions are the plan panel CTAs below (mouse primary; empty-prompt key accelerators `a` / `A` / `?` / `s` / `q` when the side panel is open).
+
+### Soft park and side panel
+
+By default the TUI **soft-parks** the plan and **auto-opens the side panel** so Approve / Revise / Clarify / Quit are visible **without** an extra click or `/view-plan`:
+
+- Toast + status chip (**“Plan ready. Side panel open”**) without a fullscreen takeover
+- Status does **not** say “Plan written. Click or /view-plan” while a live park with CTAs is active (that string is only a short idle cue before decision chrome parks)
+- After **Revise** or **Clarify** unparks, status says **“Revising plan...”** or **“Waiting for updated plan...”** (not idle click ceremony) until the agent calls `exit_plan_mode` again. Idle decision chrome does **not** re-arm mid-rewrite.
 - The **side panel** opens beside chat immediately (same surface as `/view-plan`)
 - An **inline plan card** in the transcript (preview only; not a fake button menu)
 - **Clickable footer buttons** (Approve / Notes / Clarify / Revise / Quit). Mouse works even when the prompt has draft text.
 - Live draft text is **kept** (not stashed/cleared). Prompt stays focused so typing is live.
-- Soft-park is **non-capturing** for the main thread when the panel is dismissed: bare printable keys type into the composer.
+- Soft-park is **non-capturing** for the main thread when the panel is dismissed: bare printable keys type into the composer; decisions use the soft-park strip buttons.
 
 ### Three approval surfaces
 
@@ -84,7 +101,7 @@ transcript card is **not** the full approval UI.
 | **Soft-park strip** (panel dismissed, or terminal too small for panel paint) | None | Same five clickable strip buttons in the shortcuts row (never silent empty) |
 | **Transcript plan card** | None | Plain preview / pointer text only — **not** a fake button menu |
 
-The side panel has **clickable CTA buttons** in the panel footer (Approve / Approve w/ comment / Clarify / Revise / Quit). With an **empty** prompt and Preview focus, keys `a` / `A` / `?` / `s` / `q` are accelerators **in the panel**. On a narrow side panel the footer uses shorter labels (or key-only) so the hit targets always stay clickable. If the panel is open but too small to paint those footer hits, the soft-park strip CTAs reappear so approval is never zero-chrome. **Ctrl+F** enlarges the panel to fullscreen and back. The panel always re-reads the latest session `plan.md` when you open it (so rewrites while parked show up, not a frozen snapshot from park time).
+The side panel has **clickable CTA buttons** in the panel footer (Approve / Approve w/ comment / Clarify / Revise / Quit). With an **empty** prompt while the side panel is open, keys `a` / `A` / `?` / `s` / `q` are accelerators (including when Prompt is focused after soft-park present). **Empty Enter never approves.** On a narrow side panel the footer uses shorter labels (or key-only) so the hit targets always stay clickable. If the panel is open but too small to paint those footer hits, the soft-park strip CTAs reappear so approval is never zero-chrome; status still says **Plan ready** (not click ceremony). **Ctrl+F** enlarges the panel to fullscreen and back. The panel always re-reads the latest session `plan.md` when you open it (so rewrites while parked show up, not a frozen snapshot from park time).
 
 If you dismiss the panel, reopen with **`/view-plan`**, the status chip, or **`ShowPlan`**.
 
@@ -117,10 +134,10 @@ The action bar shows these shortcuts:
 
 | Path | Intent | What the agent does |
 | ---- | ------ | ------------------- |
-| **Approve** (`a` / empty Enter) | Build it | Leave plan mode and implement |
+| **Approve** (mouse Approve / empty-prompt `a`) | Build it | Leave plan mode and implement |
 | **Approve w/ comment** (`A` + notes + Enter) | Build it, with notes | Leave plan mode; notes are attached as review comments |
 | **Clarify** (`?`) | Understand the plan | Answer from the plan and research; **do not** rewrite `plan.md` unless you explicitly ask to change it; re-present approval when done |
-| **Revise** (`s`) | Change the plan | Revise `plan.md` from your notes; stay in plan mode; re-present when ready |
+| **Revise** (`s` / mouse Revise) | Change the plan | Unpark immediately; revise `plan.md` from any freeform notes (or ask what to change if empty); stay in plan mode; re-present when ready |
 | **Quit** (`q`) | Abort | Leave plan mode; no implement |
 
 While the plan approval view is open, `Ctrl+P` (command palette → model) still works for switching model before you press `a` to approve.
@@ -131,7 +148,7 @@ The approval view has three focus states:
 
 - **Preview**: Scroll the plan and use the primary CTAs above.
 - **Commenting** (secondary): Add an inline note on a selected line range (`Enter` on a line, or double-click). Not a primary CTA.
-- **Prompt**: Type freeform notes. What Enter does depends on how you opened the prompt (`A` approve w/ comment, `?` clarify, or `s` revise). Line notes attach to whichever action submits them.
+- **Prompt**: Type freeform notes. What Enter does depends on how you opened the prompt (`A` approve w/ comment or `?` clarify; freeform Enter defaults to revise). Line notes attach to whichever action submits them. The **Revise** CTA itself submits immediately and does not leave you on the prompt.
 
 Press `Tab` to switch between the preview and the prompt. After Clarify or Revise, plan mode stays active so you can iterate.
 
@@ -144,8 +161,9 @@ selection context — not just your freeform words:
 - **Quoted text**: each selected source line, prefixed with `>`
 - **Your notes**: freeform prompt text and/or saved line comments
 
-**Single line:** move the cursor to a line (or click it), focus the prompt with
-`s` / `?` / `A`, type notes, press `Enter`. The agent sees that line’s text.
+**Single line:** move the cursor to a line (or click it), type notes in the
+prompt (or use `?` / `A` for clarify / approve-with-comment), then press
+`Enter` or click **Revise**. The agent sees that line’s text.
 
 **Multi-line highlight:** start a visual selection over several plan lines
 (same motion as multi-line select elsewhere in the line viewer), then submit
@@ -173,7 +191,7 @@ On submit:
 | ------ | ------------ |
 | **Revise** (`s`) / **Clarify** (`?`) | Text feedback goes with the plan decision; screenshots ride as multimodal content on the same turn |
 | **Approve w/ comment** (`A`) | Notes + screenshots ride together on the approve path |
-| **Approve** with only screenshots | Screenshots still attach so the implement turn has visual context |
+| **Approve** (mouse Approve / empty-prompt `a`) with only screenshots attached | Screenshots ride so the implement turn has visual context; empty Enter alone is still a no-op |
 
 Press `Tab` to switch between the preview and the prompt. When you send feedback -- inline comments, freeform notes, or both -- the agent receives it and revises the plan. Plan mode stays active so you can iterate. A complete pager command typed in the prompt (for example `/feedback <text>` or `/compact`) runs as a command instead of being sent as notes; the review stays open. Pressing `a` while such a command sits in the prompt is refused until you run it with Enter or delete it.
 
@@ -200,7 +218,7 @@ Transitions:
 Inactive    --> Active   (enter_plan_mode tool called and approved -- skips Pending)
 Inactive    --> Pending  (you toggle plan mode on with /plan or Shift+Tab)
 Pending     --> Active   (your first prompt activates plan mode)
-Active      --> Inactive (exit_plan_mode approved, or you toggle plan mode off when idle)
+Active      --> Inactive (plan panel Approve/Quit after present, or you toggle plan mode off when idle)
 Active      --> ExitPending (you toggle plan mode off while a turn is in-flight)
 ExitPending --> Inactive (after the turn completes)
 ```
@@ -215,11 +233,12 @@ During active plan mode, edits to the plan file are auto-approved without prompt
 
 This enforcement is independent of the permission mode:
 
-- **Always-approve (yolo) stays armed underneath plan mode.** Non-edit tools (bash commands, reads, MCP tools) still auto-run, but file edits are blocked until you approve exiting plan mode. Once the plan is approved, always-approve resumes for implementation.
+- **Always-approve (yolo) stays armed underneath plan mode for tool permissions only.** Non-edit tools (bash commands, reads, MCP tools) still auto-run without permission prompts, but file edits are blocked until you leave plan mode via a **plan panel** decision. Always-approve does **not** auto-click Approve on a soft-parked plan.
+- Once you **Approve** on the plan panel, plan mode ends and always-approve (if still on) resumes for implementation tool prompts as usual.
 - Bash commands are not inspected for file writes — plan mode blocks the edit tools, not shell redirection.
 - Subagents are not covered by the parent session's plan-mode edit gate. Each subagent starts with a fresh plan-mode tracker (`Inactive`), so a `general-purpose` (or other write-capable) subagent can edit files while the parent is still in plan mode — and it inherits the parent's permission mode (including always-approve). Read-only types such as `explore` remain limited by their own toolset.
 
-The status flag shows `plan` while plan mode is active. If always-approve is enabled underneath, its flag reappears when plan mode exits.
+The status flag shows `plan` while plan mode is active. If always-approve is enabled underneath, its flag may still show in the footer during soft-park; that only means tool permissions are relaxed, not that the plan was auto-approved.
 
 ---
 

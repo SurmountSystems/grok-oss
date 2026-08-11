@@ -3483,9 +3483,12 @@ impl PromptWidget {
         // Software Human-green caret: slow solid↔empty block blink
         // (`accent_user`, not agent `accent_running` magenta). Terminal hardware
         // cursor stays hidden so we do not stack two carets; phase is wall-clock
-        // so Slow redraw ticks are enough.
+        // so Slow redraw ticks are enough. Solid `█` only at true buffer end
+        // (insertion blank); mid-draft spaces reverse-plate so Left never
+        // paints a green block glyph into the line.
         let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {
-            paint_composer_box_cursor(buf, cx, cy, &theme, bg);
+            let allow_block_glyph = self.textarea.cursor() == self.textarea.text().len();
+            paint_composer_box_cursor(buf, cx, cy, &theme, bg, allow_block_glyph);
             // Hide the terminal caret — the painted box *is* the cursor.
             None
         } else {

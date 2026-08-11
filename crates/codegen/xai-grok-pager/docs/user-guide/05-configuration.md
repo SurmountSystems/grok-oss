@@ -77,6 +77,8 @@ default_selected_permission = "always_allow_all_sessions" # preselected row on t
 remember_tool_approvals = true         # show per-command "Always allow" options on permission prompts;
                                        # grants are remembered per project (default: true); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
+always_expand_thinking = false         # keep thinking fully expanded (default: false); when
+                                       # true, also hides the Ctrl+E expand-thinking footer hint
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # — and finished thoughts among them — into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
@@ -94,12 +96,34 @@ auto_run_implement = true              # after a successful turn, auto-queue a f
                                        # /implement block (token through EOF) from a follow-up or
                                        # trailing residual (default: true)
 economic_mode = true                   # soft-cap effective context at 200k (Grok 4.5 price cliff)
-                                       # for compaction / context bar (default: true). Does not
-                                       # rewrite explicit /implement --effort.
+                                       # for compaction / context bar (default: true).
+                                       # When on, also enables Token Economy implement-effort
+                                       # caps unless [token_economy] turns them off (see below).
                                        # Override one conversation with /economic-mode
+resume_canceled_turn_on_restart = true # continue interrupted turn: when reopening a session that has
+                                       # a cancel-resume marker (Esc/stop, graceful SIGTERM/Quit
+                                       # mid-turn, /rebuild mid-turn), re-queue that work once with a
+                                       # toast ("Continuing interrupted turn..."). Default on. Not the
+                                       # /resume session picker. Finished work is never invented.
+                                       # SIGKILL cannot write a marker. Settings → Session. Distinct
+                                       # from soft stop and pause.
 hide_header = false                    # hide in-app status / welcome / dashboard headers only
                                        # (default: false). Not the desktop/terminal window title.
                                        # Window titles: [ui.notifications.title] enabled (default true).
+
+# Token Economy (implement effort, period pacing, double-entry spend books).
+# Durable books live in $GROK_HOME/grok_oss.db (uniquely grok-oss; not session trees).
+# All of these knobs are also in Settings → Agent & Approval (alongside Economic mode).
+[token_economy]
+cap_implement_effort_when_economic = true  # with [ui] economic_mode: ceiling + desired inject
+max_implement_effort = 3                   # hard ceiling 1–5 when economic caps are active (default 3)
+min_implement_effort = 1                   # floor always applied (default 1). Set 2 for always-a-reviewer.
+# lock_implement_effort = 0                # 0 / omit = unlocked; 1–5 forces that effort always
+desired_implement_effort = 2               # inject when missing under economic caps; must be ≤ max
+show_period_pacing = true                  # free SuperGrok period linear-burn chrome
+local_spend_ledger = true                  # ingest usage.jsonl into grok_oss.db
+reconcile_management_usage = true          # remote Management book + /spend reconcile
+# grok_oss_database_path = ""              # override; empty → $GROK_HOME/grok_oss.db
 
 [features]
 telemetry = false                      # anonymous usage telemetry

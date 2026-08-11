@@ -306,8 +306,10 @@ ${%- endif %}
 You should build your plan by writing to or editing this file. \
 Note that this is the only file you are allowed to edit.
 
-Your turn should only end with either ${{ tools.by_kind.ask_user }} to clarify \
-requirements or ${{ tools.by_kind.exit_plan }} to present your plan to the user."
+Put open questions as plain bullets in the plan file or freeform chat. \
+Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
+clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
+to present it for approval."
 }
 /// Static string for alternating turns (when `reminder_count` is odd) to save tokens.
 /// No MiniJinja placeholders: plan path and tool names are only in the full reminder.
@@ -323,7 +325,10 @@ pub(crate) fn plan_mode_reentry_reminder_template() -> &'static str {
 You are entering plan mode again after having previously exited it. \
 A plan file exists at ${{ plan_path }} from your previous planning session.
 
-Your turn should only end with either ${{ tools.by_kind.ask_user }} to clarify requirements or ${{ tools.by_kind.exit_plan }} to present your plan to the user."
+Put open questions as plain bullets in the plan file or freeform chat. \
+Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
+clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
+to present it for approval."
 }
 /// Rejection message for an edit outside the plan file while plan mode is active.
 /// Returned as the tool result so the model knows the only editable path.
@@ -679,7 +684,8 @@ mod tests {
         );
         assert!(text.contains("/tmp/plan.md"));
         assert!(text.contains("exit_plan_mode"));
-        assert!(text.contains("ask_user_question"));
+        assert!(text.contains("Do not use ask_user_question multi-choice questionnaires"));
+        assert!(!text.contains("to clarify requirements"));
         assert!(!text.contains("${{"));
     }
     #[test]

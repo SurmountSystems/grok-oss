@@ -74,6 +74,10 @@ pub enum ActionId {
     // Agent
     NextModel,
     CancelTurn,
+    /// Pause or resume all in-process agent work (Ctrl+Shift+Space).
+    ToggleGlobalPause,
+    /// Soft stop: finish current turn then hold the queue (Ctrl+Shift+S).
+    ToggleSoftStop,
     ToggleYolo,
     ToggleMultiline,
 

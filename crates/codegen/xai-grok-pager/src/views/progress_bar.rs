@@ -56,6 +56,9 @@ fn bar_cells(width: u16, value: f32) -> impl Iterator<Item = (&'static str, /* f
 /// Build a progress bar as styled spans (one per cell).
 ///
 /// Each span has `fg` on `bg`, suitable for composing into a `Line`.
+/// Empty cells are spaces (track may be invisible when `bg` matches the
+/// surrounding background). Prefer [`progress_bar_tracked_spans`] when the
+/// operator needs clear max-extent bounds.
 pub fn progress_bar_spans(width: u16, value: f32, fg: Color, bg: Color) -> Vec<Span<'static>> {
     let fg_style = Style::default().fg(fg).bg(bg);
     let bg_style = Style::default().bg(bg);
@@ -157,5 +160,46 @@ mod tests {
         assert_eq!(BLOCKS.len(), SHADES.len());
         assert_eq!(BLOCKS[0], SHADES[0]); // both empty
         assert_eq!(BLOCKS[8], SHADES[8]); // both full block
+    }
+
+    #[test]
+    fn tracked_bar_has_bracket_bounds_and_visible_empty_track() {
+        // width 6 → [ + 4 inner + ]; 50% → two full + two empty track cells.
+        let spans = progress_bar_tracked_spans(6, 0.5, Color::Green, Color::DarkGray, Color::Black);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.starts_with('[') && text.ends_with(']'),
+            "must paint track end bounds: {text}"
+        );
+        assert!(text.contains('█'), "filled portion: {text}");
+        assert!(
+            text.contains('░'),
+            "empty track must be visible (not space-only): {text}"
+        );
+        // No bare space between brackets for empty cells.
+        let inner: String = text
+            .chars()
+            .skip(1)
+            .take(text.chars().count() - 2)
+            .collect();
+        assert!(
+            !inner.contains(' '),
+            "inner track must not use spaces: {text}"
+        );
+        assert_eq!(spans.len(), 6);
+    }
+
+    #[test]
+    fn tracked_bar_empty_is_full_track_not_blank() {
+        let spans = progress_bar_tracked_spans(8, 0.0, Color::Green, Color::DarkGray, Color::Black);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "[░░░░░░]");
+    }
+
+    #[test]
+    fn tracked_bar_full_is_solid_fill_with_brackets() {
+        let spans = progress_bar_tracked_spans(8, 1.0, Color::Green, Color::DarkGray, Color::Black);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "[██████]");
     }
 }

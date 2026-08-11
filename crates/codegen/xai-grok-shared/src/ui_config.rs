@@ -49,6 +49,11 @@ pub struct UiConfig {
     /// Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_flip_on_send: Option<bool>,
+    /// Scrub fancy punctuation in assistant text (em dash, en dash, smart
+    /// quotes, zero-width and NBSP-class spaces become ASCII).
+    /// `None` means on (default). Env `GROK_SCRUB_ASCII_PUNCT=0` also disables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrub_ascii_punct: Option<bool>,
     /// Ask before rewinding conversation history. `None` means on (default).
     /// Written by the pager's settings modal / rewind "Yes, and don't ask again".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +132,11 @@ pub struct UiConfig {
     /// `None` means on (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_thinking_blocks: Option<bool>,
+    /// Keep thinking blocks fully expanded (no collapsed one-liner by default).
+    /// When on, the footer also hides the Ctrl+E expand-thinking affordance.
+    /// `None` means off (client default). Written by the pager's settings modal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_expand_thinking: Option<bool>,
     /// Fold runs of consecutive non-destructive tool calls (reads, searches, lists) into one transcript row.
     /// `None` means on (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,12 +162,20 @@ pub struct UiConfig {
     /// Soft-cap effective model context at 200K tokens so Grok 4.5 requests
     /// stay on the lower pricing tier (prices double above 200K). Catalog
     /// windows remain larger (e.g. 500K); compaction and the context bar use
-    /// the capped size when this is on. `None` = on (client default). Does
-    /// not rewrite auto-queued `/implement --effort N`. Written by the
-    /// pager's settings modal; overridable per conversation via
-    /// `/economic-mode` when that command is available.
+    /// the capped size when this is on. `None` = on (client default).
+    /// Implement-loop effort caps live under `[token_economy]` when this is
+    /// on (hard ceiling default 3; not identity). Written by the pager's
+    /// settings modal; overridable per conversation via `/economic-mode`
+    /// when that command is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub economic_mode: Option<bool>,
+    /// When true (default), opening a session that was left on an **explicit
+    /// user cancel** re-queues that turn once with a toast ("Continuing
+    /// interrupted turn..."). That is **continue interrupted turn**, not the
+    /// `/resume` session picker. Finished or never-canceled sessions are never
+    /// invented. Written by the settings modal; `None` = on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_canceled_turn_on_restart: Option<bool>,
     /// Startup cursor style: `None` (default) inherits the terminal's own
     /// style; `Some(true)` forces the legacy blinking block, `Some(false)` a
     /// steady block. Config-file-only knob (no /settings row).
@@ -281,6 +299,7 @@ impl Default for UiConfig {
             show_timeline: None,
             dashboard_preview: None,
             page_flip_on_send: None,
+            scrub_ascii_punct: None,
             confirm_before_rewind: None,
             auto_dark_theme: None,
             auto_light_theme: None,
@@ -300,11 +319,13 @@ impl Default for UiConfig {
             keep_text_selection: None,
             selection_highlight_duration_ms: None,
             show_thinking_blocks: None,
+            always_expand_thinking: None,
             group_tool_verbs: None,
             collapsed_edit_blocks: None,
             prompt_suggestions: None,
             auto_run_implement: None,
             economic_mode: None,
+            resume_canceled_turn_on_restart: None,
             cursor_blink: None,
             screen_mode: None,
             double_click_action: None,
@@ -343,6 +364,25 @@ impl UiConfig {
 
     /// Default for [`Self::confirm_before_rewind`] when unset.
     pub const CONFIRM_BEFORE_REWIND_DEFAULT: bool = true;
+
+    /// Default for [`Self::resume_canceled_turn_on_restart`] when unset (on).
+    pub const RESUME_CANCELED_TURN_ON_RESTART_DEFAULT: bool = true;
+
+    /// Whether restart should re-queue an explicitly canceled turn once.
+    pub fn resume_canceled_turn_on_restart_enabled(&self) -> bool {
+        self.resume_canceled_turn_on_restart
+            .unwrap_or(Self::RESUME_CANCELED_TURN_ON_RESTART_DEFAULT)
+    }
+
+    /// Default for [`Self::scrub_ascii_punct`] when unset (hygiene on).
+    pub const SCRUB_ASCII_PUNCT_DEFAULT: bool = true;
+
+    /// Resolved assistant ASCII scrub: configured value, or
+    /// [`Self::SCRUB_ASCII_PUNCT_DEFAULT`] when unset.
+    pub fn scrub_ascii_punct_enabled(&self) -> bool {
+        self.scrub_ascii_punct
+            .unwrap_or(Self::SCRUB_ASCII_PUNCT_DEFAULT)
+    }
 
     pub fn confirm_before_rewind_enabled(&self) -> bool {
         self.confirm_before_rewind

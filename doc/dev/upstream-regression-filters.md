@@ -62,20 +62,23 @@ cargo test -p xai-grok-pager --lib -- shell_collision
 
 | path::test | Contract |
 |------------|----------|
-| `xai-grok-pager` `app::acp_handler::tests::session_events::retry_chrome_clears_when_retry_stream_starts` | `RetryState::StreamResumed` clears sticky `TurnActivity::Retrying` |
+| `xai-grok-pager` `app::acp_handler::tests::session_events::retry_chrome_soft_reconnects_when_retry_stream_starts` | `RetryState::StreamResumed` soft-reconnects (not zombie Waiting for response) |
+| `xai-grok-pager` `app::acp_handler::tests::session_events::stream_resumed_without_prior_retry_clears_activity` | First-stream StreamResumed invents no Retrying |
 | `xai-grok-pager` `views::turn_status::clip_retry_reason_does_not_strand_bare_error_word` | Footer clip hygiene |
 | `xai-grok-pager` `views::turn_status::clip_retry_reason_keeps_short_human_label` | Short human labels |
 | `xai-grok-pager` `views::turn_status::retrying_activity_label_uses_clipped_reason` | Activity label uses clip |
+| `xai-grok-pager` `views::turn_status::retrying_label_shows_timeout_backoff_and_reconnecting` | Timeout + backoff + reconnecting footer copy |
 | `xai-grok-shell` `session::acp_session_tests::replay_buffer_send_update_tests::stream_started_emits_retry_state_stream_resumed` | Stream start emits StreamResumed retry state |
 | `xai-grok-sampler` `actor::request_task::wait_before_attempt_aborts_on_cancel` | Esc cancels shared cooldown wait |
 | `xai-grok-sampler` `actor::request_task::retry_footer_reason_uses_short_transport_label` | Short transport footer (not opaque `Transport error: error`) |
+| `xai-grok-sampler` `actor::request_task::retry_footer_backoff_hint_appends_next_try_in` | Backoff suffix `· next try in Ns` |
 | `xai-grok-sampler` `client::tests::stream_headers_timeout_defaults_to_120_secs_when_env_unset` | Default stream headers timeout is **120s** when env unset (`0` / invalid → 120; positive override honored) |
 | `xai-grok-sampler` **integration** `stream_headers_timeout::streaming_execute_times_out_waiting_for_headers` | Hang after accept, no headers → fail within headers budget (`GROK_STREAM_HEADERS_TIMEOUT_SECS=1` in that binary) |
 
 ```bash
-cargo test -p xai-grok-pager --lib -- retry_chrome_clears clip_retry_reason retrying_activity_label
+cargo test -p xai-grok-pager --lib -- retry_chrome_soft_reconnect stream_resumed_without_prior_retry clip_retry_reason retrying_activity_label retrying_label_shows_timeout
 cargo test -p xai-grok-shell --lib -- stream_started_emits_retry_state_stream_resumed
-cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason stream_headers_timeout_defaults
+cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason retry_footer_backoff stream_headers_timeout_defaults
 cargo test -p xai-grok-sampler --test stream_headers_timeout
 ```
 
@@ -196,6 +199,10 @@ cargo test -p xai-grok-sampling-types --lib -- credit_exhausted
 cargo test -p xai-grok-shell --lib -- upsert_personal_then_business team_login_then_personal_keeps dual_supergrok load_supergrok_candidates two_principals_billing enrich_candidates principal_limits_label non_active_poll_targets remember_both_principals included_usage poll_non_active_remembers
 cargo test -p xai-grok-pager --lib -- format_dual_principals live_console_omits extra_principals_hook show_limits format_supergrok_session footer_names_live_principal
 
+# 2c. Dual SuperGrok billing poll honesty (role fail notes, fill provenance, rank, doctor)
+cargo test -p xai-grok-shell --lib -- auth_failed_poll billing_fail_note remember_poll_ok order_live_prefers_poll_ok format_human_dual_poll sibling_poll_skips_after_n session_needs_oidc_refresh ensure_fresh_refreshes_expired find_and_persist_refreshed
+cargo test -p xai-grok-pager --lib -- dual_fill_provenance compact_status_active_auth_failed format_unified_fills format_dual limits_honesty
+
 # 3. DOGE default / Human green rail + role map / hide_header / window titles / title items + bubble + clear-done
 cargo test -p xai-grok-shared --lib -- hide_header stale_hide_title
 cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config theme doge doge_accent_user_is_pure_green doge_accent_system_is_pure_cyan
@@ -215,9 +222,9 @@ cargo test -p xai-grok-pager-render --lib -- tui_screenshot
 cargo test -p xai-grok-pager --lib -- screenshot:: capture_tui_screenshot try_attach_tui_screenshot
 
 # 5c. Stuck Retrying chrome + stream headers timeout + transport footer + shell_collision
-cargo test -p xai-grok-pager --lib -- retry_chrome_clears clip_retry_reason retrying_activity_label
+cargo test -p xai-grok-pager --lib -- retry_chrome_soft_reconnect stream_resumed_without_prior_retry clip_retry_reason retrying_activity_label retrying_label_shows_timeout
 cargo test -p xai-grok-shell --lib -- stream_started_emits_retry_state_stream_resumed
-cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason stream_headers_timeout_defaults
+cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason retry_footer_backoff stream_headers_timeout_defaults
 cargo test -p xai-grok-sampler --test stream_headers_timeout
 cargo test -p xai-grok-pager --lib -- shell_collision
 ```
@@ -253,10 +260,10 @@ Minimum after import restore or onto tip land:
 # Core product harden (from this catalog)
 cargo test -p xai-grok-shared --lib -- hide_header stale_hide_title
 cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config
-cargo test -p xai-grok-pager --lib -- hide_header window_title titles_on_session default_title_items shell_collision retry_chrome_clears
+cargo test -p xai-grok-pager --lib -- hide_header window_title titles_on_session default_title_items shell_collision retry_chrome_soft_reconnect
 cargo test -p xai-grok-pager --test settings_e2e -- hide_header
 cargo test -p xai-grok-shell --lib -- stream_started_emits_retry_state_stream_resumed
-cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason stream_headers_timeout_defaults
+cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason retry_footer_backoff stream_headers_timeout_defaults
 cargo test -p xai-grok-sampler --test stream_headers_timeout
 
 just check   # full gate before push/PR

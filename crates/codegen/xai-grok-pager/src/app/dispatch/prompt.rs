@@ -1120,6 +1120,8 @@ pub(super) fn dispatch_send_prompt_submission(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
+                // Token Economy: clamp implement-loop effort on human /implement.
+                let pass_text = apply_implement_effort_on_submit(agent, pass_text);
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt
@@ -1296,6 +1298,7 @@ pub(super) fn dispatch_send_prompt_submission(
             agent.note_draft_consumed();
         }
         tip_send_now_after_queue = queued_while_running;
+        ack_queued_after_local = queued_while_busy;
     }
 
     if tip_send_now_after_queue {
@@ -1926,6 +1929,58 @@ pub(super) fn handle_prompt_response(
             && agent.session.current_prompt_id.is_none()
         {
             crate::app::auto_implement::on_successful_turn_end(agent);
+            // Successful finish: clear marker unless live background subagents
+            // still own incomplete work (implement killall dogfood).
+            super::turn::finalize_cancel_resume_after_successful_turn(
+                agent,
+                cancel_resume_keep_text.as_deref(),
+                cancel_resume_keep_pid.as_deref(),
+            );
+        } else if result.is_err()
+            && !was_cancelling
+            && !rate_limited
+            && !credit_limit_blocked
+            && !free_usage_blocked
+            && agent.session.current_prompt_id.is_none()
+        {
+            // Failed PromptResponse (not rate-limit / credits): ensure a
+            // cancel-resume marker is on disk so reopen / `/rebuild` auto-
+            // resumes even when an older clear-on-error path wiped the eager
+            // turn-start file. History recovery also covers the no-marker
+            // case via `last_primary_user_turn_failed_in_replay` after load
+            // replay of durable `stop_reason: error`.
+            if let Some(text) = cancel_resume_keep_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Some(marker) =
+                    xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+                        text,
+                        cancel_resume_keep_pid.as_deref(),
+                        now,
+                    )
+                {
+                    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+                    if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.as_ref()) {
+                        match xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+                            &cwd, sid, &marker,
+                        ) {
+                            Ok(()) => tracing::info!(
+                                session = %sid,
+                                prompt_len = text.len(),
+                                "canceled_turn_resume: marker written (error terminal PromptResponse)"
+                            ),
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                session = %sid,
+                                "canceled_turn_resume: error-terminal write failed"
+                            ),
+                        }
+                    }
+                }
+            }
         }
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
@@ -1959,6 +2014,9 @@ pub(super) fn handle_prompt_response(
             silent: true,
             nonce: Default::default(),
         });
+        if let Some(toast) = soft_stop_toast {
+            agent.show_toast(&toast);
+        }
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
     }

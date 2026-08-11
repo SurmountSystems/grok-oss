@@ -273,6 +273,14 @@ impl AgentView {
         }
         if key!(Esc).matches(key) || key!('q').matches(key) || key!('c', CONTROL).matches(key) {
             if in_plan_approval {
+                // Ctrl+C must reach the plan feedback path: empty composer
+                // abandons (like panel `q` / soft-park mouse Quit); non-empty
+                // clears the draft. Do not no-op swallow — dogfood soft-park
+                // left operators stuck. Esc / leftover bare `q` stay no-op
+                // here (Esc is focus step-back above; empty `q` is a CTA).
+                if key!('c', CONTROL).matches(key) {
+                    return self.handle_plan_feedback_key(key);
+                }
                 return InputOutcome::Changed;
             }
             // In the plan viewer, Esc first clears visual selection / search before closing
@@ -510,7 +518,9 @@ impl AgentView {
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        return self.focus_plan_prompt(PlanPromptIntent::Revise);
+                        // Panel footer Revise: submit immediately (same as
+                        // soft-park mouse / empty-prompt `s`).
+                        return self.request_plan_revise();
                     }
                     return self.send_casual_plan_comments();
                 }
@@ -867,7 +877,9 @@ impl AgentView {
             return;
         }
 
-        let btn_base = Style::default().fg(theme.selection_border);
+        // Secondary chrome (timestamps, draft/plan ⧉): theme.gray, yellow on
+        // DOGE informational chrome, not bright white selection_border.
+        let btn_base = Style::default().fg(theme.gray);
         let btn_hover = Style::default().fg(theme.text_primary);
         let icon = crate::glyphs::copy_icon();
         // Mirror prompt top-bar gate: need room for the glyph inside content.
@@ -898,7 +910,10 @@ impl AgentView {
                 if area.height == 0 {
                     return None;
                 }
-                // Top row, right edge (1 cell for ⧉).
+                // Top row, absolute content right edge (1 cell for ⧉).
+                // When timestamps share this row, EntryRenderer leaves
+                // BUBBLE_COPY_TRAILING_INSET columns free at this edge so ⧉
+                // does not paint over the time/date (overlap, not truncation).
                 let x = area.x + area.width.saturating_sub(1);
                 let y = area.y;
                 Some((idx, Rect::new(x, y, 1, 1)))
@@ -988,7 +1003,8 @@ impl AgentView {
         let sel = &selection_box.inner_area;
         let right_x = sel.x + sel.width.saturating_sub(1);
 
-        let btn_base = Style::default().fg(theme.selection_border);
+        // Same secondary chrome as always-on bubble ⧉ / timestamps (theme.gray).
+        let btn_base = Style::default().fg(theme.gray);
         let btn_hover = Style::default().fg(theme.text_primary);
 
         // Build button array based on capabilities.

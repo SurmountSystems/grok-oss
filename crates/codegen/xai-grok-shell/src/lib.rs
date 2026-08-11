@@ -42,6 +42,8 @@ pub mod leader;
 pub use xai_grok_cloud_config::managed_config;
 pub mod mcp_doctor;
 pub use xai_grok_models as models;
+/// Uniquely grok-oss durable store (`$GROK_HOME/grok_oss.db`).
+pub mod grok_oss;
 pub mod plugin;
 pub mod relay;
 pub mod remote;
@@ -51,6 +53,8 @@ pub use xai_grok_shell_terminal as terminal;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tier;
+/// Token Economy: implement effort policy, period pacing, double-entry ledger.
+pub mod token_economy;
 pub mod tools;
 pub mod upload;
 pub mod util;

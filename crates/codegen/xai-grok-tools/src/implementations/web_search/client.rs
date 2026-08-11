@@ -19,6 +19,9 @@ pub struct WebSearchClient {
     /// `allowed_domains`. Mutually exclusive with `default_allowed_domains`.
     default_excluded_domains: Option<Vec<String>>,
     api_key_provider: Option<SharedApiKeyProvider>,
+    /// Static config bearer for rate-limit keying when the dynamic provider
+    /// is empty (matches default Authorization on the HTTP client).
+    fallback_api_key: String,
     /// Optional 401-attribution hook. Callers can wire this so a 401
     /// from the Responses API emits an `auth_401_attribution` event
     /// with `consumer == "WebSearch"`.
@@ -93,6 +96,7 @@ impl WebSearchClient {
             default_allowed_domains: allowed_domains.clone(),
             default_excluded_domains: excluded_domains.clone(),
             api_key_provider,
+            fallback_api_key: api_key.clone(),
             attribution_callback: None,
         })
     }
@@ -178,6 +182,13 @@ impl WebSearchClient {
     async fn current_bearer(&self) -> Option<String> {
         crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
     }
+    async fn rate_limit_bearer(&self) -> Option<String> {
+        match self.current_bearer().await {
+            Some(k) if !k.trim().is_empty() => Some(k),
+            _ if !self.fallback_api_key.trim().is_empty() => Some(self.fallback_api_key.clone()),
+            _ => None,
+        }
+    }
     fn record_401_attribution(&self, sent_bearer: Option<&str>) {
         crate::attribution::emit_401(
             self.attribution_callback.as_ref(),
@@ -197,6 +208,13 @@ impl WebSearchClient {
         let request = self.build_request_json(query, allowed, excluded)?;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
         let sent_bearer = self.current_bearer().await;
+        let rate_bearer = self.rate_limit_bearer().await;
+        let rate_key = crate::shared_http_rate_limit::responses_provider_key(
+            &self.base_url,
+            rate_bearer.as_deref(),
+        );
+        crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
+
         let mut req = self.http.post(&url).json(&request);
         if let Some(ref key) = sent_bearer {
             req = req.header(AUTHORIZATION, format!("Bearer {key}"));
@@ -223,10 +241,21 @@ impl WebSearchClient {
             })));
         }
         if !status.is_success() {
+            crate::shared_http_rate_limit::observe_http_rate_limit(
+                &rate_key,
+                status.as_u16(),
+                response.headers(),
+                "Responses API (web_search) rate limit",
+            );
             let body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
+            if status.as_u16() == 429 {
+                return Err(xai_tool_runtime::ToolError::rate_limited(format!(
+                    "Responses API rate limited (HTTP {status}): {body}"
+                )));
+            }
             return Err(xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),
                 format!("Responses API returned {status}: {body}"),
@@ -262,6 +291,13 @@ impl WebSearchClient {
         let request = self.build_request_json(query, allowed, excluded)?;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
         let sent_bearer = self.current_bearer().await;
+        let rate_bearer = self.rate_limit_bearer().await;
+        let rate_key = crate::shared_http_rate_limit::responses_provider_key(
+            &self.base_url,
+            rate_bearer.as_deref(),
+        );
+        crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
+
         let mut req = self.http.post(&url).json(&request);
         if let Some(ref key) = sent_bearer {
             req = req.header(AUTHORIZATION, format!("Bearer {key}"));
@@ -288,10 +324,21 @@ impl WebSearchClient {
             })));
         }
         if !status.is_success() {
+            crate::shared_http_rate_limit::observe_http_rate_limit(
+                &rate_key,
+                status.as_u16(),
+                response.headers(),
+                "Responses API (web_search) rate limit",
+            );
             let body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
+            if status.as_u16() == 429 {
+                return Err(xai_tool_runtime::ToolError::rate_limited(format!(
+                    "Responses API rate limited (HTTP {status}): {body}"
+                )));
+            }
             return Err(xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),
                 format!("Responses API returned {status}: {body}"),

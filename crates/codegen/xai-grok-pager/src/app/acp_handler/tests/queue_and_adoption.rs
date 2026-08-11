@@ -1172,14 +1172,26 @@
         use crate::app::dispatch::dispatch;
         use crate::app::actions::{Action, TaskResult};
 
-        let mut app = make_app_with_agent("sess-1");
+        // Hermetic fixture: a host leftover at
+        // `$GROK_HOME/sessions/%2Ftmp/sess-1/canceled_turn_resume.json` (shared
+        // `/tmp` + common `sess-1` id) used to fire cancel-resume auto-continue
+        // after non-adoption and set `current_prompt_id`, which failed this
+        // adoption-only contract under dogfood markers. Isolate cwd + session
+        // id and pin auto-continue off so only the synthetic-id gate is under
+        // test.
+        let sid = "sess-synthetic-non-adopt";
+        let cwd = tempfile::tempdir().expect("unique temp cwd for adoption fixture");
+        let mut app = make_app_with_agent(sid);
         let id = AgentId(0);
+        app.current_ui.resume_canceled_turn_on_restart = Some(false);
+        let synthetic_pid = "task-completed-abc-123";
 
         // Seed the running turn's buffered follow-up chips keyed by the synthetic prompt id, as if they had arrived on the ext channel during replay
         {
             let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.cwd = cwd.path().to_path_buf();
             agent.follow_up_pending.insert(
-                "task-completed-abc-123".to_string(),
+                synthetic_pid.to_string(),
                 crate::app::agent_view::FollowUps {
                     response_id: "resp-syn".into(),
                     suggestions: vec!["go".into()],
@@ -1187,23 +1199,28 @@
             );
             agent
                 .follow_up_pending_order
-                .push_back("task-completed-abc-123".to_string());
+                .push_back(synthetic_pid.to_string());
         }
 
         dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
                 agent_id: id,
-                session_id: acp::SessionId::new("sess-1"),
+                session_id: acp::SessionId::new(sid),
                 models: None,
                 modes: None,
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,
-                running_prompt_id: Some("task-completed-abc-123".to_string()),
+                running_prompt_id: Some(synthetic_pid.to_string()),
             }),
             &mut app,
         );
 
+        assert_ne!(
+            app.agents[&id].session.current_prompt_id.as_deref(),
+            Some(synthetic_pid),
+            "synthetic non-scheduler running prompt must not be adopted on load"
+        );
         assert!(
             test_agent(&app, id).session.current_prompt_id.is_none(),
             "synthetic non-scheduler running prompt must not be adopted on load"

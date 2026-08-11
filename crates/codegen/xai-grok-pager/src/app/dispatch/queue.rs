@@ -161,7 +161,7 @@ pub(super) struct QueueDrain {
 }
 
 impl QueueDrain {
-    fn blocked() -> Self {
+    pub(crate) fn blocked() -> Self {
         Self {
             effects: Vec::new(),
             page_flip_entry: None,
@@ -964,10 +964,11 @@ pub(crate) fn apply_turn_start_shim(
     let page_flip_entry = if let Some(segments) = multi_segments {
         let (prompt_idx, first_id, last_id, all_ids) =
             paint_or_reuse_combined_user_bubbles(agent, &segments);
+        let restore = text
+            .clone()
+            .unwrap_or_else(|| xai_prompt_queue::join_texts(segments.iter().map(String::as_str)));
+        agent.session.note_cancel_resume_prompt_text(&restore);
         if rewindable {
-            let restore = text.clone().unwrap_or_else(|| {
-                xai_prompt_queue::join_texts(segments.iter().map(String::as_str))
-            });
             let earlier = all_ids.into_iter().filter(|id| *id != last_id).collect();
             // An adopted turn arrives with text only, never the original attachments, so a Ctrl+C rewind restores just the joined text
             // The local drain path, which owns the data, restores images/chips.
@@ -1059,13 +1060,23 @@ pub(crate) fn apply_turn_start_shim(
                 Some(RenderBlock::UserPrompt(ub)) if ub.text != text => ub.text.clone(),
                 _ => text,
             };
-            agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
-                text: restore_text,
-                images: Vec::new(),
-                scrollback_entry: prompt_entry_id,
-                combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
-            });
+            agent.session.note_cancel_resume_prompt_text(&restore_text);
+            if rewindable {
+                agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+                    text: restore_text,
+                    images: Vec::new(),
+                    scrollback_entry: prompt_entry_id,
+                    combined_scrollback_entries: Vec::new(),
+                    chip_elements: Vec::new(),
+                });
+            }
+        }
+        // Interject-fallback turns persist the user echo without a live
+        // broadcast (shell `UserEchoMode::PersistOnly`). `start_turn` armed
+        // `expect_user_echo`; clear it so a stuck skip does not swallow the
+        // next real turn's echo.
+        if prompt_id.starts_with(INTERJECT_FALLBACK_PROMPT_PREFIX) {
+            agent.session.tracker.clear_user_echo_skip();
         }
         if skip_entry_top {
             // Send-now: follow at the tail; never entry-top jump.
@@ -1121,6 +1132,14 @@ pub(crate) fn note_peek_page_flip(
 
 /// Drain the next queued prompt and, when that page-flips under a lease, note it.
 pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    // Fearless global pause: hold every session's queue until resume.
+    if app.global_work_pause.is_active() {
+        return vec![];
+    }
+    // Soft stop holding: current turn finished; do not start further queue items.
+    if app.soft_stop.blocks_drain() {
+        return vec![];
+    }
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
@@ -1136,6 +1155,15 @@ pub(crate) fn force_drain_queue_past_background_and_note_peek(
     app: &mut AppView,
     agent_id: AgentId,
 ) -> Vec<Effect> {
+    if app.global_work_pause.is_active() {
+        return vec![];
+    }
+    // Explicit send-now while soft-stop holds: release the hold (user intent
+    // to start work) then drain.
+    if app.soft_stop.is_holding() {
+        let _ = app.soft_stop.toggle();
+        app.show_toast("Soft stop cleared for send-now");
+    }
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
@@ -1149,6 +1177,9 @@ pub(crate) fn force_drain_queue_past_background_and_note_peek(
 /// Try to drain the next queued prompt (triggered after editing completes).
 pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
     if app.reconnect_pending {
+        return vec![];
+    }
+    if app.global_work_pause.is_active() {
         return vec![];
     }
     let ActiveView::Agent(id) = app.active_view else {
@@ -2791,6 +2822,83 @@ mod tests {
             RenderBlock::UserPrompt(ub) => assert_eq!(ub.text, "/deslop"),
             other => panic!("expected user prompt, got {other:?}"),
         }
+    }
+
+    /// Regression (dogfood): soft interject / queue interject paints once via
+    /// `x.ai/session/interjection` (or optimistic local push). When the
+    /// interjection misses the running turn and the shell converts it to an
+    /// `interject-fallback-*` prompt, the turn-start shim must reuse that
+    /// interjection bubble — not push a second identical green human rail.
+    #[test]
+    fn shim_reuses_interjection_bubble_for_interject_fallback_turn() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let text = "Also it appears we've had a regression [Image #1]";
+        // Live paint already happened (dispatch_interject and/or broadcast).
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt(text));
+        let before = agent.scrollback.len();
+        agent.note_self_originated_prompt("interject-fallback-019e24b7-test");
+        apply_turn_start_shim(
+            agent,
+            "interject-fallback-019e24b7-test".into(),
+            Some(text.into()),
+            "prompt",
+            None,
+        );
+        assert_eq!(
+            agent.scrollback.len(),
+            before,
+            "interject-fallback adoption must not paint a second user bubble"
+        );
+        assert_eq!(
+            user_prompt_count(agent, text),
+            1,
+            "exactly one human rail for the interjected text"
+        );
+        assert!(
+            !agent.session.tracker.expects_user_echo(),
+            "fallback has no live user-echo; skip must not stick for the next turn"
+        );
+        let last = agent.scrollback.entry(before - 1).expect("trailing entry");
+        match &last.block {
+            RenderBlock::UserPrompt(ub) => {
+                assert_eq!(ub.text, text);
+                assert!(
+                    ub.is_interjection,
+                    "reused bubble keeps interjection flag (shell numbering)"
+                );
+            }
+            other => panic!("expected user prompt, got {other:?}"),
+        }
+    }
+
+    /// A normal (non-fallback) turn must not steal a trailing mid-turn
+    /// interjection bubble that happens to share the same text.
+    #[test]
+    fn shim_does_not_claim_interjection_for_ordinary_prompt_id() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let text = "same text";
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt(text));
+        let before = agent.scrollback.len();
+        agent.note_self_originated_prompt("ordinary-prompt-id");
+        apply_turn_start_shim(
+            agent,
+            "ordinary-prompt-id".into(),
+            Some(text.into()),
+            "prompt",
+            None,
+        );
+        assert_eq!(
+            agent.scrollback.len(),
+            before + 1,
+            "ordinary adoption must still paint its own turn-start bubble"
+        );
+        assert_eq!(user_prompt_count(agent, text), 2);
     }
 
     #[test]

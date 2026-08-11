@@ -62,7 +62,7 @@ Control how entries are displayed in the scrollback.
 | `l` | `Right` | Expand selected entry |
 | `e` | | Toggle fold on selected entry |
 | `⇧E` | | Expand all / collapse all entries |
-| `Ctrl+E` | | Expand/collapse all thinking blocks |
+| `Ctrl+E` | | Expand/collapse all thinking blocks (hidden from the footer when `[ui] always_expand_thinking = true`) |
 | `r` | | Toggle raw markdown on selected entry |
 
 Setting `respect_manual_folds = true` under `[scrollback.scroll]` in
@@ -248,7 +248,9 @@ Actions that affect the agent session, available from the agent screen.
 | `?` (Shift+/) | Agent screen | Open the command palette (alt binding) |
 | `Ctrl+M` | Agent screen | Open the model picker / switch model |
 | `Ctrl+M` | Prompt focused | Toggle multiline input mode |
-| `Ctrl+C` | Agent screen | Cancel the current turn (or clear non-empty draft first; see Escape table) |
+| `Ctrl+C` | Agent screen | **Hard cancel** the current turn (or clear a non-empty draft first; see Escape table). Same action as the turn-status **`[stop]`** button (red on hover) while a turn is running. When the primary session is idle but background subagents are still running, cancel opens the “Subagents are still running” panel or stops them according to your cancel preference. This is not global pause and not soft stop. |
+| `Ctrl+Shift+Space` | Always (any screen) | **Pause or resume all work** across every open session in this process (not only the focused one). On a mouse host the turn-status row also paints a quiet **`[pause]`** control while a turn or subagents are live; while paused the same control becomes **`[resume]`** (quiet white on hover, never red). Global pause cancels in-flight turns, holds queues, then resumes only interrupted mid-turn prompts and already-queued work; finished sessions are not re-spawned. A toast tracks how long you have been paused. Bare `Space` still focuses the prompt / types spaces; voice dictation stays on `Ctrl+Space`. |
+| `Ctrl+Shift+S` | Always (any screen) | **Soft stop:** arm so that after the **current** top-level turn finishes (success or terminal fail), further **queued** work does not start. Does **not** cancel mid-flight (unlike fearless pause or hard `[stop]`). There is **no** soft-stop button on the status row in this release; the control is chord-only. Status toast shows armed vs queue held. Press again before the turn ends to disarm, or after hold to release the queue. Does not steal `Ctrl+Shift+Space`. |
 | `Ctrl+O` | Agent screen | Toggle always-approve (YOLO) mode |
 | `Ctrl+R` | Agent screen | Open the session picker (resume a previous session, same as `/resume`) |
 | `Ctrl+;` (alt: `Ctrl+'`) | Agent screen | Toggle the prompt queue pane (when non-empty). **Local macOS** VS Code family only: primary **`Ctrl+4`** (`;` / `'` still alts). SSH and non-Mac keep **`Ctrl+;`** / **`Ctrl+'`**. |
@@ -306,7 +308,7 @@ Over SSH, the remote Grok process usually cannot access the terminal's local X11
 
 ## During an active turn (agent running)
 
-While the agent is generating:
+Plain `Enter` is **not always "send."** The shortcuts bar footer labels the real outcome (`Enter: send`, `Enter: queue`, or `Enter: interject`) using the same rules as dispatch. Read that label before you type if you are unsure.
 
 - **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. By default (`[ui].follow_up_behavior = "queue"`) those follow-ups run after the current turn ends — and they deliberately **hold** while the agent is blocked waiting on background tasks or a subagent (a hint explains the hold and how to send one now). With `"steer"`, the same Enter still shows the row in the queue, then the shell injects it mid-turn at the next tool or model safe gap (see [Configuration](05-configuration.md)).
 - **`Enter` again on the emptied composer** (double-Enter) sends the **top** queued follow-up now.
@@ -326,7 +328,19 @@ While the agent is generating:
 
 In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline — except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **soft-interjects** the top row (same as normal mode). (`Ctrl+Enter` is the interject chord mid-turn when bound on non–VS Code family; it does not submit a new idle turn.)
 
-Interject is **not** cancel-and-send. To stop the turn, use **Esc** (or stop). To hand the agent a note for the **next** turn without steering mid-turn, queue with plain `Enter`; the agent picks it up at the next turn boundary.
+Interject is **not** cancel-and-send. To stop the turn, use **Esc** or the status-row **`[stop]`** control (hard cancel). To hand the agent a note for the **next** turn without steering mid-turn, queue with plain `Enter`; the agent picks it up at the next turn boundary.
+
+### Pause vs stop (discoverable chrome)
+
+Three different work controls exist. They are not interchangeable:
+
+| Control | How to find it | What it does |
+|---------|----------------|--------------|
+| **Hard stop / cancel** | Status-row **`[stop]`** (red on hover), **2× Esc**, or empty-prompt **Ctrl+C** | Cancels the focused session’s current turn. When the parent is idle but subagents still run, the same cancel path can open the subagents panel or stop those subagents per preference. |
+| **Global pause** | Status-row **`[pause]`** / **`[resume]`** (quiet white on hover), or **Ctrl+Shift+Space** | Pauses **all** sessions in this process: cancels in-flight turns, holds queues, then resumes only unfinished work. Not a media-player freeze of a single stream. |
+| **Soft stop** | **Ctrl+Shift+S** only (no status-row button) | Lets the **current** turn finish, then holds the queue so nothing new starts until you disarm. |
+
+The shortcuts bar also shows a **pause** (or **resume**) hint while work is live or global pause is holding sessions, next to cancel when a turn is running.
 
 > **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#problem-ctrlenter-doesnt-interject-in-wezterm).
 
@@ -456,6 +470,10 @@ Focus prompt:     i, Tab, or Space
 Send:             Enter
 Newline:          Shift+Enter or Alt+Enter
 Multiline:        Ctrl+M (toggle)
+Buffer start:     Ctrl+Home or Ctrl+PageUp (whole draft)
+Buffer end:       Ctrl+End or Ctrl+PageDown (whole draft)
+Line start/end:   Home / End (current visual row only; soft wrap)
+Line (logical):   Ctrl+A / Ctrl+E
 Paste:            Ctrl+V (text, files, screenshots on macOS/Linux)
 Selected text:    Middle click or Shift+Insert (Linux X11/XWayland PRIMARY)
 Paste image:      Alt+V (Windows only — for screenshots / "Copy Image")
@@ -520,13 +538,31 @@ focused the same chords jump between turns (see Navigation above).
 > a placeholder for an image it no longer holds is sent as text with a
 > toast saying so.
 
+### Plan approval (side panel open, empty prompt)
+
+Mouse footer / panel CTAs are the primary path. With an **empty** prompt while
+the side panel is open, these keys decide (full detail:
+[Plan mode](19-plan-mode.md#plan-approval)):
+
+```
+Approve:          a          (empty Enter never approves)
+Approve + notes:  A then type + Enter
+Clarify:          ? then type + Enter
+Revise:           s          (or freeform text + Enter)
+Quit plan:        q
+Reopen panel:     /view-plan
+```
+
+Always-approve (`Ctrl+O`) is **tool permissions only** — it does not auto-click
+plan Approve.
+
 ### Always available
 
 ```
 Command palette:  Ctrl+P or ?
 Model picker:     Ctrl+M (from scrollback)
 Cancel:           Ctrl+C (see Escape table)
-Always-approve:   Ctrl+O (toggle YOLO)
+Always-approve:   Ctrl+O (toggle YOLO; not plan Approve)
 New session:      Ctrl+N (press again, then choose normal/worktree)
 Quit:             Ctrl+Q (or Ctrl+D in VSCode)
 ```

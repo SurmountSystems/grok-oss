@@ -61,6 +61,16 @@ use crate::actions::ActionId;
 use crate::key;
 use crate::render::SafeBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Live `/rebuild` progress shown as a full-width bar in the agent view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RebuildUiProgress {
+    /// Overall fraction `0.0..=1.0`.
+    pub fraction: f32,
+    /// Human stage text (e.g. "Compiling xai-grok-pager (12 packages)").
+    pub detail: String,
+}
+
 /// Hit areas for inline media buttons, rebuilt each frame.
 /// All hit areas are cleared at the start of inline media rendering and repopulated only when the media is visible.
 /// Scrolling therefore never leaves stale hit areas behind.
@@ -481,7 +491,11 @@ const MODE_BANNER_TOTAL_TICKS: u8 = 69;
 const MODE_BANNER_FADE_TICKS: u8 = 9;
 /// Whether `Event::Paste(text)` should probe the clipboard for image
 /// bytes / a file reference. See [`crate::clipboard::paste_payload_needs_clipboard_attachment_probe`].
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+///
+/// Runs on every OS: terminals often deliver Ctrl+V as bracketed paste rather
+/// than a key event (especially Linux Wayland). Otty IME origin gating lives
+/// in the off-thread probe (`ProbeClipboardAttachment`), not here — so short
+/// IME commits still do not attach an unrelated clipboard image.
 pub(super) fn bracketed_paste_should_probe(text: &str) -> bool {
     crate::clipboard::paste_payload_needs_clipboard_attachment_probe(text)
 }
@@ -1281,6 +1295,9 @@ pub struct AgentView {
     /// Still-running watcher cue on the turn-status row (click opens the tasks pane, same as `Ctrl+G`).
     /// tasks pane, same as `Ctrl+G`).
     pub hit_watching_cue: HitArea,
+    /// Snapshot of process-level global work pause for this frame (set by
+    /// [`AgentView::draw`] from [`AppRenderParams::global_paused`]).
+    pub(crate) global_work_paused: bool,
     /// One-time Ctrl+G toast already fired for a watching-cue click.
     pub(crate) watching_cue_toast_shown: bool,
     /// `[hide]` button on the announcement banner (click runs `/announcements hide`).
@@ -1404,6 +1421,11 @@ pub struct AgentView {
     /// Tuple of (message, remaining_ticks). Decremented each tick, removed at 0.
     /// Does **not** carry sticky status banners; see [`Self::sticky_toast`].
     pub(crate) toast: Option<(String, u8)>,
+    /// Live `/rebuild` progress strip (bar + percent + stage). Set by
+    /// [`crate::app::actions::TaskResult::RebuildProgress`]; cleared on
+    /// rebuild done/fail. When present, render paints a full-width bar at the
+    /// bottom of the scrollback instead of a short-lived toast only.
+    pub(crate) rebuild_progress: Option<RebuildUiProgress>,
     /// Single-slot ephemeral tip shown in the banner rect above the prompt.
     /// Unlike `toast`, survives typing; cleared by TTL, any prompt-box submit (prompt/interject/bash/feedback/remember), or explicit clear.
     /// Show via `show_ephemeral_tip` (renderability-gated), never `.show()`.
@@ -2139,6 +2161,8 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::NextModel => Action::NextModel,
         ActionId::CycleMode => Action::CycleMode,
         ActionId::CancelTurn
+        | ActionId::ToggleGlobalPause
+        | ActionId::ToggleSoftStop
         | ActionId::Quit
         | ActionId::ExitSession
         | ActionId::NewSession
@@ -2630,6 +2654,7 @@ pub(crate) mod test_fixtures {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2696,6 +2721,7 @@ pub(crate) mod test_fixtures {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
+                cancel_resume_prompt_text: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
@@ -3532,6 +3558,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,

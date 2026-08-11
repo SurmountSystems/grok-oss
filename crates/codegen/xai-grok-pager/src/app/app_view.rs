@@ -505,6 +505,10 @@ pub struct AppView {
     /// `None` at startup so the normal login-then-load flow is preserved.
     pub auth_return_view: Option<ActiveView>,
     pub agents: IndexMap<AgentId, AgentView>,
+    /// Fearless global pause: holds all in-process sessions until resume.
+    pub global_work_pause: crate::app::global_work_pause::GlobalWorkPause,
+    /// Soft stop: finish current turn then hold queue drain (not mid-turn cancel).
+    pub soft_stop: crate::app::soft_stop::SoftStop,
     /// Monotonically increasing counter for agent ID allocation.
     /// IDs are never reused after `shift_remove`, to avoid collisions.
     pub next_agent_id: usize,
@@ -1401,6 +1405,8 @@ impl AppView {
             active_view: ActiveView::Welcome,
             auth_return_view: None,
             agents: IndexMap::new(),
+            global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
+            soft_stop: crate::app::soft_stop::SoftStop::new(),
             next_agent_id: 0,
             models,
             registry: ActionRegistry::defaults(),
@@ -2312,6 +2318,17 @@ impl AppView {
             );
             if !stale_idle_arm_while_busy && !pending.expired() && pending.shortcut.matches(key) {
                 let action = self.pending_action.take().unwrap().action;
+                // Second Esc that confirms cancel: set Esc trigger + post-cancel
+                // rewind grace here (first Esc only armed; policy never saw the
+                // confirm press). Other double-press arms (clear/rewind/quit)
+                // need no agent-side side effects.
+                if matches!(action, Action::CancelTurn)
+                    && let ActiveView::Agent(id) = self.active_view
+                    && let Some(agent) = self.agents.get_mut(&id)
+                {
+                    agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+                    agent.suppress_rewind_arm(std::time::Instant::now());
+                }
                 return InputOutcome::Action(action);
             }
             self.pending_action = None;
@@ -2958,6 +2975,8 @@ impl AppView {
                 }
                 Action::VoiceToggle
             }
+            ActionId::ToggleGlobalPause => Action::ToggleGlobalPause,
+            ActionId::ToggleSoftStop => Action::ToggleSoftStop,
             _ => return InputOutcome::Unchanged,
         };
         if def.requires_confirmation
@@ -5259,6 +5278,20 @@ impl AppView {
         let mut needs_redraw = false;
         needs_redraw |= self.minimal_state.needs_frames();
         needs_redraw |= self.poll_clipboard_focus_tip();
+        // Keep global-pause duration/count visible while held.
+        if self.global_work_pause.is_active() {
+            if let Some(label) = self
+                .global_work_pause
+                .status_label(std::time::Instant::now())
+            {
+                self.show_toast(&label);
+                needs_redraw = true;
+            }
+        } else if let Some(label) = self.soft_stop.status_label() {
+            // Soft-stop chrome (armed vs queue held) when pause is not active.
+            self.show_toast(label);
+            needs_redraw = true;
+        }
         if matches!(self.active_view, ActiveView::Welcome) {
             self.welcome_tick = self.welcome_tick.wrapping_add(1);
             if let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at) {
@@ -5310,6 +5343,7 @@ impl AppView {
                 needs_redraw |= child.edit_hl_tick();
             }
         }
+        let mut limits_zero_refresh_for: Option<crate::app::agent::AgentId> = None;
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
@@ -5465,6 +5499,14 @@ impl AppView {
             if agent_wants_composer_cursor_blink(agent) {
                 needs_redraw = true;
             }
+        }
+        // Countdown hit zero while /limits modal open → silent billing re-fetch.
+        if let Some(agent_id) = limits_zero_refresh_for {
+            self.pending_effects
+                .push(crate::app::actions::Effect::FetchBilling {
+                    agent_id,
+                    silent: true,
+                });
         }
         if let Some(commands) = bootstrap_commands_update {
             self.welcome_prompt
@@ -5754,6 +5796,13 @@ impl AppView {
                 // wall-clock phase; Slow ticks keep it alive without a 30fps spin
                 // while the agent is idle and the prompt is focused.
                 if agent_wants_composer_cursor_blink(agent) {
+                    return TickDemand::Slow;
+                }
+                // /limits live countdown (d/h/m/s) needs Slow ticks while open.
+                if matches!(
+                    agent.active_modal.as_ref(),
+                    Some(crate::views::modal::ActiveModal::Limits { .. })
+                ) {
                     return TickDemand::Slow;
                 }
                 TickDemand::None

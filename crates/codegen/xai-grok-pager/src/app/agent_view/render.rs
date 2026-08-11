@@ -136,39 +136,32 @@ impl AgentView {
                 ]
             }
             PlanApprovalFocus::Prompt => {
-                // Soft-park (no panel): free typing, no empty-Enter approve
-                // hint. Mouse footer CTAs + `/view-plan` for decisions.
-                if self.line_viewer.is_none() {
-                    let has_content =
-                        !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
-                    if has_content {
-                        use crate::views::plan_approval_view::PlanPromptIntent;
-                        let enter_label = match pav.prompt_intent {
-                            PlanPromptIntent::ApproveNotes => "approve w/ comment",
-                            PlanPromptIntent::Questions => "clarify",
-                            PlanPromptIntent::Revise => "revise",
-                        };
-                        return vec![
-                            HintItem::new(key!(Enter), enter_label),
-                            HintItem::new(key!(Tab), "plan"),
-                            HintItem::new(key!(Esc), "back"),
-                        ];
-                    }
+                // P1 / Q2: empty freeform Enter never approves (soft-park or
+                // panel). Mouse footer CTAs + empty-prompt `a` own bare approve.
+                // With draft text / comments, Enter still submits freeform under
+                // the current intent (revise / clarify / approve w/ comment).
+                let has_content = !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
+                if has_content {
+                    use crate::views::plan_approval_view::PlanPromptIntent;
+                    // Enter hint must name rewrite vs answer-only so operators
+                    // do not confuse Revise with Clarify.
+                    let enter_label = match pav.prompt_intent {
+                        PlanPromptIntent::ApproveNotes => "approve w/ comment",
+                        PlanPromptIntent::Questions => "clarify (no rewrite)",
+                        PlanPromptIntent::Revise => "revise (rewrites plan)",
+                    };
                     return vec![
+                        HintItem::new(key!(Enter), enter_label),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ];
                 }
-                let has_content = !pav.comments.is_empty() || !self.prompt.text().trim().is_empty();
-                if has_content {
-                    use crate::views::plan_approval_view::PlanPromptIntent;
-                    let enter_label = match pav.prompt_intent {
-                        PlanPromptIntent::ApproveNotes => "approve w/ comment",
-                        PlanPromptIntent::Questions => "clarify",
-                        PlanPromptIntent::Revise => "revise",
-                    };
+                // Empty freeform: never Enter:approve (P1/Q2). With the side
+                // panel open, empty-prompt `a` still approves (mouse primary);
+                // soft-park without panel stays mouse-strip only.
+                if self.line_viewer.is_some() {
                     vec![
-                        HintItem::new(key!(Enter), enter_label),
+                        HintItem::new(key!('a'), "approve"),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]
@@ -737,6 +730,9 @@ impl AgentView {
         } else {
             self.active_pane == AgentPane::Prompt && !overlay_focused
         };
+        // Bottom prompt outline (╭─╮│╰─╯) stays on in normal chat, plan mode,
+        // soft-park, and open plan panel. A prior gate hid it for plan surfaces;
+        // that inverted the operator contract (absence is the bug).
         let prompt_style = PromptStyle {
             focused: prompt_focused,
             show_prefix: appearance.prompt.show_prefix,
@@ -2120,6 +2116,189 @@ impl AgentView {
                     1,
                 ));
                 self.hit_cancel_button.rect = None;
+                self.hit_pause_button.rect = None;
+                self.hit_bg_button.rect = None;
+                self.hit_watching_cue.rect = None;
+            } else if let Some(in_flight) = self.plan_feedback_in_flight {
+                // P2 continuous loop: never idle "Plan written. Click or
+                // /view-plan" while waiting for re-present.
+                //
+                // When the rewrite turn is already busy, fall through to normal
+                // turn status (thinking / tools / cancel) so the surface is not
+                // a barren exclusive Revising chip (dogfood R1/R3). Idle-only
+                // path keeps the Revising / Waiting-for-update chip.
+                if !self.session.state.is_turn_running() {
+                    let diamond_color = crate::views::turn_status::pending_diamond_color(
+                        &theme,
+                        theme.accent_plan,
+                        tick,
+                    );
+                    let text_style = Style::default().fg(theme.gray);
+                    let status_label = in_flight.status_label();
+                    let spans = vec![
+                        Span::styled(
+                            format!("{} ", crate::glyphs::diamond_filled()),
+                            Style::default().fg(diamond_color),
+                        ),
+                        Span::styled(status_label, text_style),
+                    ];
+                    buf.set_line_safe(
+                        turn_area.x,
+                        turn_area.y,
+                        &Line::from(spans),
+                        turn_area.width,
+                    );
+                    let item_width: u16 = 2u16.saturating_add(status_label.len() as u16);
+                    self.hit_plan_approval_status.rect = Some(Rect::new(
+                        turn_area.x,
+                        turn_area.y,
+                        item_width.min(turn_area.width),
+                        1,
+                    ));
+                    self.hit_cancel_button.rect = None;
+                    self.hit_pause_button.rect = None;
+                    self.hit_bg_button.rect = None;
+                    self.hit_watching_cue.rect = None;
+                } else {
+                    // Busy rewrite: real turn activity chrome (same path as
+                    // the ordinary running-turn branch below).
+                    let has_running_execute = !self.is_subagent_view
+                        && self
+                            .session
+                            .tracker
+                            .running_execute_tool_call_id()
+                            .is_some();
+                    let is_pending_user_input =
+                        !self.permission_queue.is_empty() || self.question_view.is_some();
+                    let goal_verifying = self
+                        .goal_state
+                        .as_ref()
+                        .is_some_and(|g| g.verifying_completion);
+                    let held_queue = self.held_queue_count();
+                    let held_queue_top_sendable = self.held_queue_top_sendable();
+                    let turn_output = turn_status::render_turn_status(
+                        buf,
+                        turn_area,
+                        turn_status::TurnStatusArgs {
+                            state: &self.session.state,
+                            activity: &activity,
+                            turn_elapsed: self.turn_elapsed(),
+                            activity_started_at: self.activity_started_at,
+                            tick,
+                            drain_blocked,
+                            buttons: Some(turn_status::MouseButtons {
+                                cancel_hovered: self.hit_cancel_button.hovered,
+                                pause_hovered: self.hit_pause_button.hovered,
+                                bg_hovered: self.hit_bg_button.hovered,
+                                watching_hovered: self.hit_watching_cue.hovered,
+                            }),
+                            has_running_execute,
+                            total_tokens: self.context_state.as_ref().map(|c| c.used),
+                            mcp_init_progress: self.mcp_init_progress.as_ref(),
+                            is_bash_turn: self.bash_turn,
+                            is_pending_user_input,
+                            goal_verifying,
+                            watchers,
+                            parked,
+                            flat_background: false,
+                            held_queue,
+                            held_queue_top_sendable,
+                            global_paused: self.global_work_paused,
+                        },
+                    );
+                    // When activity is still generic model wait, prefer the
+                    // Revising label on the left while keeping cancel/pause.
+                    let mut left_label = String::new();
+                    for x in turn_area.x..turn_area.x.saturating_add(turn_area.width.min(48)) {
+                        if let Some(cell) = buf.cell((x, turn_area.y)) {
+                            left_label.push_str(cell.symbol());
+                        }
+                    }
+                    let generic_wait = left_label.contains("Waiting")
+                        && !left_label.to_lowercase().contains("subagent")
+                        && !left_label.to_lowercase().contains("task");
+                    if generic_wait || left_label.trim().is_empty() {
+                        let diamond_color = crate::views::turn_status::pending_diamond_color(
+                            &theme,
+                            theme.accent_plan,
+                            tick,
+                        );
+                        let status_label = in_flight.status_label();
+                        let label_w = 2u16
+                            .saturating_add(status_label.len() as u16)
+                            .min(turn_area.width);
+                        for x in turn_area.x..turn_area.x.saturating_add(label_w) {
+                            if let Some(cell) = buf.cell_mut((x, turn_area.y)) {
+                                cell.set_symbol(" ");
+                                cell.set_style(Style::default().fg(theme.gray).bg(theme.bg_base));
+                            }
+                        }
+                        buf.set_line_safe(
+                            turn_area.x,
+                            turn_area.y,
+                            &Line::from(vec![
+                                Span::styled(
+                                    format!("{} ", crate::glyphs::diamond_filled()),
+                                    Style::default().fg(diamond_color),
+                                ),
+                                Span::styled(status_label, Style::default().fg(theme.gray)),
+                            ]),
+                            label_w,
+                        );
+                        self.hit_plan_approval_status.rect =
+                            Some(Rect::new(turn_area.x, turn_area.y, label_w, 1));
+                    } else {
+                        self.hit_plan_approval_status.clear();
+                    }
+                    self.hit_cancel_button
+                        .set_unless_dropdown(turn_output.cancel_button, dropdown_open);
+                    self.hit_pause_button
+                        .set_unless_dropdown(turn_output.pause_button, dropdown_open);
+                    self.hit_bg_button
+                        .set_unless_dropdown(turn_output.bg_button, dropdown_open);
+                    self.hit_watching_cue
+                        .set_unless_dropdown(turn_output.watching_cue, dropdown_open);
+                }
+            } else if self.should_arm_plan_decision_chrome() && self.plan_preview_available() {
+                // Plan mode still on, no live reverse-request: clickable review
+                // cue so freeform "waiting on plan panel" is not a dead end.
+                // Use decision-chrome gate so post-Approve (pending leave or
+                // sticky resolved) does not re-invite a second decision park.
+                let diamond_color = crate::views::turn_status::pending_diamond_color(
+                    &theme,
+                    theme.accent_plan,
+                    tick,
+                );
+                let text_style = if self.hit_plan_approval_status.hovered {
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .add_modifier(ratatui::style::Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(theme.gray)
+                };
+                let status_label = crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS;
+                let spans = vec![
+                    Span::styled(
+                        format!("{} ", crate::glyphs::diamond_filled()),
+                        Style::default().fg(diamond_color),
+                    ),
+                    Span::styled(status_label, text_style),
+                ];
+                buf.set_line_safe(
+                    turn_area.x,
+                    turn_area.y,
+                    &Line::from(spans),
+                    turn_area.width,
+                );
+                let item_width: u16 = 2u16.saturating_add(status_label.len() as u16);
+                self.hit_plan_approval_status.rect = Some(Rect::new(
+                    turn_area.x,
+                    turn_area.y,
+                    item_width.min(turn_area.width),
+                    1,
+                ));
+                self.hit_cancel_button.rect = None;
+                self.hit_pause_button.rect = None;
                 self.hit_bg_button.rect = None;
                 self.hit_watching_cue.rect = None;
             } else {
@@ -2149,6 +2328,7 @@ impl AgentView {
                         drain_blocked: turn_status_drain_blocked,
                         buttons: Some(turn_status::MouseButtons {
                             cancel_hovered: self.hit_cancel_button.hovered,
+                            pause_hovered: self.hit_pause_button.hovered,
                             bg_hovered: self.hit_bg_button.hovered,
                             watching_hovered: self.hit_watching_cue.hovered,
                         }),
@@ -2163,10 +2343,13 @@ impl AgentView {
                         flat_background: false,
                         held_queue,
                         held_queue_top_sendable,
+                        global_paused: self.global_work_paused,
                     },
                 );
                 self.hit_cancel_button
                     .set_unless_dropdown(turn_output.cancel_button, dropdown_open);
+                self.hit_pause_button
+                    .set_unless_dropdown(turn_output.pause_button, dropdown_open);
                 self.hit_bg_button
                     .set_unless_dropdown(turn_output.bg_button, dropdown_open);
                 self.hit_watching_cue
@@ -2174,6 +2357,7 @@ impl AgentView {
             }
         } else {
             self.hit_cancel_button.clear();
+            self.hit_pause_button.clear();
             self.hit_bg_button.clear();
             self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
@@ -2392,13 +2576,23 @@ impl AgentView {
         // Meter = live spend pool. Silent sticky console (SuperGrok still
         // memoized out of allowance) must not keep SuperGrok extras as the
         // footer when tracked identity is still the default SuperGrokSession.
-        // Probe only while tracked is SuperGrok; on hit, pin ConsoleKey so
-        // later frames skip dual-auth/disk work.
+        // Live free SuperGrok period headroom blocks false sticky console pin
+        // (same helper as status compact meter; limits before credits).
         if !self.sampling_identity.is_console() {
             let grok_home = xai_grok_shell::util::grok_home::grok_home();
-            if xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(&grok_home) {
-                self.sampling_identity = crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
-            }
+            let memo_out =
+                xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(&grok_home);
+            let (known, pct) = match self.credit_balance.as_ref() {
+                Some(b) if b.included_usage_known => (true, b.usage_pct),
+                _ => (false, 0.0),
+            };
+            self.sampling_identity =
+                crate::views::credit_bar::status_sampling_identity_for_compact_meter(
+                    self.sampling_identity,
+                    known,
+                    pct,
+                    memo_out,
+                );
         }
         // When dual SuperGrok principals exist, name which role's included pool
         // the footer is talking about (active base identity).
@@ -2426,8 +2620,13 @@ impl AgentView {
         // Honest gap when cents unknown (not soft "no $ meter yet").
         let console_prepaid_gap =
             crate::views::credit_bar::resolve_console_team_prepaid_gap_default();
+        // Team postpaid OAuth / Grok Build class period $ from Management process
+        // cache (filled with billing / /limits). Distinct from team prepaid.
+        let team_postpaid_oauth_class_cents =
+            xai_grok_shell::auth::cached_console_team_postpaid_default()
+                .map(|p| p.oauth_class_cents);
         let warning =
-            crate::views::credit_bar::usage_warning_for_session_with_identity_principal_and_gap(
+            crate::views::credit_bar::usage_warning_for_session_with_identity_principal_gap_and_postpaid(
                 self.credit_balance.as_ref(),
                 self.auto_topup.as_ref(),
                 self.openrouter_credit_balance.as_ref(),
@@ -2438,6 +2637,7 @@ impl AgentView {
                 live_principal_role.as_deref(),
                 console_prepaid,
                 console_prepaid_gap,
+                team_postpaid_oauth_class_cents,
             );
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
@@ -4624,6 +4824,224 @@ mod selection_state_tests {
         assert!(agent.last_scrollback_selection_boundaries.is_empty());
     }
 }
+#[cfg(test)]
+mod prompt_outline_plan_view_tests {
+    use super::super::paste::paste_key_tests::make_plan_approval_view_state;
+    use super::super::test_fixtures::make_agent;
+    use super::AgentView;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn draw_buf(agent: &mut AgentView) -> Buffer {
+        let reg = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    /// Count bottom-prompt box corners (╭ / ╰) on the left edge of the lower
+    /// half. Plan panel borders live on the right column, so left-edge corners
+    /// in the lower half are the composer outline.
+    fn left_edge_prompt_corners(buf: &Buffer, area: Rect) -> (usize, usize) {
+        let mid_y = area.y + area.height / 2;
+        let mut top = 0usize;
+        let mut bottom = 0usize;
+        for y in mid_y..area.y + area.height {
+            // Composer outline sits after hpad; scan first few columns.
+            for x in area.x..area.x.saturating_add(6).min(area.x + area.width) {
+                if let Some(cell) = buf.cell((x, y)) {
+                    match cell.symbol() {
+                        "\u{256d}" => top += 1,    // ╭
+                        "\u{2570}" => bottom += 1, // ╰
+                        _ => {}
+                    }
+                }
+            }
+        }
+        (top, bottom)
+    }
+
+    /// Named contract: bottom prompt always paints ╭ / ╰ in normal chat, plan
+    /// approval soft-park, and open plan panel. Absence of the outline is the
+    /// bug (prior inverted "suppress in plan" gate).
+    #[test]
+    fn normal_agent_draw_paints_prompt_outline_corners() {
+        let mut agent = make_agent();
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let (top, bottom) = left_edge_prompt_corners(&buf, area);
+        assert!(
+            top >= 1 && bottom >= 1,
+            "normal chat must paint prompt ╭ and ╰ on the lower-left outline; top={top} bottom={bottom}"
+        );
+    }
+
+    #[test]
+    fn plan_approval_draw_paints_prompt_outline_corners() {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(make_plan_approval_view_state());
+        agent.reopen_plan_approval();
+        assert!(agent.line_viewer.is_some(), "approval opens plan panel");
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let (top, bottom) = left_edge_prompt_corners(&buf, area);
+        assert!(
+            top >= 1 && bottom >= 1,
+            "plan approval + panel must paint bottom prompt outline (╭/╰ on lower-left); top={top} bottom={bottom}"
+        );
+    }
+
+    #[test]
+    fn soft_park_without_panel_paints_prompt_outline() {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(make_plan_approval_view_state());
+        assert!(
+            agent.line_viewer.is_none(),
+            "soft-park with panel dismissed: no line_viewer"
+        );
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let (top, bottom) = left_edge_prompt_corners(&buf, area);
+        assert!(
+            top >= 1 && bottom >= 1,
+            "soft-park without panel must still paint prompt outline; top={top} bottom={bottom}"
+        );
+    }
+
+    #[test]
+    fn plan_mode_writing_paints_prompt_outline() {
+        // Bare plan mode (writing a plan, no approval, no panel) keeps outline.
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let (top, bottom) = left_edge_prompt_corners(&buf, area);
+        assert!(
+            top >= 1 && bottom >= 1,
+            "plan mode (writing) must paint prompt outline; top={top} bottom={bottom}"
+        );
+    }
+
+    /// Named contract (dogfood 2026-08-09): plan line-comment mode must not
+    /// paint a filled circle (●) as the composer prefix. That glyph looked
+    /// like a stuck typed character (operator tried to delete it; Backspace
+    /// cannot remove chrome). Comment mode uses the normal prompt arrow (❯),
+    /// plan-yellow tint, status flag "commenting L#", and placeholder
+    /// "Type your comment...". Saved plan-body comments may still use ●.
+    #[test]
+    fn plan_commenting_composer_prefix_is_prompt_arrow_not_filled_dot() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(make_plan_approval_view_state());
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Commenting;
+            pav.commenting_range = Some(13..14);
+        }
+        // Soft-park Prompt pane so the composer paints focused.
+        agent.active_pane = crate::app::agent_view::AgentPane::Prompt;
+
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+
+        let arrow = crate::glyphs::prompt_arrow()
+            .chars()
+            .next()
+            .expect("prompt arrow has a lead glyph")
+            .to_string();
+        let filled = crate::glyphs::filled_dot();
+        let mid_y = area.y + area.height / 2;
+        let mut saw_arrow = false;
+        let mut saw_filled_dot = false;
+        for y in mid_y..area.y + area.height {
+            for x in area.x..area.x.saturating_add(12).min(area.x + area.width) {
+                if let Some(cell) = buf.cell((x, y)) {
+                    let sym = cell.symbol();
+                    if sym == arrow.as_str() || sym.starts_with(arrow.as_str()) {
+                        saw_arrow = true;
+                    }
+                    if sym == filled || sym.starts_with(filled) {
+                        saw_filled_dot = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_arrow,
+            "plan commenting must paint the prompt arrow (❯) as left chrome"
+        );
+        assert!(
+            !saw_filled_dot,
+            "plan commenting must not paint filled-circle (●) in the composer \
+             (looks like undeletable typed text; ● is for plan-body comment markers only)"
+        );
+    }
+
+    /// Named contract (dogfood 2026-08-01): plan mode on DOGE must not paint
+    /// the composer outline in `bg_base` (black-on-black). DOGE solid-steps
+    /// `blend(bg, accent_plan, opacity)` to bg when opacity < 0.5 — a 0.4 tint
+    /// made ╭│╰ invisible while Responding in plan mode. Outline glyphs stay
+    /// on; fg must remain a visible plan/chrome colour.
+    #[test]
+    fn doge_plan_mode_prompt_outline_fg_not_canvas() {
+        use crate::theme::cache;
+        use crate::theme::{Theme, ThemeKind};
+
+        let _pin = cache::pin_theme();
+        cache::set(ThemeKind::Doge);
+        let theme = Theme::current();
+        assert_eq!(theme.bg_base, ratatui::style::Color::Rgb(0, 0, 0));
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        let area = Rect::new(0, 0, 100, 40);
+        let buf = draw_buf(&mut agent);
+        let mid_y = area.y + area.height / 2;
+        let mut corner_fgs = Vec::new();
+        for y in mid_y..area.y + area.height {
+            for x in area.x..area.x.saturating_add(6).min(area.x + area.width) {
+                if let Some(cell) = buf.cell((x, y)) {
+                    match cell.symbol() {
+                        "\u{256d}" | "\u{2570}" => {
+                            // ╭ or ╰
+                            corner_fgs.push(cell.fg);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(
+            !corner_fgs.is_empty(),
+            "plan mode must still paint ╭/╰ outline glyphs under DOGE"
+        );
+        for fg in &corner_fgs {
+            assert_ne!(
+                *fg, theme.bg_base,
+                "plan outline fg must not be canvas black (invisible); got {fg:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod voice_recording_overlay_tests {
     use super::super::test_fixtures::make_agent;

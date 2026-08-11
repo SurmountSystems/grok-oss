@@ -140,7 +140,8 @@ fn write_data_file_atomic(
     })
 }
 
-fn is_pid_alive(pid: u32) -> bool {
+/// Whether `pid` appears alive on this host (for inventory / crash hygiene).
+pub fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         let pid_i = match i32::try_from(pid) {

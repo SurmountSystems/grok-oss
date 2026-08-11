@@ -163,11 +163,15 @@ While the prompt is focused, Grok paints a **software box caret** (filled block
 on DOGE). That caret is the human input surface, not agent chrome: it must stay
 Human green (not agent magenta).
 
-- Typed letters under the caret keep their grapheme (reverse plate or green
-  ink); the caret does not eat characters.
+- Typed letters under the caret keep their grapheme; the caret does not eat
+  characters. **Solid half:** reverse plate (Human green background, readable
+  canvas-coloured ink). **Empty half:** theme `text_primary` on canvas — not
+  neon `accent_user` on the letter (that would read as a second green prompt
+  glyph). Mid-draft spaces keep reverse-plate styling on solid half and never
+  become a solid `█` (solid block only at buffer end).
 - When you move the caret (arrows, Home, End), **previous cells repaint as
-  normal text**. There must be no leftover green plate, green letter ink, or
-  solid block glyph stuck on letters behind the real caret.
+  normal text**. There must be no leftover green plate or solid block glyph
+  stuck on letters behind the real caret.
 
 Hardware terminal cursor is hidden while the software box caret paints, so you
 do not see two cursors. OSC 12 still marks the session as Grok-owned for hosts

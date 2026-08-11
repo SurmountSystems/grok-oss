@@ -2237,6 +2237,11 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
             Command::Doctor(_) => {
                 unreachable!("doctor was consumed before runtime startup")
             }
+            Command::Limits(limits_args) => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return xai_grok_pager::limits_cmd::run(limits_args).await;
+            }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 xai_grok_shell::inspect::inspect(&cwd, json).await?;
@@ -2337,6 +2342,11 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 .mode;
                 return xai_grok_pager::memory_cmd::run(memory_args, mode);
             }
+            Command::Rebuild { source } => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return run_rebuild_command(source).await;
+            }
             Command::Update {
                 check,
                 json,
@@ -2371,6 +2381,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 device_auth,
                 openrouter,
                 api_key,
+                management_key,
                 list_api_keys,
                 devbox,
             } => {
@@ -2726,7 +2737,20 @@ async fn run_update_command(
         )
         .await?;
         if let Some(installed_version) = installed {
-            signal_leaders_to_relaunch(&installed_version).await;
+            let outcomes =
+                xai_grok_shell::leader::signal_leaders_to_relaunch(&installed_version).await;
+            for o in outcomes {
+                if let xai_grok_shell::leader::LeaderRelaunchOutcome::Relaunching {
+                    from_version,
+                    to_version,
+                    ..
+                } = o
+                {
+                    eprintln!(
+                        "  ↻ Relaunching shared session (leader {from_version} → {to_version})…"
+                    );
+                }
+            }
         }
         return Ok(());
     }
@@ -2809,6 +2833,7 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
         }
         client.cancel();
     }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {

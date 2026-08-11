@@ -408,9 +408,20 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             client.record_401_attribution(ToolConsumer::ImageGen, Some(&sent_bearer));
         }
         if !status.is_success() {
+            crate::shared_http_rate_limit::observe_http_rate_limit(
+                &rate_key,
+                status.as_u16(),
+                response.headers(),
+                "Imagine image edit rate limit",
+            );
             let body = response.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(200).collect();
             tracing::warn!(http_status = %status, "Imagine edit API error: {truncated}");
+            if status.as_u16() == 429 {
+                return Err(xai_tool_runtime::ToolError::rate_limited(format!(
+                    "Image edit rate limited (HTTP {status}): {truncated}"
+                )));
+            }
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
                 format!("Image edit failed with HTTP {status}: {truncated}"),

@@ -306,6 +306,14 @@ impl VideoGenClient {
         self.bearer.resolve().await
     }
 
+    async fn rate_limit_bearer(&self) -> Option<String> {
+        match self.current_bearer().await {
+            Some(k) if !k.trim().is_empty() => Some(k),
+            _ if !self.fallback_api_key.trim().is_empty() => Some(self.fallback_api_key.clone()),
+            _ => None,
+        }
+    }
+
     fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
         crate::attribution::emit_401(self.attribution_callback.as_ref(), consumer, sent_bearer);
     }
@@ -377,6 +385,12 @@ impl VideoGenClient {
             self.record_401_attribution(ToolConsumer::VideoGenStart, Some(&sent_bearer));
         }
         if !status.is_success() {
+            crate::shared_http_rate_limit::observe_http_rate_limit(
+                &rate_key,
+                status.as_u16(),
+                response.headers(),
+                "Imagine video generation rate limit",
+            );
             let body = response.text().await.unwrap_or_default();
             // 500 chars so the unknown-voice 400 keeps its full voice roster.
             let truncated: String = body.chars().take(500).collect();
@@ -443,11 +457,22 @@ impl VideoGenClient {
                 self.record_401_attribution(ToolConsumer::VideoGenPoll, Some(&poll_sent_bearer));
             }
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
+                crate::shared_http_rate_limit::observe_http_rate_limit(
+                    &poll_rate_key,
+                    poll_status.as_u16(),
+                    poll_response.headers(),
+                    "Imagine video poll rate limit",
+                );
                 let body = poll_response.text().await.unwrap_or_default();
                 if is_zdr_upload_url_error(&body) {
                     return Err(zdr_restricted_error());
                 }
                 let truncated: String = body.chars().take(200).collect();
+                if poll_status.as_u16() == 429 {
+                    return Err(xai_tool_runtime::ToolError::rate_limited(format!(
+                        "Video poll rate limited (HTTP {poll_status}): {truncated}"
+                    )));
+                }
                 return Err(xai_tool_runtime::ToolError::new(
                     xai_tool_runtime::ToolErrorKind::Custom,
                     format!("Video poll failed with HTTP {poll_status}: {truncated}"),

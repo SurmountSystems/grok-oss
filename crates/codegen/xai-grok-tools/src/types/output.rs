@@ -891,16 +891,20 @@ impl ToolOutput {
                         format!("Write your plan to {plan_file_path}. {detail}")
                     }
                 };
+                // Default ban: no multi-choice questionnaire for plan clarifications.
+                // Open questions go in the plan file / freeform chat; present via exit_plan.
+                // `ask` is named only so the model knows which tool not to use for that.
                 format!(
                     "{message}\n\n\
                      {plan_status}\n\n\
                      In plan mode, you should:\n\
                      1. Thoroughly explore the codebase to understand existing patterns\n\
                      2. Identify similar features, codebase architecture, and understand trade-offs\n\
-                     3. Use {ask} if you need to clarify the approach\n\
-                     4. Design a concrete implementation strategy\n\
-                     5. Write your plan to the plan file above\n\
-                     6. When ready, use {exit} to present your plan to the user."
+                     3. Design a concrete implementation strategy\n\
+                     4. Write your plan to the plan file above. Put open questions as plain \
+                     bullets in the plan file or freeform chat; do not use {ask} multi-choice \
+                     questionnaires for plan clarifications\n\
+                     5. When ready, use {exit} to present your plan to the user."
                 )
             }
             ToolOutput::ExitPlanMode(exit) => match exit {
@@ -1063,6 +1067,8 @@ pub enum EnterPlanModeOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnterPlanModeToolHints {
     /// Client-facing name for `ask_user_question` (ToolKind::AskUser).
+    /// Used in enter-plan prompt text to **ban** multi-choice questionnaires for
+    /// plan clarifications (open questions go in the plan file / freeform chat).
     #[serde(default = "EnterPlanModeToolHints::default_ask_user")]
     pub ask_user: String,
     /// Client-facing name for `exit_plan_mode` (ToolKind::ExitPlan).
@@ -2368,7 +2374,11 @@ mod tests {
         let prompt = output.to_prompt_format();
         assert!(prompt.contains("entered-msg-token"));
         assert!(prompt.contains("/tmp/plan.md"));
-        assert!(prompt.contains("ask_user_question"));
+        assert!(
+            prompt.contains("do not use ask_user_question multi-choice questionnaires"),
+            "plan mode must ban questionnaire clarifications: {prompt}"
+        );
+        assert!(!prompt.contains("Use ask_user_question if you need"));
         assert!(prompt.contains("exit_plan_mode"));
         assert!(
             !prompt.contains("subagent_type"),

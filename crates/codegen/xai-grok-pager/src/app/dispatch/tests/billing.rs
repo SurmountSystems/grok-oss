@@ -82,7 +82,7 @@ fn dispatch_billing(
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance,
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(balance),
             silent,
             subscription_tier,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -90,6 +90,40 @@ fn dispatch_billing(
         }),
         app,
     );
+}
+
+/// Dispatch with full control over SuperGrok three-state + side meters.
+fn dispatch_billing_full(
+    app: &mut AppView,
+    balance: crate::views::credit_bar::CreditBalanceFetch,
+    silent: bool,
+    subscription_tier: Option<String>,
+    autotopup: crate::views::credit_bar::AutoTopupFetch,
+    openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+    console_team_prepaid_cents: Option<i64>,
+) {
+    dispatch(
+        Action::TaskComplete(TaskResult::BillingFetched {
+            agent_id: AgentId(0),
+            balance,
+            silent,
+            subscription_tier,
+            autotopup,
+            openrouter_balance,
+            console_team_prepaid_cents,
+        }),
+        app,
+    );
+}
+
+/// Unknown included meter (placeholder 0.0, not a true wire zero).
+fn test_bal_unknown() -> crate::views::credit_bar::CreditBalance {
+    crate::views::credit_bar::CreditBalance {
+        included_usage_known: false,
+        usage_pct: 0.0,
+        effective_usage_pct: 0.0,
+        ..test_bal(0.0)
+    }
 }
 
 #[test]
@@ -962,6 +996,7 @@ fn billing_fetched_non_silent_pushes_scrollback_message() {
         on_demand_cap_cents: Some(1000),
         on_demand_used_cents: Some(350),
         period_end_display: Some("Jul 1, 00:00".into()),
+        period_end_at: None,
         ..test_bal(75.5)
     };
     dispatch_billing(&mut app, Some(bal), false, None);
@@ -993,6 +1028,7 @@ fn usage_billing_console_live_with_prepaid_names_console_team_prepaid() {
         usage_pct: 100.0,
         effective_usage_pct: 100.0,
         period_end_display: Some("Jul 30, 12:00".into()),
+        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
@@ -1000,12 +1036,14 @@ fn usage_billing_console_live_with_prepaid_names_console_team_prepaid() {
         prepaid_balance_cents: Some(996),
         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
         is_unified_billing_user: None,
+        grok_build_usage_pct: None,
+        included_usage_known: true,
     };
 
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
             silent: false,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -1058,18 +1096,21 @@ fn usage_billing_console_live_without_prepaid_honest_gap_not_supergrok_extras() 
         usage_pct: 100.0,
         effective_usage_pct: 100.0,
         period_end_display: Some("Jul 30, 12:00".into()),
+        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
         prepaid_balance_cents: Some(996),
         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
         is_unified_billing_user: None,
+        grok_build_usage_pct: None,
+        included_usage_known: true,
     };
 
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
             silent: false,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -1168,6 +1209,7 @@ fn billing_fetched_propagates_balance_to_agent() {
         on_demand_cap_cents: Some(5000),
         on_demand_used_cents: Some(1200),
         period_end_display: Some("Aug 15, 00:00".into()),
+        period_end_at: None,
         ..test_bal(88.0)
     };
     dispatch_billing(&mut app, Some(bal), true, None);
@@ -1200,7 +1242,7 @@ fn billing_fetched_stores_autotopup_on_app_and_agent() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(autotopup),
@@ -1230,7 +1272,7 @@ fn billing_fetched_unchanged_autotopup_keeps_cached_rule() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal()),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal())),
             silent: true,
             subscription_tier: None,
             autotopup: resolved,
@@ -1242,7 +1284,7 @@ fn billing_fetched_unchanged_autotopup_keeps_cached_rule() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(bal()),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal())),
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -1262,10 +1304,12 @@ fn billing_fetched_cleared_autotopup_resets_cache() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(crate::views::credit_bar::CreditBalance {
-                prepaid_balance_cents: Some(1500),
-                ..test_bal(100.0)
-            }),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(
+                crate::views::credit_bar::CreditBalance {
+                    prepaid_balance_cents: Some(1500),
+                    ..test_bal(100.0)
+                },
+            )),
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(
@@ -1283,7 +1327,7 @@ fn billing_fetched_cleared_autotopup_resets_cache() {
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: Some(test_bal(50.0)),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(test_bal(50.0))),
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Cleared,
@@ -1304,7 +1348,7 @@ fn app_billing_fetched_stores_autotopup() {
     };
     dispatch(
         Action::TaskComplete(TaskResult::AppBillingFetched {
-            balance: Some(bal),
+            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(Some(bal)),
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(
                 crate::views::credit_bar::AutoTopupInfo::disabled(),
             ),

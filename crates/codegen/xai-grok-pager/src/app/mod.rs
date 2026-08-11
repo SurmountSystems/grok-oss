@@ -1251,7 +1251,55 @@ pub async fn run(
             if run_result.quit_for_update {
                 return Ok(true);
             }
+            // Rebuild and screen-mode re-exec share the restore gate: never
+            // exec onto a new process image when terminal restore failed.
+            if let Some(rebuild) = run_result.rebuild_relaunch.as_ref() {
+                if !dispatch::rebuild::may_exec_relaunch_after_restore(restore_ok) {
+                    let cleanup_error = restore_result
+                        .as_ref()
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unknown restore error".into());
+                    tracing::error!(
+                        error = %cleanup_error,
+                        "rebuild relaunch blocked: terminal restore failed"
+                    );
+                    dispatch::rebuild::print_rebuild_restore_blocked_hint(
+                        rebuild,
+                        &cleanup_error,
+                        &mut io::stderr(),
+                    );
+                    return Ok(false);
+                }
+                if let Err(e) = dispatch::rebuild::exec_rebuild_relaunch(rebuild) {
+                    tracing::error!(error = %e, "rebuild relaunch failed");
+                    dispatch::rebuild::print_rebuild_exec_failure_hint(
+                        rebuild,
+                        &e,
+                        &mut io::stderr(),
+                    );
+                }
+                return Ok(false);
+            }
             if let Some(relaunch) = run_result.relaunch.as_ref() {
+                if !dispatch::rebuild::may_exec_relaunch_after_restore(restore_ok) {
+                    let cleanup_error = restore_result
+                        .as_ref()
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unknown restore error".into());
+                    tracing::error!(
+                        error = %cleanup_error,
+                        "screen-mode relaunch blocked: terminal restore failed"
+                    );
+                    print_screen_mode_restore_blocked_hint(
+                        &relaunch.session_id,
+                        relaunch.minimal,
+                        &cleanup_error,
+                        &mut io::stderr(),
+                    );
+                    return Ok(false);
+                }
                 if let Err(e) = screen_mode_relaunch::exec_screen_mode_relaunch(
                     &relaunch.session_id,
                     relaunch.minimal,
@@ -2602,6 +2650,27 @@ mod tests {
                  Resume this session with:\n  {hint}\n"
             )
         );
+    }
+
+    /// Restore-fail gate for screen-mode: fail loud, no silent re-exec.
+    #[test]
+    fn print_screen_mode_restore_blocked_hint_writes_expected_lines() {
+        let mut buf = Vec::new();
+        print_screen_mode_restore_blocked_hint("sess-xyz", true, &"drain failed", &mut buf);
+        let hint = screen_mode_relaunch::screen_mode_relaunch_resume_hint("sess-xyz", true);
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("Terminal cleanup failed after screen-mode switch (drain failed)."),
+            "{out}"
+        );
+        assert!(
+            out.contains("Not relaunching with terminal modes possibly latched."),
+            "{out}"
+        );
+        assert!(out.contains(&format!("  {hint}\n")), "{out}");
+        // Shared gate with rebuild: restore failure must block re-exec.
+        assert!(!dispatch::rebuild::may_exec_relaunch_after_restore(false));
+        assert!(dispatch::rebuild::may_exec_relaunch_after_restore(true));
     }
     /// [`ExitInfo`] with a full summary, for the failing-writer tests.
     fn full_exit_info(session_id: &str) -> ExitInfo {

@@ -120,6 +120,18 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             // Examples: content-safety blocks, ZDR-gated operations, remote-settings-blocked users
             // Passing the proxy's message via internal_error keeps the explanation visible without triggering the client's re-auth flow on -32000
             StatusCode::FORBIDDEN => {
+                if xai_grok_sampling_types::is_credentials_rejected_message(&message)
+                    && !xai_grok_sampling_types::is_credit_exhausted_message(&message)
+                {
+                    return acp::Error::auth_required().data(message);
+                }
+                // Team credits / monthly spending limit: plain English body,
+                // not Internal error JSON envelope. Bare 403 (policy/ZDR) stays
+                // on the internal_error path with the proxy message.
+                if xai_grok_sampling_types::is_credit_exhausted_message(&message) {
+                    let plain = xai_grok_sampling_types::credit_exhausted_user_message(&message);
+                    return acp::Error::internal_error().data(plain);
+                }
                 let message = if message.contains("requires a Grok subscription")
                     && crate::agent::auth_method::has_xai_api_key_env()
                 {
@@ -668,6 +680,54 @@ mod tests {
         assert_eq!(acp_529.data, None);
     }
 
+    /// Named contract: console team credit 403 is plain English data, not a
+    /// nested Internal error JSON envelope with only status-prefixed body.
+    #[test]
+    fn terminal_credit_exhausted_403_is_plain_english_not_internal_error_json() {
+        let team_body = "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either \
+            used all available credits or reached its monthly spending limit.";
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: team_body.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_credit_exhausted());
+        let acp_err = map_sampling_err_to_acp(err);
+        // Still internal_error code (not re-auth); data is plain string.
+        assert_eq!(acp_err.code, acp::Error::internal_error().code);
+        let data = acp_err.data.expect("credit 403 must carry operator copy");
+        match data {
+            serde_json::Value::String(s) => {
+                assert!(
+                    s.contains("used all available credits")
+                        || s.contains("monthly spending limit"),
+                    "plain team sentence: {s}"
+                );
+                assert!(!s.contains("API error (status"), "{s}");
+            }
+            other => panic!("credit 403 data must be plain string, got {other}"),
+        }
+
+        // Bare 403 policy still maps; not credit plain path requirements.
+        let bare = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        let bare_acp = map_sampling_err_to_acp(bare);
+        assert_eq!(bare_acp.code, acp::Error::internal_error().code);
+        assert_eq!(
+            bare_acp.data,
+            Some(serde_json::Value::String(
+                "Content violates usage guidelines.".into()
+            ))
+        );
+    }
+
     #[test]
     fn rate_limit_error_uses_dedicated_code() {
         let err = SamplingError::Api {
@@ -769,6 +829,32 @@ mod tests {
                 "Content violates usage guidelines. Failed check: SAFETY_CHECK_TYPE_DATA_LEAKAGE"
                     .into()
             ))
+        );
+    }
+
+    /// Dogfood: 403 + bad-credentials (OAuth token not validated) must map to
+    /// auth_required, not Internal error. Same operator recovery as 401.
+    #[test]
+    fn forbidden_bad_credentials_maps_to_auth_required() {
+        let body = "unauthenticated:bad-credentials: The OAuth2 access token \
+                    could not be validated.";
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: body.to_string(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        let acp_err = map_sampling_err_to_acp(err);
+        assert_eq!(
+            acp_err.code,
+            acp::Error::auth_required().code,
+            "403 bad-credentials must surface as auth_required"
+        );
+        assert_eq!(
+            acp_err.data,
+            Some(serde_json::Value::String(body.to_string())),
+            "preserve server body for logs; UI uses re-auth prompt"
         );
     }
 

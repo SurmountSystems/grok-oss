@@ -20,6 +20,56 @@ use crate::theme::{self, Theme};
 /// ~0.15 gives a smooth wave that travels the block in ~40 ticks.
 const WAVE_SPEED: f32 = 0.15;
 
+/// Columns reserved for the short timestamp overlay (`  12:30 PM` max).
+pub const TIMESTAMP_SHORT_RESERVE: u16 = 10;
+
+/// Extra right-edge columns when always-on bubble ⧉ shares a message row
+/// with the timestamp: one gap cell + one ⧉ cell. Keeps short and expanded
+/// timestamps fully readable (⧉ stays at the content right edge).
+pub const BUBBLE_COPY_TRAILING_INSET: u16 = 2;
+
+/// Whether this block type shows a right-edge timestamp overlay.
+pub fn block_shows_timestamp(block: &RenderBlock) -> bool {
+    matches!(
+        block,
+        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+    )
+}
+
+/// Whether this block type gets always-on bubble ⧉ chrome.
+pub fn block_shows_bubble_copy(block: &RenderBlock) -> bool {
+    matches!(
+        block,
+        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_)
+    )
+}
+
+/// Columns from the content right edge reserved for bubble ⧉ (+ gap) when
+/// both timestamp and bubble copy paint on the same row. Zero otherwise.
+///
+/// Layout when non-zero (right edge of content):
+/// `[timestamp zone (TIMESTAMP_SHORT_RESERVE)][gap][⧉]`
+pub fn bubble_copy_trailing_inset(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
+    if appearance.show_timestamps
+        && appearance.scrollback.display.bubble_copy_buttons
+        && block_shows_timestamp(block)
+        && block_shows_bubble_copy(block)
+    {
+        BUBBLE_COPY_TRAILING_INSET
+    } else {
+        0
+    }
+}
+
+/// Right-side content columns reserved so message text does not wrap under
+/// the timestamp overlay (and, when bubble ⧉ is also on, under that chrome).
+pub fn message_right_chrome_reserve(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
+    if !appearance.show_timestamps || !block_shows_timestamp(block) {
+        return 0;
+    }
+    TIMESTAMP_SHORT_RESERVE + bubble_copy_trailing_inset(block, appearance)
+}
+
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
@@ -309,10 +359,7 @@ impl<'a> EntryRenderer<'a> {
     /// Timestamps are shown for user and agent messages (including /btw responses and mid-turn interjections).
     /// Thinking traces, tool calls, and system messages get none.
     fn should_show_timestamp(&self) -> bool {
-        matches!(
-            self.entry.block,
-            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-        )
+        block_shows_timestamp(&self.entry.block)
     }
 
     /// Width reserved for the timestamp on the right side of content lines.
@@ -819,9 +866,7 @@ impl Renderable for EntryRenderer<'_> {
             let first_content_y = content_area.y + if vpad_top_visible { 1 } else { 0 };
             // Check if mouse is hovering the timestamp zone (rightmost 10 cols of the first content row)
             let ts_hovered = self.mouse_pos.is_some_and(|(mx, my)| {
-                my == first_content_y
-                    && mx >= content_area.x + content_area.width.saturating_sub(10)
-                    && mx < content_area.x + content_area.width
+                my == first_content_y && mx >= ts_zone_left && mx < ts_zone_right
             });
             let ts_str = if ts_hovered {
                 ts.format("  %H:%M:%S | %b %d").to_string()
@@ -829,8 +874,9 @@ impl Renderable for EntryRenderer<'_> {
                 ts.format("  %-I:%M %p").to_string()
             };
             let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1 && first_content_y < max_row {
-                let ts_x = content_area.x + content_area.width - ts_width;
+            if content_area.width > ts_width + 1 + copy_inset && first_content_y < max_row {
+                // Right-align to the end of the timestamp zone (left of ⧉).
+                let ts_x = ts_zone_right.saturating_sub(ts_width);
                 let ts_style = Style::default().fg(self.theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
             }
@@ -1100,6 +1146,24 @@ mod tests {
         text.contains("AM") || text.contains("PM")
     }
 
+    /// Content exclusive right edge for default layout (pad_right=2 → last
+    /// content cell at width-3; exclusive end width-2).
+    fn content_right_exclusive(width: u16) -> u16 {
+        width - 2
+    }
+
+    /// Expected left x of a right-aligned timestamp string under default
+    /// appearance (timestamps + bubble_copy both on → trailing inset).
+    fn expected_ts_x(
+        width: u16,
+        ts_width: u16,
+        appearance: &AppearanceConfig,
+        block: &RenderBlock,
+    ) -> u16 {
+        let copy_inset = bubble_copy_trailing_inset(block, appearance);
+        content_right_exclusive(width).saturating_sub(copy_inset + ts_width)
+    }
+
     #[test]
     fn test_timestamp_short_format_for_user_prompt() {
         let theme = Theme::current();
@@ -1116,7 +1180,7 @@ mod tests {
         // UserPrompt has vpad=true, first content row is y=1.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
         let content_row = 1u16;
 
         let rendered = collect_row_symbols(&buf, content_row, ts_x, ts_x + ts_width);
@@ -1141,7 +1205,7 @@ mod tests {
         // AgentMessage has vpad=false, first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1174,7 +1238,7 @@ mod tests {
             .format("%H:%M:%S | %b %d")
             .to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1395,7 +1459,7 @@ mod tests {
         // AgentMessage has no vpad, so the first content row is y=0
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
             rendered, expected,

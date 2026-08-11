@@ -1,8 +1,8 @@
 # Prefer Rust tools over ad-hoc Python/bash
 
-**Date:** 2026-07-26  
-**Class:** D2 research brief (not D1 law; not a diary).  
-**Raw inventories (scratch):** `/tmp/grok-1000/python-inventory-product.md`,  
+**Date:** 2026-07-26
+**Class:** D2 research brief (not D1 law; not a diary).
+**Raw inventories (scratch):** `/tmp/grok-1000/python-inventory-product.md`,
 `python-inventory-host.md`, `rust-tool-surface-vs-python.md`.
 
 ## Goal
@@ -128,6 +128,17 @@ hooks runner, secret redaction, code-graph / fast-worktree bins.
 | **D1** | `AGENTS.md` (product + `~/.grok`), `_SKILL_RULES` standing rule |
 | **D2** | This brief; raw inventories under `/tmp/grok-1000/` |
 | **FORK** | Process checkbox — preference + inventory pinned |
+
+## Agent invent ban (process law 2026-08-09)
+
+Separate from the embed/intercept campaign above: agents must **not write and
+execute new** Python scripts or ad-hoc download/run shell scripts for agent
+work (supply-chain risk on the Python ecosystem). Prefer Rust tools and named
+product commands (`cargo`, `just`, tests, `rg`). Shell tool ≠ inventing a
+script. Full tables and exceptions: host `~/.grok/AGENTS.md` § *Prefer Rust
+tools; do not invent…*; product `AGENTS.md` hard constraint 6; skill-rules
+rule 17. This brief remains the **migration inventory** (P0–P3 ports), not
+a substitute for that ban.
 
 ## Related
 

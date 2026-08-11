@@ -170,6 +170,12 @@ define_recv_optional_windows_signal!(
 /// Request the event loop's graceful quit when it is registered and the TUI still owns the terminal.
 /// Otherwise hard-exit (agent mode, or a signal after teardown already started).
 fn request_graceful_or_exit(code: i32) {
+    // Write cancel-resume **before** notify / hard-exit. Mid-turn killall is
+    // one SIGTERM; if the event loop is wedged or a second signal force-exits
+    // before Action::Quit, the armed prompt text must already be on disk.
+    // Best-effort; idle / unarmed turns leave no marker.
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::write_armed_process_shutdown_cancel_resume();
     let notify = QUIT_NOTIFY.lock().clone();
     if TERMINAL_OWNED.load(Ordering::Acquire)
         && let Some(n) = notify

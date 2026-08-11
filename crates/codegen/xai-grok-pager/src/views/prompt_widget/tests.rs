@@ -5290,6 +5290,69 @@
         assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "\u{256e}");
     }
 
+    /// Named contract: when `show_borders` is false (inline / minimal-style),
+    /// the rounded box outline is gone but the model · flags caption still
+    /// paints on the info row. Plan surfaces keep borders on; this is the
+    /// widget capability for chromeless embeds only.
+    #[test]
+    fn no_outline_still_paints_info_caption_without_box_glyphs() {
+        use crate::views::prompt_widget::{PromptFlag, PromptInfo};
+
+        let mut pw = PromptWidget::new();
+        let style = PromptStyle {
+            focused: true,
+            chrome: true,
+            show_borders: false,
+            show_prefix: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let flags = [PromptFlag {
+            text: "plan approval",
+            color: None,
+            bold: false,
+        }];
+        let info = PromptInfo {
+            model_name: "Grok 4.5 (high)",
+            flags: &flags,
+            multiline: false,
+            usage_warning: None,
+            usage_warning_critical: false,
+        };
+        let area = Rect::new(0, 0, 60, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, Some(&info), None);
+
+        // No box outline glyphs anywhere in the prompt rect.
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let sym = buf.cell((x, y)).map(|c| c.symbol()).unwrap_or("");
+                assert!(
+                    !matches!(
+                        sym,
+                        "\u{256d}" | "\u{256e}" | "\u{2570}" | "\u{256f}" | "\u{2502}"
+                    ),
+                    "outline glyph {sym:?} must not paint when show_borders is false at ({x},{y})"
+                );
+            }
+        }
+
+        // Info caption survives without the bottom border rule.
+        let bottom = buf_text_at(&buf, 0, area.width, area.height - 1);
+        assert!(
+            bottom.contains("Grok 4.5 (high)"),
+            "model caption must remain without outline; row={bottom:?}"
+        );
+        assert!(
+            bottom.contains("plan approval"),
+            "mode flag must remain without outline; row={bottom:?}"
+        );
+        assert!(
+            !bottom.contains('\u{2500}'),
+            "bottom row must not be a ─ border rule when outline is off; row={bottom:?}"
+        );
+    }
+
     /// Focused composer paints a Human-green solid/empty block caret and hides
     /// the terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
     ///
@@ -5500,4 +5563,178 @@
         let event = pw.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::SUPER));
         assert_eq!(event, PromptEvent::Edited);
         assert_eq!(pw.textarea.text(), "hello\n");
+    }
+
+    /// Left-arrow through draft must never insert the prompt prefix glyph into
+    /// the editable buffer (prefix is chrome only).
+    #[test]
+    fn left_arrow_does_not_insert_prompt_prefix_into_buffer() {
+        let mut pw = PromptWidget::new();
+        let draft = "hello world multi line";
+        pw.set_text(draft);
+        pw.set_cursor(pw.text().len());
+        for _ in 0..40 {
+            let _ = pw.handle_key(&crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Left,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        assert_eq!(pw.text(), draft, "Left must only move the caret");
+        assert!(
+            !pw.text().contains('\u{276f}') && !pw.text().contains('❯'),
+            "prompt arrow must not enter the buffer"
+        );
+        // ASCII fallback form of the prefix also stays out of the buffer.
+        assert!(
+            !pw.text().starts_with("> ") && !pw.text().contains("\n> "),
+            "legacy > prefix must not enter the buffer"
+        );
+    }
+
+    /// Mid-buffer space under the caret must keep the space grapheme (reverse
+    /// plate), never the solid `█` block glyph. Dogfood: arrowing left over
+    /// spaces painted a green block that looked like a stray character.
+    #[test]
+    fn mid_buffer_space_caret_does_not_paint_solid_block_glyph() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        let canvas = theme.bg_base;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let area = Rect::new(0, 0, 4, 1);
+        let mut buf = Buffer::empty(area);
+        buf.cell_mut((1, 0)).expect("cell").set_symbol(" ");
+        // Mid-buffer: allow_block_glyph=false.
+        super::paint_composer_box_cursor_phase(&mut buf, 1, 0, &theme, canvas, true, false);
+        let cell = buf.cell((1, 0)).expect("space under caret");
+        assert_eq!(
+            cell.symbol(),
+            " ",
+            "mid-buffer space must keep space, not solid block; got {:?}",
+            cell.symbol()
+        );
+        assert_ne!(
+            cell.symbol(),
+            crate::glyphs::cursor_box_filled(),
+            "must not paint █ into mid-draft spaces"
+        );
+        assert_eq!(cell.bg, accent, "solid reverse plate on the space");
+    }
+
+    /// Chrome + prefix path: after Left moves the caret, previous cells lose
+    /// solid green `█` residue and the buffer still holds only draft text.
+    #[test]
+    fn left_arrow_with_chrome_prefix_clears_caret_residue() {
+        use crate::theme::cache;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let style = PromptStyle {
+            focused: true,
+            chrome: true,
+            show_borders: true,
+            show_prefix: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 48, 6);
+        let mut pw = PromptWidget::new();
+        pw.set_text("hello world");
+        pw.set_cursor(pw.text().len());
+
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        // Arrow left over the whole draft via the real key path.
+        for _ in 0..pw.text().len() {
+            assert_eq!(
+                pw.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+                PromptEvent::Edited
+            );
+            pw.draw(&mut buf, area, None, &style, None, None);
+        }
+        assert_eq!(pw.cursor(), 0);
+        assert_eq!(pw.text(), "hello world");
+        assert!(
+            !pw.text().contains('\u{276f}'),
+            "prefix glyph must stay out of the buffer after Left"
+        );
+
+        // Cursor at buffer start is on 'h' (grapheme path) — no solid █ in
+        // the textarea body.
+        let ta = pw.textarea_area();
+        let filled = crate::glyphs::cursor_box_filled();
+        let mut solid_block_count = 0u32;
+        for y in ta.y..ta.y.saturating_add(ta.height) {
+            for x in ta.x..ta.x.saturating_add(ta.width) {
+                if let Some(cell) = buf.cell((x, y))
+                    && cell.symbol() == filled
+                {
+                    solid_block_count += 1;
+                }
+            }
+        }
+        assert_eq!(
+            solid_block_count, 0,
+            "Left through draft must not leave solid green █ in the textarea body"
+        );
+    }
+
+    /// Ctrl+Home / Ctrl+PageUp → buffer start; Ctrl+End / Ctrl+PageDown → end
+    /// through the prompt widget key path (multi-line draft).
+    #[test]
+    fn ctrl_home_end_page_move_prompt_cursor_to_buffer_ends() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("one\ntwo\nthree four");
+        let end = pw.text().len();
+        pw.set_cursor(end / 2);
+
+        assert_eq!(
+            pw.handle_key(&KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL)),
+            PromptEvent::Edited
+        );
+        assert_eq!(pw.cursor(), 0, "Ctrl+Home → buffer start");
+        assert_eq!(pw.text(), "one\ntwo\nthree four");
+
+        assert_eq!(
+            pw.handle_key(&KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)),
+            PromptEvent::Edited
+        );
+        assert_eq!(pw.cursor(), end, "Ctrl+End → buffer end");
+
+        pw.set_cursor(end / 2);
+        assert_eq!(
+            pw.handle_key(&KeyEvent::new(KeyCode::PageUp, KeyModifiers::CONTROL)),
+            PromptEvent::Edited
+        );
+        assert_eq!(pw.cursor(), 0, "Ctrl+PageUp → buffer start");
+
+        assert_eq!(
+            pw.handle_key(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::CONTROL)),
+            PromptEvent::Edited
+        );
+        assert_eq!(pw.cursor(), end, "Ctrl+PageDown → buffer end");
+
+        // Bare Home remains line-local on the last line.
+        pw.set_cursor(end);
+        assert_eq!(
+            pw.handle_key(&KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            PromptEvent::Edited
+        );
+        let last_line_start = pw.text().rfind('\n').map(|i| i + 1).unwrap_or(0);
+        assert_eq!(pw.cursor(), last_line_start);
+        assert_ne!(pw.cursor(), 0, "bare Home is not whole-buffer");
     }

@@ -392,6 +392,8 @@ impl AgentView {
         // File-backed SoT: pull latest plan.md before painting so the panel
         // and comment anchors track disk rewrites while approval is parked.
         self.refresh_file_backed_plan_from_disk();
+        // Park before open so feedback_active / footer CTAs arm on this open.
+        self.park_local_idle_plan_decision_if_needed();
         let body = self.plan_body_for_preview();
         let approval_empty = self
             .plan_approval_view
@@ -419,17 +421,13 @@ impl AgentView {
         } else {
             "plan.md".to_string()
         });
-        // Plan approval opens as a right-hand side panel (option B) so chat
-        // stays visible; casual plan preview keeps the full overlay. Force-
-        // modal (`plan_approval_park=modal`) upgrades to fullscreen after
-        // reopen in `handle_exit_plan_mode`.
-        if self.plan_approval_view.is_some() {
-            viewer.side_panel = true;
-            viewer.fullscreen = false;
-        } else {
-            viewer.side_panel = false;
-            viewer.fullscreen = true;
-        }
+        // Casual `/view-plan` and approval soft-park both open as a right-hand
+        // side panel (half screen) so chat stays visible. Fullscreen is opt-in
+        // via Ctrl+F / the enlarge control. Force-modal
+        // (`plan_approval_park=modal`) upgrades to fullscreen after reopen in
+        // `handle_exit_plan_mode`.
+        viewer.side_panel = true;
+        viewer.fullscreen = false;
         {
             let plan = viewer.plan_mut();
             plan.show_action_buttons = self.plan_approval_view.is_none();
@@ -794,6 +792,7 @@ impl AgentView {
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
+        let is_local_idle = pav.is_local_idle_decision;
         let formatted = pav.format_feedback_with_selection(feedback.as_deref(), selection.as_ref());
         let to_send = if formatted.trim().is_empty() {
             feedback
@@ -824,6 +823,24 @@ impl AgentView {
                 action: "question".to_string(),
             });
         }
+
+        if is_local_idle || !sent_acp {
+            let q = to_send
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Please answer the operator's questions about the plan.");
+            let mut text = format!(
+                "The user has clarifying questions about the plan (answer only; do not \
+                 rewrite plan.md unless they ask):\n\n{q}\n\nWhen done answering, call \
+                 exit_plan_mode again if the plan is still ready for approval."
+            );
+            if !images.is_empty() {
+                text.push_str("\n\nScreenshot(s) attached for plan feedback.");
+            }
+            return InputOutcome::Action(Action::Interject { text, images });
+        }
+
         if !images.is_empty() {
             return InputOutcome::Action(Action::Interject {
                 text: "Screenshot(s) attached for plan feedback.".to_owned(),
@@ -1022,14 +1039,8 @@ impl AgentView {
                         PlanPromptIntent::ApproveNotes => self.approve_plan(),
                     };
                 }
-                // Soft-park / Preview without panel: do not approve on empty
-                // Enter — mouse / panel only (L1 modal-free).
-                if self.line_viewer.is_none() {
-                    return InputOutcome::Changed;
-                }
-                if text.trim().is_empty() && !has_comments && !has_images {
-                    return self.approve_plan();
-                }
+                // Soft-park / Preview without Prompt focus: do not approve on
+                // empty Enter — mouse / empty-prompt `a` only (L1 modal-free).
                 return InputOutcome::Changed;
             }
             EnterOutcome::PassThrough => {}
@@ -1578,6 +1589,7 @@ mod plan_approval_enter_tests {
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
             Some("Type revision notes, or press a to approve.")
         );
+        buf
     }
     #[test]
     fn enter_with_revision_text_requests_changes() {
@@ -2363,6 +2375,13 @@ mod plan_approval_optimistic_mode_tests {
             &mut agent,
             false,
         );
+
+        // Turn-end + open + draw (dogfood re-park sources).
+        agent.surface_idle_plan_review_if_needed();
+        agent.dismiss_plan_approval_after_turn_if_stale();
+        agent.show_plan_preview();
+        let _buf = draw_agent_hits(&mut agent, 120, 40);
+
         assert!(
             !plan_review_closed_rows(&agent)
                 .iter()
@@ -2505,6 +2524,13 @@ mod plan_approval_optimistic_mode_tests {
             agent.plan_approval_view.is_some(),
             "review stays mounted until ExecutePlan is accepted"
         );
+        // Either Revising label (generic wait overlay) or real activity, plus
+        // cancel affordance when the turn is running.
+        let has_revising = full.contains("Revising") || full.contains("revising");
+        let has_activityish = full.contains("Waiting")
+            || full.contains("Thinking")
+            || full.contains("Running")
+            || has_revising;
         assert!(
             plan_review_closed_rows(&agent).is_empty(),
             "approved row must not land before dispatch accepts"

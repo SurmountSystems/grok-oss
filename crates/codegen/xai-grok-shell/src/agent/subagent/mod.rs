@@ -794,9 +794,10 @@ async fn read_parent_sampling_config(
             );
             let inherited = xai_grok_sampler::SamplerConfig {
                 api_key: creds.api_key,
-                // Keep dual-auth failover so prefer_live / mid-request hop can
-                // leave SuperGrok for the console key (was stripped → subagents
-                // stayed on SuperGrok extras while the parent had already hopped).
+                // Keep dual-auth failover list so prefer_live can switch to the
+                // console key after SuperGrok is out of allowance (stripping the
+                // list left subagents on SuperGrok $ extras after the parent
+                // already moved to console).
                 failover_api_keys: creds.failover_api_keys,
                 failover_base_url: creds.failover_base_url,
                 session_base_url: creds.session_base_url,
@@ -941,7 +942,36 @@ fn resolve_model_override_to_config(
     };
     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
     let has_session_key = session_key.is_some();
-    let mut credentials = resolve_credentials(&entry, session_key);
+    // Same dual-auth rank as main sampling: preferred_method + auto_use_included_limits
+    // so a model override cannot re-introduce console keys while SuperGrok
+    // included weekly still has headroom (limits-before-credits).
+    // Prefer live parent `agent_config` (spawn snapshot) over re-loading disk
+    // config. When both are missing, fail closed (auto rank while a SuperGrok
+    // session is live). When parent sampling is already SuperGrok-session-only
+    // (no console keys in the list), do not re-queue console for the override.
+    let disk_flags = crate::config::load_effective_config()
+        .ok()
+        .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
+        .map(|c| {
+            (
+                c.grok_com_config.preferred_method,
+                c.grok_com_config.auto_use_included_limits,
+            )
+        });
+    let parent_supergrok_session_only =
+        parent_sampling_is_supergrok_session_only(&ctx.sampling_config, session_key);
+    let (preferred, auto_use_included_limits) = subagent_override_auth_rank_flags(
+        ctx.agent_config.as_ref(),
+        disk_flags,
+        has_session_key,
+        parent_supergrok_session_only,
+    );
+    let mut credentials = resolve_credentials_preferring_with_rank(
+        &entry,
+        session_key,
+        preferred,
+        auto_use_included_limits,
+    );
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;
     let mut config = sampling_config_for_model(

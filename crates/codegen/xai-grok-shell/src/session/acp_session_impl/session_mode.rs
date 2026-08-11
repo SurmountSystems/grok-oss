@@ -22,9 +22,14 @@ pub(super) fn session_mode_id_from_prompt_mode(prompt_mode: PromptMode) -> acp::
 /// Pass-through twin: no toolset in this build carries a plan-gated tool.
 pub(super) fn filter_cursor_tools_by_plan_mode(
     defs: Vec<ToolDefinition>,
-    _plan_active: bool,
+    plan_active: bool,
 ) -> Vec<ToolDefinition> {
-    defs
+    if !plan_active {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|d| !is_plan_mode_blocked_ask_user_tool_name(d.function.name.as_str()))
+        .collect()
 }
 impl SessionActor {
     pub(super) fn apply_prompt_modes_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {

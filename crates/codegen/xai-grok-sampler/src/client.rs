@@ -899,6 +899,12 @@ impl SamplingClient {
                 ));
             }
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                self.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected): {message}"
+                )));
+            }
             return Err(SamplingError::Api {
                 status,
                 message,
@@ -1363,6 +1369,13 @@ impl SamplingClient {
             }
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                self.record_401_attribution(crate::attribution::SamplingConsumer::Responses);
+                let endpoint = self.endpoint("responses");
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected) from {endpoint}: {message}"
+                )));
+            }
             tracing::warn!(
                 status = %status,
                 error_message = %message,
@@ -1722,6 +1735,13 @@ impl SamplingClient {
             }
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
+            if is_forbidden_credentials_rejection(status, &message) {
+                self.record_401_attribution(crate::attribution::SamplingConsumer::Messages);
+                let endpoint = self.endpoint("messages");
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (token rejected) from {endpoint}: {message}"
+                )));
+            }
             tracing::warn!(
                 status = %status,
                 error_message = %message,

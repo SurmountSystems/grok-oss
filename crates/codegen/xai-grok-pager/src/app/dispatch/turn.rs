@@ -184,7 +184,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 );
                 agent.cancel_turn_view = Some(crate::views::modal::CancelTurnViewState {
                     active_idx: 0,
-                    running_count,
+                    running_count: running_subagent_count,
                 });
                 // Default focus to the picker so keyboard up/down navigates options immediately
                 // With the scrollback pane focused (e.g. browsing history) the modal would open but keys would still go to scrollback.
@@ -205,6 +205,28 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     )
 }
 
+/// Kill every running standalone (non-workflow) subagent on this agent.
+/// Used by idle stop chrome and cancel-panel choices when no parent turn runs.
+fn kill_running_standalone_subagents(agent: &mut crate::app::agent_view::AgentView) -> Vec<Effect> {
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    let mut effects = Vec::new();
+    for info in agent.subagent_sessions.values_mut() {
+        if info.is_running() && info.workflow_run_id.is_none() {
+            info.pending_kill = true;
+            info.kill_requested_at = Some(Instant::now());
+            effects.push(Effect::KillSubagent {
+                session_id: session_id.clone(),
+                subagent_id: info.subagent_id.to_string(),
+            });
+        }
+    }
+    agent.cancel_turn_view = None;
+    agent.cancel_turn_buttons.clear();
+    effects
+}
+
 pub(super) fn dispatch_cancel_turn_choice(
     app: &mut AppView,
     choice: crate::views::modal::CancelTurnChoice,
@@ -214,6 +236,15 @@ pub(super) fn dispatch_cancel_turn_choice(
         choice,
         CancelTurnChoice::StopRunning | CancelTurnChoice::AlwaysStop
     );
+
+    // Capture whether a parent turn is still running before closing the panel.
+    let turn_running = if let ActiveView::Agent(id) = app.active_view {
+        app.agents
+            .get(&id)
+            .is_some_and(|a| a.session.state.is_turn_running())
+    } else {
+        false
+    };
 
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
@@ -687,10 +718,67 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
             && agent.session.current_prompt_id.is_none();
         if clean_success {
             crate::app::auto_implement::on_successful_turn_end(agent);
+            finalize_cancel_resume_after_successful_turn(
+                agent,
+                cancel_resume_keep_text.as_deref(),
+                cancel_resume_keep_pid.as_deref(),
+            );
+        } else if !was_cancelling
+            && matches!(pending.stop_reason.as_deref(), Some("rate_limit"))
+            && agent.session.current_prompt_id.is_none()
+            && !agent.has_live_background_subagents()
+        {
+            // Rate-limit terminal: drop the eager turn-start marker (dedicated
+            // paywall / retry UX owns the next step). User cancel leaves the
+            // marker (`was_cancelling`). Error terminals re-arm below.
+            clear_cancel_resume_marker_for_session(&agent.session);
+        } else if !was_cancelling
+            && matches!(pending.stop_reason.as_deref(), Some("error"))
+            && agent.session.current_prompt_id.is_none()
+        {
+            // Error terminal: ensure marker on disk (reopen / rebuild auto-
+            // resume). Prefer kept whole-turn text; history recovery still
+            // covers no-marker sessions via durable stop_reason error.
+            if let Some(text) = cancel_resume_keep_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Some(marker) =
+                    xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+                        text,
+                        cancel_resume_keep_pid.as_deref(),
+                        now,
+                    )
+                {
+                    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+                    if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.as_ref()) {
+                        match xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+                            &cwd, sid, &marker,
+                        ) {
+                            Ok(()) => tracing::info!(
+                                session = %sid,
+                                prompt_len = text.len(),
+                                "canceled_turn_resume: marker written (error terminal reconcile)"
+                            ),
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                session = %sid,
+                                "canceled_turn_resume: error-terminal reconcile write failed"
+                            ),
+                        }
+                    }
+                }
+            }
         }
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         effects.extend(drain.effects);
         drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
+        if let Some(toast) = soft_stop_toast {
+            // Prefer agent toast so we do not reborrow AppView while agent is live.
+            agent.show_toast(&toast);
+        }
     }
     for (id, page_flip_entry) in drained_ids {
         note_peek_page_flip(app, id, page_flip_entry);

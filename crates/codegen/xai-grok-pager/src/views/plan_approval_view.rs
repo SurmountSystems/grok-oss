@@ -104,6 +104,13 @@ pub struct PlanApprovalViewState {
     pub commenting_range: Option<std::ops::Range<usize>>,
 
     pub stashed_feedback_prompt: Option<StashedPrompt>,
+
+    /// Local idle decision surface (no shell reverse-request channel).
+    ///
+    /// Parked when plan mode is still on with a plan body but `exit_plan_mode`
+    /// is not awaiting. Approve / Revise / Quit drive SetPlanMode / Interject
+    /// instead of ACP `x.ai/exit_plan_mode` outcomes.
+    pub is_local_idle_decision: bool,
 }
 
 impl PlanApprovalViewState {
@@ -166,6 +173,31 @@ impl PlanApprovalViewState {
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            is_local_idle_decision: false,
+        }
+    }
+
+    /// Local decision park when plan mode is idle with a plan body but no
+    /// live `exit_plan_mode` reverse-request. Same side-panel CTAs; decisions
+    /// leave plan mode / Interject rather than ACP outcomes.
+    pub fn for_idle_decision(plan_content: Option<String>) -> Self {
+        let plan_content = plan_content.filter(|s| !s.trim().is_empty());
+        let has_plan = plan_content.is_some();
+        Self {
+            tool_call_id: IDLE_PLAN_DECISION_TOOL_CALL_ID.to_owned(),
+            has_plan,
+            plan_content,
+            source: PlanReviewSource::FileBacked,
+            stashed_prompt: StashedPrompt::default(),
+            response_tx: None,
+            focus: PlanApprovalFocus::Prompt,
+            prompt_intent: PlanPromptIntent::Revise,
+            comments: Vec::new(),
+            next_comment_id: 0,
+            editing_comment_id: None,
+            commenting_range: None,
+            stashed_feedback_prompt: None,
+            is_local_idle_decision: true,
         }
     }
 
@@ -568,6 +600,41 @@ mod tests {
             plan_approval_status_label(false),
             "No plan written: approve or request changes"
         );
+        assert!(
+            PLAN_IDLE_REVIEW_TOAST.contains("Side panel open")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Approve")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Revise")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Shift+Tab"),
+            "idle-review toast must name panel + decision CTAs + exit; got {PLAN_IDLE_REVIEW_TOAST:?}"
+        );
+        assert!(
+            PLAN_IDLE_REVIEW_STATUS.contains("Click")
+                && PLAN_IDLE_REVIEW_STATUS.contains("/view-plan"),
+            "idle-review status must be click-discoverable; got {PLAN_IDLE_REVIEW_STATUS:?}"
+        );
+        assert_eq!(
+            PlanFeedbackInFlight::Revising.status_label(),
+            PLAN_REVISING_STATUS
+        );
+        assert_eq!(
+            PlanFeedbackInFlight::Clarifying.status_label(),
+            PLAN_WAITING_UPDATED_STATUS
+        );
+        assert!(
+            PLAN_REVISING_STATUS.contains("Revising")
+                && !PLAN_REVISING_STATUS.contains("Click")
+                && !PLAN_REVISING_STATUS.contains("/view-plan"),
+            "revising status must not be idle click ceremony; got {PLAN_REVISING_STATUS:?}"
+        );
+        assert!(
+            PLAN_WAITING_UPDATED_STATUS.contains("Waiting")
+                && !PLAN_WAITING_UPDATED_STATUS.contains("Click"),
+            "waiting status must not be idle click ceremony; got {PLAN_WAITING_UPDATED_STATUS:?}"
+        );
+        assert!(
+            PLAN_FEEDBACK_QUEUE_TOAST.to_lowercase().contains("queue"),
+            "queue toast must mention queue; got {PLAN_FEEDBACK_QUEUE_TOAST:?}"
+        );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());
         assert!(
@@ -607,6 +674,27 @@ mod tests {
             !empty.contains("Approve ·") && !empty.contains("a/A/?/s/q"),
             "empty card must not fake button chrome; got {empty:?}"
         );
+    }
+
+    /// Phase P: operator-facing card/placeholder copy must distinguish revise
+    /// (rewrites the plan) from clarify (answers without rewriting).
+    #[test]
+    fn plan_card_copy_distinguishes_revise_from_clarify() {
+        assert!(
+            PLAN_CARD_CTAS.contains("rewrites the plan"),
+            "card pointer must say revise rewrites the plan; got {PLAN_CARD_CTAS:?}"
+        );
+        assert!(
+            PLAN_CARD_CTAS.contains("without rewriting"),
+            "card pointer must say clarify answers without rewriting; got {PLAN_CARD_CTAS:?}"
+        );
+        assert!(
+            EMPTY_PLAN_PLACEHOLDER.contains("rewrites the")
+                && EMPTY_PLAN_PLACEHOLDER.contains("without rewriting"),
+            "empty-plan body must name rewrite vs answer-only; got {EMPTY_PLAN_PLACEHOLDER:?}"
+        );
+        let card = format_parked_plan_card(Some("# Title"));
+        assert!(card.contains("rewrites the plan") && card.contains("without rewriting"));
     }
 
     #[test]

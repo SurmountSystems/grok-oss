@@ -2,9 +2,13 @@
 //!
 //! Multi-line detail for spend meters. Session token/cost stays on `/usage`
 //! (`/cost`). Footer stays one-line; this is the full snapshot.
+//!
+//! - `/limits` — dismissible popup modal (live countdown).
+//! - `/limits --json` — pretty JSON into conversation scrollback (same shape
+//!   as CLI `grok limits --json`; bypasses the modal).
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 
 /// Show SuperGrok + console limits detail from cached billing.
 pub struct LimitsCommand;
@@ -19,7 +23,7 @@ impl SlashCommand for LimitsCommand {
     }
 
     fn usage(&self) -> &str {
-        "/limits"
+        "/limits [--json]"
     }
 
     /// Works once an agent view exists (billing cache is app/agent scoped).
@@ -27,11 +31,28 @@ impl SlashCommand for LimitsCommand {
         true
     }
 
+    fn takes_args(&self) -> bool {
+        true
+    }
+
+    fn suggest_args(&self, _ctx: &AppCtx, _args_query: &str) -> Option<Vec<ArgItem>> {
+        Some(vec![ArgItem {
+            display: "--json".into(),
+            match_text: "--json".into(),
+            insert_text: "--json".into(),
+            description: "Print JSON to chat (same as grok limits --json)".into(),
+        }])
+    }
+
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        if !args.trim().is_empty() {
-            return CommandResult::Error("Usage: /limits (no arguments)".to_string());
+        let arg = args.trim();
+        match arg {
+            "" => CommandResult::Action(Action::ShowLimits),
+            "--json" | "json" => CommandResult::Action(Action::ShowLimitsJson),
+            _ => CommandResult::Error(format!(
+                "Unknown argument: {arg}. Use /limits or /limits --json"
+            )),
         }
-        CommandResult::Action(Action::ShowLimits)
     }
 }
 
@@ -77,11 +98,27 @@ mod tests {
     }
 
     #[test]
-    fn limits_command_rejects_args() {
+    fn limits_json_flag_emits_show_limits_json_action() {
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        for args in ["--json", "json", "  --json  "] {
+            let result = LimitsCommand.run(&mut ctx, args);
+            assert!(
+                matches!(result, CommandResult::Action(Action::ShowLimitsJson)),
+                "expected ShowLimitsJson for {args:?}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn limits_command_rejects_unknown_args() {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
         let result = LimitsCommand.run(&mut ctx, "extra");
-        assert!(matches!(result, CommandResult::Error(_)));
+        assert!(
+            matches!(result, CommandResult::Error(ref e) if e.contains("--json")),
+            "expected usage error mentioning --json, got {result:?}"
+        );
     }
 
     #[test]

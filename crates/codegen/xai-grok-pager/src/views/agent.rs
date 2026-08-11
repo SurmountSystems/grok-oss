@@ -748,6 +748,7 @@ pub(crate) fn build_hints(
     vim_mode: bool,
     surface: ViewSurface,
     is_turn_running: bool,
+    has_live_background_subagents: bool,
     esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     queue_mutation: QueueMutation,
@@ -837,17 +838,29 @@ pub(crate) fn build_hints(
             } else {
                 crate::key!(Enter, SHIFT)
             };
-            let submit_label = if is_turn_running { "queue" } else { "send" };
+            // Enter label matches dispatch (send / queue / soft-interject).
+            // Live background subagents do not force queue (pass false).
+            let enter_mode = enter_prompt_mode(
+                prompt.can_send(),
+                is_turn_running,
+                false,
+                has_queued_follow_up,
+            );
             if let Some(key) = registry.key_for(ActionId::SendPrompt) {
                 if prompt.paste_element_at_cursor().is_some() {
                     hints.push(HintItem::new(key, "expand"));
-                } else if multiline_mode && prompt.can_send() {
-                    hints.push(HintItem::new(newline_key, submit_label));
-                } else if prompt.can_send() {
-                    hints.push(HintItem::new(key, submit_label));
-                } else if is_turn_running && has_queued_follow_up {
-                    // Empty Enter mid-turn soft-interjects the top queued row.
-                    hints.push(HintItem::new(key, "interject"));
+                } else if let Some(submit_label) = enter_mode.footer_label() {
+                    if multiline_mode && prompt.can_send() {
+                        // Multiline: modified Enter submits; bare Enter is newline
+                        // (except empty mid-turn queue soft-interject, still bare Enter).
+                        if matches!(enter_mode, EnterPromptMode::Interject) {
+                            hints.push(HintItem::new(key, submit_label));
+                        } else {
+                            hints.push(HintItem::new(newline_key, submit_label));
+                        }
+                    } else {
+                        hints.push(HintItem::new(key, submit_label));
+                    }
                 }
             }
             if !multiline_mode && prompt.can_send() {
@@ -880,8 +893,12 @@ pub(crate) fn build_hints(
                     continue;
                 }
                 // Live expand vs collapse verb from scrollback state — not the
-                // static ActionDef "expand/collapse thinking" label.
+                // static ActionDef "expand/collapse thinking" label. Hidden when
+                // always-expand-thinking is on (chord is pointless; no dead label).
                 if def.id == ActionId::ExpandAllThinking {
+                    if crate::appearance::cache::load_always_expand_thinking() {
+                        continue;
+                    }
                     let mut item = def.hint();
                     item.label = std::borrow::Cow::Borrowed(thinking_label);
                     hints.push(item);
@@ -973,7 +990,9 @@ pub(crate) fn build_hints(
                         hints.push(HintItem::new(key, "expand"));
                     }
                 }
-                if let Some(key) = registry.key_for(ActionId::ExpandAllThinking) {
+                if !crate::appearance::cache::load_always_expand_thinking()
+                    && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
+                {
                     hints.push(HintItem::new(key, thinking_label));
                 }
                 if !user_collapsed {
@@ -1022,6 +1041,7 @@ pub(crate) fn build_hints(
                 hints.push(HintItem::paired(l, h, "turn").pinned());
             }
             if !selected_is_user_prompt
+                && !crate::appearance::cache::load_always_expand_thinking()
                 && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
             {
                 hints.push(HintItem::new(key, thinking_label));
@@ -1060,9 +1080,25 @@ pub(crate) fn build_hints(
         }
         hints.push(hint);
     }
+    // Work B: advertise global pause while a turn runs or background subagents
+    // are live (same live-work surface as status-row pause chrome). Soft stop
+    // stays chord-only (no footer button). Live children do not force queue.
+    if (is_turn_running || has_live_background_subagents)
+        && let Some(def) = registry.find(ActionId::ToggleGlobalPause)
+    {
+        let mut hint = def.hint();
+        // Short footer label; long_help still names fearless global pause.
+        hint.label = std::borrow::Cow::Borrowed("pause");
+        hints.push(hint);
+    }
     let has_composer_payload = !prompt.text().trim().is_empty() || is_editing_queued;
+    // Soft-interject only while the primary turn is busy (not merely because
+    // background subagents are running).
+    let interject_available =
+        ActionRegistry::interjection_possible(is_turn_running, has_composer_payload)
+            || (is_turn_running && has_queued_follow_up);
     if matches!(active_pane, ActivePane::Prompt)
-        && ActionRegistry::interjection_possible(is_turn_running, has_composer_payload)
+        && interject_available
         && let Some(def) = registry.find(ActionId::InterjectPrompt)
     {
         hints.push(def.hint());
@@ -1165,6 +1201,7 @@ mod tests {
             false,
             false,
             QueueMutation::PerRowKind,
+            false,
             false,
             false,
             false,
@@ -1331,6 +1368,7 @@ mod tests {
             false,
             false,
             QueueMutation::PerRowKind,
+            false,
             false,
             false,
             false,
@@ -1505,6 +1543,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(&search),
         )
     }
@@ -1611,6 +1650,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
         );
         assert!(
@@ -1625,6 +1665,7 @@ mod tests {
     /// focus was still using the registry label).
     #[test]
     fn prompt_ctrl_e_thinking_hint_reflects_expand_or_collapse_state() {
+        crate::appearance::cache::set_always_expand_thinking(false);
         let registry = ActionRegistry::defaults();
         for thinking_label in ["expand thinking", "collapse thinking"] {
             let hints = build_hints(
@@ -1643,6 +1684,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -1673,6 +1715,7 @@ mod tests {
     /// Same contract on scrollback-focused footer (already wired; guard regression).
     #[test]
     fn scrollback_ctrl_e_thinking_hint_reflects_expand_or_collapse_state() {
+        crate::appearance::cache::set_always_expand_thinking(false);
         let registry = ActionRegistry::defaults();
         for thinking_label in ["expand thinking", "collapse thinking"] {
             let hints = build_hints(
@@ -1699,6 +1742,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 None,
             );
             let thinking = hints
@@ -1708,6 +1752,79 @@ mod tests {
             assert_eq!(thinking.label.as_ref(), thinking_label);
             assert_ne!(thinking.label.as_ref(), "expand/collapse thinking");
         }
+    }
+
+    /// Contract: when always_expand_thinking is on, footers omit the Ctrl+E
+    /// expand/collapse thinking affordance (no dead label).
+    #[test]
+    fn always_expand_thinking_hides_ctrl_e_footer_hint() {
+        crate::appearance::cache::set_always_expand_thinking(true);
+        let registry = ActionRegistry::defaults();
+        for pane in [ActivePane::Prompt, ActivePane::Scrollback] {
+            let hints = build_hints(
+                pane,
+                &PromptWidget::default(),
+                &registry,
+                false,
+                None,
+                None,
+                "expand thinking",
+                false,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            assert!(
+                !hints.iter().any(|h| h.label.as_ref().contains("thinking")),
+                "always_expand_thinking must hide Ctrl+E thinking hint on {pane:?}; got {hints:?}"
+            );
+        }
+        crate::appearance::cache::set_always_expand_thinking(false);
+        let hints = build_hints(
+            ActivePane::Prompt,
+            &PromptWidget::default(),
+            &registry,
+            false,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
+        assert!(
+            hints.iter().any(|h| h.label.as_ref().contains("thinking")),
+            "with always_expand_thinking off, Ctrl+E thinking hint must return"
+        );
     }
     fn prompt_hints_with_text(
         multiline_mode: bool,
@@ -1720,6 +1837,20 @@ mod tests {
         multiline_mode: bool,
         prefer_alt_enter_newline: bool,
         is_turn_running: bool,
+    ) -> Vec<HintItem> {
+        prompt_hints_with_text_turn_and_hold(
+            multiline_mode,
+            shift_enter_unavailable,
+            is_turn_running,
+            false,
+        )
+    }
+
+    fn prompt_hints_with_text_turn_and_hold(
+        multiline_mode: bool,
+        shift_enter_unavailable: bool,
+        is_turn_running: bool,
+        has_live_background_subagents: bool,
     ) -> Vec<HintItem> {
         let mut prompt = PromptWidget::default();
         prompt.textarea.insert_str(text);
@@ -1744,6 +1875,7 @@ mod tests {
             true,
             ViewSurface::Root,
             is_turn_running,
+            has_live_background_subagents,
             false,
             QueueMutation::PerRowKind,
             false,
@@ -1805,6 +1937,7 @@ mod tests {
                 true,
                 ViewSurface::Root,
                 true,
+                false,
                 false,
                 true,
                 QueueMutation::PerRowKind,
@@ -1907,6 +2040,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(&search),
         );
         let esc_cancels: Vec<&HintItem> = hints
@@ -1955,6 +2089,7 @@ mod tests {
             true,
             false,
             QueueMutation::PerRowKind,
+            false,
             false,
             false,
             false,

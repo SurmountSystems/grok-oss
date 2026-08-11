@@ -37,8 +37,15 @@ Percent thresholds apply to the *effective* window — with **Economic mode** on
 ### `/economic-mode`
 
 Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing.
-Default **on** for new sessions (`[ui] economic_mode`). Soft-caps context only;
-does not rewrite explicit `/implement --effort`.
+Default **on** for new sessions (`[ui] economic_mode`). Soft-caps the context
+window for compaction and the context bar.
+
+Token Economy may rewrite **implement-loop effort** (skill reviewer fan-out
+1–5, not model reasoning effort) on `/implement`: optional **lock** and
+**min floor** always apply when set; economic mode + cap master still own the
+hard ceiling (default **3**) and desired inject when missing (default **2**).
+Toasts fire when the product rewrites effort. See
+[Configuration → Token Economy](05-configuration.md#token-economy).
 
 ```
 /economic-mode              # toggle this conversation
@@ -174,6 +181,8 @@ Both are real toggles for the permission mode: they stay in the menu, and runnin
 | `/auto` | Auto-review: a classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
 
 Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to Auto-review. `/auto` only appears when the Auto-review permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Auto-review (when enabled) / Always-approve), `Ctrl+O`, or `/settings`.
+
+**Not plan approval:** `/always-approve` does not auto-approve a soft-parked plan. Plan decisions stay on the plan panel CTAs ([Plan mode](19-plan-mode.md#present-is-not-approval)).
 
 ### `/multiline`
 
@@ -426,7 +435,7 @@ Leave a **mid-session operator note** that is **not** a pending main-turn prompt
 ```
 
 - Stores the note on the **current session only** (id, time, text, optional trailing `#tags`).
-- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for on-disk join notes that agents write for other agents.
+- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for short on-disk reports that agents write for other agents.
 - Bare `/note` (or alias `/notes`) lists notes as a system block. `/tasks` also shows a count when notes exist.
 - Full TUI confirms a save with a toast; minimal mode writes a short system line.
 
@@ -443,6 +452,35 @@ Check the current session for terminal, clipboard, color, input, notification, a
 The dual-auth block also lists SuperGrok principal(s) (role + fingerprint only
 when two logins are stored) and console key fingerprints. See
 [Authentication → Two SuperGrok logins](02-authentication.md#two-supergrok-logins-personal--business).
+
+### `/rebuild`
+
+Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances
+on this machine (same user and `GROK_HOME`). Distinct from worktree database
+rebuild and from the SpaceXAI auto-updater channel.
+
+1. Walks up from the process working directory to find a Grok OSS source tree
+   (`justfile` + `crates/codegen/xai-grok-pager-bin`).
+2. Runs `just install` (or fixed `cargo build` + install when `just` is missing)
+   into `${CARGO_HOME:-~/.cargo}/bin/grok-oss`.
+3. Verifies the installed binary's package version + git SHA.
+4. Soft-signals reachable leaders to drain and exit for upgrade (same grace path
+   as update relaunch; clients reconnect and reload the session).
+5. Writes a cooperative relaunch request under `$GROK_HOME` and signals **every
+   other live product TUI** registered in `active_sessions` (`SIGUSR1`) so those
+   windows re-exec onto the new binary with the same session (not only the window
+   that typed `/rebuild`). Mid-turn work uses canceled-turn-on-restart resume.
+6. Re-execs **this** TUI onto the new binary with the same session id when
+   possible. Mid-turn work is canceled with the normal canceled-turn-on-restart
+   resume (re-queue once), not invent success.
+
+CLI equivalent for agents and scripts: `grok-oss rebuild` (and optional
+`--source <dir>`). After a successful rebuild, all active product windows on this
+host should pick up the new binary; the rebuild report lists leaders and peer
+TUI signal outcomes.
+
+See also [Getting Started](01-getting-started.md) install notes and
+`grok-oss update --check` (freshness vs Surmount `main` only; no auto-install).
 
 ### `/release-notes`
 
@@ -506,6 +544,12 @@ Log out and return to the login screen.
 
 View **session** token/cost totals, then SuperGrok billing when the consumer
 surface is visible. Alias: `/cost`.
+
+When free SuperGrok **billing period** bounds are known, also shows **linear-burn
+pacing**: whether free SuperGrok period used % is ahead of or behind linear burn
+for the period (never as dollars). When live sampling is a console key, SuperGrok
+pacing is labeled as not the live principal. Full double-entry books are on
+`/spend` and a section of `/limits`.
 
 ```
 /usage

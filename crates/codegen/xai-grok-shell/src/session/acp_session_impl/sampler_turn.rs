@@ -690,7 +690,28 @@ impl SessionActor {
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         // Refresh the session token before the sampler reads it; gated to sessions that use it.
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
+            // Free SuperGrok period dual-identity rank must drive SessionToken
+            // bearer. Without this, sticky AuthManager Team base keeps sampling
+            // business JWT while rank preferred personal free SuperGrok period.
+            if am.grok_com_config().auto_use_included_limits {
+                let _ = am.align_to_ranked_free_period_primary();
+            }
             let _ = am.auth().await;
+            // Path-trace every SessionToken reconstruct: principal_type + team_id
+            // prove which SuperGrok identity is wire-active (User/personal vs
+            // Team/business) without dumping the JWT. Dogfood for free SuperGrok
+            // period debit needs this next to flat creditUsagePercent evidence.
+            if let Some(trace) = am.session_wire_bearer_trace() {
+                tracing::info!(
+                    ?trace,
+                    "auth: SessionToken wire bearer for free SuperGrok period path"
+                );
+                xai_grok_telemetry::unified_log::info(
+                    "auth: SessionToken wire bearer for free SuperGrok period path",
+                    None,
+                    Some(trace),
+                );
+            }
         }
         // Session path: only seed a wire-valid AT
         // Hard-expired keys must not land in default headers when the resolver has nothing to stamp
@@ -1682,6 +1703,11 @@ impl SessionActor {
             },
         ))
         .await;
+        // Credit-exhausted team 403: plain string data (operator-readable), not
+        // `{"message":"API error (status …)","http_status":403}` envelope only.
+        if credit_exhausted_terminal {
+            return Err(acp::Error::internal_error().data(detailed_message));
+        }
         Err(
             acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
                 detailed_message,

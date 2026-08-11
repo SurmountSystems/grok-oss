@@ -740,6 +740,15 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "auto_run_implement",
             // SHELL-owned economic_mode (Agent; after auto_run_implement).
             "economic_mode",
+            // Token Economy ([token_economy]) — implement-effort policy + pacing.
+            "token_economy.cap_implement_effort_when_economic",
+            "token_economy.max_implement_effort",
+            "token_economy.min_implement_effort",
+            "token_economy.desired_implement_effort",
+            "token_economy.lock_implement_effort",
+            "token_economy.show_period_pacing",
+            "token_economy.local_spend_ledger",
+            "token_economy.reconcile_management_usage",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
@@ -4533,7 +4542,7 @@ fn section_headers_have_blank_line_above_except_first() {
         x: 0,
         y: 0,
         width: 80,
-        height: 60,
+        height: 120,
     };
     let mut buf = Buffer::empty(area);
     let theme = Theme::current();

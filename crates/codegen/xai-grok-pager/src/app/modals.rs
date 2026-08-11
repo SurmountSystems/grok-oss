@@ -394,6 +394,19 @@ impl AgentView {
             }
         }
 
+        // Limits: dismissible meters popup (Esc / q).
+        if let ActiveModal::Limits { state } = modal {
+            use crate::views::limits_modal::{LimitsModalOutcome, handle_limits_key};
+            match handle_limits_key(state, key) {
+                LimitsModalOutcome::Close => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                LimitsModalOutcome::Changed => return InputOutcome::Changed,
+                LimitsModalOutcome::Unchanged => return InputOutcome::Unchanged,
+            }
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let ActiveModal::Settings { state } = modal {
             // Sub-mode short-circuit: FilterFocused, PickingEnum, PickingGroup, and EditingValue handle their own Esc and keystrokes
@@ -486,7 +499,8 @@ impl AgentView {
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
-            | ActiveModal::RememberNoteReview { .. } => unreachable!(),
+            | ActiveModal::RememberNoteReview { .. }
+            | ActiveModal::Limits { .. } => unreachable!(),
         }
     }
 
@@ -2362,6 +2376,18 @@ impl AgentView {
                 );
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
+            } else if let modal::ActiveModal::Limits {
+                state: limits_state,
+            } = active_modal
+            {
+                crate::views::limits_modal::render_limits_modal(
+                    buf,
+                    area,
+                    limits_state,
+                    &theme,
+                    compact,
+                    chrono::Utc::now(),
+                );
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal
