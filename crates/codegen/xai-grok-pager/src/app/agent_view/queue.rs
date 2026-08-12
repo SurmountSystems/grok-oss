@@ -313,6 +313,9 @@ impl AgentView {
 
     /// Send one merged-queue row now (cancel-and-send), by selection id. The
     /// shell cancels the running turn and runs this row as the next turn.
+    ///
+    /// Always surfaces a toast on reject/defer — never a silent no-op when the
+    /// user clicked `[Send now]` or pressed the send-now chord on a row.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
         if !self.session.state.is_turn_running() {
             self.show_toast("No turn running — prompt will send when ready");
@@ -337,6 +340,7 @@ impl AgentView {
                 // `resolve_send_now_awaiting_confirm`).
                 if self.optimistic_queue_ids.contains(&server_id) {
                     self.send_now_awaiting_confirm = Some(server_id);
+                    self.show_toast("Send now armed — waiting for queue confirm");
                     return InputOutcome::Changed;
                 }
                 return InputOutcome::Action(Action::QueueInterjectShared {
@@ -345,6 +349,7 @@ impl AgentView {
                     new_text: None,
                 });
             }
+            self.show_toast("Queued prompt is gone");
             return InputOutcome::Changed;
         }
         // Local rows: only plain prompts / raw skill rows can re-send (others would send display text, not payload).
@@ -358,6 +363,7 @@ impl AgentView {
                 images: prompt.images,
             });
         }
+        self.show_toast("Queued prompt is gone");
         InputOutcome::Changed
     }
 

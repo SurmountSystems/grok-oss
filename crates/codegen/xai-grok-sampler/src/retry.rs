@@ -5,29 +5,21 @@
 //!
 //! # Retry behavior summary
 //!
-//! **Retried** (up to 14 times — attempt [`DEFAULT_MAX_RETRIES`] = 15 is
-//! fatal — ≈5.5 min: every wait, including a server `Retry-After`, is
-//! capped at [`MAX_RETRY_BACKOFF`] and jittered):
-//! - 429 and any 5xx except 525/526 — covers the Cloudflare edge pages
-//!   (520–524 origin unreachable/timed out, 530 edge 1xxx) and upstream
-//!   overload (529). The rule is `RetryPolicy::edge_client`.
+//! **Retried** until success (default budget: [`DEFAULT_MAX_RETRIES`] =
+//! [`u32::MAX`] — effectively unlimited; set `GROK_MAX_RETRIES` to cap):
+//! - 500, 502, 503, 504, 520 (server errors)
 //! - Connection errors (timeout, refused, reset)
 //! - `EventStreamError` / `StreamError` (mid-stream failures)
 //! - `EmptyResponse` (model returned no content/tool calls)
-//!
-//! **Retried with lower cap** ([`RATE_LIMIT_RETRY_THRESHOLD`] = 2):
-//! - 429 (rate limited) — waits the full `Retry-After`, so the attempt
-//!   count is what bounds the total wait
+//! - 429 (rate limited) — honors `Retry-After`, else exponential backoff
 //!
 //! **Special handling**:
 //! - 413 / image processing errors → strip images and retry. Debits the
 //!   retry budget but is never blocked by it; a repeat with nothing left to
 //!   strip is fatal, so at most one strip cycle per request.
 //!
-//! **Not retried** (Fatal immediately):
+//! **Not retried** (Fatal immediately — not fixable by waiting):
 //! - 400, 401, 403, 404, 408, 422 (client errors)
-//! - Cloudflare 525/526 (origin TLS handshake / invalid cert) — a broken
-//!   origin certificate never clears on its own
 //! - `Auth` / `InvalidConfiguration` (credential/config issues)
 //! - `IdleTimeout` (model stuck, retry would stall again)
 //! - `Serialization` (response parsing failure)
@@ -37,33 +29,37 @@
 //! - `false` → Fatal immediately, regardless of status code
 //! - `true` / absent → falls through to status-code logic above
 //!
-//! CCP's header is 429 + any 5xx (`RetryPolicy::server`). Cloudflare's own
-//! 52x pages never carry it, so the client policy above is what applies at
-//! the edge, and 525/526 stay Fatal even if a future header said retry.
+//! Backoff: exponential 2s → 4s → 8s → … capped at
+//! [`MAX_BACKOFF`] (60s) with ±20% jitter. Proxied providers (OpenRouter)
+//! need long tails; unlimited retries + cap keeps pressure reasonable.
 
 use std::time::Duration;
 
-use xai_grok_sampling_types::{SamplingError, is_retryable_api_status};
+use xai_grok_sampling_types::SamplingError;
 
-/// After this many rate-limit (429) retries, escalate to the caller
-/// instead of waiting again. Rate-limit waits can be long and there is
-/// no point burning a long backoff just to be rate-limited again.
-pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
+/// Legacy name: rate-limit retries used to stop early. With unlimited
+/// defaults this matches [`DEFAULT_MAX_RETRIES`] so 429s keep retrying.
+pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = u32::MAX;
 
-/// Default retry budget when no env or model override is set: at most 14
-/// retries (the attempt reaching this count is fatal). With the 30s cap:
-/// retries 1-4 exponential (2+4+8+16s ≈ 30s), 5-14 flat ~30s (≈ 5 min) —
-/// ≈ 5.5 min total.
-pub const DEFAULT_MAX_RETRIES: u32 = 15;
+/// Default max retries: effectively unlimited. Transient proxy/upstream
+/// failures keep retrying with exponential backoff until success or the
+/// user cancels. Override with `GROK_MAX_RETRIES` or per-model config.
+pub const DEFAULT_MAX_RETRIES: u32 = u32::MAX;
 
-/// Longest single wait on the generic retry path — the exponential-backoff
-/// ceiling, and the clamp for a server `Retry-After`. Cloudflare answers 52x
-/// with `Retry-After: 60`–`120`; honoring that verbatim across 14 retries
-/// would stall a turn ~28 min instead of the ~5.5 min budget above. The 429
-/// path deliberately waits the full `Retry-After` instead, bounded by
-/// [`RATE_LIMIT_RETRY_THRESHOLD`] attempts (and by the parse-level 120s cap
-/// on the header).
-pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+/// Ceiling for **jittered exponential** backoff between retries when the
+/// server did **not** send `Retry-After`. Shared / server-driven waits are
+/// uncapped by default (see `grok-rate-limit` and `extract_retry_after`).
+///
+/// Override with `GROK_MAX_BACKOFF_SECS` if needed; `0` or unset uses this default.
+pub const MAX_BACKOFF_SECS: u64 = 60;
+
+fn max_backoff_secs() -> u64 {
+    std::env::var("GROK_MAX_BACKOFF_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(MAX_BACKOFF_SECS)
+}
 
 /// Resolve max API retries from an optional env override, model config,
 /// or default ([`DEFAULT_MAX_RETRIES`]).
@@ -83,6 +79,11 @@ pub fn resolve_max_retries(model_max_retries: Option<u32>) -> u32 {
     resolve_max_retries_with_env(env_override.as_deref(), model_max_retries)
 }
 
+/// Whether the retry budget is treated as unlimited (no hard stop).
+pub fn is_unlimited_retries(max_retries: u32) -> bool {
+    max_retries == u32::MAX
+}
+
 /// Backoff for doom-loop resamples: near-immediate with a small jitter.
 /// Loops are stochastic at sampling temperature, so a fresh sample is the
 /// remedy — waiting buys nothing beyond de-syncing concurrent resamples.
@@ -98,26 +99,17 @@ pub fn doom_loop_backoff(retry_count: u32) -> Duration {
     Duration::from_millis(hasher.finish() % 251)
 }
 
-/// Exponential backoff (2s, 4s, 8s, ..., capped at [`MAX_RETRY_BACKOFF`])
+/// Exponential backoff (2s, 4s, 8s, ..., capped at [`MAX_BACKOFF_SECS`])
 /// with +/-20% jitter to prevent thundering-herd retry storms.
 pub fn retry_backoff_with_jitter(retry_count: u32) -> Duration {
-    let shift = retry_count.saturating_sub(1);
-    let base_ms = 2000u64
-        .checked_shl(shift)
-        .unwrap_or(u64::MAX)
-        .min(MAX_RETRY_BACKOFF.as_millis() as u64);
-    jittered(Duration::from_millis(base_ms))
-}
-
-/// +/-20% jitter around `base`, de-syncing clients that failed at the
-/// same instant (e.g. a mass Cloudflare 52x event during an origin outage).
-fn jittered(base: Duration) -> Duration {
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static JITTER_SEQ: AtomicU64 = AtomicU64::new(0);
 
-    let base_ms = base.as_millis() as u64;
+    let shift = retry_count.saturating_sub(1);
+    let cap_ms = max_backoff_secs().saturating_mul(1000);
+    let base_ms = 2000u64.checked_shl(shift).unwrap_or(u64::MAX).min(cap_ms);
     let jitter_range = base_ms / 5;
     let mut hasher = std::hash::DefaultHasher::new();
     JITTER_SEQ.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
@@ -183,9 +175,6 @@ pub fn classify_error(
     if err.is_encrypted_content_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
-    if max_retries == 0 {
-        return RetryDecision::Fatal(clone_error(err));
-    }
 
     // 413 Payload Too Large: strip inline images and try once. The
     // caller checks if there are images left after the strip; if not,
@@ -200,20 +189,26 @@ pub fn classify_error(
         return RetryDecision::RetryWithImageStrip;
     }
 
-    // Shared retry vetoes (`SamplingError::is_retry_vetoed`, also used by
-    // one-shot callers like /btw):
-    // - x-should-retry: false — trust the server, it knows if the error is
-    //   request-content-caused (e.g. malformed tool call in history) vs
-    //   transient. x-should-retry: true is intentionally NOT handled — the
-    //   header only suppresses retries; forcing them on non-retryable
-    //   statuses could amplify failures.
-    // - Context-window / size overflow — deterministic, re-sending the same
-    //   (or larger) payload always fails, whatever status the backend used.
+    // Server explicitly said don't retry (x-should-retry: false).
+    // Trust the server — it knows if the error is request-content-caused
+    // (e.g. malformed tool call in conversation history) vs transient.
+    //
+    // x-should-retry: true is intentionally NOT handled here — we only
+    // use the header to suppress retries (false), not to force them
+    // (true). Forcing retries on non-retryable status codes could
+    // amplify failures. true falls through to existing status-code logic.
     //
     // Checked AFTER image-strip guards: image stripping changes the
     // request payload, so a server "don't retry" on the original
     // request doesn't apply to the stripped request.
-    if err.is_retry_vetoed() {
+    if let Some(false) = err.should_retry_header() {
+        return RetryDecision::Fatal(clone_error(err));
+    }
+
+    // Context-window / size overflow is deterministic — re-sending the same (or
+    // larger) payload always fails — so never retry it, whatever status the backend
+    // used (in-stream `ResponseError`→500, HTTP 400/500, OpenAI/Anthropic variants).
+    if err.is_context_length_error() {
         return RetryDecision::Fatal(clone_error(err));
     }
 
@@ -228,12 +223,12 @@ pub fn classify_error(
         };
     }
 
-    // Rate-limited (429): cap retries at the rate-limit threshold to
-    // avoid burning long waits.
+    // Rate-limited (429): honor Retry-After / exponential backoff.
+    // Unlimited budget (default) keeps trying until credits/upstream recover.
     if err.is_rate_limited() {
-        let next_attempt = retry_count + 1;
-        // `next_attempt >= 1` also catches an effective cap of 0.
-        if next_attempt >= max_retries.min(rate_limit_threshold) {
+        let next_attempt = retry_count.saturating_add(1);
+        let effective_cap = max_retries.min(rate_limit_threshold);
+        if !is_unlimited_retries(effective_cap) && next_attempt >= effective_cap {
             return RetryDecision::Fatal(clone_error(err));
         }
         let backoff = err
@@ -248,18 +243,15 @@ pub fn classify_error(
 
     // Generic retryable transport / 5xx errors. First retry rebuilds
     // the HTTP client with HTTP/1.1 to escape poisoned HTTP/2 pools;
-    // later retries just back off. A server `Retry-After` is honored but
-    // clamped to [`MAX_RETRY_BACKOFF`] (see that constant) and jittered —
-    // during an edge outage every client gets the same `Retry-After` at
-    // the same instant.
+    // later retries just back off. Unlimited by default.
     if err.is_retryable() {
-        let next_attempt = retry_count + 1;
-        if next_attempt >= max_retries {
+        let next_attempt = retry_count.saturating_add(1);
+        if !is_unlimited_retries(max_retries) && next_attempt >= max_retries {
             return RetryDecision::Fatal(clone_error(err));
         }
         let backoff = err
             .retry_after()
-            .map(|secs| jittered(Duration::from_secs(secs).min(MAX_RETRY_BACKOFF)))
+            .map(Duration::from_secs)
             .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
         if next_attempt == 1 {
             return RetryDecision::RetryWithClientRebuild { backoff };
@@ -284,10 +276,10 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
     };
 
     match err {
-        SamplingError::Auth { message, .. } => {
+        SamplingError::Auth(msg) => {
             format!(
                 "{}Authentication failed: {}. Please check your API key configuration.",
-                retry_prefix, message
+                retry_prefix, msg
             )
         }
         SamplingError::InvalidConfiguration(msg) => {
@@ -340,8 +332,8 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 413 => " (request too large - try /compact or start new session)",
                 429 => " (rate limited - please wait and retry)",
                 500 => " (server internal error)",
-                // Any other retryable status (5xx minus origin-TLS 525/526).
-                _ if is_retryable_api_status(*status) => " (server unavailable - please retry)",
+                #[allow(clippy::manual_range_patterns)]
+                502 | 503 | 504 => " (server unavailable - please retry)",
                 _ => "",
             };
             format!(
@@ -411,13 +403,7 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
 /// retry budget re-generating a response that fails the same way.
 pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
     match err {
-        SamplingError::Auth {
-            message,
-            credential,
-        } => SamplingError::Auth {
-            message: message.clone(),
-            credential: *credential,
-        },
+        SamplingError::Auth(msg) => SamplingError::Auth(msg.clone()),
         SamplingError::InvalidConfiguration(msg) => SamplingError::InvalidConfiguration(msg),
         SamplingError::Http(e) => {
             // reqwest::Error is not Clone; preserve the rendered message
@@ -535,14 +521,67 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_then_caps_at_thirty_seconds() {
+    fn backoff_doubles_then_caps_at_max_backoff() {
         // retry_count=2: base 4s
         let r2 = retry_backoff_with_jitter(2);
         assert!(r2 >= Duration::from_millis(3200) && r2 <= Duration::from_millis(4800));
 
-        // retry_count=10: base would be 2^10 * 2000 = 2.048s but capped to 30s
+        // retry_count=10: base would exceed cap → MAX_BACKOFF_SECS (60s) ±20%
         let r10 = retry_backoff_with_jitter(10);
-        assert!(r10 >= Duration::from_millis(24_000) && r10 <= Duration::from_millis(36_000));
+        let cap_ms = MAX_BACKOFF_SECS * 1000;
+        assert!(
+            r10 >= Duration::from_millis(cap_ms * 4 / 5)
+                && r10 <= Duration::from_millis(cap_ms * 6 / 5),
+            "expected ~{cap_ms}ms cap, got {r10:?}"
+        );
+    }
+
+    #[test]
+    fn unlimited_retries_never_fatals_on_5xx() {
+        let err = api_err(StatusCode::BAD_GATEWAY, "proxy blip");
+        match classify_error(&err, 100, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { .. } | RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("expected Retry under unlimited budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unlimited_retries_never_fatals_on_429() {
+        let err = api_err(StatusCode::TOO_MANY_REQUESTS, "slow down");
+        match classify_error(&err, 50, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                is_rate_limited: true,
+                ..
+            } => {}
+            other => panic!("expected rate-limit Retry under unlimited budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_max_retries_is_unlimited() {
+        assert_eq!(DEFAULT_MAX_RETRIES, u32::MAX);
+        assert!(is_unlimited_retries(DEFAULT_MAX_RETRIES));
+        assert_eq!(resolve_max_retries_with_env(None, None), u32::MAX);
+    }
+
+    #[test]
+    fn resolve_max_retries_env_can_cap() {
+        assert_eq!(resolve_max_retries_with_env(Some("3"), None), 3);
+        assert_eq!(resolve_max_retries_with_env(Some("3"), Some(99)), 3);
+    }
+
+    #[test]
+    fn long_retry_after_on_429_is_used() {
+        let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 3600);
+        match classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                backoff,
+                is_rate_limited: true,
+            } => {
+                assert_eq!(backoff, Duration::from_secs(3600));
+            }
+            other => panic!("expected 3600s Retry-After, got {other:?}"),
+        }
     }
 
     #[test]
@@ -555,9 +594,9 @@ mod tests {
 
     #[test]
     fn classify_auth_error_emits_to_session() {
-        let err = SamplingError::auth_unknown("bad token");
+        let err = SamplingError::Auth("bad token".into());
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::EmitToSession(SamplingError::Auth { .. }) => {}
+            RetryDecision::EmitToSession(SamplingError::Auth(_)) => {}
             other => panic!("expected EmitToSession(Auth), got {other:?}"),
         }
     }
@@ -695,40 +734,12 @@ mod tests {
     #[test]
     fn classify_rate_limited_capped_at_threshold() {
         let err = api_err(StatusCode::TOO_MANY_REQUESTS, "slow");
-        // retry_count=1, threshold=2 -> next_attempt=2 >= 2 -> Fatal.
-        match classify_error(&err, 1, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+        // Explicit finite threshold: retry_count=1, threshold=2 -> next=2 >= 2 -> Fatal.
+        match classify_error(&err, 1, 5, 2) {
             RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
                 assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
             }
             other => panic!("expected Fatal at threshold, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn zero_retry_budget_never_reuses_a_model_output_cap() {
-        for err in [
-            api_err(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
-            api_err(StatusCode::PAYLOAD_TOO_LARGE, "too big"),
-            api_err(StatusCode::BAD_REQUEST, "Could not process image"),
-            SamplingError::EmptyResponse {
-                context: xai_grok_sampling_types::EmptyResponseContext {
-                    reason: xai_grok_sampling_types::EmptyReason::NoVisibleContent,
-                    had_reasoning: false,
-                    content_len: 0,
-                    tool_call_count: 0,
-                    finish_reason: Some("stop".into()),
-                    completion_tokens: Some(1),
-                    reasoning_tokens: Some(0),
-                    prompt_tokens: Some(10),
-                    model: "m".into(),
-                    first_choice_seen: true,
-                },
-            },
-        ] {
-            assert!(matches!(
-                classify_error(&err, 0, 0, RATE_LIMIT_RETRY_THRESHOLD),
-                RetryDecision::Fatal(_)
-            ));
         }
     }
 
@@ -923,14 +934,14 @@ mod tests {
 
     #[test]
     fn format_includes_retry_prefix_when_count_present() {
-        let err = SamplingError::auth_unknown("bad");
+        let err = SamplingError::Auth("bad".into());
         let s = format_sampling_error(&err, Some(3));
         assert!(s.starts_with("Request failed after 3 retries."));
     }
 
     #[test]
     fn format_omits_retry_prefix_when_count_absent() {
-        let err = SamplingError::auth_unknown("bad");
+        let err = SamplingError::Auth("bad".into());
         let s = format_sampling_error(&err, None);
         assert!(!s.starts_with("Request failed after"));
         assert!(s.starts_with("Authentication failed:"));

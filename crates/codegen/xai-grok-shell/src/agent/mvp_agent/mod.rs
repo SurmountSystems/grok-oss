@@ -62,7 +62,7 @@ use xai_grok_sampling_types::{
     supports_reasoning_effort_meta,
 };
 use crate::agent::update_chunk_merge;
-use crate::auth::AuthManager;
+use crate::auth::{AuthManager, AuthUrlInfo};
 use crate::config::StorageMode;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use xai_grok_telemetry::id::{agent_id, agent_instance_id};
@@ -76,8 +76,7 @@ use xai_grok_sampler::SamplerConfig as SamplingConfig;
 use crate::session::persistence::PersistenceHandle;
 use crate::session::worktree::BackgroundCopyContext;
 use crate::session::{
-    ParsedPromptInfo, SCHEDULER_BACKGROUND_LOOPS_META_KEY, SessionCommand, SessionHandle,
-    CancelOptions, CancelTrigger, SessionLiveState, SessionThread, ShutdownKind,
+    ParsedPromptInfo, SessionCommand, SessionHandle, SessionLiveState, SessionThread,
     info::Info as SessionInfo, spawn_session_on_thread,
 };
 use crate::terminal::{AcpTerminalRunner, TerminalRunner};
@@ -136,7 +135,6 @@ pub(crate) fn jwt_tier_claim(jwt: &str) -> Option<String> {
             4 => "x_premium_plus",
             5 => "supergrok_heavy",
             6 => "supergrok_lite",
-            7 => "supergrok_plus",
             0 => "free",
             _ => return Some(tier.to_string()),
         }
@@ -181,62 +179,11 @@ pub(crate) fn jwt_claim_matches_user_subscription_tier(
         "XPremiumPlus" => jwt_claim == "x_premium_plus",
         "SuperGrokPro" => jwt_claim == "supergrok_heavy",
         "SuperGrokLite" => jwt_claim == "supergrok_lite",
-        "SuperGrokPlus" => jwt_claim == "supergrok_plus",
-        _ => jwt_claim.parse::<u64>().is_ok_and(|n| n != 0),
+        _ => false,
     }
 }
-/// ACP `_meta` key for chat+local workspace intent (pager stamps on chat create).
-#[cfg(feature = "local-workspace")]
-const LOCAL_WORKSPACE_META_KEY: &str = "x.ai/local_workspace";
-/// True when `_meta` carries a valid chat+local intent object
-/// (`mode` is `"own"` or `"attach"`).
-#[cfg(feature = "local-workspace")]
-fn local_workspace_intent_present(meta: Option<&acp::Meta>) -> bool {
-    meta.and_then(|m| m.get(LOCAL_WORKSPACE_META_KEY))
-        .and_then(|v| v.as_object())
-        .and_then(|o| o.get("mode"))
-        .and_then(|m| m.as_str())
-        .is_some_and(|mode| mode == "own" || mode == "attach")
-}
-/// valid local-workspace intent → ExistingWorkspace only.
-///
-/// `server_id` comes from the intent object, else `cloud_existing_workspace`.
-/// Never reads `envId` / never emits `SandboxEnvironment`.
-#[cfg(feature = "local-workspace")]
-fn parse_local_workspace_existing(
-    meta: Option<&acp::Meta>,
-) -> Option<crate::gateway_bridge::ComputerSession> {
-    use crate::gateway_bridge::ComputerSession;
-    let local = meta.and_then(|m| m.get(LOCAL_WORKSPACE_META_KEY))?;
-    let mode = local.get("mode").and_then(|v| v.as_str())?;
-    if mode != "own" && mode != "attach" {
-        return None;
-    }
-    let server_id = meta_non_empty_str(local, "server_id")
-        .or_else(|| {
-            meta
-                .and_then(|m| m.get(CLOUD_EXISTING_WORKSPACE_META_KEY))
-                .and_then(|w| meta_non_empty_str(w, "server_id"))
-        })?;
-    let cwd = meta_non_empty_str(local, "cwd")
-        .or_else(|| {
-            meta
-                .and_then(|m| m.get(CLOUD_EXISTING_WORKSPACE_META_KEY))
-                .and_then(|w| meta_non_empty_str(w, "cwd"))
-        });
-    Some(ComputerSession::ExistingWorkspace {
-        server_id,
-        cwd,
-    })
-}
-#[allow(dead_code)]
 fn parse_session_computer_sessions(_meta: Option<&acp::Meta>) -> Option<Vec<()>> {
     None
-}
-fn resolve_session_computer_sessions(
-    _meta: Option<&acp::Meta>,
-) -> Result<Option<Vec<()>>, acp::Error> {
-    Ok(None)
 }
 pub(crate) struct SessionSpawnOptions<'a> {
     pub session_info: SessionInfo,
@@ -253,25 +200,20 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub client_terminal: bool,
     pub client_fs_read: bool,
     pub client_fs_write: bool,
-    /// In-flight `.envrc` load; `None` → `spawn_and_register_session` spawns its own.
-    pub envrc: Option<xai_grok_workspace::envrc::EnvrcLoad>,
+    pub preloaded_envrc: Option<std::collections::HashMap<String, String>>,
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
     pub persisted_plan_mode: Option<crate::session::plan_mode::PlanModeSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
-    pub persisted_workflow_runs: Vec<
-        crate::session::workflow::store::RestoredWorkflowRun,
-    >,
     pub persisted_announcement_state: Option<
         crate::session::announcement_state::AnnouncementState,
     >,
     pub session_meta: Option<&'a acp::Meta>,
+    pub managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub model_agent_type: Option<&'a str>,
     pub session_model_id: acp::ModelId,
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
     pub prompt_display_cwd: Option<String>,
-    /// Sticky chat product kind for ACU / product skills sourcing.
-    pub is_chat_kind: bool,
 }
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -301,47 +243,10 @@ fn parse_session_kind(
         .and_then(|k| SessionKind::deserialize(k).ok())
         .unwrap_or(SessionKind::Build)
 }
-/// Whether meta requests chat kind (ignores whether the binary supports it).
-fn wants_chat_session_kind(meta: Option<&acp::Meta>) -> bool {
-    matches!(
-        parse_session_kind(meta),
-        crate::session::unified_list::SessionKind::Chat
-    )
-}
-use crate::session::unified_list::SessionKind;
-/// A chat-kind assertion from a request; only a claim until checked. Always
-/// false without the `chat` feature.
-#[derive(Clone, Copy)]
-pub(crate) struct ChatKindClaim(bool);
-impl ChatKindClaim {
-    pub(crate) fn from_meta(meta: Option<&acp::Meta>) -> Self {
-        {
-            let _ = meta;
-            Self(false)
-        }
-    }
-    /// Which pipeline owns this id. The session decides; the claim answers
-    /// only for an id the registry has never seen.
-    pub(crate) fn resolve(self, agent: &MvpAgent, id: &acp::SessionId) -> SessionKind {
-        let _ = (agent, id);
-        self.declared()
-    }
-    /// What the request asked to create; authoritative only at `session/new`.
-    pub(crate) fn declared(self) -> SessionKind {
-        if self.0 { SessionKind::Chat } else { SessionKind::Build }
-    }
-}
-/// Fail closed when a client requests `kind: "chat"` on a build-only binary.
-fn reject_chat_kind_without_feature(meta: Option<&acp::Meta>) -> Result<(), acp::Error> {
-    {
-        if wants_chat_session_kind(meta) {
-            return Err(
-                acp::Error::invalid_params()
-                    .data("session kind \"chat\" requires a chat-enabled binary"),
-            );
-        }
-        Ok(())
-    }
+/// Hard-off in release builds: `kind: "chat"` meta is ignored and
+/// sessions stay on the local Build path.
+fn is_chat_session_kind(meta: Option<&acp::Meta>) -> bool {
+    false
 }
 fn chat_initial_model(
     is_chat_kind: bool,
@@ -360,7 +265,7 @@ fn chat_new_session_model_state(
         && !state.available_models.iter().any(|m| m.model_id.0.as_ref() == requested)
     {
         tracing::warn!(
-            requested_model = %requested,
+            requested_model = % requested,
             "chat session/new _meta.modelId not in the /rest/modes catalog; \
              reporting it as current anyway (picker may diverge from catalog)"
         );
@@ -387,7 +292,7 @@ pub(crate) fn parse_session_plugin_dirs(
     let mut dirs = Vec::new();
     for entry in entries {
         let Some(raw) = entry.as_str() else {
-            tracing::warn!(?entry, "pluginDirs entry is not a string; skipping");
+            tracing::warn!(? entry, "pluginDirs entry is not a string; skipping");
             continue;
         };
         let path = std::path::PathBuf::from(raw);
@@ -433,19 +338,18 @@ pub(crate) fn chat_session_spawn_options<'a>(
         client_terminal: false,
         client_fs_read: false,
         client_fs_write: false,
-        envrc: None,
+        preloaded_envrc: None,
         persisted_signals: None,
         persisted_plan_mode: None,
         persisted_goal_mode: None,
-        persisted_workflow_runs: Vec::new(),
         persisted_announcement_state: None,
         session_meta,
+        managed_mcp_expires_at: None,
         model_agent_type,
         session_model_id,
         session_yolo_mode,
         session_auto_mode: false,
         prompt_display_cwd: None,
-        is_chat_kind: true,
     }
 }
 /// `_meta.noReplay` → skip gateway replay (client already has the transcript).
@@ -520,8 +424,6 @@ pub(crate) struct PromptResponseMeta {
     pub structured_output: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
 }
 /// Inputs for [`build_prompt_response_meta`]. A struct (not positional args)
 /// so call sites are self-documenting and adding a field can't silently
@@ -536,7 +438,6 @@ pub(crate) struct PromptResponseMetaArgs<'a> {
     pub cancellation_category: Option<String>,
     pub cancel_trigger: Option<String>,
     pub structured_output: Option<Result<serde_json::Value, String>>,
-    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
 }
 /// Build the `_meta` JSON for `PromptResponse`. Includes baseline
 /// session/prompt/model identifiers plus optional per-turn token counts
@@ -554,7 +455,6 @@ pub(crate) fn build_prompt_response_meta(
         cancellation_category,
         cancel_trigger,
         structured_output,
-        tool_overrides,
     } = args;
     let (structured_output, structured_output_error) = match structured_output {
         Some(Ok(value)) => (Some(value), None),
@@ -576,7 +476,6 @@ pub(crate) fn build_prompt_response_meta(
         cancel_trigger,
         structured_output,
         structured_output_error,
-        tool_overrides,
     };
     serde_json::to_value(meta).expect("PromptResponseMeta is always serializable")
 }
@@ -589,19 +488,9 @@ pub(crate) fn build_prompt_response_meta(
 struct SettingsUpdateNotification {
     show_resolved_model: Option<bool>,
     sharing_enabled: Option<bool>,
-    privacy_notice_rollout: Option<bool>,
-    privacy_banner_reshow_days: Option<u64>,
     session_picker_grouped: Option<bool>,
     tips: Option<Vec<String>>,
-    slash_command_tags: Option<std::collections::BTreeMap<String, String>>,
     announcements: Option<Vec<xai_grok_announcements::RemoteAnnouncement>>,
-    /// Remote campaigns snapshot for the client's process-global campaign
-    /// cache. `Some` whenever settings exist (empty means campaigns were
-    /// withdrawn); `None` when the agent has no settings yet, which clients
-    /// treat as "leave the cache alone". In leader mode this push is the only
-    /// seam that seeds the TUI process, so a `/model` pick can record a remote
-    /// campaign's dismissal even when the TUI's own startup prefetch missed.
-    campaigns: Option<Vec<crate::util::config::CampaignOverride>>,
     gate_message: Option<String>,
     gate_url: Option<String>,
     gate_label: Option<String>,
@@ -677,7 +566,7 @@ fn announcements_refresh_interval() -> std::time::Duration {
 /// gates fails.  Used in `x.ai/code/status` responses and to generate
 /// clear error messages on code-nav requests from ineligible clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodeNavEligibility {
+pub enum CodeNavEligibility {
     /// Client type is not web (web-only for initial rollout).
     ClientNotWeb,
     /// Client did not advertise `x.ai/codeNavigation.enabled`.
@@ -729,16 +618,49 @@ struct RetainedResources {
 /// `resident_roster_titles`.
 type RosterDisplayCache = HashMap<String, (Option<String>, Option<String>)>;
 pub struct MvpAgent {
-    /// LEADER-SAFE(shared): `Send + Sync` mirror of per-session activity for the
-    /// leader's auto-update checker, which cannot read the `!Send` maps. Expires
-    /// when the actor exits. See [`crate::agent::activity::AgentActivity`].
+    /// LEADER-SAFE(per-session): keyed by SessionId. Sessions are created/removed
+    /// per client request; no cross-session iteration except cleanup
+    /// (`remove_session`, `sweep_dead_sessions`).
+    pub(crate) sessions: RefCell<HashMap<acp::SessionId, SessionHandle>>,
+    /// `Send + Sync` mirror of per-session activity (running turn, pending
+    /// interactions, subagent gauge) shared with the leader's auto-update
+    /// checker, which cannot read the `!Send` maps above. Sessions are
+    /// registered at handle creation and expire when their actor exits — no
+    /// unregister bookkeeping. See [`crate::agent::activity::AgentActivity`].
     pub(crate) activity: crate::agent::activity::AgentActivity,
-    /// LEADER-SAFE(per-session).
-    session_registry: SessionRegistry,
-    /// `(title, last_turn_summary)` per resident session id, refreshed each
-    /// `build_roster`. Lets the synchronous roster deltas reuse both instead
-    /// of emitting empty ones — `resident_roster_entry` can't read disk.
-    resident_roster_titles: RefCell<RosterDisplayCache>,
+    /// Sessions with a `session/load` currently in flight. LEADER-SAFE(per-session).
+    ///
+    /// Inserted by [`Self::begin_session_load`] at the top of `load_session`
+    /// and removed when the returned RAII guard drops (any exit path). Lets
+    /// racing session-scoped requests — notably `session/prompt` sent right
+    /// behind a reconnect-replayed `session/load` after a leader restart —
+    /// wait for the load via [`Self::wait_for_in_flight_session_load`]
+    /// instead of failing with "unknown session id". The watch channel closes
+    /// when the guard drops, waking all waiters.
+    loading_sessions: RefCell<
+        HashMap<acp::SessionId, tokio::sync::watch::Receiver<bool>>,
+    >,
+    /// Per-session prompt-intake serialization lock. LEADER-SAFE(per-session):
+    /// keyed by SessionId, mirrors `sessions` lifecycle.
+    ///
+    /// Each incoming `session/prompt` RPC is dispatched as its own task by the
+    /// ACP message loop, and [`Self::prompt`] runs an async preamble (prompt-mode
+    /// query, trace context, model lookup) BEFORE it enqueues
+    /// `SessionCommand::Prompt` onto the actor's FIFO mailbox. Without
+    /// serialization those preambles interleave across tasks, so the mailbox —
+    /// and therefore the authoritative prompt queue — receives prompts out of
+    /// submission order. `prompt()` holds this lock across the preamble and
+    /// releases it immediately after the enqueue (the turn itself runs unlocked),
+    /// which makes intake order match arrival order.
+    prompt_intake_locks: RefCell<
+        HashMap<acp::SessionId, std::rc::Rc<tokio::sync::Mutex<()>>>,
+    >,
+    /// LEADER-SAFE(per-session): keyed by SessionId. Mirrors `sessions` lifecycle.
+    session_threads: RefCell<HashMap<acp::SessionId, SessionThread>>,
+    /// Title per resident session id, refreshed each `build_roster`. Lets the
+    /// synchronous roster deltas reuse the title instead of emitting an empty
+    /// one — `resident_roster_entry` can't read disk.
+    resident_roster_titles: RefCell<HashMap<String, String>>,
     pub(crate) initialize_request: OnceLock<acp::InitializeRequest>,
     pub(crate) gateway: GatewaySender,
     /// Agent configuration. LEADER-SAFE(init-once): never mutated after construction.
@@ -758,11 +680,10 @@ pub struct MvpAgent {
     /// grok.com chat-product catalog (`/rest/modes`) for chat sessions; distinct
     /// from `models_manager` (the build `/v1/models` catalog).
     pub(crate) chat_modes: crate::agent::chat_modes::ChatModesManager,
-    /// Single-flight guard for interactive login (device poll / loopback
-    /// wait). Owns the active attempt's cancel token and its code/url
-    /// channels; a new `authenticate` or `x.ai/auth/cancel` cancels the
-    /// prior attempt.
-    pub(crate) interactive_auth: crate::auth::single_flight::AuthSingleFlight,
+    /// Forwards pasted codes from `handle_auth_submit_code` to the auth flow.
+    pub(crate) auth_code_tx: RefCell<Option<tokio::sync::mpsc::Sender<String>>>,
+    /// Receives the auth URL from the auth flow; read by `handle_auth_get_url`.
+    pub(crate) auth_url_rx: RefCell<Option<tokio::sync::oneshot::Receiver<AuthUrlInfo>>>,
     /// Client type. LEADER-SAFE(init-once): set once during `initialize` from
     /// `_meta.clientIdentifier` (injected by the IPC server in leader mode).
     ///
@@ -800,17 +721,8 @@ pub struct MvpAgent {
     /// external-auth users bypass the check). When `false`, the pager shows a
     /// gate CTA instead of the prompt.
     tier_allowed: std::cell::Cell<bool>,
-    /// The `user_id` the current `tier_allowed` verdict was resolved for.
-    /// `cfg.remote_settings` isn't reset on account switch, so a mismatch here
-    /// means "unknown" (provisional open), like `OtelGate::rearm_on_switch`.
-    allow_access_resolved_for: std::cell::RefCell<Option<String>>,
-    /// Writeback vs local. `Cell` so [`Self::reapply_storage_mode`] can
-    /// upgrade it when remote settings land; persistence reads the live value.
-    /// Authoritative post-construction — `Config.storage_mode` is only the
-    /// boot seed.
-    storage_mode: std::cell::Cell<StorageMode>,
-    /// External-OTEL emission gate; see [`crate::agent::otel_gate`].
-    otel_gate: crate::agent::otel_gate::OtelGate,
+    /// Storage mode - determines whether to sync to backend (writeback) or local only
+    storage_mode: StorageMode,
     /// Default YOLO mode - when true, sessions start with auto-approve enabled.
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
@@ -849,15 +761,27 @@ pub struct MvpAgent {
     buffering_settings: RefCell<Option<update_chunk_merge::BufferingSettings>>,
     /// Context for managing background copy operations (e.g., copying ignored files)
     pub(crate) background_copy_context: BackgroundCopyContext,
-    /// LEADER-SAFE(shared): agent-level code-nav index manager, keyed by cwd,
-    /// no per-client state.
+    /// LEADER-SAFE(per-session): keyed by SessionId, no cross-session iteration.
+    pub(crate) session_turn_numbers: RefCell<HashMap<acp::SessionId, u64>>,
+    /// LEADER-SAFE(per-session): keyed by SessionId, no cross-session iteration.
+    permission_event_receivers: RefCell<
+        HashMap<acp::SessionId, tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>>,
+    >,
+    /// Agent-level codebase index manager for code navigation.
+    /// Indexes are shared across sessions with the same cwd.
+    /// LEADER-SAFE(shared): keyed internally by cwd. No per-client state.
     codebase_indexes: Arc<parking_lot::Mutex<CodebaseIndexManager>>,
+    /// Per-session strong refs that keep the code-nav index alive. The
+    /// CodebaseIndexManager holds only Weak; without these the actor would
+    /// be reaped immediately. Cleaned up in remove_session.
+    session_index_claims: RefCell<
+        HashMap<acp::SessionId, std::sync::Arc<xai_codebase_graph::IndexManagerHandle>>,
+    >,
     /// Worktree creation type (resolved: local config > remote > default Linked).
     pub(crate) worktree_type: crate::util::config::WorktreeType,
     /// Restore codebase state on worktree resume (resolved: local config > remote > default false).
     pub(crate) restore_code: bool,
-    /// Local session-registry override: `GROK_SESSION_REGISTRY` env, else
-    /// `[cli] session_registry`.
+    /// Local config.toml override for session registry (`[cli] session_registry`).
     /// `Some(true)` enables, `Some(false)` disables, `None` defers to remote settings.
     session_registry_local: Option<bool>,
     /// Managed MCP configs and gateway tool catalog; lazily fetched.
@@ -867,6 +791,15 @@ pub struct MvpAgent {
     agent_mcp_state: std::sync::Arc<
         tokio::sync::Mutex<crate::session::mcp_servers::McpState>,
     >,
+    /// Sessions whose persisted model was unavailable at `session/load` time
+    /// with no same-family fallback, keyed by session id → the unavailable
+    /// model id. Prompts to these sessions are blocked until either
+    /// (a) the model reappears in the catalog — the catalog can be
+    /// transiently degraded when a reconnect replays `session/load` (e.g.
+    /// fetch still in flight after a leader restart), so the prompt path
+    /// re-checks and self-heals — or (b) the user explicitly switches
+    /// models via `set_session_model`.
+    model_unavailable_sessions: RefCell<std::collections::HashMap<String, acp::ModelId>>,
     /// Unified sender for all subagent coordinator events.
     /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
     subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
@@ -881,13 +814,28 @@ pub struct MvpAgent {
             >,
         >,
     >,
-    /// Shell-only presentation state; lifecycle lives in the channel actor.
-    subagent_presentation: RefCell<crate::agent::subagent::SubagentPresentation>,
+    /// Active subagent tracking — owns all subagent lifecycle state.
+    /// LEADER-SAFE(per-session): keyed by subagent_id, no cross-session iteration.
+    subagent_coordinator: RefCell<crate::agent::subagent::SubagentCoordinator>,
     /// Shared buffer for mid-turn monitor event notifications.
     /// Pushed by the `InjectNotification` handler when a turn is active and the
     /// notification has `Next` priority. Drained by the session turn loop
     /// (`inject_pending_monitor_events`) into a hidden synthetic user message.
-    monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer,
+    monitor_event_buffer: xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer,
+    /// Per-subagent model ID overrides from config.toml `[subagents.models]`.
+    /// Populated from `SubagentsConfig.models` during `with_models()`.
+    subagent_model_overrides: std::collections::HashMap<String, String>,
+    /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
+    /// Populated from `SubagentsConfig.toggle` during `with_models()`.
+    subagent_toggle: std::collections::HashMap<String, bool>,
+    subagent_roles: std::collections::HashMap<
+        String,
+        xai_grok_subagent_resolution::config::SubagentRole,
+    >,
+    subagent_personas: std::collections::HashMap<
+        String,
+        xai_grok_subagent_resolution::config::SubagentPersona,
+    >,
     /// The process launch directory, captured once at construction so the
     /// deferred launch-dir init paths share one source of truth instead of each
     /// re-calling `std::env::current_dir()` (which could drift if the process
@@ -907,6 +855,7 @@ pub struct MvpAgent {
     /// the first session-creating call via [`Self::ensure_plugin_registry`];
     /// this flag keeps that to a single discovery walk.
     plugin_registry_initialized: std::cell::Cell<bool>,
+    persona_io_summaries: Vec<String>,
     /// Single-flight guard for the proactive bundle sync background task.
     ///
     /// `maybe_sync_bundle_in_background` is invoked from each post-auth path
@@ -936,39 +885,21 @@ pub struct MvpAgent {
     /// The agent never opens Computer Hub as a harness/client; remote cloud
     /// sandboxes are gateway-owned (`gateway_bridge` / `computer_sessions`).
     workspace_ops: RefCell<Option<xai_grok_workspace::WorkspaceOps>>,
-    /// Per-session owned local `workspace_server` handles (chat+local `own`).
-    #[cfg(all(feature = "local-workspace", unix))]
-    local_workspace_supervisors: Rc<
-        RefCell<
-            HashMap<
-                acp::SessionId,
-                crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceHandle,
-            >,
-        >,
-    >,
-    /// Invalidates in-flight crash restarts when the session supervisor is reaped.
-    #[cfg(all(feature = "local-workspace", unix))]
-    local_workspace_generations: Rc<RefCell<HashMap<acp::SessionId, u64>>>,
-    /// Sessions whose own supervisor is mid crash-restart (map entry temporarily empty).
-    #[cfg(all(feature = "local-workspace", unix))]
-    local_workspace_restart_pending: Rc<
-        RefCell<std::collections::HashSet<acp::SessionId>>,
-    >,
-    /// Sessions that already have a local existing workspace (own or attach).
-    /// mid-session add refuses while this is set; cleared on session end.
-    #[cfg(feature = "local-workspace")]
-    local_workspace_bound: Rc<RefCell<std::collections::HashSet<acp::SessionId>>>,
+    /// Sessions opened with `require_gateway` / chat light-frontend (K13).
+    /// Prompt-time guard consults this when the bridge map entry is missing,
+    /// independent of prompt `_meta` (pager often omits kind on prompt).
+    require_gateway_sessions: Rc<RefCell<std::collections::HashSet<acp::SessionId>>>,
+    /// Per-session coarse lifecycle state (residency + turn-state).
+    /// Updated by `spawn_and_register_session` (→ `IdleResident`) and the
+    /// join-handle supervisor on actor exit (→ `DeadFailed`) / explicit close
+    /// (→ `Completed`). This is the roster's data source in PR-6; for now it
+    /// gives the supervisor an observable demotion signal.
+    /// LEADER-SAFE(per-session): keyed by SessionId.
+    session_live_state: RefCell<HashMap<acp::SessionId, SessionLiveState>>,
     /// Idempotency guard: the join-handle supervisor task is spawned at most
     /// once (on the first `spawn_and_register_session`). See
     /// `ensure_session_supervisor`.
     supervisor_started: std::cell::Cell<bool>,
-    /// Dedup guard for `spawn_settings_reapply`; at most one task in flight.
-    /// `Rc` so the drop-guard owns a clone without dereferencing the agent.
-    settings_reapply_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
-    /// Separate dedup guard for `spawn_post_auth_settings`, so an in-flight
-    /// reapply can't coalesce away a freshly authenticated identity's gate and
-    /// settings resolution.
-    post_auth_settings_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
     /// Last value handed out by `next_announcements_gen` (single-threaded
     /// LocalSet, so a plain `Cell` suffices). LEADER-SAFE(shared): one
     /// agent-wide push stream.
@@ -1004,18 +935,18 @@ pub struct MvpAgent {
     /// actually spawned. Asserts `ensure_session_supervisor` is idempotent.
     #[cfg(test)]
     supervisor_spawn_count: std::cell::Cell<usize>,
-    /// Test-only: counts `spawn_settings_reapply` tasks spawned past the
-    /// in-flight guard.
-    #[cfg(test)]
-    settings_reapply_spawn_count: std::cell::Cell<usize>,
-    /// Test-only: counts `spawn_post_auth_settings` tasks spawned past its
-    /// own guard.
-    #[cfg(test)]
-    post_auth_settings_spawn_count: std::cell::Cell<usize>,
 }
-/// Spawn a thread to warm the shared async HTTP client (`OnceLock`-cached).
-/// Loading TLS root certs is ~95ms; doing it here avoids a cold-start hit
-/// on the first request. Idempotent.
+/// Kick off background warmup of the async shared HTTP client.
+///
+/// Building a `reqwest::Client` is expensive (~95ms) because it loads TLS
+/// root certificates. This function spawns a thread to initialize both
+/// the shared client and a throwaway sampling client concurrently so
+/// that TLS roots are cached before the first session needs them.
+///
+/// Safe to call multiple times — the underlying `OnceLock` ensures only
+/// the first initialization does real work for `shared_client()`. The
+/// sampling client is discarded, but the TLS root certificates it loads
+/// are cached at the process level by `rustls-native-certs`.
 pub fn warm_async_http_client() {
     std::thread::spawn(|| {
         let _timer = crate::instrumentation_timer!("startup.async_http_warmup");
@@ -1111,41 +1042,6 @@ fn read_session_or_init_meta_str<'a>(
         m.and_then(|m| m.get(key)).and_then(|v| v.as_str())
     };
     read(session_meta).or_else(|| read(init_meta))
-}
-/// Resolve `startupHints` for a session spawn: the session request `_meta`
-/// wins over the connection-level `initialize` `_meta`.
-///
-/// Same OnceLock-bypass rationale as [`read_session_or_init_meta_str`], and
-/// it matters most for headless clients: the shared `initialize_request`
-/// holds whichever client initialized this process first, and a leader can
-/// multiplex many logical clients — so on a leader-routed `session/load`
-/// the init-level hints can belong to a *different* client than the one
-/// loading the session. Losing `nonInteractive` silently downgrades
-/// `McpInitStrategy::Blocking` to `Progressive`, letting the first prompt
-/// of a loaded headless session run while the MCP server carrying its only
-/// user-visible output channel is still handshaking.
-///
-/// The first parseable `startupHints` object wins whole (no per-field
-/// merge), mirroring how a client would send it on `initialize`; an
-/// unparseable value falls through, matching the sibling helper's
-/// treatment of wrong-typed values.
-fn startup_hints_from_meta(
-    session_meta: Option<&acp::Meta>,
-    init_meta: Option<&acp::Meta>,
-) -> crate::session::StartupHints {
-    explicit_startup_hints(session_meta)
-        .or_else(|| explicit_startup_hints(init_meta))
-        .unwrap_or_default()
-}
-/// Parse `startupHints` carried explicitly on one `_meta` object. `None`
-/// when absent or unparseable — callers that must distinguish "client made
-/// no claim" from "client sent defaults" (the resident re-attach rail) key
-/// on this, so an attach without hints never resets a session's policy.
-fn explicit_startup_hints(
-    meta: Option<&acp::Meta>,
-) -> Option<crate::session::StartupHints> {
-    meta.and_then(|m| m.get("startupHints"))
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 use xai_chat_state::conversation_util::replace_or_insert_system_head;
 /// Non-empty `systemPromptOverride` from session meta (preferred) or init meta.
@@ -1255,10 +1151,6 @@ struct AuthRequestMeta {
     /// user abandons the browser flow, the current session continues.
     #[serde(default)]
     force_interactive: bool,
-    /// Pager auth `request_seq` for this attempt. Scopes `x.ai/auth/cancel`
-    /// so a delayed cancel cannot tear down a successor login.
-    #[serde(default)]
-    request_seq: Option<u64>,
 }
 impl AuthRequestMeta {
     /// `--oauth` → force loopback; otherwise default (loopback).
@@ -1308,9 +1200,6 @@ fn inject_proxy_headers(
                 .map(String::from)
                 .unwrap_or_else(|| xai_grok_version::VERSION.to_string())
         });
-    headers
-        .entry("x-grok-client-identifier".to_string())
-        .or_insert_with(crate::http::process_client_identifier);
     if crate::util::is_cli_chat_proxy_url(base_url) {
         headers
             .entry("X-XAI-Token-Auth".to_string())
@@ -1372,11 +1261,11 @@ fn plan_hunk_tracking(mode_str: Option<&str>) -> HunkTrackingPlan {
         actor_mode: resolve_hunk_tracking_mode(mode_str),
     }
 }
-/// Bound on waiting out an evicted session's flushing actor thread.
-pub(super) const DRAIN_OLD_THREAD_WAIT: std::time::Duration = std::time::Duration::from_secs(
-    5,
-);
-/// RAII marker for an in-flight attach; dropping it wakes every waiter.
+/// RAII marker for an in-flight `session/load` (see
+/// [`MvpAgent::begin_session_load`]). Holding the guard keeps the session id
+/// in `MvpAgent::loading_sessions`; dropping it removes the marker and wakes
+/// every [`MvpAgent::wait_for_in_flight_session_load`] waiter (the held
+/// watch sender drops with the guard, closing the channel).
 pub(crate) struct SessionLoadGuard<'a> {
     agent: &'a MvpAgent,
     session_id: acp::SessionId,
@@ -1386,21 +1275,19 @@ pub(crate) struct SessionLoadGuard<'a> {
 }
 impl Drop for SessionLoadGuard<'_> {
     fn drop(&mut self) {
-        self.agent.session_registry.settle_attach(&self.session_id, &self.rx);
+        let mut map = self.agent.loading_sessions.borrow_mut();
+        if map.get(&self.session_id).is_some_and(|rx| rx.same_channel(&self.rx)) {
+            map.remove(&self.session_id);
+        }
     }
 }
 mod code_nav;
 mod folder_trust_prompt;
 mod heap_profile;
-mod resource_telemetry;
-mod session_registry;
 mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;
-mod session_setup;
-use session_registry::SessionRegistry;
-pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
 /// Emit the `auth.lifecycle` login span with optional user id and error
 /// category. Named `auth.lifecycle` (not `auth`) to avoid colliding with the
@@ -1412,12 +1299,8 @@ fn emit_login_span(
     error_category: Option<&str>,
 ) {
     let span = tracing::info_span!(
-        "auth.lifecycle",
-        action = "login",
-        success,
-        auth_method,
-        user_id = tracing::field::Empty,
-        error_category = tracing::field::Empty,
+        "auth.lifecycle", action = "login", success, auth_method, user_id =
+        tracing::field::Empty, error_category = tracing::field::Empty,
     );
     if let Some(uid) = user_id
         .filter(|u| !u.is_empty() && !u.eq_ignore_ascii_case("unknown"))
@@ -1436,6 +1319,303 @@ pub(crate) struct OrphanedTask {
     cwd: String,
 }
 impl MvpAgent {
+    /// Forward one raw JSONL replay line and collect its completion receiver.
+    ///
+    /// Dispatches by on-disk method name:
+    /// - ACP updates (`"session/update"`) → typed `SessionNotification` for correct
+    ///   TUI dispatch (direct dispatch preserves Rust types, not method strings).
+    /// - xAI updates (`"_x.ai/session/update"`) → `ExtNotification`.
+    ///
+    /// When `mark_replay` is true, the notification is tagged with
+    /// `_meta.isReplay: true` so the client knows it's historical data.
+    /// Cursor-based reconnects set this to false for events after the cursor
+    /// so the client processes them as live updates.
+    fn forward_raw_replay_line(
+        &self,
+        line: &str,
+        persist_data: Option<&serde_json::Value>,
+        target_client_id: Option<&serde_json::Value>,
+        completions: &mut Vec<
+            tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<()>>,
+        >,
+        mark_replay: bool,
+        pending_tool_calls: &mut std::collections::HashMap<
+            acp::ToolCallId,
+            acp::ToolCall,
+        >,
+    ) {
+        use crate::session::storage::RawLinePeek;
+        let env = match serde_json::from_str::<RawLinePeek<'_>>(line) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!(? e, "replay: skipping unparseable JSONL line");
+                return;
+            }
+        };
+        let method = env.method.unwrap_or("session/update");
+        let Some(raw_params) = env.params else {
+            tracing::debug!("replay: skipping JSONL line with no params");
+            return;
+        };
+        let is_xai = method == "_x.ai/session/update";
+        if is_xai {
+            if target_client_id.is_none() && !mark_replay {
+                if let Ok(owned) = serde_json::value::RawValue::from_string(
+                    raw_params.get().to_owned(),
+                ) {
+                    completions
+                        .push(
+                            self
+                                .gateway
+                                .forward_with_completion(
+                                    acp::ExtNotification::new(
+                                        "x.ai/session/update",
+                                        std::sync::Arc::from(owned),
+                                    ),
+                                ),
+                        );
+                }
+            } else {
+                let Ok(mut params) = serde_json::from_str::<
+                    serde_json::Value,
+                >(raw_params.get()) else {
+                    tracing::debug!(
+                        "replay: skipping xAI update with unparseable params"
+                    );
+                    return;
+                };
+                if let Some(obj) = params.as_object_mut() {
+                    let meta = obj
+                        .entry("_meta")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(m) = meta.as_object_mut() {
+                        if mark_replay {
+                            m.insert("isReplay".to_string(), serde_json::json!(true));
+                        }
+                        if let Some(pd) = persist_data {
+                            m.insert("x.ai/persist".to_string(), pd.clone());
+                        }
+                        if let Some(tid) = target_client_id {
+                            m.insert("x.ai/leaderClientId".to_string(), tid.clone());
+                        }
+                    }
+                }
+                if let Ok(raw_val) = serde_json::value::to_raw_value(&params) {
+                    completions
+                        .push(
+                            self
+                                .gateway
+                                .forward_with_completion(
+                                    acp::ExtNotification::new(
+                                        "x.ai/session/update",
+                                        std::sync::Arc::from(raw_val),
+                                    ),
+                                ),
+                        );
+                }
+            }
+        } else {
+            let Ok(mut notification) = serde_json::from_str::<
+                acp::SessionNotification,
+            >(raw_params.get()) else {
+                tracing::debug!("replay: skipping ACP update with unparseable params");
+                return;
+            };
+            match &mut notification.update {
+                acp::SessionUpdate::ToolCall(tc) => {
+                    let is_pre_completed = matches!(
+                        tc.status, acp::ToolCallStatus::Completed |
+                        acp::ToolCallStatus::Failed
+                    );
+                    if is_pre_completed {} else {
+                        pending_tool_calls.insert(tc.tool_call_id.clone(), tc.clone());
+                        return;
+                    }
+                }
+                acp::SessionUpdate::ToolCallUpdate(u) => {
+                    match u.fields.status {
+                        Some(acp::ToolCallStatus::Completed)
+                        | Some(acp::ToolCallStatus::Failed) => {
+                            if let Some(mut base) = pending_tool_calls
+                                .remove(&u.tool_call_id)
+                            {
+                                base.update(std::mem::take(&mut u.fields));
+                                notification.update = acp::SessionUpdate::ToolCall(base);
+                            }
+                        }
+                        None => {
+                            if let Some(base) = pending_tool_calls
+                                .get_mut(&u.tool_call_id)
+                            {
+                                base.update(std::mem::take(&mut u.fields));
+                            }
+                            return;
+                        }
+                        _ => return,
+                    }
+                }
+                _ => {}
+            }
+            if mark_replay {
+                mark_as_replay(&mut notification.meta, persist_data);
+            }
+            if let Some(tid) = target_client_id {
+                stamp_meta_value(&mut notification.meta, "x.ai/leaderClientId", tid);
+            }
+            completions.push(self.gateway.forward_with_completion(notification));
+        }
+    }
+    /// Replay updates from disk and drain completions.
+    /// Returns `(initial_total_tokens, end_offset)`.
+    pub(super) async fn replay_session_updates(
+        &self,
+        session_id: &acp::SessionId,
+        cwd: &AbsPathBuf,
+        updates_file_path: &Option<PathBuf>,
+        persist_data: Option<&serde_json::Value>,
+        target_client_id: Option<&serde_json::Value>,
+        cursor: Option<&str>,
+    ) -> Result<(u64, u64, Vec<(String, String)>), acp::Error> {
+        let mut replay_timer = crate::instrumentation_timer!(
+            "session.load_session_replay"
+        );
+        replay_timer.with_field("session_id", session_id.0.as_ref());
+        replay_timer.with_field("cwd", cwd.as_str());
+        let Some(updates_path) = updates_file_path.clone() else {
+            tracing::warn!(session_id = % session_id.0, "replay: no updates file path");
+            return Ok((0, 0, Vec::new()));
+        };
+        let file_size = std::fs::metadata(&updates_path).map(|m| m.len()).unwrap_or(0);
+        let raw_contents = match std::fs::read_to_string(&updates_path) {
+            Ok(s) if !s.is_empty() => s,
+            _ => return Ok((0, 0, Vec::new())),
+        };
+        let end_offset = raw_contents.len() as u64;
+        let mut prepared = {
+            let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
+            crate::session::storage::prepare_replay_lines(&raw_contents, cursor)
+        };
+        let unfinished_subagents = std::mem::take(&mut prepared.unfinished_subagents);
+        if cursor.is_some() {
+            let sending = prepared.lines.len();
+            if prepared.mark_replay {
+                tracing::warn!(
+                    session_id = % session_id.0,
+                    "replay: cursor not found, falling back to full replay"
+                );
+            } else {
+                tracing::info!(
+                    session_id = % session_id.0, skipped = prepared.total_live - sending,
+                    remaining = sending, "replay: cursor found, skipping events"
+                );
+            }
+        }
+        let last_tokens = prepared.last_tokens;
+        let mark_replay = prepared.mark_replay;
+        if let Some(max_seq) = prepared.max_event_seq {
+            crate::util::event_id::ensure_event_counter_at_least(max_seq + 1);
+        }
+        let lines_to_send = prepared.lines;
+        let updates_count = lines_to_send.len() as u64;
+        let mut completions = Vec::with_capacity(lines_to_send.len());
+        {
+            let _timer = crate::instrumentation_timer!("session.replay.forward_updates");
+            let mut pending_tool_calls = std::collections::HashMap::new();
+            for line in &lines_to_send {
+                self.forward_raw_replay_line(
+                    line,
+                    persist_data,
+                    target_client_id,
+                    &mut completions,
+                    mark_replay,
+                    &mut pending_tool_calls,
+                );
+            }
+        }
+        if updates_count > 0 && completions.is_empty() {
+            tracing::warn!(
+                updates_count,
+                "Replay sent updates but collected 0 completions — \
+                 forward_raw_replay_line must use gateway.forward_with_completion(). \
+                 See: session/load notification ordering bug."
+            );
+        }
+        {
+            let _timer = crate::instrumentation_timer!(
+                "session.replay.drain_completions"
+            );
+            for rx in completions {
+                let _ = rx.await;
+            }
+        }
+        tracing::info!(
+            session_id = % session_id.0, updates_count, end_offset, file_size,
+            "replay: completed"
+        );
+        replay_timer.with_field("updates_count", updates_count);
+        Ok((last_tokens, end_offset, unfinished_subagents))
+    }
+    /// Enqueue replay notifications for updates appended after `from_offset`.
+    /// Returns completion receivers; callers open the gate then drain.
+    /// Intentionally sync (not async) so no prompt-task progress before gate flip.
+    ///
+    /// When `mark_replay` is false (cursor-based reconnect), delta events are
+    /// forwarded without `_meta.isReplay` since they are truly new events the
+    /// client has not seen.
+    pub(super) fn replay_session_updates_from_offset_enqueue(
+        &self,
+        session_id: &acp::SessionId,
+        updates_file_path: &Option<PathBuf>,
+        from_offset: u64,
+        persist_data: Option<&serde_json::Value>,
+        target_client_id: Option<&serde_json::Value>,
+        mark_replay: bool,
+    ) -> Vec<tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<()>>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Some(updates_path) = updates_file_path.clone() else {
+            return Vec::new();
+        };
+        let mut file = match std::fs::File::open(&updates_path) {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+        if file.seek(SeekFrom::Start(from_offset)).is_err() {
+            return Vec::new();
+        }
+        let mut contents = String::new();
+        if file.read_to_string(&mut contents).is_err() || contents.is_empty() {
+            return Vec::new();
+        }
+        let live_lines = crate::session::storage::filter_delta_replay_lines(&contents);
+        let delta_count = live_lines.len();
+        let mut completions = Vec::with_capacity(live_lines.len());
+        let mut pending_tool_calls = std::collections::HashMap::new();
+        for line in &live_lines {
+            self.forward_raw_replay_line(
+                line,
+                persist_data,
+                target_client_id,
+                &mut completions,
+                mark_replay,
+                &mut pending_tool_calls,
+            );
+        }
+        if delta_count > 0 && completions.is_empty() {
+            tracing::warn!(
+                delta_count,
+                "Delta replay sent updates but collected 0 completions — \
+                 forward_raw_replay_line must use gateway.forward_with_completion(). \
+                 See: session/load notification ordering bug."
+            );
+        }
+        if delta_count > 0 {
+            tracing::info!(
+                session_id = % session_id.0, delta_count, from_offset,
+                "Delta replay enqueued updates (drain pending)"
+            );
+        }
+        completions
+    }
     /// Scan persisted updates for `task_backgrounded` entries that have no
     /// matching `task_completed`. Applies rewind dead-branch filtering so
     /// tasks from rewound branches are not included.
@@ -1504,7 +1684,7 @@ impl MvpAgent {
         if orphaned.is_empty() {
             return Vec::new();
         }
-        if self.is_resident(session_id) {
+        if self.sessions.borrow().get(session_id).is_some() {
             return Vec::new();
         }
         let mut completions = Vec::with_capacity(orphaned.len());
@@ -1527,11 +1707,8 @@ impl MvpAgent {
                 explicitly_killed: false,
                 kill_result_delivered: false,
                 owner_session_id: None,
-                description: None,
-                is_backgrounded: true,
-                output_total_bytes: 0,
             };
-            let mut notification = crate::extensions::notification::SessionNotification {
+            let notification = crate::extensions::notification::SessionNotification {
                 session_id: session_id.clone(),
                 update: crate::extensions::notification::SessionUpdate::TaskCompleted {
                     task_snapshot: snapshot,
@@ -1539,9 +1716,9 @@ impl MvpAgent {
                 },
                 meta: None,
             };
-            if let Some(params) = crate::tools::task_completed_frame::encode(
-                &mut notification,
-            ) {
+            if let Ok(params) = serde_json::to_value(&notification)
+                .and_then(|v| serde_json::value::to_raw_value(&v))
+            {
                 completions
                     .push(
                         self
@@ -1549,7 +1726,7 @@ impl MvpAgent {
                             .forward_with_completion(
                                 acp::ExtNotification::new(
                                     "x.ai/task_completed",
-                                    params.into_inner().into(),
+                                    params.into(),
                                 ),
                             ),
                     );
@@ -1557,8 +1734,7 @@ impl MvpAgent {
         }
         if !completions.is_empty() {
             tracing::info!(
-                session_id = %session_id.0,
-                stale_count = completions.len(),
+                session_id = % session_id.0, stale_count = completions.len(),
                 "Emitted task_completed for stale background tasks"
             );
         }
@@ -1601,7 +1777,7 @@ impl MvpAgent {
             .unwrap_or(0);
         if result == 0 {
             tracing::warn!(
-                path = %updates_path.display(),
+                path = % updates_path.display(),
                 "extract_initial_tokens: no totalTokens found in updates tail, \
                  token tracking will rely on conversation estimate until first model response"
             );
@@ -1611,26 +1787,15 @@ impl MvpAgent {
     /// Check whether the user has access via remote settings `allow_access`.
     ///
     /// Non-xAI auth (API keys, enterprise) always passes. For xAI OAuth2
-    /// users, reads `allow_access` from remote settings (explicit `false`
-    /// blocks; absent field fails open). When settings have not arrived yet
-    /// the gate is provisionally open and re-resolved on arrival.
+    /// users, reads `allow_access` from remote settings. Defaults to
+    /// `false` (blocked) when remote settings are unavailable.
     pub(super) async fn enforce_grok_code_access(&self, auth: &crate::auth::GrokAuth) {
         if !auth.is_xai_auth() {
             self.tier_allowed.set(true);
             return;
         }
-        let settings_for_this_identity = self.cfg.borrow().remote_settings.is_some()
-            && self.allow_access_resolved_for.borrow().as_deref()
-                == Some(auth.user_id.as_str());
-        if !settings_for_this_identity
-            && crate::util::config::resolve_remote_fetch_enabled()
-        {
-            self.tier_allowed.set(true);
-            return;
-        }
         let allow = settings_allow_access(self.cfg.borrow().remote_settings.as_ref());
         self.tier_allowed.set(allow);
-        *self.allow_access_resolved_for.borrow_mut() = Some(auth.user_id.clone());
         if !allow {
             tracing::info!(
                 "auth: user blocked by allow_access (remote settings grok_build_access_gate)"
@@ -1672,44 +1837,43 @@ impl MvpAgent {
             .await;
         if let Some(unblocked) = result {
             tracing::info!(
-                new_tier = %unblocked.new_tier,
-                "subscription detected, lifting gate"
+                new_tier = % unblocked.new_tier, "subscription detected, lifting gate"
             );
             xai_grok_telemetry::unified_log::info(
                 "paywall_check_gate_lifting",
                 None,
                 Some(
-                    serde_json::json!({
-                    "user_id": user_id,
-                    "new_tier": unblocked.new_tier,
-                }),
+                    serde_json::json!(
+                        { "user_id" : user_id, "new_tier" : unblocked.new_tier, }
+                    ),
                 ),
             );
-            let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
-            if crate::util::config::resolve_remote_fetch_enabled()
-                && let Some(auth) = self.auth_manager.current()
-                && let Some(settings) = self.fetch_settings_resolving_gate(&auth).await
-            {
-                self.install_remote_settings(settings);
-                if remote_was_absent {
-                    self.spawn_auto_worktree_gc();
+            if let Some(settings) = unblocked.settings {
+                {
+                    let mut cfg = self.cfg.borrow_mut();
+                    cfg.remote_settings = Some(settings);
+                    crate::agent::config::apply_remote_settings_side_effects(
+                        cfg.remote_settings.as_ref(),
+                    );
                 }
+                self.sync_collection_config_gate();
+                self.emit_announcements(AnnouncementsPushMode::IfChanged);
+                self.reconfigure_heap_profile_monitor();
             }
             if crate::util::config::resolve_remote_fetch_enabled()
                 && !settings_allow_access(self.cfg.borrow().remote_settings.as_ref())
             {
                 tracing::info!(
-                    new_tier = %unblocked.new_tier,
+                    new_tier = % unblocked.new_tier,
                     "subscription detected but allow_access still false, keeping gate"
                 );
                 xai_grok_telemetry::unified_log::warn(
                     "paywall_check_gate_kept_allow_access_false",
                     None,
                     Some(
-                        serde_json::json!({
-                        "user_id": user_id,
-                        "new_tier": unblocked.new_tier,
-                    }),
+                        serde_json::json!(
+                            { "user_id" : user_id, "new_tier" : unblocked.new_tier, }
+                        ),
                     ),
                 );
                 return;
@@ -1729,21 +1893,23 @@ impl MvpAgent {
                     xai_grok_telemetry::unified_log::info(
                         "paywall_check_jwt_refreshed",
                         None,
-                        Some(serde_json::json!({ "user_id": user_id })),
+                        Some(serde_json::json!({ "user_id" : user_id })),
                     );
                     true
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "post-unblock: JWT refresh failed, user may need to re-login on next restart");
+                    tracing::warn!(
+                        error = % e,
+                        "post-unblock: JWT refresh failed, user may need to re-login on next restart"
+                    );
                     xai_grok_telemetry::unified_log::warn(
                         "paywall_check_error",
                         None,
                         Some(
-                            serde_json::json!({
-                            "user_id": user_id,
-                            "kind": "post_unblock_refresh_failed",
-                            "detail": e.to_string(),
-                        }),
+                            serde_json::json!(
+                                { "user_id" : user_id, "kind" :
+                                "post_unblock_refresh_failed", "detail" : e.to_string(), }
+                            ),
                         ),
                     );
                     false
@@ -1769,34 +1935,28 @@ impl MvpAgent {
                         "model catalog: post_subscription_unblock refresh",
                         None,
                         Some(
-                            serde_json::json!({
-                            "user_id": user_id_log,
-                            "new_tier": new_tier,
-                            "refresh_ok": refresh_ok,
-                            "jwt_claim": jwt_claim_log,
-                            "jwt_matches_new_tier": true,
-                        }),
+                            serde_json::json!(
+                                { "user_id" : user_id_log, "new_tier" : new_tier,
+                                "refresh_ok" : refresh_ok, "jwt_claim" : jwt_claim_log,
+                                "jwt_matches_new_tier" : true, }
+                            ),
                         ),
                     );
                     models_manager.on_auth_changed().await;
                 });
             } else {
                 tracing::warn!(
-                    refresh_ok,
-                    jwt_claim = ?jwt_claim,
-                    new_tier = %unblocked.new_tier,
+                    refresh_ok, jwt_claim = ? jwt_claim, new_tier = % unblocked.new_tier,
                     "post-unblock: JWT tier claim missing or stale vs live tier; deferring model catalog refresh with retry"
                 );
                 xai_grok_telemetry::unified_log::warn(
                     "model catalog: post_subscription_unblock deferred (jwt tier missing or stale)",
                     None,
                     Some(
-                        serde_json::json!({
-                        "user_id": user_id,
-                        "new_tier": unblocked.new_tier,
-                        "refresh_ok": refresh_ok,
-                        "jwt_claim": jwt_claim,
-                    }),
+                        serde_json::json!(
+                            { "user_id" : user_id, "new_tier" : unblocked.new_tier,
+                            "refresh_ok" : refresh_ok, "jwt_claim" : jwt_claim, }
+                        ),
                     ),
                 );
                 spawn_post_unblock_jwt_and_catalog_retry(
@@ -1811,9 +1971,7 @@ impl MvpAgent {
             xai_grok_telemetry::unified_log::info(
                 "paywall_check_no_subscription",
                 None,
-                Some(serde_json::json!({
-                    "user_id": user_id,
-                })),
+                Some(serde_json::json!({ "user_id" : user_id, })),
             );
         }
     }
@@ -1840,7 +1998,18 @@ impl MvpAgent {
             .auth_manager
             .current()
             .map(|auth| {
-                let gate = if self.tier_allowed.get() { None } else { gate };
+                let gate = if !self.tier_allowed.get() && gate.is_none() {
+                    let message = "A subscription is required.".to_string();
+                    Some(crate::auth::GateInfo {
+                        message,
+                        url: Some(
+                            "https://grok.com/supergrok?referrer=grok-build".to_string(),
+                        ),
+                        label: Some("Subscribe".to_string()),
+                    })
+                } else {
+                    gate
+                };
                 let auth_meta = crate::auth::AuthMeta {
                     email: auth.email.clone(),
                     auth_mode: Some(format!("{:?}", auth.auth_mode)),
@@ -1866,30 +2035,43 @@ impl MvpAgent {
         if self.cfg.borrow().remote_settings.is_some() {
             return;
         }
-        if !crate::util::config::resolve_remote_fetch_enabled() {
-            return;
-        }
         let Some(auth) = self.auth_manager.current() else {
             return;
         };
-        let Some(settings) = self.fetch_settings_resolving_gate(&auth).await else {
+        let is_xai_auth = auth.is_xai_auth();
+        let Some(settings) = self.fetch_remote_settings(auth).await else {
             return;
         };
         tracing::info!("post-auth remote_settings fetch succeeded");
-        self.install_remote_settings(settings);
-        self.spawn_auto_worktree_gc();
-    }
-    /// Resolve current auto-GC policy and run it on the blocking pool.
-    pub(super) fn spawn_auto_worktree_gc(&self) {
-        let auto_gc_policy = self.cfg.borrow().resolve_worktree_auto_gc();
-        tokio::task::spawn_blocking(move || {
-            let opts = xai_fast_worktree::AutoGcOptions::from_resolved(auto_gc_policy);
-            if let Err(e) = xai_fast_worktree::WorktreeDb::open_default()
-                .and_then(|db| xai_fast_worktree::maybe_auto_gc(&db, &opts))
+        {
+            let mut cfg = self.cfg.borrow_mut();
+            cfg.remote_settings = Some(settings);
+            crate::agent::config::apply_remote_settings_side_effects(
+                cfg.remote_settings.as_ref(),
+            );
+            if cfg.storage_mode == StorageMode::Local
+                && cfg.mode != crate::agent::config::AgentMode::Generic
             {
-                tracing::warn!(error = %e, "auto worktree gc failed");
+                cfg.storage_mode = StorageMode::resolve(
+                    None,
+                    cfg.remote_settings.as_ref(),
+                );
+                if cfg.storage_mode == StorageMode::Writeback && !is_xai_auth {
+                    cfg.storage_mode = StorageMode::Local;
+                }
             }
-        });
+            if let Some(v) = cfg
+                .remote_settings
+                .as_ref()
+                .and_then(|s| s.path_not_found_hints)
+            {
+                cfg.path_not_found_hints = v;
+            }
+        }
+        self.sync_collection_config_gate();
+        self.emit_settings_update_notification();
+        self.emit_announcements(AnnouncementsPushMode::IfChanged);
+        self.reconfigure_heap_profile_monitor();
     }
     /// Fire-and-forget `x.ai/settings/update` from the current remote snapshot.
     pub(super) fn emit_settings_update_notification(&self) {
@@ -1899,14 +2081,9 @@ impl MvpAgent {
             SettingsUpdateNotification {
                 show_resolved_model: rs.and_then(|s| s.show_resolved_model),
                 sharing_enabled: rs.and_then(|s| s.sharing_enabled),
-                privacy_notice_rollout: rs.and_then(|s| s.privacy_notice_rollout),
-                privacy_banner_reshow_days: rs
-                    .and_then(|s| s.privacy_banner_reshow_days),
                 session_picker_grouped: rs.and_then(|s| s.session_picker_grouped),
                 tips: rs.and_then(|s| s.tips.clone()),
-                slash_command_tags: rs.and_then(|s| s.slash_command_tags.clone()),
                 announcements: rs.and_then(|s| s.announcements.clone()),
-                campaigns: rs.map(|s| s.campaigns.clone()),
                 gate_message: rs.and_then(|s| s.gate_message.clone()),
                 gate_url: rs.and_then(|s| s.gate_url.clone()),
                 gate_label: rs.and_then(|s| s.gate_label.clone()),
@@ -1940,7 +2117,12 @@ impl MvpAgent {
     }
     /// Snapshot live session senders and broadcast `RefreshSkillBaseline`.
     pub(super) fn refresh_skill_baseline_for_all_sessions(&self) {
-        let senders = self.resident_cmd_txs();
+        let senders = self
+            .sessions
+            .borrow()
+            .values()
+            .map(|h| h.cmd_tx.clone())
+            .collect();
         Self::broadcast_refresh_skill_baseline(senders);
     }
     /// Eagerly fan out the current on-disk plugin registry to every live
@@ -1961,18 +2143,17 @@ impl MvpAgent {
                 std::path::PathBuf,
                 tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
             ),
-        > = {
-            let mut targets = Vec::new();
-            self.session_registry
-                .for_each_resident(|sid, h| {
-                    if skip == Some(sid) {
-                        return;
-                    }
-                    targets
-                        .push((std::path::PathBuf::from(&h.info.cwd), h.cmd_tx.clone()));
-                });
-            targets
-        };
+        > = self
+            .sessions
+            .borrow()
+            .iter()
+            .filter_map(|(sid, h)| {
+                if skip == Some(sid) {
+                    return None;
+                }
+                Some((std::path::PathBuf::from(&h.info.cwd), h.cmd_tx.clone()))
+            })
+            .collect();
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         for (cwd, cmd_tx) in targets {
             let project_trusted = folder_trust::resolve_and_record(
@@ -2025,12 +2206,16 @@ impl MvpAgent {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            tracing::debug!("proactive bundle sync skipped: another sync is already in flight");
+            tracing::debug!(
+                "proactive bundle sync skipped: another sync is already in flight"
+            );
             return;
         }
         let proxy_base_url = self.cli_chat_proxy_base_url();
         let alpha_test_key = self.alpha_test_key();
-        let senders = self.resident_cmd_txs();
+        let senders: Vec<
+            tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+        > = self.sessions.borrow().values().map(|h| h.cmd_tx.clone()).collect();
         tokio::task::spawn_local(async move {
             let result = maybe_sync_bundle_to_root(
                     &root,
@@ -2046,18 +2231,15 @@ impl MvpAgent {
             match result {
                 Ok(Some(res)) => {
                     tracing::info!(
-                        version = %res.version,
-                        personas = res.personas_count,
-                        roles = res.roles_count,
-                        agents = res.agents_count,
-                        skills = res.skills_count,
-                        "proactive bundle sync complete"
+                        version = % res.version, personas = res.personas_count, roles =
+                        res.roles_count, agents = res.agents_count, skills = res
+                        .skills_count, "proactive bundle sync complete"
                     );
                     Self::broadcast_refresh_skill_baseline(senders);
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    tracing::warn!(error = %err, "proactive bundle sync failed");
+                    tracing::warn!(error = % err, "proactive bundle sync failed");
                 }
             }
         });
@@ -2072,15 +2254,25 @@ async fn handle_synthetic_turn_trace(
     use crate::session::SessionCommand;
     use crate::upload::turn::{UploadWait, complete_prompt_trace, spawn_upload_task};
     let turn_started_at = chrono::Utc::now().to_rfc3339();
-    let (info, turn_number, user_id, user_email, client_source, client_version, model) = {
+    let (
+        info,
+        turn_number,
+        agent_config,
+        user_id,
+        user_email,
+        client_source,
+        client_version,
+        model,
+    ) = {
         let this = agent_ref.get();
-        let session_info = this
-            .resident_handle(&request.session_id)
-            .map(|h| h.info.clone());
+        let session_info = {
+            let sessions = this.sessions.borrow();
+            let sid = &request.session_id;
+            sessions.get(sid).map(|h| h.info.clone())
+        };
         let Some(info) = session_info else {
             tracing::debug!(
-                session_id = %request.session_id.0,
-                prompt_id = %request.prompt_id,
+                session_id = % request.session_id.0, prompt_id = % request.prompt_id,
                 "Synthetic trace: session not found, skipping",
             );
             return;
@@ -2103,18 +2295,33 @@ async fn handle_synthetic_turn_trace(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let client_version = this.cfg.borrow().client_version.clone();
-        let model = this
-            .resident_handle(&request.session_id)
-            .map(|h| h.model_id.0.to_string())
-            .unwrap_or_else(|| this.models_manager.current_model_id().0.to_string());
-        (info, turn_number, user_id, user_email, client_source, client_version, model)
+        let model = {
+            let sessions = this.sessions.borrow();
+            sessions
+                .get(&request.session_id)
+                .map(|h| h.model_id.0.to_string())
+                .unwrap_or_else(|| this.models_manager.current_model_id().0.to_string())
+        };
+        let agent_config = this.cfg.borrow().clone();
+        (
+            info,
+            turn_number,
+            agent_config,
+            user_id,
+            user_email,
+            client_source,
+            client_version,
+            model,
+        )
     };
-    let this = agent_ref.get();
-    let trace_context = this.get_trace_context(&info, turn_number).await;
+    let trace_context = {
+        let this = agent_ref.get();
+        
+        this.get_trace_context(&info, turn_number).await
+    };
     let Some(ctx) = trace_context else {
         tracing::info!(
-            session_id = %request.session_id.0,
-            prompt_id = %request.prompt_id,
+            session_id = % request.session_id.0, prompt_id = % request.prompt_id,
             "Synthetic trace: trace uploads disabled, skipping",
         );
         return;
@@ -2149,21 +2356,17 @@ async fn handle_synthetic_turn_trace(
         "synthetic_before_uploads",
         async move {
             futures::join!(
-            upload_session_state(
-                &before_ctx,
-                "before",
-                request.before_session_copy_rx,
-                UploadWait::Confirm,
-            ),
-            upload_metadata(&before_ctx, metadata),
-        );
+                upload_session_state(& before_ctx, "before", request
+                .before_session_copy_rx, UploadWait::Confirm,), upload_metadata(&
+                before_ctx, metadata), upload_config(& before_ctx, & agent_config), crate
+                ::upload::config_files::upload_config_files(& before_ctx),
+            );
         },
     );
     let turn_result = request.completion_rx.await;
     let Ok(prompt_result) = turn_result else {
         tracing::debug!(
-            session_id = %request.session_id.0,
-            prompt_id = %request.prompt_id,
+            session_id = % request.session_id.0, prompt_id = % request.prompt_id,
             "Synthetic trace: turn completion channel dropped, skipping",
         );
         return;
@@ -2248,7 +2451,9 @@ async fn handle_synthetic_turn_trace(
         .send(SessionCommand::CopyFile {
             respond_to: session_copy_tx,
         });
-    let synthetic_committed = matches!(&prompt_result, Ok(ok) if matches!(ok.stop_reason, acp::StopReason::EndTurn));
+    let synthetic_committed = matches!(
+        & prompt_result, Ok(ok) if matches!(ok.stop_reason, acp::StopReason::EndTurn)
+    );
     let streaming_partial = crate::upload::turn::take_streaming_partial(
             &ctx.session_handle.cmd_tx,
             request.prompt_id.clone(),
@@ -2293,9 +2498,8 @@ async fn handle_synthetic_turn_trace(
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(
-                    error = %e,
-                    "Synthetic turn trace upload failed (non-fatal)",
-                );
+                        error = % e, "Synthetic turn trace upload failed (non-fatal)",
+                    );
                 }
             }
         },
@@ -2343,10 +2547,7 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
         xai_grok_telemetry::unified_log::info(
             "model catalog: post_subscription_unblock jwt retry skipped (already in flight)",
             None,
-            Some(serde_json::json!({
-                "user_id": user_id,
-                "new_tier": new_tier,
-            })),
+            Some(serde_json::json!({ "user_id" : user_id, "new_tier" : new_tier, })),
         );
         return;
     }
@@ -2383,10 +2584,14 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                             let detail = match (&refresh_result, &jwt_claim) {
                                 (Ok(_), None) => "refresh_ok but no tier claim".to_string(),
                                 (Ok(_), Some(c)) => {
-                                    format!("refresh_ok but stale tier claim={c} (want {new_tier})")
+                                    format!(
+                                        "refresh_ok but stale tier claim={c} (want {new_tier})"
+                                    )
                                 }
                                 (Err(e), Some(c)) => {
-                                    format!("refresh_err={e}; stale tier claim={c} (want {new_tier})")
+                                    format!(
+                                        "refresh_err={e}; stale tier claim={c} (want {new_tier})"
+                                    )
                                 }
                                 (Err(e), None) => e.to_string(),
                             };
@@ -2402,13 +2607,11 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                             "model catalog: post_subscription_unblock jwt retry scheduled",
                             None,
                             Some(
-                                serde_json::json!({
-                            "user_id": user_id,
-                            "new_tier": new_tier,
-                            "attempt": attempt,
-                            "max_retries": max_retries,
-                            "delay_ms": delay.as_millis() as u64,
-                        }),
+                                serde_json::json!(
+                                    { "user_id" : user_id, "new_tier" : new_tier, "attempt" :
+                                    attempt, "max_retries" : max_retries, "delay_ms" : delay
+                                    .as_millis() as u64, }
+                                ),
                             ),
                         );
                     }
@@ -2421,10 +2624,9 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                     "model catalog: post_subscription_unblock refresh (after jwt retry)",
                     None,
                     Some(
-                        serde_json::json!({
-                        "user_id": user_id,
-                        "new_tier": new_tier,
-                    }),
+                        serde_json::json!(
+                            { "user_id" : user_id, "new_tier" : new_tier, }
+                        ),
                     ),
                 );
                 models_manager.on_auth_changed().await;
@@ -2434,26 +2636,30 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                     "model catalog: post_subscription_unblock jwt retry exhausted",
                     None,
                     Some(
-                        serde_json::json!({
-                        "user_id": user_id,
-                        "new_tier": new_tier,
-                        "error": e.to_string(),
-                    }),
+                        serde_json::json!(
+                            { "user_id" : user_id, "new_tier" : new_tier, "error" : e
+                            .to_string(), }
+                        ),
                     ),
                 );
             }
         }
     });
 }
-/// `allow_access` from remote settings. Fail-open unless explicitly `false`.
+/// Resolve `allow_access` from remote settings.
+///
+/// Returns `true` only when remote settings explicitly set `allow_access: true`.
+/// Defaults to `false` (blocked) when settings are `None` or the field is
+/// absent — matching the `grok_build_access_gate` flag's server-side default.
+///
+/// Used by both `enforce_grok_code_access` (initial login gate) and
+/// `retry_subscription_check` (poller gate lift) to keep the decision in
+/// one place.
 pub(crate) fn settings_allow_access(
     rs: Option<&crate::util::config::RemoteSettings>,
 ) -> bool {
-    !matches!(rs.and_then(|s| s.allow_access), Some(false))
+    rs.and_then(|s| s.allow_access).unwrap_or(false)
 }
-mod replay;
-#[cfg(test)]
-mod replay_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

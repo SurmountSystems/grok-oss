@@ -2322,6 +2322,7 @@ mod tests {
             SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_DELETE_TOOL_NAME,
         };
         let builder = ToolRegistryBuilder::new();
+        // Note: deploy_app is a no-op stub in OSS builds and is not registered.
         let config = ToolServerConfig {
             tools: [
                 "read_file",

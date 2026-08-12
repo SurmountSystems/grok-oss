@@ -14,6 +14,7 @@ test-support = []
 test-util = []
 # Local Computer Hub workspace_server (own/attach + crash-restart). Requires
 local-workspace = []
+unstable = []
 default-bazel = [
     "local-workspace",
     "test-support",
@@ -113,7 +114,6 @@ arc-swap = { workspace = true }
 infer = "0.15"
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 moka = { workspace = true, features = ["future"] }
-dhat = { workspace = true, optional = true }
 base64 = { workspace = true }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 sha2 = { workspace = true }
@@ -125,7 +125,7 @@ xai-fast-worktree = { path = "../xai-fast-worktree", features = ["metadata"] }
 tonic = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 xai-grok-paths = { path = "../xai-grok-paths" }
-xai-grok-shell-base = { workspace = true }
+xai-grok-shell-base = { workspace = true, features = ["test-support"] }
 xai-grok-shell-session-support = { workspace = true }
 xai-grok-shared = { workspace = true }
 xai-tracing-macros = { path = "../xai-tracing-macros" }
@@ -139,7 +139,6 @@ xai-chat-state = { path = "../xai-chat-state" }
 # Segment markdown rendering + the `compaction/` store path convention.
 xai-compaction-transcript = { workspace = true }
 xai-grok-compaction = { path = "../../common/xai-grok-compaction" }
-xai-grok-extra-ca = { workspace = true }
 xai-grok-sampler = { path = "../xai-grok-sampler" }
 # Session FTS search; owns this crate's only rusqlite/bundled-SQLite use.
 xai-grok-session-search = { workspace = true }
@@ -147,7 +146,6 @@ xai-token-estimation = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
 xai-tty-utils = { workspace = true }
-xai-workflow = { path = "../xai-workflow" }
 xai-system-power = { workspace = true }
 xai-grok-workspace = { workspace = true }
 # Backs the compatibility-only `xai_grok_shell::foreign_sessions` re-export.
@@ -157,7 +155,7 @@ xai-grok-agent = { path = "../xai-grok-agent" }
 xai-grok-bundle = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-config-types = { workspace = true }
-xai-grok-memory = { workspace = true }
+xai-grok-memory = { workspace = true, features = ["test-support"] }
 xai-grok-hooks = { path = "../xai-grok-hooks" }
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 xai-grok-plugin-marketplace = { path = "../xai-grok-plugin-marketplace" }
@@ -205,17 +203,18 @@ windows = { workspace = true, features = ["Win32_Security_Credentials"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
-# Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
-ctor = { workspace = true }
 filetime = { workspace = true }
-pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 # `extensions::bundle` tests build archives with `bundle::test_helpers`, which
 # is `#[cfg(test)]`-only inside xai-grok-bundle without this feature.
 xai-grok-bundle = { workspace = true, features = ["test-support"] }
 xai-grok-memory = { workspace = true, features = ["test-support"] }
 xai-grok-workspace = { workspace = true, features = ["test-support"] }
-xai-grok-config = { workspace = true, features = [] }
+# Feature-unification applies the signing seam to the lib when building tests, so
+# integration tests can inject a throwaway trusted key; production builds exclude
+# dev-deps and compile the seam out.
+xai-grok-config = { workspace = true, features = ["test-support"] }
+# Ed25519 signing for the managed-config signature tests.
 ring = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }

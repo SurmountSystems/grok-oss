@@ -100,3 +100,6 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
 local-workspace = ["xai-grok-pager/local-workspace"]
 release-dist = ["xai-grok-pager/release-dist"]
+
+[lints]
+workspace = true

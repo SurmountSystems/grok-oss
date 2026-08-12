@@ -9,8 +9,10 @@ description = "Foundation modules for the grok shell crate family: environment p
 # Forwarded from shell; empty here (no local-ws code in this crate).
 local-workspace = []
 # Exposes `#[cfg(test)]`-only helpers (`env::EnvVarGuard`,
-# `cpu_profile` test seams) to downstream crates' test targets. Enabled by
+# `cpu_profile` test seams) to downstream crates' test targets.
 test-support = ["xai-grok-env/test-support"]
+# CI default set: builds a single shared rlib per crate, so downstream test
+# targets need the test-only helper surface compiled in.
 default-bazel = ["test-support"]
 
 [dependencies]

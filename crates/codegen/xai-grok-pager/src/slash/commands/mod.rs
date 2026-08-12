@@ -15,10 +15,7 @@ pub mod context;
 pub mod copy;
 pub mod dashboard;
 pub mod debug;
-pub mod delete;
 pub mod docs;
-pub mod doctor;
-pub mod edit_prompt;
 pub mod effort;
 pub mod effort_levels;
 pub mod exit;
@@ -34,7 +31,6 @@ pub mod home;
 pub mod imagine;
 pub mod imagine_video;
 pub mod import_claude;
-pub mod jump;
 pub mod login;
 pub mod logout;
 pub mod loop_cmd;
@@ -59,17 +55,15 @@ pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
 pub mod tasks;
+pub mod terminal_setup;
 pub mod theme;
-pub mod timeline;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
-pub mod tutorial;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
 pub mod voice;
-pub mod workflows;
 use super::command::SlashCommand;
 use std::sync::Arc;
 /// All pager-local builtin commands, in display order.
@@ -82,7 +76,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(help::HelpCommand),
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),
-        Arc::new(delete::DeleteCommand),
         Arc::new(new::NewCommand),
         Arc::new(fork::ForkCommand),
         Arc::new(compact::CompactCommand),
@@ -91,10 +84,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(history::HistoryCommand),
         Arc::new(export::ExportCommand),
         Arc::new(transcript::TranscriptCommand),
-        Arc::new(edit_prompt::EditPromptCommand),
         Arc::new(expand::ExpandCommand),
         Arc::new(context::ContextCommand),
-        // Screen-mode switchers: visible only in the opposite mode.
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::minimal()),
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
         Arc::new(model::ModelCommand),
@@ -121,21 +112,18 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(view_plan::ViewPlanCommand),
         Arc::new(resume::ResumeCommand),
         Arc::new(mcps::McpsCommand),
-        Arc::new(workflows::WorkflowsCommand),
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
-        Arc::new(doctor::DoctorCommand),
+        Arc::new(terminal_setup::TerminalSetupCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(imagine::ImagineCommand),
         Arc::new(imagine_video::ImagineVideoCommand),
         Arc::new(timestamps::TimestampsCommand),
-        Arc::new(timeline::TimelineCommand),
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(privacy::PrivacyCommand),
         Arc::new(rewind::RewindCommand),
-        Arc::new(jump::JumpCommand),
         Arc::new(login::LoginCommand),
         Arc::new(logout::LogoutCommand),
         Arc::new(import_claude::ImportClaudeCommand),
@@ -143,14 +131,10 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
         Arc::new(release_notes::ReleaseNotesCommand),
-        Arc::new(tutorial::TutorialCommand),
         Arc::new(config_agents::ConfigAgentsCommand),
         Arc::new(personas::PersonasCommand),
-        // Hidden easter egg: never listed, runs on bare `/gboom`.
         Arc::new(gboom::GboomCommand),
-        // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
         Arc::new(scroll_debug::ScrollDebugCommand),
-        // Debug toggles: always registered, listed only on debug binaries.
         Arc::new(debug::DebugCommand),
     ]
 }
@@ -159,7 +143,7 @@ mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
     use crate::app::actions::Action;
-    use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+    use crate::slash::command::{CommandExecCtx, CommandResult};
     use crate::slash::registry::CommandRegistry;
     use agent_client_protocol as acp;
     /// Build a ModelState with two models for testing.
@@ -195,8 +179,6 @@ mod tests {
             session_id: None,
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,
@@ -252,23 +234,13 @@ mod tests {
         assert!(reg.get("welcome").is_some());
         assert!(reg.get("show-plan").is_some());
         assert!(reg.get("plan-view").is_some());
-        assert!(reg.get("undo").is_some());
     }
     #[test]
-    fn aliases_resolve_to_same_command() {
+    fn alias_resolves_to_same_command() {
         let reg = CommandRegistry::new(builtin_commands());
         let exit_cmd = reg.get("exit").unwrap();
         let quit_cmd = reg.get("quit").unwrap();
         assert_eq!(exit_cmd.name(), quit_cmd.name());
-        let doctor = reg.get("doctor").unwrap();
-        assert_eq!(doctor.usage(), "/doctor [fix [FIX]]");
-        for alias in ["terminal-setup", "terminal-check", "terminal-info"] {
-            assert_eq!(reg.get(alias).unwrap().name(), doctor.name());
-            assert_eq!(reg.get(alias).unwrap().usage(), doctor.usage());
-        }
-        let rewind = reg.get("rewind").unwrap();
-        assert_eq!(reg.get("undo").unwrap().name(), rewind.name());
-        assert_eq!(reg.get("undo").unwrap().usage(), rewind.usage());
     }
     #[test]
     fn exit_returns_quit_action() {
@@ -293,19 +265,6 @@ mod tests {
         let cmd = home::HomeCommand;
         let result = cmd.run(&mut ctx, "");
         assert!(matches!(result, CommandResult::Action(Action::ExitSession)));
-    }
-    #[test]
-    fn delete_requires_session_and_dispatches() {
-        let models = ModelState::default();
-        let cmd = delete::DeleteCommand;
-        let mut ctx = make_ctx(&models);
-        assert!(matches!(cmd.run(&mut ctx, ""), CommandResult::Error(_)));
-        let session_id = acp::SessionId::new("sess-delete");
-        ctx.session_id = Some(&session_id);
-        assert!(matches!(
-            cmd.run(&mut ctx, ""),
-            CommandResult::Action(Action::DeleteCurrentSession)
-        ));
     }
     #[test]
     fn view_plan_returns_show_plan_action() {
@@ -430,11 +389,7 @@ mod tests {
             models: &models,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
-            workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
-            current_title: None,
         };
         let cmd = model::ModelCommand;
         let items = cmd.suggest_args(&ctx, "").expect("should have suggestions");
@@ -457,11 +412,7 @@ mod tests {
             models: &models,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
-            workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
-            current_title: None,
         };
         let cmd = model::ModelCommand;
         assert!(cmd.suggest_args(&ctx, "").is_none());
@@ -501,111 +452,100 @@ mod tests {
             CommandResult::Action(Action::EnterRememberMode)
         ));
     }
-    fn run_usage(args: &str, billing: bool) -> CommandResult {
-        run_usage_gated(args, billing, true)
-    }
-    fn run_usage_gated(args: &str, billing: bool, usage_cmd: bool) -> CommandResult {
+    fn run_usage(args: &str) -> CommandResult {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
-        ctx.billing_surface_visible = billing;
-        ctx.usage_command_visible = usage_cmd;
         usage::UsageCommand.run(&mut ctx, args)
     }
     #[test]
-    fn usage_consumer_show_and_manage() {
+    fn usage_no_args_returns_show_usage() {
         assert!(matches!(
-            run_usage("", true),
+            run_usage(""),
             CommandResult::Action(Action::ShowUsage)
         ));
+    }
+    #[test]
+    fn usage_show_returns_show_usage() {
         assert!(matches!(
-            run_usage("show", true),
+            run_usage("show"),
             CommandResult::Action(Action::ShowUsage)
         ));
-        assert!(matches!(
-            run_usage("  manage  ", true),
-            CommandResult::Action(Action::ManageBilling)
-        ));
-        assert!(matches!(run_usage("delete", true), CommandResult::Error(_)));
     }
     #[test]
-    fn usage_non_consumer_is_bare_only() {
+    fn usage_manage_returns_open_url() {
+        match run_usage("manage") {
+            CommandResult::Action(Action::OpenUrl(url)) => {
+                assert_eq!(url, "https://grok.com/?_s=usage");
+            }
+            other => panic!("expected Action(OpenUrl), got {other:?}"),
+        }
+    }
+    #[test]
+    fn usage_invalid_arg_returns_error() {
+        match run_usage("delete") {
+            CommandResult::Error(msg) => {
+                assert!(msg.contains("delete"), "got: {msg}");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+    #[test]
+    fn usage_whitespace_only_treated_as_no_args() {
         assert!(matches!(
-            run_usage("", false),
+            run_usage("   "),
             CommandResult::Action(Action::ShowUsage)
         ));
+    }
+    #[test]
+    fn usage_show_with_leading_whitespace() {
         assert!(matches!(
-            run_usage("manage", false),
-            CommandResult::Error(_)
+            run_usage("  show  "),
+            CommandResult::Action(Action::ShowUsage)
         ));
-        assert!(matches!(run_usage("show", false), CommandResult::Error(_)));
     }
     #[test]
-    fn usage_takes_args_only_for_consumer() {
-        let models = ModelState::default();
-        let mut ctx = crate::slash::command::AppCtx {
-            models: &models,
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
-            workflows_available: true,
-            screen_mode: crate::app::ScreenMode::Fullscreen,
-            current_title: None,
-        };
-        let cmd = usage::UsageCommand;
-        assert!(cmd.takes_args_now(&ctx));
-        ctx.billing_surface_visible = false;
-        assert!(!cmd.takes_args_now(&ctx));
+    fn usage_manage_with_leading_whitespace() {
+        match run_usage("  manage  ") {
+            CommandResult::Action(Action::OpenUrl(url)) => {
+                assert_eq!(url, "https://grok.com/?_s=usage");
+            }
+            other => panic!("expected Action(OpenUrl), got {other:?}"),
+        }
     }
     #[test]
-    fn usage_suggest_args_consumer_only() {
-        let models = ModelState::default();
-        let mut ctx = crate::slash::command::AppCtx {
-            models: &models,
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
-            workflows_available: false,
-            screen_mode: crate::app::ScreenMode::Fullscreen,
-            current_title: None,
-        };
-        let items = usage::UsageCommand.suggest_args(&ctx, "").unwrap();
-        assert_eq!(
-            items.iter().map(|i| i.display.as_str()).collect::<Vec<_>>(),
-            ["show", "manage"]
-        );
-        ctx.billing_surface_visible = false;
-        assert!(usage::UsageCommand.suggest_args(&ctx, "").is_none());
-    }
-    #[test]
-    fn usage_registered_in_builtin_commands() {
-        assert!(
-            CommandRegistry::new(builtin_commands())
-                .get("usage")
-                .is_some()
-        );
-    }
-    #[test]
-    fn usage_hidden_when_command_not_visible() {
+    fn usage_suggest_args_returns_show_and_manage() {
         let models = ModelState::default();
         let ctx = crate::slash::command::AppCtx {
             models: &models,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: false,
-            workflows_available: false,
             screen_mode: crate::app::ScreenMode::Fullscreen,
-            current_title: None,
         };
-        assert!(!usage::UsageCommand.visible(&ctx));
-        assert!(!usage::UsageCommand.takes_args_now(&ctx));
-        assert!(usage::UsageCommand.suggest_args(&ctx, "").is_none());
-        assert!(matches!(
-            run_usage_gated("", true, false),
-            CommandResult::Error(msg) if msg.contains("not available")
-        ));
+        let items = usage::UsageCommand
+            .suggest_args(&ctx, "")
+            .expect("should have suggestions");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].display, "show");
+        assert_eq!(items[0].insert_text, "show");
+        assert_eq!(items[1].display, "manage");
+        assert_eq!(items[1].insert_text, "manage");
+    }
+    #[test]
+    fn usage_metadata() {
+        let cmd = usage::UsageCommand;
+        assert_eq!(cmd.name(), "usage");
+        assert!(cmd.takes_args());
+        assert_eq!(cmd.arg_placeholder(), Some("show | manage"));
+        assert!(!cmd.description().is_empty());
+        assert!(!cmd.usage().is_empty());
+    }
+    #[test]
+    fn usage_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("usage").is_some(),
+            "/usage should be registered in builtins"
+        );
     }
     #[test]
     fn cd_registered_in_builtin_commands() {
@@ -634,7 +574,8 @@ mod tests {
     #[test]
     fn cost_aliases_usage() {
         let reg = CommandRegistry::new(builtin_commands());
-        assert_eq!(reg.get("cost").expect("/cost").name(), "usage");
+        let cost = reg.get("cost").expect("/cost should resolve");
+        assert_eq!(cost.name(), "usage", "/cost must alias /usage");
     }
     #[test]
     fn debug_is_registered_and_executable() {
@@ -653,11 +594,7 @@ mod tests {
             models: &models,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
-            billing_surface_visible: true,
-            usage_command_visible: true,
-            workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
-            current_title: None,
         };
         assert!(
             !gboom::GboomCommand.visible(&ctx),
@@ -678,17 +615,10 @@ mod tests {
     #[test]
     fn recap_registered_in_builtin_commands() {
         let mut reg = CommandRegistry::new(builtin_commands());
-        assert!(reg.get("recap").is_none());
-        assert!(reg.get("summarize").is_none());
         reg.set_recap_visible(true);
         assert!(
             reg.get("recap").is_some(),
             "/recap should be registered in builtins"
-        );
-        assert_eq!(
-            reg.get("summarize").map(|c| c.name()),
-            Some("recap"),
-            "/summarize should alias /recap"
         );
     }
     #[test]
@@ -743,47 +673,5 @@ mod tests {
         assert!(reg.get("voice").is_some());
         reg.set_voice_visible(false);
         assert!(reg.get("voice").is_none());
-    }
-    /// Every pager builtin trigger key must appear in the shell's
-    /// `PAGER_COMMAND_KEYS`. Add new names there when adding a pager builtin.
-    #[test]
-    fn pager_builtin_triggers_are_reserved_in_shell() {
-        let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS
-            .iter()
-            .copied()
-            .collect();
-        let missing: Vec<String> = builtin_commands()
-            .iter()
-            .flat_map(|cmd| {
-                std::iter::once(cmd.name().to_string())
-                    .chain(cmd.aliases().iter().map(|a| a.to_string()))
-            })
-            .filter(|key| !reserved.contains(key.as_str()))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "pager builtin trigger keys missing from the shell's \
-             PAGER_COMMAND_KEYS (xai-grok-shell/src/session/slash_commands.rs); \
-             a skill with one of these names would shadow or be shadowed by \
-             the pager builtin: {missing:?}"
-        );
-    }
-    #[test]
-    fn pager_blocked_acp_names_are_reserved_in_shell() {
-        let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS
-            .iter()
-            .copied()
-            .collect();
-        let missing: Vec<&str> = crate::slash::registry::BLOCKED_ACP_NAMES
-            .iter()
-            .copied()
-            .filter(|name| !reserved.contains(name))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "pager BLOCKED_ACP_NAMES missing from PAGER_COMMAND_KEYS; \
-             a skill with one of these names is advertised bare and then \
-             dropped: {missing:?}"
-        );
     }
 }

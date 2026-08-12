@@ -5,10 +5,7 @@
 //! Cancellation is cooperative via `CancellationToken`.
 
 use std::pin::pin;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -29,9 +26,54 @@ use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
 };
-use crate::stream::responses::stream_responses_tracked;
-use crate::stream::{stream_chat_completions, stream_messages};
+use crate::stream::{stream_chat_completions, stream_messages, stream_responses};
 use crate::types::RequestId;
+
+use grok_rate_limit::{ProviderKey, RateLimitMeta, SharedRateLimitStore, fingerprint_secret};
+
+fn provider_key_for_config(config: &SamplerConfig) -> ProviderKey {
+    match config.api_key.as_deref() {
+        Some(k) if !k.is_empty() => {
+            ProviderKey::from_base_url_and_key_fingerprint(&config.base_url, &fingerprint_secret(k))
+        }
+        _ => ProviderKey::from_base_url(&config.base_url),
+    }
+}
+
+/// Before each HTTP attempt: honor any shared cross-process cooldown.
+async fn wait_before_attempt(config: &SamplerConfig) {
+    let store = SharedRateLimitStore::process_default();
+    store
+        .wait_if_limited(&provider_key_for_config(config))
+        .await;
+}
+
+/// After a failed attempt: on 429 publish shared cooldown; always wait shared
+/// then apply local backoff for non-429 (429 is fully covered by shared wait).
+async fn sleep_for_retry(config: &SamplerConfig, err: &SamplingError, local_backoff: Duration) {
+    let store = SharedRateLimitStore::process_default();
+    let key = provider_key_for_config(config);
+    if err.is_rate_limited() {
+        let wait = err
+            .retry_after()
+            .map(Duration::from_secs)
+            .unwrap_or(local_backoff);
+        let meta = RateLimitMeta {
+            status: Some(429),
+            reason: Some(err.to_string()),
+        };
+        if let Err(e) = store.observe(&key, wait, meta) {
+            tracing::debug!(error = %e, "shared rate limit observe failed");
+        }
+        store.wait_if_limited(&key).await;
+    } else {
+        // Peers may still have a host-level cooldown; then local exp backoff.
+        store.wait_if_limited(&key).await;
+        if !local_backoff.is_zero() {
+            tokio::time::sleep(local_backoff).await;
+        }
+    }
+}
 
 /// Default per-chunk idle timeout when neither config nor caller
 /// supplies one. Matches the shell's session-level default
@@ -93,12 +135,7 @@ pub(crate) async fn run_request_task(
             .idle_timeout_secs
             .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
     );
-    let configured_max_retries = config.max_retries.or(Some(retry_policy.max_retries));
-    let max_retries = if configured_max_retries == Some(0) {
-        0
-    } else {
-        resolve_max_retries(configured_max_retries)
-    };
+    let max_retries = resolve_max_retries(config.max_retries.or(Some(retry_policy.max_retries)));
 
     // Build the initial client. Configuration errors here are fatal
     // (no point retrying with the same broken config).
@@ -126,14 +163,18 @@ pub(crate) async fn run_request_task(
     let mut retry_count: u32 = 0;
     // Doom-loop recovery keeps its own resample budget, independent of the
     // transport/empty budget above.
-    let doom_policy = (max_retries > 0)
-        .then_some(config.doom_loop_recovery)
-        .flatten();
+    let doom_policy = config.doom_loop_recovery;
     let doom_max_retries = doom_policy.map_or(0, |p| p.max_retries);
     let mut doom_retry_count: u32 = 0;
-    let output_observed = Arc::new(AtomicBool::new(false));
 
     loop {
+        if cancel_token.is_cancelled() {
+            handle_cancellation(&event_tx, &request_id, &mut completion_tx);
+            return request_id;
+        }
+
+        // Cross-process rate-limit coordination (Grok OSS): wait until peers say open.
+        wait_before_attempt(&config).await;
         if cancel_token.is_cancelled() {
             handle_cancellation(&event_tx, &request_id, &mut completion_tx);
             return request_id;
@@ -150,17 +191,9 @@ pub(crate) async fn run_request_task(
             &event_tx,
             &cancel_token,
             doom_check,
-            Arc::clone(&output_observed),
         )
         .instrument(sampling_span.clone())
         .await;
-
-        let effective_max_retries =
-            if retry_policy.retry_only_before_output && output_observed.load(Ordering::Relaxed) {
-                0
-            } else {
-                max_retries
-            };
 
         match outcome {
             AttemptOutcome::Completed {
@@ -216,14 +249,13 @@ pub(crate) async fn run_request_task(
                 if !apply_retry_decision(
                     &err,
                     &mut retry_count,
-                    effective_max_retries,
+                    max_retries,
                     &retry_policy,
                     &event_tx,
                     &request_id,
                     &mut request,
                     &mut client,
                     &config,
-                    &cancel_token,
                     &mut completion_tx,
                 )
                 .await
@@ -236,13 +268,6 @@ pub(crate) async fn run_request_task(
                 // consult the transport classifier, so no classifier change
                 // can silently debit the transport budget for a doom failure.
                 if let SamplingError::DoomLoopDetected { .. } = &error {
-                    if retry_policy.retry_only_before_output
-                        && output_observed.load(Ordering::Relaxed)
-                    {
-                        emit_failed(&event_tx, &request_id, &error);
-                        send_completion(&mut completion_tx, Err(clone_error(&error)));
-                        return request_id;
-                    }
                     let backoff = retry_mod::doom_loop_backoff(doom_retry_count + 1);
                     doom_retry_count += 1;
                     tracing::warn!(
@@ -259,24 +284,21 @@ pub(crate) async fn run_request_task(
                         doom_retry_count,
                         doom_max_retries,
                         &error,
+                        &config,
                     );
-                    if sleep_or_cancel(backoff, &cancel_token).await {
-                        continue;
-                    }
-                    handle_cancellation(&event_tx, &request_id, &mut completion_tx);
-                    return request_id;
+                    tokio::time::sleep(backoff).await;
+                    continue;
                 }
                 if !apply_retry_decision(
                     &error,
                     &mut retry_count,
-                    effective_max_retries,
+                    max_retries,
                     &retry_policy,
                     &event_tx,
                     &request_id,
                     &mut request,
                     &mut client,
                     &config,
-                    &cancel_token,
                     &mut completion_tx,
                 )
                 .await
@@ -292,14 +314,13 @@ pub(crate) async fn run_request_task(
                 if !apply_retry_decision(
                     &error,
                     &mut retry_count,
-                    effective_max_retries,
+                    max_retries,
                     &retry_policy,
                     &event_tx,
                     &request_id,
                     &mut request,
                     &mut client,
                     &config,
-                    &cancel_token,
                     &mut completion_tx,
                 )
                 .await
@@ -327,7 +348,6 @@ async fn apply_retry_decision(
     request: &mut ConversationRequest,
     client: &mut SamplingClient,
     config: &SamplerConfig,
-    cancel_token: &CancellationToken,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
 ) -> bool {
     let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
@@ -369,23 +389,15 @@ async fn apply_retry_decision(
     match decision {
         RetryDecision::Retry { backoff } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
-            if sleep_or_cancel(backoff, cancel_token).await {
-                true
-            } else {
-                handle_cancellation(event_tx, request_id, completion_tx);
-                false
-            }
+            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            sleep_for_retry(config, err, backoff).await;
+            true
         }
         RetryDecision::RetryWithBackoff { backoff, .. } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
-            if sleep_or_cancel(backoff, cancel_token).await {
-                true
-            } else {
-                handle_cancellation(event_tx, request_id, completion_tx);
-                false
-            }
+            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            sleep_for_retry(config, err, backoff).await;
+            true
         }
         RetryDecision::RetryWithImageStrip => {
             let stripped_urls = request.strip_images();
@@ -429,16 +441,13 @@ async fn apply_retry_decision(
             );
             emit_images_stripped(event_tx, request_id, stripped_urls, reason);
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
             true
         }
         RetryDecision::RetryWithClientRebuild { backoff } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
-            if !sleep_or_cancel(backoff, cancel_token).await {
-                handle_cancellation(event_tx, request_id, completion_tx);
-                return false;
-            }
+            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, config);
+            sleep_for_retry(config, err, backoff).await;
 
             // Rebuild client with HTTP/1.1 fallback to escape poisoned
             // HTTP/2 connection pools.
@@ -468,11 +477,14 @@ async fn apply_retry_decision(
             // cap), mirroring `classify_error`'s Fatal conditions — NOT on a
             // server `x-should-retry: false` or a non-retryable error, which
             // are also Fatal but are not "exhausted".
-            let next_attempt = *retry_count + 1;
+            let next_attempt = (*retry_count).saturating_add(1);
             let server_said_stop = matches!(err.should_retry_header(), Some(false));
+            // Unlimited (u32::MAX) never exhausts by budget.
             let budget_exhausted = !server_said_stop
+                && !retry_mod::is_unlimited_retries(max_retries)
                 && if err.is_rate_limited() {
-                    next_attempt >= max_retries.min(rate_limit_threshold)
+                    let cap = max_retries.min(rate_limit_threshold);
+                    !retry_mod::is_unlimited_retries(cap) && next_attempt >= cap
                 } else {
                     err.is_retryable() && next_attempt >= max_retries
                 };
@@ -501,14 +513,6 @@ async fn apply_retry_decision(
     }
 }
 
-async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -> bool {
-    tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => false,
-        _ = tokio::time::sleep(duration) => true,
-    }
-}
-
 /// Run a single attempt: build the raw stream, drive it through the
 /// matching L2 transform, and forward all non-terminal events to
 /// `event_tx`. Captures the rich `SamplingError` from the underlying
@@ -517,7 +521,6 @@ async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -
 /// `doom_check` is the doom-loop policy while the resample budget lasts;
 /// `None` disarms the mid-stream abort and the terminal confidence check so
 /// the attempt completes and its response can be accepted.
-#[allow(clippy::too_many_arguments)]
 async fn run_one_attempt(
     client: &SamplingClient,
     request: ConversationRequest,
@@ -526,7 +529,6 @@ async fn run_one_attempt(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     cancel_token: &CancellationToken,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
-    output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
@@ -536,16 +538,7 @@ async fn run_one_attempt(
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_chat_completions(teed, metadata, request_id.clone(), idle_timeout);
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                None,
-                output_observed,
-            )
-            .await
+            drive_l2(l2, request_id, event_tx, cancel_token, captured, None).await
         }
         ApiBackend::Responses => {
             let (raw, metadata, doom_loop) =
@@ -559,24 +552,8 @@ async fn run_one_attempt(
                 collector.disarm_abort();
             }
             let (teed, captured) = tee_errors(raw);
-            let l2 = stream_responses_tracked(
-                teed,
-                metadata,
-                request_id.clone(),
-                idle_timeout,
-                doom_loop,
-                Arc::clone(&output_observed),
-            );
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                doom_check,
-                output_observed,
-            )
-            .await
+            let l2 = stream_responses(teed, metadata, request_id.clone(), idle_timeout, doom_loop);
+            drive_l2(l2, request_id, event_tx, cancel_token, captured, doom_check).await
         }
         ApiBackend::Messages => {
             let (raw, metadata) = match client.conversation_stream_messages(request).await {
@@ -585,16 +562,7 @@ async fn run_one_attempt(
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
-            drive_l2(
-                l2,
-                request_id,
-                event_tx,
-                cancel_token,
-                captured,
-                None,
-                output_observed,
-            )
-            .await
+            drive_l2(l2, request_id, event_tx, cancel_token, captured, None).await
         }
     }
 }
@@ -634,7 +602,6 @@ fn tee_errors<'a, T: Send + 'a>(
 /// the terminal event (or cancellation). `doom_check`, when set, turns a
 /// completed response carrying confident doom-loop signals into a
 /// retryable failure (belt-and-braces behind the mid-stream abort).
-#[allow(clippy::too_many_arguments)]
 async fn drive_l2(
     l2: impl futures_util::Stream<Item = SamplingEvent>,
     request_id: RequestId,
@@ -642,7 +609,6 @@ async fn drive_l2(
     cancel_token: &CancellationToken,
     captured: ErrorCell,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
-    output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
     loop {
@@ -653,7 +619,6 @@ async fn drive_l2(
             }
             next = l2.next() => match next {
                 Some(SamplingEvent::Completed { response, metrics, .. }) => {
-                    output_observed.store(true, Ordering::Relaxed);
                     // Doom outranks the truncation/empty classes: a confident
                     // loop poisons the attempt whatever else it looks like.
                     if let Some(policy) = doom_check {
@@ -692,16 +657,6 @@ async fn drive_l2(
                     return AttemptOutcome::Failed { error };
                 }
                 Some(other) => {
-                    if matches!(
-                        other,
-                        SamplingEvent::FirstToken { .. }
-                            | SamplingEvent::ChannelToken { .. }
-                            | SamplingEvent::ToolCallDelta { .. }
-                            | SamplingEvent::BackendToolCallStarted { .. }
-                            | SamplingEvent::BackendToolCallCompleted { .. }
-                    ) {
-                        output_observed.store(true, Ordering::Relaxed);
-                    }
                     let _ = event_tx.send(retag(other, &request_id));
                 }
                 None => {
@@ -740,10 +695,7 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 .find_map(|tok| tok.strip_suffix('s').and_then(|n| n.parse::<u64>().ok()))
                 .unwrap_or(0),
         },
-        SamplingErrorKind::Auth => SamplingError::Auth {
-            message: info.message.clone(),
-            credential: info.credential,
-        },
+        SamplingErrorKind::Auth => SamplingError::Auth(info.message.clone()),
         // Must stay Serialization: EventStreamError is retryable, and a
         // response-parse failure is deterministic on retry. `info.message`
         // is the variant's rendered Display, so rebuild via the constructor
@@ -847,14 +799,27 @@ fn emit_retrying(
     attempt: u32,
     max_retries: u32,
     err: &SamplingError,
+    config: &SamplerConfig,
 ) {
     let info = SamplingErrorInfo::from(err);
+    let mut reason = err.to_string();
+    if err.is_rate_limited() {
+        let key = provider_key_for_config(config);
+        let rem = SharedRateLimitStore::process_default().remaining(&key);
+        if let Some(secs) = err.retry_after() {
+            reason = format!("{reason} · wait {secs}s (shared across grok-oss processes)");
+        } else if !rem.is_zero() {
+            reason = format!("{reason} · shared wait {}s", rem.as_secs().max(1));
+        } else {
+            reason = format!("{reason} · coordinating with other grok-oss sessions");
+        }
+    }
     let _ = event_tx.send(SamplingEvent::Retrying {
         request_id: request_id.clone(),
         attempt,
         max_retries,
         kind: info.kind,
-        reason: err.to_string(),
+        reason,
         doom_loop_triggers: info.doom_loop_triggers,
         doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
     });
@@ -893,7 +858,6 @@ fn handle_cancellation(
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
-        credential: SentCredential::Unknown,
     };
     let _ = event_tx.send(SamplingEvent::Failed {
         request_id: request_id.clone(),
@@ -901,7 +865,7 @@ fn handle_cancellation(
     });
     send_completion(
         completion_tx,
-        Err(SamplingError::auth_unknown("request cancelled")),
+        Err(SamplingError::Auth("request cancelled".to_string())),
     );
 }
 
@@ -934,7 +898,6 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
-            credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -957,19 +920,14 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
-            credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
             SamplingError::Api {
-                status,
-                message,
-                should_retry,
-                ..
+                status, message, ..
             } => {
                 assert_eq!(status.as_u16(), 500);
                 assert_eq!(message, "boom");
-                assert_eq!(should_retry, Some(false), "server veto must survive");
             }
             other => panic!("expected Api, got {other:?}"),
         }
@@ -1037,7 +995,6 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
-            credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1072,60 +1029,6 @@ mod tests {
             info.message,
             "rebuilt Display must round-trip without double-prefixing"
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retry_sleep_returns_immediately_on_cancellation() {
-        let cancel_token = CancellationToken::new();
-        let sleeper = sleep_or_cancel(Duration::from_secs(120), &cancel_token);
-        tokio::pin!(sleeper);
-
-        cancel_token.cancel();
-        assert!(!sleeper.await);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retry_decision_cancellation_emits_terminal_cancel() {
-        let cancel_token = CancellationToken::new();
-        cancel_token.cancel();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let (completion_tx, completion_rx) = oneshot::channel();
-        let mut completion_tx = Some(completion_tx);
-        let mut retry_count = 0;
-        let mut request = ConversationRequest::default();
-        let config = SamplerConfig {
-            base_url: "http://localhost".into(),
-            model: "test-model".into(),
-            ..Default::default()
-        };
-        let mut client = SamplingClient::new(config.clone()).expect("test client");
-        let error = SamplingError::EventStreamError("retry me".into());
-
-        let should_continue = apply_retry_decision(
-            &error,
-            &mut retry_count,
-            2,
-            &RetryPolicy::default(),
-            &event_tx,
-            &RequestId::from("cancel-backoff"),
-            &mut request,
-            &mut client,
-            &config,
-            &cancel_token,
-            &mut completion_tx,
-        )
-        .await;
-
-        assert!(!should_continue);
-        assert!(matches!(
-            event_rx.recv().await,
-            Some(SamplingEvent::Retrying { .. })
-        ));
-        assert!(matches!(
-            event_rx.recv().await,
-            Some(SamplingEvent::Failed { .. })
-        ));
-        assert!(completion_rx.await.expect("completion sent").is_err());
     }
 
     #[tokio::test]

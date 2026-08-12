@@ -15,10 +15,6 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Check terminal, clipboard, color, and input support without starting Grok
-    Doctor(crate::doctor_cmd::DoctorArgs),
-    /// Manage running leader processes
-    Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
     Logout {
         /// Clear only the stored OpenRouter API key (not xAI session auth).
@@ -103,26 +99,28 @@ See ~/.grok/README.md for more information.
     /// Export or upload session trace data
     Trace(crate::trace_cmd::TraceArgs),
     /// Check for updates or install a specific version
+    /// Check freshness vs Surmount main (git SHA), or print how to rebuild.
+    ///
+    /// Grok OSS has no binary release train. `update --check` compares this
+    /// build’s commit to github.com/SurmountSystems/grok-oss `main`.
     Update {
-        /// Check for updates without installing.
+        /// Compare embedded git SHA to Surmount `main` (no install).
         #[arg(long)]
         check: bool,
         /// Emit machine-readable JSON output (for --check).
         #[arg(long)]
         json: bool,
-        /// Force re-download and install even if already up to date.
-        #[arg(long)]
+        /// Force re-download via xAI updater (requires GROK_OSS_ENABLE_XAI_UPDATER=1).
+        #[arg(long, hide = true)]
         force_reinstall: bool,
-        /// Install a specific version (e.g. 0.1.150 or 0.1.151-alpha.2).
-        #[arg(long)]
+        /// Install a specific version via xAI updater (requires GROK_OSS_ENABLE_XAI_UPDATER=1).
+        #[arg(long, hide = true)]
         version: Option<String>,
-        /// Switch to the alpha release channel (faster updates, may have bugs).
-        #[arg(long, conflicts_with_all = ["stable", "enterprise"])]
+        /// xAI channel switch (hidden; requires GROK_OSS_ENABLE_XAI_UPDATER=1).
+        #[arg(long, conflicts_with_all = ["stable", "enterprise"], hide = true)]
         alpha: bool,
-        /// Switch to the stable release channel (default, weekly releases).
-        #[arg(long, conflicts_with_all = ["alpha", "enterprise"])]
+        #[arg(long, conflicts_with_all = ["alpha", "enterprise"], hide = true)]
         stable: bool,
-        /// Switch to the enterprise release channel.
         #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
         enterprise: bool,
         /// Internal: what spawned this `grok update` (`user_command`,
@@ -149,9 +147,6 @@ See ~/.grok/README.md for more information.
     },
     /// Manage git worktrees
     Worktree(crate::worktree_cmd::WorktreeArgs),
-    /// Show what the grok home (~/.grok) uses on disk
-    #[command(name = "du", visible_alias = "disk-usage")]
-    DiskUsage(crate::disk_usage_cmd::DiskUsageArgs),
     /// Expose this workspace to the Computer Hub (via the leader).
     ///
     /// Disabled by default and enabled server-side per account; set
@@ -180,36 +175,12 @@ pub struct WrapArgs {
     )]
     pub command: Vec<String>,
 }
-/// Targets a running leader process by PID (used by `grok leader` / `grok workspace`).
+/// Targets a running leader process by PID (used by `grok workspace`).
 #[derive(Debug, clap::Args, Clone, Default)]
 pub struct LeaderTargetArgs {
-    /// Leader process ID from `grok leader list`.
+    /// Leader process ID.
     #[arg(long)]
     pub pid: Option<u32>,
-}
-#[derive(Debug, clap::Args, Clone)]
-pub struct LeaderMgmtArgs {
-    #[command(subcommand)]
-    pub command: LeaderMgmtCommand,
-}
-#[derive(Debug, Subcommand, Clone)]
-pub enum LeaderMgmtCommand {
-    /// List running leader processes
-    List {
-        /// Emit machine-readable JSON output.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show details for a leader process
-    Info {
-        #[command(flatten)]
-        target: LeaderTargetArgs,
-        /// Emit machine-readable JSON output.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Stop all running leader processes
-    Kill,
 }
 #[derive(Debug, clap::Args, Clone)]
 pub struct WorkspaceMgmtArgs {
@@ -421,11 +392,21 @@ pub struct LeaderArgs {
     #[command(flatten)]
     pub headless: HeadlessArgs,
 }
+/// Return the version string for `--version` / `-v` (clap `ArgAction::Version`).
+///
+/// Grok OSS: upstream package version + short git SHA (no release channel).
+/// Uses a `OnceLock` so the result is `'static` for clap.
+fn version_with_channel() -> &'static str {
+    use std::sync::OnceLock;
+    static V: OnceLock<String> = OnceLock::new();
+    // env!("VERSION_WITH_COMMIT") is set by this crate's build.rs.
+    V.get_or_init(|| env!("VERSION_WITH_COMMIT").to_string())
+}
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "grok",
-    version = env!("VERSION_WITH_COMMIT"),
-    about = "Grok Build TUI",
+    name = "grok-oss",
+    version = version_with_channel(),
+    about = "Grok OSS TUI (unofficial Surmount fork of Grok Build)",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
@@ -444,8 +425,8 @@ Commands:
 )]
 pub struct PagerArgs {
     /// Print version
-    #[arg(short = 'v', short_alias = 'V', long = "version", action = ArgAction::SetTrue)]
-    pub version: bool,
+    #[arg(short = 'v', short_alias = 'V', long = "version", action = ArgAction::Version)]
+    pub version: (),
     /// Working directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
@@ -527,10 +508,6 @@ pub struct PagerArgs {
     /// Output format for headless mode.
     #[clap(long = "output-format", value_enum, default_value = "plain")]
     pub output_format: OutputFormat,
-    /// Emit incremental `stream_event` lines (text/thinking deltas) alongside
-    /// whole messages. Only affects `--output-format streaming-messages-json`.
-    #[clap(long = "include-partial-messages")]
-    pub include_partial_messages: bool,
     /// JSON Schema for structured output. When set, the model is constrained to
     /// produce JSON matching this schema. Implies --output-format json.
     /// Example: --json-schema '{"type":"object","properties":{"name":{"type":"string"}}}'
@@ -567,14 +544,11 @@ pub struct PagerArgs {
         value_name = "PROMPT"
     )]
     pub system_prompt_override: Option<String>,
-    /// Resume a session by ID or title, or the most recent if omitted.
-    /// Non-ID values match session titles for the current directory
-    /// (ignoring letter case; a sole renamed match wins among duplicates,
-    /// otherwise ambiguity errors; UUID-shaped values always mean IDs).
+    /// Resume a session by ID, or the most recent if omitted.
     #[arg(
         long = "resume",
         short = 'r',
-        value_name = "SESSION_ID_OR_TITLE",
+        value_name = "SESSION_ID",
         num_args = 0..= 1,
         default_missing_value = "",
         conflicts_with_all = ["continue_last_session"]
@@ -588,17 +562,6 @@ pub struct PagerArgs {
         conflicts_with_all = ["continue_last_session"]
     )]
     pub load_session: Option<String>,
-    /// Set by [`Self::pin_local_resume_target`]: the resume target was
-    /// resolved (or definitively missed) before the OS sandbox, so
-    /// materialization must not re-run local title selection.
-    #[clap(skip)]
-    pub resume_target_pinned: bool,
-    /// Sandbox profile of the title-pinned session, captured at pin time from
-    /// the selected summary (outer `None` = no title pin happened). The
-    /// id-based peek cannot re-derive it: a legacy id duplicated across cwd
-    /// dirs makes that lookup ambiguous.
-    #[clap(skip)]
-    pub(crate) pinned_resume_profile: Option<Option<String>>,
     /// Continue the most recent session for the current working directory.
     #[arg(
         short = 'c',
@@ -619,49 +582,18 @@ pub struct PagerArgs {
     #[arg(long = "fork-session")]
     pub fork_session: bool,
     /// Start the session in a new git worktree, optionally named.
-    /// With `--resume` of a remote session, pass `--restore-code` to apply
-    /// the snapshot codebase (conversation is restored either way).
-    /// Headless (`-p`) does not create a worktree from this flag.
     #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "")]
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
     #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree")]
     pub worktree_ref: Option<String>,
-    /// Restore the original session's repository snapshot when resuming.
-    /// Remote sessions require `--worktree` (never checks out into the current
-    /// directory). Without this flag, resume restores conversation only.
+    /// Check out the original session's commit when resuming.
     #[arg(long = "restore-code", requires = "resume_session")]
     pub restore_code: bool,
     /// Disable plan mode.
     #[arg(long = "no-plan")]
     pub no_plan: bool,
-    /// Own a local `workspace_server` (replaces remote sandbox). Requires `--chat`.
-    ///
-    /// Compiled only with `--features local-workspace` (not implied by `chat`).
-    #[cfg(feature = "local-workspace")]
-    #[arg(
-        long = "local-workspace",
-        num_args = 0..= 1,
-        value_name = "CWD",
-        conflicts_with = "local_workspace_attach",
-        requires = "chat"
-    )]
-    pub local_workspace: Option<Option<PathBuf>>,
-    /// Attach an existing local `workspace_server` by `server_id`,
-    /// replacing the chat sandbox (ExistingWorkspace only). Requires `--chat`.
-    #[cfg(feature = "local-workspace")]
-    #[arg(
-        long = "local-workspace-attach",
-        value_name = "SERVER_ID",
-        conflicts_with = "local_workspace",
-        requires = "chat"
-    )]
-    pub local_workspace_attach: Option<String>,
-    /// Cwd override for local-workspace attach/own. Requires `--chat`.
-    #[cfg(feature = "local-workspace")]
-    #[arg(long = "local-workspace-cwd", value_name = "PATH", requires = "chat")]
-    pub local_workspace_cwd: Option<PathBuf>,
     /// Disable subagent spawning.
     #[arg(long = "no-subagents")]
     pub no_subagents: bool,
@@ -705,6 +637,9 @@ pub struct PagerArgs {
     /// Disable web search and web fetch tools.
     #[arg(long = "disable-web-search")]
     pub disable_web_search: bool,
+    /// Append a self-verification loop to the prompt (headless only).
+    #[arg(long = "check", alias = "self-verify", conflicts_with = "no_subagents")]
+    pub self_verify: bool,
     /// Exit as soon as the first agent turn ends, without waiting for pending
     /// background bash/monitor tasks or background subagents (headless only).
     /// Default for all `grok -p` runs is to wait (up to `--background-wait-timeout`)
@@ -728,6 +663,9 @@ pub struct PagerArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub background_wait_timeout_secs: u64,
+    /// Run the task N ways in parallel and pick the best (headless only).
+    #[arg(long = "best-of-n", value_name = "N", conflicts_with = "no_subagents")]
+    pub best_of_n: Option<u32>,
     /// Sandbox profile for filesystem and network access.
     #[arg(long, env = "GROK_SANDBOX", value_name = "PROFILE")]
     pub sandbox: Option<String>,
@@ -769,14 +707,16 @@ pub struct PagerArgs {
     /// Experimental: scrollback-native rendering. Finalized blocks are printed
     /// into the terminal's native scrollback (use the terminal's own scroll /
     /// selection); a small pinned region holds the prompt + running turn.
-    /// Session-scoped only — does not write config. To default plain `grok` to
-    /// minimal, set `[ui] screen_mode = "minimal"` in ~/.grok/config.toml.
+    /// Sticky: records `[ui] screen_mode = "minimal"` in ~/.grok/config.toml
+    /// so future plain `grok` invocations open in minimal mode too.
     #[arg(long = "minimal")]
     pub minimal: bool,
-    /// Open in the standard fullscreen TUI for this session, overriding a
-    /// config `[ui] screen_mode = "minimal"` preference. Session-scoped only —
-    /// does not write config. Fullscreen-vs-inline still follows the alt-screen
-    /// policy (--no-alt-screen, [terminal] alt_screen, terminal auto-detection).
+    /// Open in the standard fullscreen TUI, overriding a sticky minimal
+    /// preference. Sticky counterpart of --minimal: records
+    /// `[ui] screen_mode = "fullscreen"` in ~/.grok/config.toml so future
+    /// plain `grok` invocations open fullscreen again. Fullscreen-vs-inline
+    /// still follows the alt-screen policy (--no-alt-screen, [terminal]
+    /// alt_screen, terminal auto-detection).
     #[arg(long = "fullscreen", conflicts_with = "minimal")]
     pub fullscreen: bool,
     /// Write sampling events to ~/.grok/logs/sampling.jsonl.
@@ -827,23 +767,9 @@ pub enum ResumeTarget {
     /// Not resuming an existing session (new auto or new-with-id).
     None,
 }
-fn anchor_to_launch_dir(path: PathBuf, launch_dir: Option<&std::path::Path>) -> PathBuf {
-    if path.is_absolute() {
-        strip_cur_dir(path)
-    } else if let Some(launch_dir) = launch_dir {
-        strip_cur_dir(launch_dir.join(path))
-    } else {
-        strip_cur_dir(path)
-    }
-}
-fn strip_cur_dir(path: PathBuf) -> PathBuf {
-    path.components()
-        .filter(|component| !matches!(component, std::path::Component::CurDir))
-        .collect()
-}
 impl PagerArgs {
-    /// Parse CLI arguments without applying side effects.
-    pub fn parse_cli() -> Self {
+    /// Parse CLI arguments and apply `--cwd` if provided.
+    pub fn parse_and_apply_cwd() -> anyhow::Result<Self> {
         let bin_name = std::env::args()
             .next()
             .as_deref()
@@ -853,47 +779,24 @@ impl PagerArgs {
             .filter(|n| *n == "grok" || *n == "agent")
             .unwrap_or("grok")
             .to_owned();
-        Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
-    }
-    /// Apply launch-directory path anchoring and `--cwd` after early commands
-    /// have been dispatched without filesystem or process initialization.
-    pub fn apply_cwd(self) -> anyhow::Result<Self> {
-        let launch_dir = std::env::current_dir().ok();
-        self.apply_cwd_from(launch_dir.as_deref())
-    }
-    fn apply_cwd_from(mut self, launch_dir: Option<&std::path::Path>) -> anyhow::Result<Self> {
-        if let Some(socket) = self.leader_socket.take() {
-            self.leader_socket = Some(anchor_to_launch_dir(socket, launch_dir));
+        let mut args = Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)));
+        if let Some(socket) = args.leader_socket.take() {
+            args.leader_socket = Some(std::path::absolute(&socket).unwrap_or(socket));
         }
-        if let Some(file) = self.debug_file.take() {
-            self.debug_file = Some(anchor_to_launch_dir(file, launch_dir));
+        if let Some(file) = args.debug_file.take() {
+            args.debug_file = Some(std::path::absolute(&file).unwrap_or(file));
         }
-        if let Some(ref cwd) = self.cwd {
+        if let Some(ref cwd) = args.cwd {
             std::env::set_current_dir(cwd).map_err(|e| {
                 anyhow::anyhow!("Failed to set working directory to {:?}: {}", cwd, e)
             })?;
         }
-        Ok(self)
+        Ok(args)
     }
     /// Optional-flag accessor; always `false` in builds without the optional
     /// feature, so call sites need no `cfg` of their own.
     pub fn chat(&self) -> bool {
         false
-    }
-    /// `--local-workspace[=cwd]` own-mode flag.
-    #[cfg(feature = "local-workspace")]
-    pub fn local_workspace(&self) -> Option<Option<&std::path::Path>> {
-        self.local_workspace.as_ref().map(|inner| inner.as_deref())
-    }
-    /// `--local-workspace-attach=<server_id>`.
-    #[cfg(feature = "local-workspace")]
-    pub fn local_workspace_attach(&self) -> Option<&str> {
-        self.local_workspace_attach.as_deref()
-    }
-    /// `--local-workspace-cwd=<path>`.
-    #[cfg(feature = "local-workspace")]
-    pub fn local_workspace_cwd(&self) -> Option<&std::path::Path> {
-        self.local_workspace_cwd.as_deref()
     }
     /// Get the session ID to resume, from either --resume or --load (hidden alias).
     ///
@@ -947,69 +850,13 @@ impl PagerArgs {
         let explicit = self.sandbox.as_deref().filter(|s| !s.is_empty());
         Self::resolve_startup_sandbox(explicit, saved.map(String::from))
     }
-    /// Pin an explicit non-UUID, non-chat resume/load target to its canonical
-    /// local session id, before the (irreversible) OS sandbox is applied.
-    ///
-    /// Resolving once — recorded via `resume_target_pinned` so materialization
-    /// never re-runs local title selection — makes the saved-profile peek and
-    /// materialization consume the same immutable target; re-selecting after
-    /// the sandbox would race a concurrent rename/create. Listing failures
-    /// and ambiguity are hard errors here (fail closed / surfaced before the
-    /// sandbox); a definitive no-match keeps the raw arg for the legacy
-    /// remote/worktree id path.
-    pub fn pin_local_resume_target(&mut self) -> anyhow::Result<()> {
-        let cwd_buf = std::env::current_dir().ok();
-        let cwd_str = cwd_buf.as_deref().map(|p| p.to_string_lossy());
-        self.pin_local_resume_target_for_cwd(cwd_str.as_deref())
-    }
-    /// Same as [`Self::pin_local_resume_target`] with an explicit cwd, so
-    /// tests never mutate the process cwd.
-    pub fn pin_local_resume_target_for_cwd(&mut self, cwd: Option<&str>) -> anyhow::Result<()> {
-        if self.chat() {
-            return Ok(());
-        }
-        let Some(target) = self.session_to_resume().map(str::to_owned) else {
-            return Ok(());
-        };
-        use crate::app::session_title_resolve::{PinnedResumeTarget, presandbox_resume_target};
-        let pinned = presandbox_resume_target(&target, cwd)?;
-        self.resume_target_pinned = true;
-        if let PinnedResumeTarget::Title {
-            ref id,
-            ref sandbox_profile,
-        } = pinned
-        {
-            eprintln!("Resuming session {} (matched by title)", id);
-            self.pinned_resume_profile = Some(sandbox_profile.clone());
-        }
-        let Some(id) = pinned.id() else {
-            return Ok(());
-        };
-        if self
-            .resume_session
-            .as_deref()
-            .is_some_and(|s| !s.is_empty())
-        {
-            self.resume_session = Some(id);
-        } else if self.load_session.as_deref().is_some_and(|s| !s.is_empty()) {
-            self.load_session = Some(id);
-        }
-        Ok(())
-    }
     /// The sandbox profile persisted with the session being resumed, if any.
     /// Local, best-effort; `None` when not resuming or nothing is found. Read once
     /// for the profile resume resolution.
     pub fn saved_resume_profile(&self) -> Option<String> {
         let cwd_buf = std::env::current_dir().ok();
         let cwd_str = cwd_buf.as_deref().map(|p| p.to_string_lossy());
-        self.saved_resume_profile_for_cwd(cwd_str.as_deref())
-    }
-    /// Same as [`Self::saved_resume_profile`] with an explicit cwd, so tests
-    /// never mutate the process cwd.
-    pub fn saved_resume_profile_for_cwd(&self, cwd: Option<&str>) -> Option<String> {
-        if let Some(pinned) = &self.pinned_resume_profile {
-            return pinned.clone();
-        }
+        let cwd = cwd_str.as_deref();
         match self.resume_target() {
             ResumeTarget::SessionId(id) => {
                 xai_grok_shell::session::persistence::resumed_session_sandbox_profile(
@@ -1056,89 +903,24 @@ impl PagerArgs {
 mod tests {
     use super::*;
     #[test]
-    fn version_flags_parse_as_early_intent_without_exiting() {
-        for flag in ["--version", "-v", "-V"] {
-            let args = PagerArgs::try_parse_from(["grok", flag]).expect("version flag parses");
-            assert!(args.version, "{flag} must set the early version intent");
-            assert!(args.command.is_none());
-        }
-    }
-    #[test]
-    fn ordinary_and_doctor_parsing_do_not_set_version_intent() {
-        assert!(!PagerArgs::try_parse_from(["grok"]).unwrap().version);
+    fn version_flag_exits_zero() {
+        let err = PagerArgs::try_parse_from(["grok", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
         assert!(
-            !PagerArgs::try_parse_from(["grok", "doctor"])
-                .unwrap()
-                .version
+            err.exit_code() == 0,
+            "--version must exit 0; got {}",
+            err.exit_code()
         );
-        assert!(matches!(
-            PagerArgs::try_parse_from(["grok", "version"])
-                .unwrap()
-                .command,
-            Some(Command::Version { json: false })
-        ));
     }
     #[test]
-    fn doctor_accepts_report_and_explicit_fix_forms() {
-        let bare = PagerArgs::try_parse_from(["grok", "doctor"]).expect("bare doctor parses");
-        assert!(matches!(
-            bare.command,
-            Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
-                json: false,
-                command: None,
-            }))
-        ));
-        let json =
-            PagerArgs::try_parse_from(["grok", "doctor", "--json"]).expect("doctor --json parses");
-        assert!(matches!(
-            json.command,
-            Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
-                json: true,
-                command: None,
-            }))
-        ));
-        for id in [
-            "terminal.ssh-wrap",
-            "tmux-clipboard",
-            "terminal.dcs-passthrough",
-            "tmux-extended-keys",
-        ] {
-            let fix = PagerArgs::try_parse_from(["grok", "doctor", "fix", id, "--yes"])
-                .expect("doctor fix parses");
-            assert!(matches!(
-                fix.command,
-                Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
-                    json: false,
-                    command: Some(crate::doctor_cmd::DoctorCommand::Fix(
-                        crate::doctor_cmd::FixArgs { id: Some(ref parsed), yes: true }
-                    )),
-                })) if parsed == id
-            ));
-        }
-        let list = PagerArgs::try_parse_from(["grok", "doctor", "fix"])
-            .expect("doctor fix without an ID lists applicable fixes");
-        assert!(matches!(
-            list.command,
-            Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
-                json: false,
-                command: Some(crate::doctor_cmd::DoctorCommand::Fix(
-                    crate::doctor_cmd::FixArgs {
-                        id: None,
-                        yes: false
-                    }
-                )),
-            }))
-        ));
-        for unsupported in [
-            vec!["grok", "doctor", "all"],
-            vec!["grok", "doctor", "fix", "ssh-wrap", "extra"],
-            vec!["grok", "doctor", "fix", "--yes"],
-            vec!["grok", "doctor", "--json", "fix", "terminal.ssh-wrap"],
-        ] {
-            let error = PagerArgs::try_parse_from(unsupported)
-                .expect_err("unsupported doctor form must fail");
-            assert_eq!(error.exit_code(), 2);
-        }
+    fn version_short_flag_exits_zero() {
+        let err = PagerArgs::try_parse_from(["grok", "-v"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(
+            err.exit_code() == 0,
+            "-v must exit 0; got {}",
+            err.exit_code()
+        );
     }
     #[test]
     fn resume_target_classifies_flags() {
@@ -1275,41 +1057,6 @@ mod tests {
         );
     }
     #[test]
-    fn launch_directory_anchoring_precedes_cwd_change() {
-        let args = PagerArgs::try_parse_from([
-            "grok",
-            "--leader-socket",
-            "relative.sock",
-            "--debug-file",
-            "relative.log",
-        ])
-        .unwrap()
-        .apply_cwd_from(Some(std::path::Path::new("/launch")))
-        .unwrap();
-        assert_eq!(
-            args.leader_socket.as_deref(),
-            Some(std::path::Path::new("/launch/relative.sock"))
-        );
-        assert_eq!(
-            args.debug_file.as_deref(),
-            Some(std::path::Path::new("/launch/relative.log"))
-        );
-    }
-    #[test]
-    fn launch_directory_anchoring_normalizes_dot_components() {
-        for (input, expected) in [
-            ("./leader.sock", "/launch/leader.sock"),
-            ("logs/../debug.log", "/launch/logs/../debug.log"),
-            ("../leader.sock", "/launch/../leader.sock"),
-        ] {
-            assert_eq!(
-                anchor_to_launch_dir(PathBuf::from(input), Some(std::path::Path::new("/launch"))),
-                PathBuf::from(expected),
-                "input: {input}"
-            );
-        }
-    }
-    #[test]
     fn leader_socket_flag_parses_at_root() {
         let args = PagerArgs::try_parse_from(["grok", "--leader-socket", "/tmp/leader-x.sock"])
             .expect("--leader-socket parses at the root");
@@ -1337,36 +1084,6 @@ mod tests {
     fn leader_socket_flag_defaults_to_none() {
         let args = PagerArgs::try_parse_from(["grok"]).expect("bare grok parses");
         assert!(args.leader_socket.is_none());
-    }
-    #[test]
-    fn leader_mgmt_list_info_kill_parse() {
-        let list = PagerArgs::try_parse_from(["grok", "leader", "list", "--json"])
-            .expect("grok leader list --json");
-        assert!(matches!(
-            list.command,
-            Some(Command::Leader(LeaderMgmtArgs {
-                command: LeaderMgmtCommand::List { json: true },
-            }))
-        ));
-        let info = PagerArgs::try_parse_from(["grok", "leader", "info", "--pid", "42"])
-            .expect("grok leader info --pid");
-        assert!(matches!(
-            info.command,
-            Some(Command::Leader(LeaderMgmtArgs {
-                command: LeaderMgmtCommand::Info {
-                    target: LeaderTargetArgs { pid: Some(42) },
-                    json: false,
-                },
-            }))
-        ));
-        let kill = PagerArgs::try_parse_from(["grok", "leader", "kill"]).expect("grok leader kill");
-        assert!(matches!(
-            kill.command,
-            Some(Command::Leader(LeaderMgmtArgs {
-                command: LeaderMgmtCommand::Kill,
-            }))
-        ));
-        assert!(PagerArgs::try_parse_from(["grok", "leader", "profile"]).is_err());
     }
     #[test]
     fn debug_file_flag_parses_and_is_global() {
@@ -1421,14 +1138,9 @@ mod tests {
 
     #[test]
     fn login_openrouter_parses_api_key() {
-        let args = PagerArgs::try_parse_from([
-            "grok",
-            "login",
-            "--openrouter",
-            "--api-key",
-            "sk-or-test",
-        ])
-        .expect("login --openrouter parses");
+        let args =
+            PagerArgs::try_parse_from(["grok", "login", "--openrouter", "--api-key", "sk-or-test"])
+                .expect("login --openrouter parses");
         match args.command {
             Some(Command::Login {
                 openrouter: true,
