@@ -117,6 +117,12 @@ fn matrix_is_subset_of_registry() {
 fn make_state() -> SettingsModalState {
     // Voice rows are hidden when the process gate is off (default until startup).
     xai_grok_pager::app::set_voice_mode_enabled_for_test(true);
+    // Shell-owned live caches seed from `$GROK_HOME/config.toml` on first
+    // `load_*`. Pin product defaults so a developer machine with real config
+    // (e.g. `[ui].render_mermaid = "on"`) cannot break settings_e2e.
+    xai_grok_pager::appearance::cache::set_render_mermaid(
+        xai_grok_pager::appearance::RenderMermaid::Auto,
+    );
     SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
         UiConfig::default(),
@@ -1931,7 +1937,7 @@ fn defaults_round_trip_through_registry() {
     let pager = PagerLocalSnapshot::default();
 
     // `current_value_for` for these keys reads process-wide caches, not `ui`.
-    // Reset to defaults so a sibling test on this worker thread can't leak in.
+    // Reset to defaults so a sibling test / real `$GROK_HOME` seed can't leak in.
     xai_grok_pager::appearance::cache::set_keep_text_selection(
         xai_grok_pager::appearance::TextSelection::Flash,
     );
@@ -1947,6 +1953,9 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_invert_scroll(false);
     // 3 = the registry default shown while the profile is in charge.
     xai_grok_pager::appearance::cache::set_scroll_lines(3);
+    xai_grok_pager::appearance::cache::set_render_mermaid(
+        xai_grok_pager::appearance::RenderMermaid::Auto,
+    );
 
     // Hard-coded per-key expectations (independent of registry).
     let expected = |key: &str| -> SettingValue {
