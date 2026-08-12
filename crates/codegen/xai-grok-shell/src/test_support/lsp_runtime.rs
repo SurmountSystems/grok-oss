@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
+use xai_grok_tools::implementations::grok_build::task::types::{
+    SubagentOwner, SubagentRequest, SubagentResult,
+};
 pub(crate) type GatewayOut = <acp::AgentSide as xai_acp_lib::AcpSide>::OutMessage;
 pub(crate) fn test_gateway() -> GatewaySender {
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -140,10 +143,37 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             .to_string(),
         auto_wake_enabled: true,
         goal_loop_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        parent_blocking_wait_depth: std::sync::Arc::new(
+            crate::tools::tool_context::BlockingWaitState::new(),
+        ),
         parent_terminal_backend: None,
         parent_notification_handle: None,
         parent_scheduler_handle: None,
     }
+}
+pub(crate) fn make_request(
+    subagent_type: &str,
+) -> (SubagentRequest, oneshot::Receiver<SubagentResult>) {
+    let (tx, rx) = oneshot::channel();
+    let req = SubagentRequest {
+        id: uuid::Uuid::now_v7().to_string(),
+        prompt: "do something".into(),
+        description: "test task".into(),
+        subagent_type: subagent_type.into(),
+        parent_session_id: "test-parent".into(),
+        parent_prompt_id: Some("parent-prompt".into()),
+        resume_from: None,
+        cwd: None,
+        runtime_overrides: Default::default(),
+        run_in_background: false,
+        surface_completion: true,
+        await_to_completion: false,
+        fork_context: false,
+        owner: SubagentOwner::Task,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
+        result_tx: tx,
+    };
+    (req, rx)
 }
 #[derive(Default)]
 pub(crate) struct DummyLspDispatch;

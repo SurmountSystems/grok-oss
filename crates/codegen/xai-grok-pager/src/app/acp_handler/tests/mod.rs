@@ -83,6 +83,7 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         context_source: None,
         resumed_from: None,
         capability_mode: None,
+        workflow_run_id: None,
         context_normalized: false,
         parent_prompt_id: None,
         started_at: Instant::now(),
@@ -110,6 +111,47 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         worktree_path: None,
         child_updates_replayed: false,
     }
+}
+#[test]
+fn workflow_catalog_projection_and_open_modal_refresh_are_coalesced() {
+    let workflow = acp::AvailableCommand::new("review", "review")
+        .meta(serde_json::json!({ "workflowSource" : "project" }).as_object().cloned());
+    assert_eq!(
+        workflow_commands(& [workflow]), vec![("review", "review", Some("project"),
+        None)]
+    );
+    let mut app = make_app_with_agent("session-workflows");
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().extensions_modal = Some(
+        crate::views::extensions_modal::ExtensionsModalState::new(
+            crate::views::extensions_modal::ExtensionsTab::Skills,
+        ),
+    );
+    queue_open_workflows_modal_refresh(&mut app, id);
+    queue_open_workflows_modal_refresh(&mut app, id);
+    assert_eq!(app.pending_effects.len(), 1);
+    assert!(
+        matches!(app.pending_effects.first(), Some(Effect::FetchWorkflowsList { agent_id,
+        session_id }) if * agent_id == id && session_id.0.as_ref() ==
+        "session-workflows")
+    );
+}
+#[test]
+fn workflow_catalog_projection_detects_same_name_metadata_changes() {
+    let command = |description: &str, path: &str| {
+        acp::AvailableCommand::new("review", description)
+            .meta(
+                serde_json::json!(
+                    { "workflowSource" : "project", "workflowPath" : path, }
+                )
+                    .as_object()
+                    .cloned(),
+            )
+    };
+    assert_ne!(
+        workflow_commands(& [command("Workflow: old", "/old/review.rhai")]),
+        workflow_commands(& [command("Workflow: new", "/new/review.rhai")]),
+    );
 }
 pub(super) fn compressed_entry(
     index: usize,
@@ -192,12 +234,12 @@ pub(super) fn insert_running_task(agent: &mut AgentView, task_id: &str, command:
             },
         );
 }
-/// Marker texts of all parked blocks in scrollback, in order — the
-/// initial parked marker plus every countdown re-push.
+/// Marker texts of all parked blocks in scrollback, in order — one per
+/// park episode (re-pushed only after new parent output, i.e. a re-park).
 pub(super) fn parked_marker_messages(agent: &AgentView) -> Vec<String> {
     (0..agent.scrollback.len())
         .filter_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) if b.parked => Some(b.marker_text()),
+            Some(RenderBlock::SessionEvent(b)) if b.parked => Some(b.event.message()),
             _ => None,
         })
         .collect()
@@ -393,6 +435,18 @@ pub(super) fn queue_changed_running(
     ids: &[&str],
     running: Option<&str>,
 ) -> acp::ExtNotification {
+    queue_changed_running_ex(session_id, ids, running, None, None, None)
+}
+/// Like [`queue_changed_running`], with optional running-turn display
+/// fields (`runningText` / `runningKind` / `runningCombinedTexts`).
+pub(super) fn queue_changed_running_ex(
+    session_id: &str,
+    ids: &[&str],
+    running: Option<&str>,
+    running_text: Option<&str>,
+    running_kind: Option<&str>,
+    running_combined_texts: Option<&[&str]>,
+) -> acp::ExtNotification {
     let entries: Vec<serde_json::Value> = ids
         .iter()
         .enumerate()
@@ -408,6 +462,15 @@ pub(super) fn queue_changed_running(
     );
     if let Some(r) = running {
         params["runningPromptId"] = serde_json::Value::String(r.to_string());
+    }
+    if let Some(t) = running_text {
+        params["runningText"] = serde_json::Value::String(t.to_string());
+    }
+    if let Some(k) = running_kind {
+        params["runningKind"] = serde_json::Value::String(k.to_string());
+    }
+    if let Some(segs) = running_combined_texts {
+        params["runningCombinedTexts"] = serde_json::json!(segs);
     }
     acp::ExtNotification::new(
         "x.ai/queue/changed",
@@ -511,6 +574,26 @@ pub(super) fn make_fired_notif(
             prompt: prompt.into(),
             human_schedule: human_schedule.into(),
             next_fire_at: next_fire_at.map(str::to_string),
+            subagent_id: None,
+        },
+        meta: None,
+    };
+    let raw = serde_json::value::to_raw_value(&notif).unwrap();
+    acp::ExtNotification::new("x.ai/scheduled_task_fired", std::sync::Arc::from(raw))
+}
+pub(super) fn make_fired_notif_with_subagent(
+    session_id: &str,
+    task_id: &str,
+    subagent_id: &str,
+) -> acp::ExtNotification {
+    let notif = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: XaiSessionUpdate::ScheduledTaskFired {
+            task_id: task_id.into(),
+            prompt: "p".into(),
+            human_schedule: "every 1 minute".into(),
+            next_fire_at: Some("2026-02-02T02:02:02Z".into()),
+            subagent_id: Some(subagent_id.into()),
         },
         meta: None,
     };
@@ -931,18 +1014,6 @@ pub(super) fn xai_wake_turn_completed_notif(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-/// The newest turn-marker block on the agent's scrollback.
-pub(super) fn last_marker_block(
-    sb: &ScrollbackState,
-) -> &crate::scrollback::blocks::SessionEventBlock {
-    (0..sb.len())
-        .rev()
-        .find_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) => Some(b),
-            _ => None,
-        })
-        .expect("a turn-end marker must exist")
-}
 /// Build a `HookExecution` update (one successful run) on the
 /// `x.ai/session/update` rail, optionally stamped `isReplay`.
 /// `prompt_id == None` models pre-attribution shells.
@@ -953,16 +1024,31 @@ pub(super) fn xai_hook_execution_notif_for_prompt(
     is_replay: bool,
 ) -> acp::ExtNotification {
     use xai_grok_shell::extensions::notification::{HookRunEntryDto, HookRunStatusDto};
+    xai_hook_execution_notif_with_runs(
+        session_id,
+        event_name,
+        prompt_id,
+        is_replay,
+        vec![
+            HookRunEntryDto { name : "global/notify".into(), status :
+            HookRunStatusDto::Success { elapsed_ms : 12 }, output : None, }
+        ],
+    )
+}
+pub(super) fn xai_hook_execution_notif_with_runs(
+    session_id: &str,
+    event_name: &str,
+    prompt_id: Option<&str>,
+    is_replay: bool,
+    runs: Vec<xai_grok_shell::extensions::notification::HookRunEntryDto>,
+) -> acp::ExtNotification {
     let payload = SessionNotification {
         session_id: acp::SessionId::new(session_id),
         update: XaiSessionUpdate::HookExecution {
             event_name: event_name.into(),
             tool_name: None,
             prompt_id: prompt_id.map(str::to_string),
-            runs: vec![
-                HookRunEntryDto { name : "global/notify".into(), status :
-                HookRunStatusDto::Success { elapsed_ms : 12 }, output : None, }
-            ],
+            runs,
         },
         meta: Some(serde_json::json!({ "isReplay" : is_replay })),
     };
@@ -1005,6 +1091,7 @@ pub(super) fn last_marker_stop_hook_groups(
         })
 }
 /// Work-only status lines ("N … still running") pushed as system rows.
+/// Never pushed in production; tests assert emptiness.
 pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
     (0..sb.len())
         .filter_map(|i| match sb.get(i).map(|e| &e.block) {
@@ -1016,9 +1103,8 @@ pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
         .collect()
 }
 /// Register two running background commands on the (idle) agent through
-/// the wire, then open the between-turns status window the way a
-/// counted turn-end marker would.
-pub(super) fn seed_two_bg_tasks_and_announce(app: &mut AppView, session_id: &str) {
+/// the wire.
+pub(super) fn seed_two_bg_tasks(app: &mut AppView, session_id: &str) {
     let _ = handle_ext_notification(
         &make_task_backgrounded_notif(session_id, "tc-1", "task-1", "sleep 98"),
         app,
@@ -1027,7 +1113,6 @@ pub(super) fn seed_two_bg_tasks_and_announce(app: &mut AppView, session_id: &str
         &make_task_backgrounded_notif(session_id, "tc-2", "task-2", "sleep 99"),
         app,
     );
-    app.agents.get_mut(&AgentId(0)).unwrap().end_work_announced = true;
 }
 /// Build an `x.ai/session/interjection` ext-notification (no id).
 pub(super) fn interjection_ext(session_id: &str, text: &str) -> acp::ExtNotification {
@@ -1194,6 +1279,7 @@ pub(super) fn test_subagent_spawned(
         effective_context_source: None,
         context_normalized: false,
         capability_mode: None,
+        workflow_run_id: None,
         persona: None,
         role: None,
         model: None,
@@ -1201,12 +1287,6 @@ pub(super) fn test_subagent_spawned(
     }
 }
 pub(super) fn test_subagent_finished(child_sid: &str) -> XaiSessionUpdate {
-    test_subagent_finished_with_wake(child_sid, false)
-}
-pub(super) fn test_subagent_finished_with_wake(
-    child_sid: &str,
-    will_wake: bool,
-) -> XaiSessionUpdate {
     XaiSessionUpdate::SubagentFinished {
         subagent_id: child_sid.into(),
         child_session_id: child_sid.into(),
@@ -1217,7 +1297,7 @@ pub(super) fn test_subagent_finished_with_wake(
         duration_ms: 500,
         tokens_used: 0,
         output: None,
-        will_wake,
+        will_wake: false,
     }
 }
 pub(super) fn test_subagent_progress(

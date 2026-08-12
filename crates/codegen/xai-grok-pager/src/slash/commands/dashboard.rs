@@ -92,6 +92,31 @@ mod tests {
         ));
     }
 
+    /// Feature-flag gating is applied externally by the registry
+    /// (`set_dashboard_visible`), not via `visible()` — `AppCtx` carries no
+    /// dashboard state. `visible()` only gates on screen mode: offered in
+    /// fullscreen/inline, hidden from the minimal-mode dropdown (where the
+    /// dashboard has nothing to open and dispatch would just refuse).
+    #[test]
+    fn visible_everywhere_except_minimal() {
+        let models = ModelState::default();
+        let cmd = DashboardCommand;
+        let ctx = |screen_mode| AppCtx {
+            models: &models,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            workflows_available: true,
+            screen_mode,
+        };
+        assert!(cmd.visible(&ctx(crate::app::ScreenMode::Fullscreen)));
+        assert!(cmd.visible(&ctx(crate::app::ScreenMode::Inline)));
+        assert!(
+            !cmd.visible(&ctx(crate::app::ScreenMode::Minimal)),
+            "the dashboard (and its /sessions alias) must not be offered in minimal mode"
+        );
+    }
+
     #[test]
     fn does_not_take_args() {
         let cmd = DashboardCommand;

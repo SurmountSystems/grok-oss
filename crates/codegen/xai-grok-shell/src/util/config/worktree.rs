@@ -157,6 +157,42 @@ pub(crate) fn resolve_worktree_auto_gc_from_settings(
     )
 }
 
+/// Parse `[worktree.auto_gc]` (per-field tolerant via [`WorktreeAutoGcSettings`]).
+pub fn worktree_auto_gc_from_toml(root: &TomlValue) -> super::WorktreeAutoGcSettings {
+    root.get("worktree")
+        .and_then(|w| w.get("auto_gc"))
+        // toml::Value only deserializes by value (no &Value Deserializer).
+        .and_then(|v| super::WorktreeAutoGcSettings::deserialize(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Resolve: env > local TOML > remote > defaults (clamped). Platform age policy
+/// is applied later in `maybe_auto_gc`.
+pub fn resolve_worktree_auto_gc(
+    raw_config: &TomlValue,
+    remote: Option<&RemoteSettings>,
+) -> xai_fast_worktree::ResolvedWorktreeAutoGc {
+    let local = worktree_auto_gc_from_toml(raw_config);
+    resolve_worktree_auto_gc_from_settings(
+        Some(&local),
+        remote.and_then(|r| r.worktree_auto_gc.as_ref()),
+    )
+}
+
+/// Same layering with already-parsed settings.
+pub fn resolve_worktree_auto_gc_from_settings(
+    local: Option<&super::WorktreeAutoGcSettings>,
+    remote: Option<&super::WorktreeAutoGcSettings>,
+) -> xai_fast_worktree::ResolvedWorktreeAutoGc {
+    use xai_grok_workspace::worktree::worktree_auto_gc_layer_from_settings;
+    let local_layer = local.map(worktree_auto_gc_layer_from_settings);
+    let remote_layer = remote.map(worktree_auto_gc_layer_from_settings);
+    xai_fast_worktree::resolve_worktree_auto_gc_from_layers(
+        local_layer.as_ref(),
+        remote_layer.as_ref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::RemoteSettings;

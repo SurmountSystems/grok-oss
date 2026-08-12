@@ -76,16 +76,17 @@ use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
     preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
     set_auto_compact_threshold, set_auto_dark_theme, set_auto_light_theme, set_auto_run_implement,
-    set_auto_update, set_collapsed_edit_blocks, set_compact_mode, set_contextual_hint_image_input,
-    set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
-    set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
-    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-    set_economic_mode, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
-    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
-    set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_stt_language,
+    set_auto_update, set_collapsed_edit_blocks, set_combine_queued_prompts, set_compact_mode,
+    set_contextual_hint_image_input, set_contextual_hint_plan_mode, set_contextual_hint_send_now,
+    set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap, set_contextual_hint_undo,
+    set_contextual_hint_word_select, set_default_model, set_default_selected_permission,
+    set_display_refresh_auto_cadence, set_economic_mode, set_fork_secondary_model,
+    set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
+    set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
+    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
+    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips,
+    set_simple_mode, set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
+    set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -94,7 +95,7 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_open_gboom, dispatch_share_session,
+    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_share_session,
     dispatch_show_context_info, dispatch_show_privacy_info, dispatch_show_queue,
     dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
     dispatch_show_usage, set_coding_data_sharing,
@@ -117,8 +118,22 @@ use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::types::DisplayMode;
 use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
 use xai_grok_telemetry::session_ctx::log_event;
-pub(super) fn auth_copy_was_confirmed(delivery: crate::clipboard::ClipboardDelivery) -> bool {
-    delivery == crate::clipboard::ClipboardDelivery::Confirmed
+pub(super) fn dispatch_copy_auth_url(
+    app: &mut AppView,
+    copy: impl FnOnce(&str) -> crate::clipboard::ClipboardDelivery,
+) -> Vec<Effect> {
+    let AuthState::Authenticating {
+        auth_url: Some(url),
+        ..
+    } = &app.auth_state
+    else {
+        return vec![];
+    };
+    app.auth_clipboard_delivery = Some(copy(url));
+    app.auth_clipboard_feedback_generation = app.auth_clipboard_feedback_generation.wrapping_add(1);
+    vec![Effect::ScheduleClearAuthCopyFeedback {
+        generation: app.auth_clipboard_feedback_generation,
+    }]
 }
 /// Dispatch an action: mutate state, return effects to execute.
 ///
@@ -359,6 +374,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }],
             None => vec![],
         },
+        Action::QueueHoldEditShared { id } => match active_agent_session_id(app) {
+            Some(session_id) => vec![Effect::QueueHoldEdit { session_id, id }],
+            None => vec![],
+        },
+        Action::QueueReleaseEditShared { id } => match active_agent_session_id(app) {
+            Some(session_id) => vec![Effect::QueueReleaseEdit { session_id, id }],
+            None => vec![],
+        },
         Action::QueueInterjectShared {
             id,
             expected_version,
@@ -536,8 +559,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_copy_block_content(app);
             vec![]
         }
-        Action::CopyAssistantMessage { n } => {
-            dispatch_copy_assistant_message(app, n);
+        Action::CopyAssistantMessage { n, file_path } => {
+            dispatch_copy_assistant_message(app, n, file_path);
             vec![]
         }
         Action::ExportConversation { file_path } => {
@@ -645,14 +668,21 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             };
             if let Some(ref mut modal) = agent.extensions_modal {
                 modal.skills_data = crate::views::extensions_modal::TabDataState::Loading;
+                modal.workflows_data = crate::views::extensions_modal::TabDataState::Loading;
             }
             let Some(session_id) = agent.session.session_id.clone() else {
                 return vec![];
             };
-            vec![Effect::FetchSkillsList {
-                agent_id: id,
-                session_id,
-            }]
+            vec![
+                Effect::FetchSkillsList {
+                    agent_id: id,
+                    session_id: session_id.clone(),
+                },
+                Effect::FetchWorkflowsList {
+                    agent_id: id,
+                    session_id,
+                },
+            ]
         }
         Action::RefreshMcpList => {
             let ActiveView::Agent(id) = app.active_view else {
@@ -903,6 +933,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::RenameSession { title } => dispatch_rename_session(app, title),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
+        Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
         Action::ShowPlan => dispatch_show_plan(app),
@@ -951,6 +982,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetCompactMode(v) => set_compact_mode(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
+        Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),
+        Action::SetCombineQueuedPrompts(v) => set_combine_queued_prompts(app, v),
         Action::SetSimpleMode(v) => set_simple_mode(app, v),
         Action::SetContextualHintUndo(v) => set_contextual_hint_undo(app, v),
         Action::SetContextualHintPlanMode(v) => set_contextual_hint_plan_mode(app, v),
@@ -1038,19 +1071,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {
-            if let AuthState::Authenticating {
-                auth_url: Some(url),
-                ..
-            } = &app.auth_state
-            {
-                app.auth_clipboard_copied =
-                    auth_copy_was_confirmed(crate::clipboard::SystemClipboard::try_set(url));
-            }
-            if app.auth_clipboard_copied {
-                vec![Effect::ScheduleClearAuthCopied]
-            } else {
-                vec![]
-            }
+            dispatch_copy_auth_url(app, crate::clipboard::SystemClipboard::try_set)
         }
         Action::ShowRawAuthUrl => {
             app.auth_show_raw_url = true;
@@ -1162,15 +1183,22 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             path,
             refresh_agents_modal,
         } => {
-            if let ActiveView::Agent(id) = app.active_view
-                && let Some(agent) = app.agents.get_mut(&id)
-            {
-                agent.active_modal = None;
+            if app.pending_editor.is_none() {
+                if let ActiveView::Agent(id) = app.active_view
+                    && let Some(agent) = app.agents.get_mut(&id)
+                {
+                    agent.active_modal = None;
+                }
+                app.pending_editor = Some(
+                    crate::app::external_editor::PendingEditorRequest::ConfigFile {
+                        path,
+                        refresh_agents_modal,
+                    },
+                );
             }
-            app.pending_editor_path = Some(path);
-            app.pending_agents_modal_refresh = refresh_agents_modal;
             vec![]
         }
+        Action::EditPromptExternal => super::external_editor::dispatch_edit_prompt_external(app),
         Action::OpenDashboard => dispatch_open_dashboard(app),
         Action::ExitDashboard => dispatch_exit_dashboard(app),
         Action::DashboardAttach(id) => dispatch_dashboard_attach(app, id),
@@ -1187,14 +1215,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DashboardCancelRename => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.rename = None;
-            }
-            vec![]
-        }
-        Action::DashboardRenameInput(text) => {
-            if let Some(d) = app.dashboard.as_mut()
-                && let Some(rn) = d.rename.as_mut()
-            {
-                rn.draft = text;
             }
             vec![]
         }
@@ -1294,6 +1314,24 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             with_active_agent(app, |agent| {
                 if agent.goal_state.is_some() {
                     agent.show_goal_detail = !agent.show_goal_detail;
+                }
+            });
+            vec![]
+        }
+        Action::ToggleWorkflows => {
+            let opening = matches!(
+                app.active_view, ActiveView::Agent(id) if app.agents.get(& id)
+                .is_some_and(| agent | ! agent.show_workflows)
+            );
+            if opening {
+                app.scroll_state.cancel_stream();
+                app.last_scroll_pos = None;
+            }
+            with_active_agent(app, |agent| {
+                agent.show_workflows = !agent.show_workflows;
+                if agent.show_workflows {
+                    agent.workflows_view.reset();
+                    agent.show_goal_detail = false;
                 }
             });
             vec![]

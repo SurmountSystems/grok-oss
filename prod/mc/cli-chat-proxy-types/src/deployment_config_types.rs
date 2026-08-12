@@ -31,6 +31,17 @@ pub fn is_server_nonce_shape(nonce: &str) -> bool {
 pub const MANAGED_POLICY_TYP: &str = "grok.managed_policy.v1";
 pub const MANAGED_IDENTITY_TYP: &str = "grok.managed_identity.v1";
 
+/// Client echoes its persisted envelope `nonce` on this header for the server probe.
+pub const MANAGED_CONFIG_NONCE_ECHO_HEADER: &str = "x-grok-managed-config-nonce";
+
+/// Shape of a server-minted nonce (16 random bytes as hex): what `fresh_nonce`
+/// produces and the only shape the client echoes (hex is HTTP-header-safe).
+/// Shared so a mint change cannot silently disable the echo: the proxy pins
+/// its mint against this, the client gates its echo on it.
+pub fn is_server_nonce_shape(nonce: &str) -> bool {
+    nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// The exact bytes the server signs: the served policy, the principal it is
 /// bound to, and an expiry. Serialized once on the server and shipped verbatim
 /// as `signed_payload`, so the client verifies the received bytes directly

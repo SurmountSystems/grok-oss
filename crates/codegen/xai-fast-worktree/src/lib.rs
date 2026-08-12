@@ -55,6 +55,11 @@ pub use auto_gc::{
 };
 #[cfg(feature = "metadata")]
 pub use db::{
+    DbStats, ListFilter, WorktreeDb, WorktreeKind, WorktreeRecord, WorktreeStatus, id_from_path,
+    now_epoch_secs, repo_name_from_path, resolve_grok_home,
+};
+#[cfg(feature = "metadata")]
+pub use db::{
     DbStats, ListFilter, META_KEY_LABEL, RegistryOpen, SqliteFailureKind, WorktreeDb, WorktreeKind,
     WorktreeRecord, WorktreeStatus, classify_sqlite_error, id_from_path, now_epoch_secs,
     repo_name_from_path, resolve_grok_home,

@@ -51,6 +51,32 @@ pub(crate) fn env_from(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .collect()
 }
 
+// TODO: make term seq codes invariant in a crate.
+/// Tracks whether Kitty keyboard enhancement flags were pushed during
+/// `init_terminal`, so teardown paths (`restore_terminal`, panic hook)
+/// only pop when flags were actually pushed.
+static KITTY_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// Whether Kitty keyboard enhancement flags were actually pushed during
+/// `init_terminal` — i.e. the brand wasn't in the skip list *and* the
+/// runtime probe (`supports_keyboard_enhancement`) succeeded. False means
+/// modified keys (Shift+Enter, Ctrl+.) arrive as legacy bytes.
+pub fn kitty_flags_pushed() -> bool {
+    KITTY_FLAGS_PUSHED.load(Ordering::Acquire)
+}
+
+/// Record whether Kitty keyboard enhancement flags were pushed during
+/// `init_terminal`.
+pub fn set_kitty_flags_pushed(v: bool) {
+    KITTY_FLAGS_PUSHED.store(v, Ordering::Release)
+}
+
+/// Atomically clear the Kitty-flags-pushed state, returning the prior value.
+/// Used by teardown paths so concurrent callers cannot both pop.
+pub fn take_kitty_flags_pushed() -> bool {
+    KITTY_FLAGS_PUSHED.swap(false, Ordering::AcqRel)
+}
+
 /// Known terminal emulator categories.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, strum::Display)]
 pub enum TerminalName {

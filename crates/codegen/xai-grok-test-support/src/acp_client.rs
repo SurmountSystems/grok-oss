@@ -322,6 +322,11 @@ impl GrokStdioClient {
         eprintln!("[harness-timing] {what}: {:?}", started.elapsed());
     }
 
+    /// Timing breadcrumb for tuning CI timeout budgets (visible with --nocapture).
+    fn log_timing(what: &str, started: std::time::Instant) {
+        eprintln!("[harness-timing] {what}: {:?}", started.elapsed());
+    }
+
     pub async fn initialize_with_timeout(&self) -> acp::InitializeResponse {
         let started = std::time::Instant::now();
         let r = tokio::time::timeout(scaled(Duration::from_secs(20)), self.initialize())

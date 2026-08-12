@@ -21,16 +21,19 @@ use super::token_output::{expiry_after_seconds, parse_token_output};
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub struct AuthProviderConfig {
-    /// Command to run; without `args` it uses the platform shell, with `args` it execs directly.
+    /// Command that prints a bearer token on stdout, bare or as JSON
+    /// `{access_token, expires_in}`. Without `args` it runs via `sh -c`.
     pub command: String,
-    /// Command arguments; when set (even empty) the command execs directly.
+    /// Arguments for `command`. When present (even empty), the command runs
+    /// directly with no shell; `command` is a program name on `PATH`, or a path.
     pub args: Option<Vec<String>>,
-    /// Fallback token lifetime used when the output carries no `expires_in`.
+    /// Fallback token lifetime in seconds, used when the command's output
+    /// carries no `expires_in`. Takes precedence over a JWT `exp` claim.
     pub token_ttl_secs: Option<u64>,
-    /// Max seconds to wait for the command (default 30, clamped to 1..=600).
+    /// Maximum seconds to wait for the command (default 30, clamped to 1..=600).
+    /// A turn waits up to this long on a mint, so keep helpers fast and
+    /// non-interactive.
     pub timeout_secs: Option<u64>,
-    /// Working directory for the command; a leading `~` expands to home.
-    pub cwd: Option<String>,
 }
 
 impl AuthProviderConfig {
@@ -207,17 +210,14 @@ const PROVIDER_STDERR_CAP_BYTES: u64 = 64 << 10; // 64 KiB
 /// new `AuthProviderConfig` field is a compile error until it is classified as
 /// token-shaping (add it here) or an execution knob like `timeout_secs`
 /// (editing it never invalidates).
-fn token_identity(
-    config: &AuthProviderConfig,
-) -> (&str, Option<&[String]>, Option<u64>, Option<&str>) {
+fn token_identity(config: &AuthProviderConfig) -> (&str, Option<&[String]>, Option<u64>) {
     let AuthProviderConfig {
         command,
         args,
         token_ttl_secs,
         timeout_secs: _,
-        cwd,
     } = config;
-    (command, args.as_deref(), *token_ttl_secs, cwd.as_deref())
+    (command, args.as_deref(), *token_ttl_secs)
 }
 
 fn minted_token_is_stale(minted: &MintedProviderToken, config: &AuthProviderConfig) -> bool {
@@ -282,7 +282,6 @@ async fn run_capped(
     cmd: &mut tokio::process::Command,
     timeout: std::time::Duration,
 ) -> anyhow::Result<std::process::Output> {
-    #[allow(clippy::disallowed_methods)] // killed at the timeout this call reports
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("command failed to start: {e}"))?;
@@ -334,19 +333,6 @@ async fn run_capped(
     })
 }
 
-fn resolve_program(command: &str, cwd: Option<&std::path::Path>) -> std::path::PathBuf {
-    let path = std::path::Path::new(command);
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    if path.components().count() > 1
-        && let Some(dir) = cwd
-    {
-        return dir.join(path);
-    }
-    std::path::PathBuf::from(command)
-}
-
 async fn mint_provider_token(
     provider: &AuthProviderRef,
     mark_expired: bool,
@@ -370,25 +356,20 @@ async fn mint_provider_token(
         "auth provider: running helper command"
     );
 
-    let cwd = config
-        .cwd
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .map(crate::util::expand_home);
-
     let mut cmd = match config.args {
         Some(ref args) => {
-            let program = resolve_program(config.command.trim(), cwd.as_deref());
-            let mut cmd = tokio::process::Command::new(program);
+            // Direct exec: the program name is a PATH lookup, so trim stray
+            // whitespace that would otherwise fail to resolve.
+            let mut cmd = tokio::process::Command::new(config.command.trim());
             cmd.args(args);
             cmd
         }
-        None => crate::util::subprocess::shell_c(config.command.as_str()),
+        None => {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.args(["-c", &config.command]);
+            cmd
+        }
     };
-    if let Some(ref dir) = cwd {
-        cmd.current_dir(dir);
-    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         // Capture stderr for the failure log; inheriting corrupts the TUI.
@@ -632,7 +613,6 @@ pub(crate) fn test_counting_provider(name: &str, dir: &std::path::Path) -> AuthP
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,
-            cwd: None,
         },
     )
 }

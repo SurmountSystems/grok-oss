@@ -859,13 +859,14 @@ mod tests {
             match start_result {
                 Ok(started) => {
                     assert!(matches!(
-                        started,
-                        ControlPayload::CpuProfileStarted {
-                            svg_path,
-                            frequency_hz: 200,
-                            ..
-                        } if svg_path == output_path
-                    ));
+                                            started,
+                                            ControlPayload::CpuProfileStarted {
+                                                svg_path,
+                                                frequency_hz: 200,
+                                                ..
+                                            }
+                    if svg_path == output_path
+                                        ));
 
                     let status = client
                         .send_control(ControlCommand::CpuProfileStatus)
@@ -873,15 +874,16 @@ mod tests {
                         .unwrap()
                         .unwrap();
                     assert!(matches!(
-                        status,
-                        ControlPayload::CpuProfileStatus {
-                            active: true,
-                            stopping: false,
-                            svg_path: Some(path),
-                            frequency_hz: Some(200),
-                            ..
-                        } if path == output_path
-                    ));
+                                            status,
+                                            ControlPayload::CpuProfileStatus {
+                                                active: true,
+                                                stopping: false,
+                                                svg_path: Some(path),
+                                                frequency_hz: Some(200),
+                                                ..
+                                            }
+                    if path == output_path
+                                        ));
 
                     let stopped = client
                         .send_control(ControlCommand::StopCpuProfile)
@@ -889,9 +891,10 @@ mod tests {
                         .unwrap()
                         .unwrap();
                     assert!(matches!(
-                        stopped,
-                        ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == output_path
-                    ));
+                                            stopped,
+                                            ControlPayload::CpuProfileStopped { svg_path, .. }
+                    if svg_path == output_path
+                                        ));
                     assert!(output_path.exists());
                 }
                 Err(error) => {
@@ -988,15 +991,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(
-            status,
-            ControlPayload::CpuProfileStatus {
-                active: false,
-                stopping: true,
-                svg_path: Some(path),
-                frequency_hz: Some(200),
-                ..
-            } if path == output_path
-        ));
+                    status,
+                    ControlPayload::CpuProfileStatus {
+                        active: false,
+                        stopping: true,
+                        svg_path: Some(path),
+                        frequency_hz: Some(200),
+                        ..
+                    }
+        if path == output_path
+                ));
 
         let leader_info = client_b
             .send_control(ControlCommand::GetLeaderInfo)
@@ -1034,9 +1038,10 @@ mod tests {
 
         let stopped = stop_task.await.unwrap().unwrap().unwrap();
         assert!(matches!(
-            stopped,
-            ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == output_path
-        ));
+                    stopped,
+                    ControlPayload::CpuProfileStopped { svg_path, .. }
+        if svg_path == output_path
+                ));
         assert_eq!(
             stop_calls.lock().unwrap().as_slice(),
             std::slice::from_ref(&output_path)

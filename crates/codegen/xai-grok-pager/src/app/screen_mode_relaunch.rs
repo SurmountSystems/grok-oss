@@ -22,6 +22,34 @@ use std::sync::OnceLock;
 /// [`take_screen_mode_env_override`]; not a public user interface.
 pub(crate) const GROK_SCREEN_MODE_ENV: &str = "GROK_SCREEN_MODE";
 
+/// Default user-facing CLI name for Surmount Grok OSS (`cargo install` artifact).
+///
+/// Upstream xAI prints `grok`; this fork's binary is `grok-oss`. Resume and
+/// relaunch hints must match what the user can actually type after quit.
+pub(crate) const DEFAULT_CLI_HINT_NAME: &str = crate::client_identity::PRODUCT_CLI_NAME;
+
+/// Basename for resume / relaunch command lines shown after quit.
+///
+/// Prefers the running executable's file name when it looks like a product
+/// install (`grok-oss`, `grok`, versioned `grok-*` downloads). Cargo-test
+/// harness binaries fall through to [`DEFAULT_CLI_HINT_NAME`].
+pub(crate) fn cli_hint_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .filter(|name| is_product_cli_name(name))
+        .unwrap_or_else(|| DEFAULT_CLI_HINT_NAME.to_owned())
+}
+
+fn is_product_cli_name(name: &str) -> bool {
+    if name == "grok-oss" || name == "grok" || name.starts_with("grok-oss") {
+        return true;
+    }
+    // Versioned release artifacts: `grok-0.2.101-…` (not crate test bins).
+    name.strip_prefix("grok-")
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// Argv tokens (`--long`, `-s`, and their aliases) of [`super::cli::PagerArgs`]
 /// flags that consume a following value token when not written as
 /// `--flag=value`.
