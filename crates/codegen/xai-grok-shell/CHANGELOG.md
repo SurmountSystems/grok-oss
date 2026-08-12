@@ -90,6 +90,9 @@
 
 ## Features
 
+- **OpenRouter** is available as a separate model option (`openrouter-grok-4.5` / Grok 4.5 via OpenRouter). It does not replace native Grok Build models.
+- **`grok login --openrouter`** / **`grok logout --openrouter`** store or clear an OpenRouter API key in the OS keyring (or `~/.grok/provider_credentials.json`). Prefer `OPENROUTER_API_KEY` when set.
+- **Zed-compatible credential discovery**: when no Grok-local key is set, Grok read-only probes Zed’s `development_credentials` file and Zed’s OS keychain layouts so an OpenRouter key already configured in Zed can be reused. Grok never writes Zed’s stores.
 - Dashboard rows show a short summary of what the agent did in the previous turn
 - Extensions modal groups items alphabetically with collapsible Skills sections
 - Grok skips the project-directory prompt when launched from home or other non-project directories

@@ -1468,6 +1468,92 @@ fn resolve_credentials_no_session_key_returns_api_key() {
     let creds = resolve_credentials(&model, None);
     assert_eq!(creds.auth_type, xai_chat_state::AuthType::ApiKey);
 }
+
+#[test]
+fn default_models_include_openrouter_grok_45_separate_from_default() {
+    let endpoints = EndpointsConfig::default();
+    let models = default_model_entries(&endpoints);
+    let or_id = crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID;
+    let entry = models
+        .get(or_id)
+        .unwrap_or_else(|| panic!("missing {or_id} in defaults"));
+    assert_eq!(
+        entry.info.model,
+        crate::auth::openrouter::OPENROUTER_GROK_45_MODEL
+    );
+    assert_eq!(
+        entry.info.base_url,
+        crate::auth::openrouter::OPENROUTER_API_URL
+    );
+    assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
+    assert!(entry.supported_in_api);
+    assert_eq!(
+        entry.env_key.as_ref().map(|k| k.names()),
+        Some(vec![crate::auth::openrouter::OPENROUTER_API_KEY_ENV])
+    );
+    // Native default stays first-party; OpenRouter is additive.
+    let dm = crate::models::default_model();
+    assert_ne!(
+        dm,
+        crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID,
+        "OpenRouter must stay additive, not the product default"
+    );
+    assert!(
+        models.contains_key(dm) || models.values().any(|m| m.model == dm),
+        "defaults must include the product default model {dm}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn resolve_credentials_openrouter_uses_env_not_session() {
+    use xai_chat_state::AuthType;
+    let _env = xai_grok_test_support::EnvGuard::set(
+        crate::auth::openrouter::OPENROUTER_API_KEY_ENV,
+        "sk-or-test",
+    );
+    let entry = ModelEntry::from_config_entry(&openrouter_grok_45_default_entry());
+    let creds = resolve_credentials(&entry, Some("session-jwt"));
+    assert_eq!(creds.auth_type, AuthType::ApiKey);
+    assert_eq!(creds.api_key.as_deref(), Some("sk-or-test"));
+    assert_eq!(creds.base_url, crate::auth::openrouter::OPENROUTER_API_URL);
+}
+
+#[test]
+#[serial_test::serial]
+fn resolve_credentials_openrouter_does_not_use_xai_session() {
+    use xai_chat_state::AuthType;
+    let _env =
+        xai_grok_test_support::EnvGuard::unset(crate::auth::openrouter::OPENROUTER_API_KEY_ENV);
+    let entry = ModelEntry::from_config_entry(&openrouter_grok_45_default_entry());
+    let creds = resolve_credentials(&entry, Some("session-jwt"));
+    assert_eq!(creds.auth_type, AuthType::ApiKey);
+    assert_ne!(
+        creds.api_key.as_deref(),
+        Some("session-jwt"),
+        "OpenRouter must never use the xAI session token"
+    );
+    assert_eq!(creds.base_url, crate::auth::openrouter::OPENROUTER_API_URL);
+}
+
+#[test]
+fn inject_url_derived_headers_adds_openrouter_attribution() {
+    let mut headers = IndexMap::new();
+    inject_url_derived_headers(
+        &mut headers,
+        None,
+        crate::auth::openrouter::OPENROUTER_API_URL,
+    );
+    assert_eq!(
+        headers.get("HTTP-Referer").map(String::as_str),
+        Some(crate::auth::openrouter::OPENROUTER_HTTP_REFERER)
+    );
+    assert_eq!(
+        headers.get("X-Title").map(String::as_str),
+        Some(crate::auth::openrouter::OPENROUTER_X_TITLE)
+    );
+    assert!(!headers.contains_key("X-XAI-Token-Auth"));
+}
 fn api_key_creds(base_url: &str) -> ResolvedCredentials {
     ResolvedCredentials {
         api_key: Some("xai-secret".to_string()),

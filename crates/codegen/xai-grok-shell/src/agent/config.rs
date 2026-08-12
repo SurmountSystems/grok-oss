@@ -3495,6 +3495,17 @@ pub(crate) fn resolve_model_list(
     if let Some(mut prefetched) = prefetched {
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
         let default_cw = DEFAULT_CONTEXT_WINDOW;
+        // Preserve additive third-party defaults (e.g. OpenRouter) that the
+        // remote catalog does not list — prefetched replaces first-party
+        // defaults but must not erase provider options we ship client-side.
+        let preserved: Vec<(String, ModelEntry)> = resolved
+            .iter()
+            .filter(|(k, e)| {
+                !prefetched.contains_key(*k)
+                    && crate::auth::openrouter::is_openrouter_base_url(&e.info.base_url)
+            })
+            .map(|(k, e)| (k.clone(), e.clone()))
+            .collect();
         for (key, entry) in prefetched.iter_mut() {
             let donor = resolved.get(key);
             if let Some(donor) = donor {
@@ -3523,6 +3534,9 @@ pub(crate) fn resolve_model_list(
             }
         }
         resolved = prefetched;
+        for (key, entry) in preserved {
+            resolved.entry(key).or_insert(entry);
+        }
     }
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
@@ -3776,7 +3790,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
         count = entries.len(),
         "loaded default models from embedded JSON"
     );
-    entries
+    let mut map: IndexMap<String, ModelEntryConfig> = entries
         .into_iter()
         .map(|m| {
             assert!(
@@ -3824,7 +3838,62 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
             };
             (key, config)
         })
-        .collect()
+        .collect();
+    // Additive OpenRouter option (not the default). OpenRouter does not host
+    // Composer-class models — keep this separate from native xAI catalog entries.
+    let openrouter = openrouter_grok_45_default_entry();
+    map.entry(crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID.to_owned())
+        .or_insert(openrouter);
+    map
+}
+
+/// Built-in OpenRouter Grok 4.5 catalog entry (chat completions, BYOK).
+fn openrouter_grok_45_default_entry() -> ModelEntryConfig {
+    use crate::auth::openrouter::{
+        OPENROUTER_API_KEY_ENV, OPENROUTER_API_URL, OPENROUTER_GROK_45_CATALOG_ID,
+        OPENROUTER_GROK_45_CONTEXT_WINDOW, OPENROUTER_GROK_45_MODEL, OPENROUTER_HTTP_REFERER,
+        OPENROUTER_X_TITLE,
+    };
+    let mut extra_headers = IndexMap::new();
+    extra_headers.insert("HTTP-Referer".to_owned(), OPENROUTER_HTTP_REFERER.to_owned());
+    extra_headers.insert("X-Title".to_owned(), OPENROUTER_X_TITLE.to_owned());
+    ModelEntryConfig {
+        id: Some(OPENROUTER_GROK_45_CATALOG_ID.to_owned()),
+        model: OPENROUTER_GROK_45_MODEL.to_owned(),
+        base_url: OPENROUTER_API_URL.to_owned(),
+        api_base_url: None,
+        name: Some("Grok 4.5 (OpenRouter)".to_owned()),
+        description: Some(
+            "Grok 4.5 via OpenRouter (bring your own OpenRouter API key)".to_owned(),
+        ),
+        context_window: NonZeroU64::new(OPENROUTER_GROK_45_CONTEXT_WINDOW)
+            .expect("openrouter context window is non-zero"),
+        auto_compact_threshold_percent: None,
+        system_prompt_label: None,
+        temperature: Some(0.7),
+        top_p: Some(0.95),
+        max_completion_tokens: None,
+        api_backend: ApiBackend::ChatCompletions,
+        auth_scheme: None,
+        agent_type: default_agent_type(),
+        inference_idle_timeout_secs: None,
+        max_retries: None,
+        api_key: None,
+        env_key: Some(EnvKeys::single(OPENROUTER_API_KEY_ENV)),
+        extra_headers,
+        use_concise: false,
+        hidden: false,
+        supported_in_api: true,
+        reasoning_effort: None,
+        supports_reasoning_effort: false,
+        reasoning_efforts: Vec::new(),
+        supports_backend_search: false,
+        compactions_remaining: None,
+        compaction_at_tokens: None,
+        show_model_fingerprint: false,
+        stream_tool_calls: None,
+        laziness_detector: LazinessDetectorPerModelConfig::default(),
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntryConfig {
@@ -4346,11 +4415,20 @@ impl ModelEntry {
             api_base_url: entry.api_base_url.clone(),
         }
     }
-    /// Non-empty `api_key`, else first non-empty resolved `env_key`.
-    /// `None` → fall through to session / global key. Static only: never
-    /// consults auth-provider tokens.
+    /// Non-empty `api_key`, else first non-empty resolved `env_key`, else
+    /// (for OpenRouter base URLs) the secret store. `None` → fall through to
+    /// session / global key (except OpenRouter, which never falls through).
+    /// Static own path: never consults auth-provider tokens.
     pub(crate) fn own_credential(&self) -> Option<String> {
-        first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
+        first_own_credential(self.api_key.as_deref(), self.env_key.as_ref()).or_else(|| {
+            if crate::auth::openrouter::is_openrouter_base_url(&self.info.base_url) {
+                crate::auth::openrouter::load_openrouter_api_key_default()
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            }
+        })
     }
     /// The provider governing this model's bearer: `None` when a static
     /// `api_key`/`env_key` resolves. The turn paths consult this, so a
@@ -4362,9 +4440,10 @@ impl ModelEntry {
         self.auth_provider.as_ref()
     }
     /// `true` when the model has a non-empty `api_key`, an `env_key` that
-    /// resolves to a non-empty value, or a named auth provider.
-    /// Probes `std::env::var` at call time: result is not stable across env
-    /// changes. Never executes a provider command.
+    /// resolves to a non-empty value, a named auth provider, or (OpenRouter)
+    /// a key in the secret store.
+    /// Probes `std::env::var` / secret store at call time: result is not stable
+    /// across env or store changes. Never executes a provider command.
     pub(crate) fn has_own_credentials(&self) -> bool {
         self.own_credential().is_some() || self.auth_provider.is_some()
     }
@@ -4759,16 +4838,35 @@ pub(crate) fn first_own_credential(
         .map(str::to_owned)
         .or_else(|| env_key.and_then(EnvKeys::resolve_value))
 }
-/// Priority: model api_key/env_key > cached auth-provider token > session
-/// token > XAI_API_KEY.
+/// Resolve credentials for a model.
+/// Priority: model api_key/env_key/secret-store > cached auth-provider token >
+/// session token > XAI_API_KEY.
+///
+/// When `env_key` lists multiple names, the first set non-empty value is used.
+/// OpenRouter base URLs never fall through to xAI session / `XAI_API_KEY`
+/// (would send the wrong credential to a third-party host).
 pub(crate) fn resolve_credentials(
     model: &ModelEntry,
     session_key: Option<&str>,
 ) -> ResolvedCredentials {
     let info = model.info();
+    let is_openrouter = crate::auth::openrouter::is_openrouter_base_url(&info.base_url);
     let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
         (
             Some(key),
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+        )
+    } else if is_openrouter {
+        // Own credential already checked env + secret store. Do not use
+        // xAI session or XAI_API_KEY against OpenRouter.
+        tracing::warn!(
+            model = %info.model,
+            env = crate::auth::openrouter::OPENROUTER_API_KEY_ENV,
+            "OpenRouter model has no API key — set OPENROUTER_API_KEY or run `grok login --openrouter`"
+        );
+        (
+            None,
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
@@ -5220,6 +5318,14 @@ pub(crate) fn inject_url_derived_headers(
         headers
             .entry(crate::http::CLIENT_MODE_HEADER.to_string())
             .or_insert_with(|| crate::http::process_client_mode().to_string());
+    }
+    if crate::auth::openrouter::is_openrouter_base_url(base_url) {
+        headers.entry("HTTP-Referer".to_string()).or_insert_with(|| {
+            crate::auth::openrouter::OPENROUTER_HTTP_REFERER.to_string()
+        });
+        headers
+            .entry("X-Title".to_string())
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_X_TITLE.to_string());
     }
     let _ = (alpha_test_key, base_url);
 }
