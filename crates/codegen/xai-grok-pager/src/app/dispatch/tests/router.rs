@@ -1,316 +1,16 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
 #[test]
-fn auth_copy_dispatch_preserves_all_delivery_states() {
-    for delivery in [
-        crate::clipboard::ClipboardDelivery::Confirmed,
-        crate::clipboard::ClipboardDelivery::Unverified,
-        crate::clipboard::ClipboardDelivery::Failed,
-    ] {
-        let mut app = test_app();
-        app.auth_state = AuthState::Authenticating {
-            request_seq: 1,
-            handle: None,
-            auth_url: Some("https://grok.com/auth".to_owned()),
-            mode: AuthMode::Command,
-        };
-        let effects = crate::app::dispatch::router::dispatch_copy_auth_url(&mut app, |url| {
-            assert_eq!(url, "https://grok.com/auth");
-            delivery
-        });
-        assert_eq!(app.auth_clipboard_delivery, Some(delivery));
-        assert_eq!(app.auth_clipboard_feedback_generation, 1);
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::ScheduleClearAuthCopyFeedback { generation: 1 }]
-        ));
-    }
-}
-#[test]
-fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
-    use crate::app::agent_view::PromptInputMode;
-    for mode in [
-        PromptInputMode::Normal,
-        PromptInputMode::Bash,
-        PromptInputMode::Remember,
-    ] {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        app.screen_mode = crate::app::ScreenMode::Minimal;
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent
-            .prompt
-            .set_screen_mode(crate::app::ScreenMode::Minimal);
-        agent.prompt_input_mode = mode;
-        agent.prompt.set_text("draft with\nnewlines");
-        let effects = dispatch(Action::EditPromptExternal, &mut app);
-        assert!(effects.is_empty());
-        let request = app.pending_editor.take().expect("editor request");
-        match request {
-            crate::app::external_editor::PendingEditorRequest::PromptDraft {
-                agent_id,
-                original_text,
-            } => {
-                assert_eq!(agent_id, id);
-                assert_eq!(original_text, "draft with\nnewlines");
-            }
-            other => panic!("expected prompt draft request, got {other:?}"),
-        }
-        assert_eq!(app.agents[&id].prompt_input_mode, mode);
-        assert_eq!(app.agents[&id].prompt.text(), "draft with\nnewlines");
-    }
-}
-#[test]
-fn external_prompt_editor_refuses_nonminimal_and_owned_input() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none(), "full TUI must refuse");
-    app.screen_mode = crate::app::ScreenMode::Minimal;
-    app.agents.get_mut(&id).unwrap().active_pane = ActivePane::Scrollback;
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(
-        matches!(
-            app.pending_editor,
-            Some(crate::app::external_editor::PendingEditorRequest::PromptDraft { .. })
-        ),
-        "minimal's logical composer remains authoritative after Tab/Vim focus"
-    );
-    app.pending_editor = None;
-    app.agents.get_mut(&id).unwrap().cancel_turn_view =
-        Some(crate::views::modal::CancelTurnViewState {
-            active_idx: 0,
-            running_count: 1,
-        });
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none(), "modal owner must refuse");
-    assert_eq!(app.agents[&id].prompt.text(), "draft");
-    app.agents.get_mut(&id).unwrap().cancel_turn_view = None;
-    app.agents.get_mut(&id).unwrap().prompt_mode = PromptMode::EditingQueued {
-        id: 1,
-        original: "queued".to_owned(),
-        server_id: None,
-        kind: crate::app::agent::QueueEntryKind::Prompt,
-    };
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none(), "queue edit must refuse");
-    assert_eq!(app.agents[&id].prompt.text(), "draft");
-    app.agents.get_mut(&id).unwrap().prompt_mode = PromptMode::Normal;
-    app.agents.get_mut(&id).unwrap().prompt.set_text("/");
-    let models = app.agents[&id].session.models.clone();
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .prompt
-        .refresh_slash(&models);
-    assert!(app.agents[&id].prompt.any_dropdown_open());
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none(), "dropdown owner must refuse");
-}
-#[test]
-fn external_prompt_editor_refuses_elements_with_visible_message() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.screen_mode = crate::app::ScreenMode::Minimal;
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .prompt
-        .set_screen_mode(crate::app::ScreenMode::Minimal);
-    let agent = app.agents.get_mut(&id).unwrap();
-    let pasted = "one\ntwo\nthree\nfour";
-    let _ = agent.prompt.handle_paste(pasted);
-    assert!(!agent.prompt.textarea.elements().is_empty());
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none());
-    assert_eq!(app.agents[&id].prompt.text(), pasted);
-    assert!(!app.agents[&id].prompt.textarea.elements().is_empty());
-    assert!(
-        app.agents[&id]
-            .scrollback
-            .iter_entries()
-            .any(|(_, entry)| entry.block.searchable_text().as_deref()
-                == Some(crate::app::external_editor::ATTACHMENT_MESSAGE))
-    );
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.prompt.set_text("");
-    agent.prompt.textarea.insert_element(
-        "@src/main.rs",
-        crate::views::prompt_widget::KIND_FILE_REF,
-        None,
-    );
-    let file_ref_text = agent.prompt.text().to_owned();
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none());
-    assert_eq!(app.agents[&id].prompt.text(), file_ref_text);
-    assert!(!app.agents[&id].prompt.textarea.elements().is_empty());
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.prompt.set_text("");
-    let image = crate::prompt_images::PastedImage {
-        element_id: xai_ratatui_textarea::ElementId::from_raw(0),
-        display_number: 0,
-        mime_type: "image/png".to_owned(),
-        dimensions: Some((8, 8)),
-        byte_len: 1,
-        encoded_bytes: Some(vec![0].into()),
-        source_path: None,
-        staged_temp_path: None,
-        session_image_path: None,
-        preview: crate::prompt_images::PromptImagePreview::default(),
-    };
-    agent.prompt.insert_image(image).unwrap();
-    let image_text = agent.prompt.text().to_owned();
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none());
-    assert_eq!(app.agents[&id].prompt.text(), image_text);
-    assert_eq!(app.agents[&id].prompt.images.len(), 1);
-}
-#[test]
-fn external_prompt_editor_refuses_voice_and_pending_paste_with_visible_messages() {
-    use crate::app::agent_view::AgentDeferredSend;
-    use crate::app::app_view::{VoiceState, VoiceTarget};
-    for voice_state in [
-        VoiceState::ColdStart {
-            hold: false,
-            target: VoiceTarget::Agent(AgentId(0)),
-        },
-        VoiceState::Recording {
-            hold: false,
-            target: VoiceTarget::Agent(AgentId(0)),
-            interim: Some("partial".to_owned()),
-        },
-        VoiceState::Stopping {
-            target: VoiceTarget::Agent(AgentId(0)),
-            interim: Some("partial".to_owned()),
-        },
-    ] {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        app.screen_mode = crate::app::ScreenMode::Minimal;
-        app.voice_state = voice_state;
-        app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
-        let _ = dispatch(Action::EditPromptExternal, &mut app);
-        assert!(app.pending_editor.is_none());
-        assert_eq!(app.agents[&id].prompt.text(), "draft");
-        assert!(
-            app.agents[&id]
-                .scrollback
-                .iter_entries()
-                .any(|(_, entry)| entry.block.searchable_text().as_deref()
-                    == Some(crate::app::external_editor::VOICE_MESSAGE))
-        );
-    }
-    for (probes, deferred_send) in [
-        (1, None),
-        (1, Some(AgentDeferredSend::SendPrompt)),
-        (0, Some(AgentDeferredSend::SendPrompt)),
-    ] {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        app.screen_mode = crate::app::ScreenMode::Minimal;
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.prompt.set_text("draft");
-        agent.paste_probe_in_flight = probes;
-        agent.deferred_send = deferred_send;
-        let _ = dispatch(Action::EditPromptExternal, &mut app);
-        assert!(app.pending_editor.is_none());
-        assert_eq!(app.agents[&id].prompt.text(), "draft");
-        assert_eq!(app.agents[&id].paste_probe_in_flight, probes);
-        assert_eq!(app.agents[&id].deferred_send, deferred_send);
-        assert!(
-            app.agents[&id]
-                .scrollback
-                .iter_entries()
-                .any(|(_, entry)| entry.block.searchable_text().as_deref()
-                    == Some(crate::app::external_editor::PASTE_MESSAGE))
-        );
-    }
-}
-#[test]
-fn deferred_paste_completion_after_refused_editor_does_not_implicitly_send_without_stash() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.screen_mode = crate::app::ScreenMode::Minimal;
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.prompt.set_text("draft");
-    let draft_len = agent.prompt.text().len();
-    agent.prompt.set_cursor(draft_len);
-    agent.paste_probe_in_flight = 1;
-    let _ = dispatch(Action::EditPromptExternal, &mut app);
-    assert!(app.pending_editor.is_none());
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ClipboardAttachmentProbed {
-            ctx: crate::app::actions::ClipboardPasteContext {
-                target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
-                    agent_id: id,
-                    images_dir: None,
-                },
-                source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
-                    text: crate::app::actions::ClipboardTextRead::Success(Some(
-                        "pasted".to_owned(),
-                    )),
-                    tip_showing: false,
-                },
-            },
-            image: crate::app::actions::ProbedAttachment::NoRaster,
-            file_urls: None,
-        }),
-        &mut app,
-    );
-    assert!(effects.is_empty(), "no deferred submit was armed");
-    assert_eq!(app.agents[&id].prompt.text(), "draftpasted");
-    assert!(app.agents[&id].session.pending_prompts.is_empty());
-}
-#[test]
-fn external_prompt_editor_result_replaces_or_clears_without_sending() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
-    app.agents.get_mut(&id).unwrap().prompt.set_text("original");
-    crate::app::external_editor::apply_prompt_text(&mut app, id, "edited\n".to_owned());
-    assert_eq!(app.agents[&id].prompt.text(), "edited\n");
-    assert!(app.agents[&id].session.state.is_turn_running());
-    assert!(app.agents[&id].session.pending_prompts.is_empty());
-    crate::app::external_editor::apply_prompt_text(&mut app, id, String::new());
-    assert_eq!(app.agents[&id].prompt.text(), "");
-    assert!(app.agents[&id].session.state.is_turn_running());
-}
-#[test]
-fn editor_failure_targets_original_agent_and_vanished_agent_is_safe() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().prompt.set_text("original");
-    crate::app::external_editor::report_prompt_failure(&mut app, id, "editor failed");
-    assert_eq!(app.agents[&id].prompt.text(), "original");
-    assert!(
-        app.agents[&id]
-            .scrollback
-            .iter_entries()
-            .any(|(_, entry)| entry.block.searchable_text().as_deref() == Some("editor failed"))
-    );
-    app.agents.shift_remove(&id);
-    crate::app::external_editor::apply_prompt_text(&mut app, id, "ignored".to_owned());
-    crate::app::external_editor::report_prompt_failure(&mut app, id, "ignored");
-    assert!(app.agents.is_empty());
-}
-#[test]
-fn config_editor_action_still_uses_typed_request() {
-    let mut app = test_app_with_agent();
-    let path = std::path::PathBuf::from("/tmp/agent-config.md");
-    let _ = dispatch(
-        Action::SuspendForEditor {
-            path: path.clone(),
-            refresh_agents_modal: Some(crate::views::agents_modal::AgentsTab::Agents),
-        },
-        &mut app,
-    );
-    assert!(matches!(
-        app.pending_editor,
-        Some(crate::app::external_editor::PendingEditorRequest::ConfigFile {
-            path: ref queued,
-            refresh_agents_modal: Some(crate::views::agents_modal::AgentsTab::Agents),
-        }) if queued == &path
+fn auth_copy_success_requires_confirmed_delivery() {
+    use crate::clipboard::ClipboardDelivery;
+    assert!(crate::app::dispatch::router::auth_copy_was_confirmed(
+        ClipboardDelivery::Confirmed
+    ));
+    assert!(!crate::app::dispatch::router::auth_copy_was_confirmed(
+        ClipboardDelivery::Unverified
+    ));
+    assert!(!crate::app::dispatch::router::auth_copy_was_confirmed(
+        ClipboardDelivery::Failed
     ));
 }
 fn seed_foreign_resume_hint(
@@ -479,7 +179,8 @@ fn follow_up_chip_does_not_execute_slash_command() {
         "a /always-approve chip must NOT flip YOLO mode"
     );
     assert!(
-        matches!(&effects[..], [Effect::SendPrompt { text, .. }] if text == "/always-approve"),
+        matches!(& effects[..], [Effect::SendPrompt { text, .. }] if text ==
+        "/always-approve"),
         "chip text must be submitted literally, got {effects:?}"
     );
 }
@@ -488,7 +189,7 @@ fn follow_up_chip_does_not_execute_exit_alias() {
     let mut app = test_app_with_agent();
     let effects = dispatch(Action::SubmitFollowUp("quit".into()), &mut app);
     assert!(
-        matches!(&effects[..], [Effect::SendPrompt { text, .. }] if text == "quit"),
+        matches!(& effects[..], [Effect::SendPrompt { text, .. }] if text == "quit"),
         "bare 'quit' chip must be a literal prompt, got {effects:?}"
     );
 }
@@ -504,7 +205,8 @@ fn chip_submit_while_running_clears_follow_up_chips() {
     }
     let effects = dispatch(Action::SubmitFollowUp("Summarize".into()), &mut app);
     assert!(
-        matches!(&effects[..], [Effect::SendPrompt { text, .. }] if text == "Summarize"),
+        matches!(& effects[..], [Effect::SendPrompt { text, .. }] if text ==
+        "Summarize"),
         "chip must immediate-send while running, got {effects:?}"
     );
     assert_eq!(app.agents[&id].session.queue_len(), 0);
@@ -536,7 +238,8 @@ fn chip_submit_while_reconnect_pending_keeps_chips_and_does_not_send() {
     app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
     let effects2 = dispatch(Action::SubmitFollowUp("Summarize".into()), &mut app);
     assert!(
-        matches!(&effects2[..], [Effect::SendPrompt { text, .. }] if text == "Summarize"),
+        matches!(& effects2[..], [Effect::SendPrompt { text, .. }] if text ==
+        "Summarize"),
         "after reconnect clears, the chip must submit, got {effects2:?}"
     );
     assert!(
@@ -785,11 +488,12 @@ fn dispatch_send_prompt_announcements_via_registry() {
     app.active_announcements = vec![critical_announcement("crit-a")];
     let effects = dispatch(Action::SendPrompt("/announcements hide".into()), &mut app);
     assert!(
-            effects.iter().any(
-                |e| matches!(e, Effect::PersistAnnouncementsHidden { hidden_ids } if hidden_ids.contains("crit-a"))
-            ),
-            "expected persist effect carrying the hidden id, got {effects:?}"
-        );
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
+        hidden_ids } if hidden_ids.contains("crit-a"))),
+        "expected persist effect carrying the hidden id, got {effects:?}"
+    );
     assert!(app.hidden_announcement_ids.contains("crit-a"));
     assert_eq!(shown_banner_id(&app), None, "hidden critical closes banner");
     assert!(app.agents[&agent_id].prompt.text().is_empty());
@@ -848,11 +552,12 @@ fn announcements_show_clears_visible_critical_ids_only() {
     assert_eq!(shown_banner_id(&app), None);
     let effects = dispatch(Action::AnnouncementsShow, &mut app);
     assert!(
-            effects.iter().any(
-                |e| matches!(e, Effect::PersistAnnouncementsHidden { hidden_ids } if !hidden_ids.contains("outage-a"))
-            ),
-            "expected persist effect without the un-hidden id, got {effects:?}"
-        );
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
+        hidden_ids } if ! hidden_ids.contains("outage-a"))),
+        "expected persist effect without the un-hidden id, got {effects:?}"
+    );
     assert_eq!(shown_banner_id(&app).as_deref(), Some("outage-a"));
     assert!(
         app.hidden_announcement_ids.contains("unrelated"),
@@ -939,9 +644,10 @@ fn announcements_show_clears_hidden_promo_ids() {
     assert_eq!(shown_banner_id(&app), None);
     let effects = dispatch(Action::AnnouncementsShow, &mut app);
     assert!(
-        effects.iter().any(
-            |e| matches!(e, Effect::PersistAnnouncementsHidden { hidden_ids } if !hidden_ids.contains("promo-a"))
-        ),
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
+        hidden_ids } if ! hidden_ids.contains("promo-a"))),
         "expected persist effect without the un-hidden promo id, got {effects:?}"
     );
     assert_eq!(shown_banner_id(&app).as_deref(), Some("promo-a"));
@@ -964,7 +670,10 @@ fn switch_model_dispatch_produces_effect_and_sets_pending() {
         &mut app,
     );
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id));
+    assert!(
+        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. } if mid == &
+        model_id)
+    );
     assert!(app.agents[&id].session.model_switch_pending);
     assert!(app.agents[&id].session.state.is_idle());
 }
@@ -982,7 +691,10 @@ fn switch_model_allowed_when_agent_chat_kind() {
         &mut app,
     );
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id));
+    assert!(
+        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. } if mid == &
+        model_id)
+    );
     assert!(app.agents[&id].session.model_switch_pending);
 }
 #[test]
@@ -999,7 +711,10 @@ fn switch_model_allowed_when_app_chat_mode() {
         &mut app,
     );
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id));
+    assert!(
+        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. } if mid == &
+        model_id)
+    );
     assert!(app.agents[&id].session.model_switch_pending);
 }
 #[test]
@@ -1048,11 +763,7 @@ fn agent_type_mismatch_with_effort_stashes_deferred_switch() {
         let agent = &app.agents[&new_aid];
         assert_eq!(
             agent.session.deferred_model_switch,
-            Some(crate::app::agent::DeferredModelSwitch {
-                model_id,
-                effort,
-                prev_model_id: None,
-            }),
+            Some((model_id, effort)),
             "effort override must be stashed for the shell via deferred_model_switch",
         );
     } else {
@@ -1068,11 +779,7 @@ fn deferred_model_switch_still_works_for_cli_override() {
     let id = AgentId(0);
     assert_eq!(
         app.agents[&id].session.deferred_model_switch,
-        Some(crate::app::agent::DeferredModelSwitch {
-            model_id: cli_model,
-            effort: None,
-            prev_model_id: None,
-        }),
+        Some((cli_model, None)),
         "CLI -m override must still populate deferred_model_switch",
     );
 }
@@ -1165,7 +872,7 @@ fn slash_hooks_opens_modal() {
     let id = AgentId(0);
     let effects = dispatch(Action::SendPrompt("/hooks".into()), &mut app);
     assert!(app.agents[&id].extensions_modal.is_some());
-    assert_eq!(effects.len(), 6);
+    assert_eq!(effects.len(), 5);
 }
 #[test]
 fn acp_bootstrap_command_appears_in_autocomplete() {
@@ -1225,7 +932,7 @@ fn acp_bootstrap_command_executes_as_passthrough() {
     let effects = dispatch(Action::SendPrompt("/flush".into()), &mut app);
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/flush"),
+        matches!(& effects[0], Effect::SendPrompt { text, .. } if text == "/flush"),
         "ACP command should passthrough, got: {effects:?}"
     );
 }
@@ -1360,7 +1067,8 @@ fn acp_command_with_args_passthrough_includes_args() {
     let effects = dispatch(Action::SendPrompt("/search find bugs".into()), &mut app);
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/search find bugs"),
+        matches!(& effects[0], Effect::SendPrompt { text, .. } if text ==
+        "/search find bugs"),
         "ACP passthrough should preserve args, got: {effects:?}"
     );
 }
@@ -1401,10 +1109,9 @@ fn tick_propagates_available_commands_to_bootstrap() {
     dispatch(Action::NewSession, &mut app);
     let id = AgentId(0);
     app.active_view = crate::app::app_view::ActiveView::Agent(id);
-    let skill_meta = serde_json::json!({
-        "scope": "user",
-        "path": "/home/user/.grok/skills/pick-best/SKILL.md",
-    });
+    let skill_meta = serde_json::json!(
+        { "scope" : "user", "path" : "/home/user/.grok/skills/pick-best/SKILL.md", }
+    );
     app.agents.get_mut(&id).unwrap().session.available_commands = vec![
         acp::AvailableCommand::new("compact".to_string(), "Builtin".to_string()),
         acp::AvailableCommand::new("pick-best".to_string(), "Parallel tournament".to_string())
@@ -1488,7 +1195,7 @@ fn deferred_switch_overwritten_by_second_switch() {
     app.agents.get_mut(&id).unwrap().session.session_id = None;
     dispatch(
         Action::SwitchModel {
-            model_id: model_a.clone(),
+            model_id: model_a,
             effort: None,
         },
         &mut app,
@@ -1502,93 +1209,7 @@ fn deferred_switch_overwritten_by_second_switch() {
     );
     assert_eq!(
         app.agents[&id].session.deferred_model_switch,
-        Some(crate::app::agent::DeferredModelSwitch {
-            model_id: model_b.clone(),
-            effort: None,
-            prev_model_id: Some(model_a),
-        })
-    );
-}
-#[test]
-fn pick_over_cli_seed_keeps_display_as_rollback_target() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let displayed = acp::ModelId::new(std::sync::Arc::from("displayed-model"));
-    let cli_model = acp::ModelId::new(std::sync::Arc::from("cli-model"));
-    let picked = acp::ModelId::new(std::sync::Arc::from("picked-model"));
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.session_id = None;
-    agent.session.models.current = Some(displayed.clone());
-    agent.session.deferred_model_switch = Some(crate::app::agent::DeferredModelSwitch {
-        model_id: cli_model,
-        effort: None,
-        prev_model_id: None,
-    });
-    dispatch(
-        Action::SwitchModel {
-            model_id: picked.clone(),
-            effort: None,
-        },
-        &mut app,
-    );
-    assert_eq!(
-        app.agents[&id].session.deferred_model_switch,
-        Some(crate::app::agent::DeferredModelSwitch {
-            model_id: picked,
-            effort: None,
-            prev_model_id: Some(displayed),
-        })
-    );
-}
-#[test]
-fn deferred_switch_updates_display_and_persists() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let model_id = acp::ModelId::new(std::sync::Arc::from("model-b"));
-    app.agents.get_mut(&id).unwrap().session.session_id = None;
-    let effects = dispatch(
-        Action::SwitchModel {
-            model_id: model_id.clone(),
-            effort: None,
-        },
-        &mut app,
-    );
-    let agent = &app.agents[&id];
-    assert_eq!(
-        agent.session.models.current,
-        Some(model_id.clone()),
-        "pre-session pick must update the displayed model immediately"
-    );
-    assert_eq!(
-        agent.session.deferred_model_switch,
-        Some(crate::app::agent::DeferredModelSwitch {
-            model_id: model_id.clone(),
-            effort: None,
-            prev_model_id: None,
-        }),
-        "switch must still round-trip once the session exists"
-    );
-    assert!(
-        !agent.session.model_switch_pending,
-        "nothing is in flight yet — the queue must not be blocked"
-    );
-    assert!(
-        matches!(
-            &effects[..],
-            [Effect::PersistPreferredModel { model_id: m, .. }] if m == &model_id
-        ),
-        "expected a single PersistPreferredModel effect, got {effects:?}"
-    );
-    let effects = dispatch(
-        Action::SwitchModel {
-            model_id: model_id.clone(),
-            effort: None,
-        },
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "unchanged pre-session pick must not re-persist, got {effects:?}"
+        Some((model_b, None))
     );
 }
 #[test]
@@ -1604,43 +1225,12 @@ fn request_bundle_status_emits_effect() {
 fn conversation_entry_load_sets_chat_kind_bit() {
     let mut app = test_app();
     let effects = dispatch(Action::LoadSession("conv-id".into(), None, true), &mut app);
-    assert!(matches!(
-        &effects[..],
-        [Effect::LoadSession {
-            session_id,
-            chat_kind: true,
-            ..
-        }] if session_id == "conv-id"
-    ));
+    assert!(
+        matches!(& effects[..], [Effect::LoadSession { session_id, chat_kind : true, ..
+        }] if session_id == "conv-id")
+    );
     let agent = app.agents.values().next().expect("agent");
     assert!(agent.chat_kind, "conversation entry → agent chat_kind");
-    assert!(
-        agent.conversation_entry,
-        "conversation entry must stamp conversation_entry for rename kind"
-    );
-    assert_eq!(
-        agent.rename_kind(),
-        xai_grok_shell::session::unified_list::SessionKind::Chat
-    );
-    let rename = dispatch(
-        Action::RenameSession {
-            title: "conv title".into(),
-        },
-        &mut app,
-    );
-    assert!(
-        matches!(
-            &rename[..],
-            [Effect::RenameSession { kind, .. }]
-                if *kind == xai_grok_shell::session::unified_list::SessionKind::Chat
-        ),
-        "conversation-entry rename must send kind=chat, got {rename:?}"
-    );
-    let reset = dispatch(Action::ResetSessionTitleToAuto, &mut app);
-    assert!(
-        reset.is_empty(),
-        "conversation-entry --auto must refuse client-side, got {reset:?}"
-    );
 }
 /// Process-wide `--chat` + non-conversation resume of a non-disk id still
 /// loads (gateway conversation) with agent chat_kind from sticky mode.
@@ -1652,102 +1242,18 @@ fn chat_mode_resume_without_local_disk_loads_as_chat() {
         Action::LoadSession("remote-conv-only".into(), None, false),
         &mut app,
     );
-    assert!(matches!(
-        &effects[..],
-        [Effect::LoadSession {
-            session_id,
-            chat_kind: false,
-            ..
-        }] if session_id == "remote-conv-only"
-    ));
+    assert!(
+        matches!(& effects[..], [Effect::LoadSession { session_id, chat_kind : false, ..
+        }] if session_id == "remote-conv-only")
+    );
     let agent = app.agents.values().next().expect("agent");
     assert!(
         agent.chat_kind,
         "sticky --chat must set agent chat_kind even without entry bit"
     );
     assert!(
-        agent.conversation_entry,
-        "sticky --chat gateway resume (no local disk) opens as chat"
-    );
-    assert_eq!(
-        agent.rename_kind(),
-        xai_grok_shell::session::unified_list::SessionKind::Chat
-    );
-    assert!(
         agent.app_chat_mode,
         "app.chat_mode must propagate to AgentView::app_chat_mode"
-    );
-    let rename = dispatch(
-        Action::RenameSession {
-            title: "gw title".into(),
-        },
-        &mut app,
-    );
-    assert!(
-        matches!(
-            &rename[..],
-            [Effect::RenameSession { kind, .. }]
-                if *kind == xai_grok_shell::session::unified_list::SessionKind::Chat
-        ),
-        "sticky --chat gateway resume rename must send kind=chat, got {rename:?}"
-    );
-}
-/// Sticky `--chat` + history-bypass local-disk load stays Build for rename.
-/// Without the bypass flag this same disk row is refused (see
-/// `chat_mode_refuses_local_build_disk_load`).
-#[cfg(feature = "local-workspace")]
-#[test]
-fn load_sticky_chat_history_bypass_rename_kind_is_build() {
-    let cwd = PathBuf::from(format!("/tmp/chat-mode-hist-bypass-{}", std::process::id()));
-    let session_id = format!("local-build-disk-{}", std::process::id());
-    let sess_dir = plant_local_build_session(&cwd, &session_id);
-    let mut app = test_app();
-    app.cwd = cwd;
-    app.chat_mode = true;
-    app.welcome_history_load_as_build = true;
-    let effects = dispatch(
-        Action::LoadSession(session_id.clone(), None, false),
-        &mut app,
-    );
-    let _ = std::fs::remove_dir_all(&sess_dir);
-    assert!(
-        matches!(
-            &effects[..],
-            [Effect::LoadSession {
-                session_id: sid,
-                chat_kind: false,
-                ..
-            }] if sid == &session_id
-        ),
-        "history-bypass must load the local disk row, got {effects:?}"
-    );
-    let agent = app.agents.values().next().expect("agent");
-    assert!(
-        agent.chat_kind,
-        "sticky --chat still sets the UI chat_kind bit"
-    );
-    assert!(
-        !agent.conversation_entry,
-        "history-bypass local build must not open as chat"
-    );
-    assert_eq!(
-        agent.rename_kind(),
-        xai_grok_shell::session::unified_list::SessionKind::Build
-    );
-    let rename = dispatch(
-        Action::RenameSession {
-            title: "local title".into(),
-        },
-        &mut app,
-    );
-    assert!(
-        matches!(
-            &rename[..],
-            [Effect::RenameSession { kind, title, .. }]
-                if *kind == xai_grok_shell::session::unified_list::SessionKind::Build
-                    && title == "local title"
-        ),
-        "history-bypass rename must send kind=build, got {rename:?}"
     );
 }
 /// Process-wide `--chat` refuses local Build disk rows (no LoadSession).
@@ -1791,15 +1297,6 @@ fn chat_mode_allows_conversation_entry_even_if_local_path() {
             ..
         }]
     ));
-    let agent = app.agents.values().next().expect("agent");
-    assert!(
-        agent.conversation_entry,
-        "conversation-entry bit must stamp conversation_entry even if a local path exists"
-    );
-    assert_eq!(
-        agent.rename_kind(),
-        xai_grok_shell::session::unified_list::SessionKind::Chat
-    );
 }
 #[test]
 fn view_catalog_entry_emits_fetch_effect() {
@@ -1812,11 +1309,10 @@ fn view_catalog_entry_emits_fetch_effect() {
         &mut app,
     );
     assert_eq!(effects.len(), 1);
-    assert!(matches!(
-        &effects[0],
-        Effect::FetchCatalogEntry { kind, name }
-        if kind == "persona" && name == "researcher"
-    ));
+    assert!(
+        matches!(& effects[0], Effect::FetchCatalogEntry { kind, name } if kind ==
+        "persona" && name == "researcher")
+    );
 }
 /// End-to-end regression test for the "always re-asks" requirement.
 ///
@@ -2257,7 +1753,7 @@ fn show_tasks_empty_commits_empty_message() {
     assert_eq!(agent_scrollback_len(&app), before + 1);
     assert_eq!(
         last_system_text(&app, AgentId(0)),
-        "No background tasks, workflows, or subagents."
+        "No background tasks or subagents."
     );
 }
 #[test]
@@ -2275,7 +1771,6 @@ fn show_tasks_lists_a_scheduled_task() {
                 created_at: std::time::Instant::now(),
                 next_fire_at: None,
                 tag: "loop".to_string(),
-                last_subagent_id: None,
             },
         );
     }

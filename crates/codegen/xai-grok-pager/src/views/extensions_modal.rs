@@ -1014,6 +1014,102 @@ pub enum McpSetupOutcome {
     Submit,
 }
 
+/// Modal message overlay (errors, confirmations).
+#[derive(Debug, Clone)]
+pub struct McpSetupFormState {
+    pub server_name: String,
+    pub field: crate::views::mcps_modal::McpSetupField,
+    pub selected: usize,
+    pub error: Option<String>,
+}
+
+impl McpSetupFormState {
+    pub fn new(server: &crate::views::mcps_modal::McpServerInfo) -> Option<Self> {
+        let setup = server.setup.as_ref()?.clone();
+        Self::from_setup(server.name.clone(), setup, server.setup_values.clone())
+    }
+
+    pub fn from_setup(
+        server_name: String,
+        setup: crate::views::mcps_modal::McpSetupConfig,
+        values: std::collections::HashMap<String, String>,
+    ) -> Option<Self> {
+        if setup.fields.len() != 1 {
+            return None;
+        }
+        let field = setup.fields.into_iter().next()?;
+        if field.options.is_empty() {
+            return None;
+        }
+        let selected = values
+            .get(&field.id)
+            .or(field.default.as_ref())
+            .and_then(|value| {
+                field
+                    .options
+                    .iter()
+                    .position(|option| option.value == *value)
+            })
+            .unwrap_or(0);
+        Some(Self {
+            server_name,
+            field,
+            selected,
+            error: None,
+        })
+    }
+
+    pub fn selected_value(&self) -> Option<String> {
+        self.field
+            .options
+            .get(self.selected)
+            .map(|option| option.value.clone())
+    }
+
+    pub fn values(&self) -> Option<std::collections::HashMap<String, String>> {
+        let mut values = std::collections::HashMap::new();
+        values.insert(self.field.id.clone(), self.selected_value()?);
+        Some(values)
+    }
+
+    pub fn handle_key(&mut self, key: &KeyEvent) -> McpSetupOutcome {
+        match key.code {
+            KeyCode::Esc => McpSetupOutcome::Cancel,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.error = None;
+                if self.selected > 0 {
+                    self.selected -= 1;
+                }
+                McpSetupOutcome::Changed
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.error = None;
+                if self.selected + 1 < self.field.options.len() {
+                    self.selected += 1;
+                }
+                McpSetupOutcome::Changed
+            }
+            KeyCode::Enter => {
+                if self.selected_value().is_none() {
+                    self.error = Some("Select an option".to_string());
+                    McpSetupOutcome::Changed
+                } else {
+                    McpSetupOutcome::Submit
+                }
+            }
+            _ => McpSetupOutcome::Unchanged,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSetupOutcome {
+    Changed,
+    Unchanged,
+    Cancel,
+    Submit,
+}
+
 /// Concrete action to run after the user presses `y` on a confirmation overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmationAction {

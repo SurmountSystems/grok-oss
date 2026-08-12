@@ -8,13 +8,13 @@ use unicode_width::UnicodeWidthStr;
 
 use super::state::{
     CONTENT_MIN_WIDTH, MAX_THOUGHTS_WIDTH_WIDENED_MARGIN, MODAL_TITLE, RowEntry,
-    STANDARD_MAX_WIDTH, SettingsModalState, SettingsMode, SettingsModeKind,
-    TITLE_LEADING_DECORATION_W, effective_enum_choices, group_children, mode_is_consent_chooser,
+    STANDARD_MAX_WIDTH, SettingsModalMode, SettingsModalState, TITLE_LEADING_DECORATION_W,
+    effective_enum_choices, group_children,
 };
 use crate::render::line_utils::truncate_str;
 use crate::settings::{
-    CodingDataSharingLock, OwnedEnumChoice, SettingKey, SettingKind, SettingMeta, SettingValue,
-    StringValidator, dynamic_enum_choices,
+    OwnedEnumChoice, SettingKey, SettingKind, SettingMeta, SettingValue, StringValidator,
+    dynamic_enum_choices,
 };
 use crate::theme::Theme;
 use crate::views::modal_window::{
@@ -61,8 +61,8 @@ pub fn render_settings_modal(
         );
         &breadcrumb_owned
     } else {
-        match &state.state.mode {
-            SettingsMode::PickingEnum { key, .. } => {
+        match &state.mode {
+            SettingsModalMode::PickingEnum { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
                     breadcrumb_owned =
                         format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
@@ -72,7 +72,7 @@ pub fn render_settings_modal(
                 }
             }
 
-            SettingsMode::EditingString { key, .. } | SettingsMode::EditingInt { key, .. } => {
+            SettingsModalMode::EditingValue { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
                     breadcrumb_owned =
                         format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
@@ -81,7 +81,7 @@ pub fn render_settings_modal(
                     MODAL_TITLE
                 }
             }
-            SettingsMode::PickingGroup { key, .. } => {
+            SettingsModalMode::PickingGroup { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
                     breadcrumb_owned =
                         format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
@@ -99,8 +99,8 @@ pub fn render_settings_modal(
     // docs footer. Widen the modal when editing `max_thoughts_width`
     // so the wrap preview is useful at widths above STANDARD_MAX_WIDTH.
     let widen_for_max_thoughts_width = matches!(
-        &state.state.mode,
-        SettingsMode::EditingInt { key, .. }
+        &state.mode,
+        SettingsModalMode::EditingValue { key, .. }
             if *key == crate::settings::defs::MAX_THOUGHTS_WIDTH_KEY
     );
     let widened_candidate = full_area
@@ -122,12 +122,7 @@ pub fn render_settings_modal(
         footer_lines: 2,
     }
     .with_compact(compact);
-    // Must agree with the `docs_footer_area` split below — a mismatch
-    // would reserve a row nothing paints (or paint into the body).
-    let has_tip_footer = !matches!(
-        state.state.mode_kind(),
-        SettingsModeKind::EditingString | SettingsModeKind::EditingInt
-    ) && !mode_is_consent_chooser(&state.state.mode);
+    let has_tip_footer = !matches!(state.mode, SettingsModalMode::EditingValue { .. });
     let footer_lines = if has_tip_footer {
         modal_window::footer_lines_with_tip_gap(full_area, &sizing, shortcuts)
     } else {
@@ -170,37 +165,34 @@ pub fn render_settings_modal(
         return true;
     }
 
-    let (inner_area, docs_footer_area) = match state.state.mode_kind() {
-        SettingsModeKind::EditingString | SettingsModeKind::EditingInt => (content_area, None),
-        // A consent chooser shows the disclosure and the choices only.
-        _ if mode_is_consent_chooser(&state.state.mode) => (content_area, None),
+    let (inner_area, docs_footer_area) = match state.mode {
+        SettingsModalMode::EditingValue { .. } => (content_area, None),
         _ => modal_window::split_content_for_tip_footer(content_area),
     };
 
     // Per-mode render dispatch (exhaustive to catch new variants).
     let mode_is_sub_pane = matches!(
-        state.state.mode_kind(),
-        SettingsModeKind::PickingEnum
-            | SettingsModeKind::PickingGroup
-            | SettingsModeKind::EditingString
-            | SettingsModeKind::EditingInt
+        state.mode,
+        SettingsModalMode::PickingEnum { .. }
+            | SettingsModalMode::PickingGroup { .. }
+            | SettingsModalMode::EditingValue { .. }
     );
-    match state.state.mode_kind() {
-        SettingsModeKind::PickingEnum => {
+    match state.mode {
+        SettingsModalMode::PickingEnum { .. } => {
             state.reset_hit_rects();
             render_picking_enum(buf, inner_area, state, &theme);
             state.picker_choice_rects = take_picker_choice_rects();
         }
-        SettingsModeKind::PickingGroup => {
+        SettingsModalMode::PickingGroup { .. } => {
             state.reset_hit_rects();
             let rects = render_picking_group(buf, inner_area, state, &theme);
             state.picker_choice_rects = rects;
         }
-        SettingsModeKind::EditingString | SettingsModeKind::EditingInt => {
+        SettingsModalMode::EditingValue { .. } => {
             state.reset_hit_rects();
             render_editing_value(buf, inner_area, state, &theme);
         }
-        SettingsModeKind::Browse | SettingsModeKind::FilterFocused => {
+        SettingsModalMode::Browse | SettingsModalMode::FilterFocused => {
             // Clear sub-pane hit-rects from prior frames.
             state.picker_choice_rects.clear();
             state.editor_adornment_rects = (Rect::default(), Rect::default());
@@ -359,13 +351,13 @@ fn build_reset_confirm_shortcuts() -> Vec<Shortcut<'static>> {
 }
 
 /// Render the row list with a search bar at the top (Browse/FilterFocused).
-pub(super) fn render_row_list_with_search_bar(
+fn render_row_list_with_search_bar(
     buf: &mut Buffer,
     content_area: Rect,
     state: &mut SettingsModalState,
     theme: &Theme,
 ) {
-    let filter_focused = state.state.mode_kind() == SettingsModeKind::FilterFocused;
+    let filter_focused = matches!(state.mode, SettingsModalMode::FilterFocused);
     if content_area.height >= 3 {
         // row 0: search bar, row 1: divider, row 2+: list.
         let search_area = Rect {
@@ -374,15 +366,16 @@ pub(super) fn render_row_list_with_search_bar(
             width: content_area.width,
             height: 1,
         };
-        crate::views::picker::render_line_editor_search_bar(
+        crate::views::picker::render_search_bar(
             buf,
             search_area.x,
             search_area.y,
             search_area.width,
             theme,
-            &state.state.filter,
+            &state.query,
             filter_focused,
             true,
+            state.query_cursor,
             Some(theme.bg_base),
         );
         crate::views::picker::render_divider(
@@ -410,15 +403,16 @@ pub(super) fn render_row_list_with_search_bar(
             width: content_area.width,
             height: 1,
         };
-        crate::views::picker::render_line_editor_search_bar(
+        crate::views::picker::render_search_bar(
             buf,
             search_area.x,
             search_area.y,
             search_area.width,
             theme,
-            &state.state.filter,
+            &state.query,
             filter_focused,
             true,
+            state.query_cursor,
             Some(theme.bg_base),
         );
         let list_area = Rect {
@@ -471,16 +465,16 @@ pub(super) fn render_rows(
 
     // Empty filter — show "No matches for <query>".
     if total_visible == 0 {
-        if !state.query().is_empty() {
+        if !state.query.is_empty() {
             let prefix = "No matches for ";
             let suffix_quote_w = 2u16; // surrounding "" chars
             let available_for_query = (area.width as usize)
                 .saturating_sub(prefix.width())
                 .saturating_sub(suffix_quote_w as usize);
-            let q_disp = if state.query().width() <= available_for_query {
-                state.query().to_owned()
+            let q_disp = if state.query.width() <= available_for_query {
+                state.query.clone()
             } else {
-                truncate_str(state.query(), available_for_query)
+                truncate_str(&state.query, available_for_query)
             };
             let msg = format!("{prefix}\"{q_disp}\"");
             let style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
@@ -648,9 +642,9 @@ pub(super) fn render_rows(
                             width: area.width,
                             height: desc_height.min(8),
                         };
-                        render_expanded_description(buf, desc_rect, meta, None, theme);
+                        render_expanded_description(buf, desc_rect, meta, theme);
                         let consumed =
-                            wrapped_description_height(meta, None, area.width, desc_rect.height);
+                            wrapped_description_height(meta, area.width, desc_rect.height);
                         y_cursor = y_cursor.saturating_add(consumed);
                     }
                     continue;
@@ -672,10 +666,25 @@ pub(super) fn render_rows(
                     }
                 };
 
-                let lock = state.row_lock(key);
-
                 // Decide 1 vs 2 line layout; fall back to 1 if viewport is tight.
-                let value_display = value_display(meta, value, lock);
+                let value_display = match value {
+                    SettingValue::Bool(b) => {
+                        if *b {
+                            "on".to_string()
+                        } else {
+                            "off".to_string()
+                        }
+                    }
+                    SettingValue::String(s) => {
+                        if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
+                            "(no override)".to_string()
+                        } else {
+                            s.clone()
+                        }
+                    }
+                    SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
+                    SettingValue::Int(i) => i.to_string(),
+                };
                 let show_restart_pill_for_layout = meta.restart_required && is_expanded;
                 let layout_decision = row_layout(
                     area.width,
@@ -711,7 +720,6 @@ pub(super) fn render_rows(
                     theme,
                     is_expanded,
                     is_hovered,
-                    lock,
                 );
                 state.value_hit_rects[row_idx] = value_rect;
                 y_cursor = y_cursor.saturating_add(row_height);
@@ -724,12 +732,10 @@ pub(super) fn render_rows(
                         width: area.width,
                         height: desc_height.min(8), // cap at 8 lines per row to keep scroll sane
                     };
-                    let lock_reason = lock.map(CodingDataSharingLock::reason);
-                    render_expanded_description(buf, desc_rect, meta, lock_reason, theme);
+                    render_expanded_description(buf, desc_rect, meta, theme);
                     // Re-measure how many lines the wrapped description
                     // actually consumed, so y_cursor advances precisely.
-                    let consumed =
-                        wrapped_description_height(meta, lock_reason, area.width, desc_rect.height);
+                    let consumed = wrapped_description_height(meta, area.width, desc_rect.height);
                     y_cursor = y_cursor.saturating_add(consumed);
                 }
             }
@@ -816,7 +822,7 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                 if matches!(meta.kind, SettingKind::Group { .. }) {
                     let mut h: u16 = 1;
                     if state.expanded_keys.contains(key) {
-                        h = h.saturating_add(wrapped_description_height(meta, None, area_width, 8));
+                        h = h.saturating_add(wrapped_description_height(meta, area_width, 8));
                     }
                     heights.push(h);
                     continue;
@@ -826,8 +832,24 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                     continue;
                 };
                 let is_expanded = state.expanded_keys.contains(key);
-                let lock = state.row_lock(key);
-                let value_display = value_display(meta, &value, lock);
+                let value_display = match &value {
+                    SettingValue::Bool(b) => {
+                        if *b {
+                            "on".to_string()
+                        } else {
+                            "off".to_string()
+                        }
+                    }
+                    SettingValue::String(s) => {
+                        if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
+                            "(no override)".to_string()
+                        } else {
+                            s.clone()
+                        }
+                    }
+                    SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
+                    SettingValue::Int(i) => i.to_string(),
+                };
                 let show_restart_pill = meta.restart_required && is_expanded;
                 let layout = row_layout(area_width, meta.label, &value_display, show_restart_pill);
                 let mut h: u16 = match layout {
@@ -837,12 +859,7 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                 if is_expanded {
                     // Cap matches the forward render loop at line
                     // 2040 (`desc_rect.height = ... .min(8)`).
-                    h = h.saturating_add(wrapped_description_height(
-                        meta,
-                        lock.map(CodingDataSharingLock::reason),
-                        area_width,
-                        8,
-                    ));
+                    h = h.saturating_add(wrapped_description_height(meta, area_width, 8));
                 }
                 heights.push(h);
             }
@@ -852,26 +869,20 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
 }
 
 /// Wrapped description height for scroll math (mirrors render path).
-fn wrapped_description_height(
-    meta: &SettingMeta,
-    lock_reason: Option<&'static str>,
-    area_width: u16,
-    cap: u16,
-) -> u16 {
+fn wrapped_description_height(meta: &SettingMeta, area_width: u16, cap: u16) -> u16 {
     let indent = 4u16.min(area_width);
     let wrap_w = area_width.saturating_sub(indent);
     if wrap_w == 0 {
         return 0;
     }
-    let text = lock_reason.unwrap_or(meta.description);
-    let line = Line::from(Span::raw(text));
+    let line = Line::from(Span::raw(meta.description));
     let wrapped = crate::render::wrapping::word_wrap_line(&line, wrap_w as usize);
     (wrapped.len() as u16).min(cap)
 }
 
-// Picker prefix width templates (glyphs are drawn separately).
-const PICKER_PREFIX_SELECTED: &str = " \u{25CF}  ";
-const PICKER_PREFIX_UNSELECTED: &str = " \u{25CB}  ";
+// Picker prefix constants (hoisted to avoid per-frame allocation).
+const PICKER_PREFIX_FOCUSED: &str = " \u{25CF}  ";
+const PICKER_PREFIX_UNFOCUSED: &str = " \u{25CB}  ";
 
 pub(super) const PICKER_PREFIX_W: u16 = 4;
 const PICKER_SEPARATOR: &str = " \u{00B7} ";
@@ -944,14 +955,14 @@ pub(super) fn render_picking_enum(
     theme: &Theme,
 ) {
     debug_assert_eq!(
-        PICKER_PREFIX_SELECTED.width(),
+        PICKER_PREFIX_FOCUSED.width(),
         PICKER_PREFIX_W as usize,
-        "PICKER_PREFIX_W drifted from PICKER_PREFIX_SELECTED width",
+        "PICKER_PREFIX_W drifted from PICKER_PREFIX_FOCUSED width",
     );
     debug_assert_eq!(
-        PICKER_PREFIX_UNSELECTED.width(),
+        PICKER_PREFIX_UNFOCUSED.width(),
         PICKER_PREFIX_W as usize,
-        "PICKER_PREFIX_W drifted from PICKER_PREFIX_UNSELECTED width",
+        "PICKER_PREFIX_W drifted from PICKER_PREFIX_UNFOCUSED width",
     );
     debug_assert_eq!(
         PICKER_SEPARATOR.width(),
@@ -959,19 +970,11 @@ pub(super) fn render_picking_enum(
         "PICKER_SEPARATOR_W drifted from PICKER_SEPARATOR width",
     );
 
-    let (setting_key, choices_idx, original_value) = match &state.state.mode {
-        SettingsMode::PickingEnum {
-            key,
-            choices_idx,
-            original_value,
-            ..
-        } => (*key, *choices_idx, original_value),
-        _ => unreachable!("picker renderer requires PickingEnum state"),
-    };
-    let committed_canonical: Option<&str> = match original_value {
-        SettingValue::Enum(s) => Some(s),
-        SettingValue::String(s) => Some(s.as_str()),
-        _ => None,
+    let (setting_key, choices_idx) = match &state.mode {
+        SettingsModalMode::PickingEnum {
+            key, choices_idx, ..
+        } => (*key, *choices_idx),
+        _ => return,
     };
     let Some(meta) = state.registry.find(setting_key) else {
         return;
@@ -1058,7 +1061,6 @@ pub(super) fn render_picking_enum(
     {
         let choice = &choices[choice_i];
         let is_focused = choice_i == choices_idx;
-        let is_current = committed_canonical.is_some_and(|c| c == choice.canonical);
 
         let is_hovered = !is_focused && state.hover_row == Some(choice_i);
         let bg = settings_list_row_bg(theme, is_focused, is_hovered);
@@ -1072,12 +1074,12 @@ pub(super) fn render_picking_enum(
             Style::default().fg(fg_primary).bg(bg)
         };
         let desc_style = Style::default().fg(fg_gray).bg(bg);
-        let marker_style = if is_current {
+        let marker_style = if is_focused {
             Style::default().fg(fg_accent).bg(bg)
         } else {
             Style::default().fg(fg_gray).bg(bg)
         };
-        let marker = if is_current {
+        let marker = if is_focused {
             crate::glyphs::filled_dot()
         } else {
             "\u{25CB}"
@@ -1272,9 +1274,9 @@ fn render_picking_group(
     state: &SettingsModalState,
     theme: &Theme,
 ) -> Vec<Rect> {
-    let (group_key, child_idx) = match &state.state.mode {
-        SettingsMode::PickingGroup { key, child_idx } => (*key, *child_idx),
-        _ => unreachable!("group renderer requires PickingGroup state"),
+    let (group_key, child_idx) = match &state.mode {
+        SettingsModalMode::PickingGroup { key, child_idx } => (*key, *child_idx),
+        _ => return Vec::new(),
     };
     let Some(group_meta) = state.registry.find(group_key) else {
         return Vec::new();
@@ -1568,14 +1570,32 @@ pub(super) fn render_editing_value(
 
     state.editor_adornment_rects = (Rect::default(), Rect::default());
 
-    if let SettingsMode::EditingInt {
-        key: setting_key,
-        buffer,
-        ..
-    } = &state.state.mode
-    {
-        let setting_key = *setting_key;
-        let buffer = buffer.clone();
+    // Snapshot mode payload to avoid borrow conflicts with mut state.
+    let (setting_key, buffer_owned, cursor_byte, validation_error_owned, kind_is_int) = {
+        let (setting_key, buffer, cursor_byte, validation_error) = match &state.mode {
+            SettingsModalMode::EditingValue {
+                key,
+                buffer,
+                cursor_byte,
+                validation_error,
+            } => (*key, buffer.clone(), *cursor_byte, validation_error.clone()),
+            _ => return,
+        };
+        let kind_is_int = state
+            .registry
+            .find(setting_key)
+            .map(|m| matches!(m.kind, SettingKind::Int { .. }))
+            .unwrap_or(false);
+        (
+            setting_key,
+            buffer,
+            cursor_byte,
+            validation_error,
+            kind_is_int,
+        )
+    };
+
+    if kind_is_int {
         let Some(meta) = state.registry.find(setting_key) else {
             return;
         };
@@ -1589,24 +1609,14 @@ pub(super) fn render_editing_value(
             setting_key,
             label,
             description,
-            &buffer,
+            &buffer_owned,
             theme,
         );
         return;
     }
 
-    let SettingsMode::EditingString {
-        key: setting_key,
-        editor,
-        validation_error,
-        ..
-    } = &state.state.mode
-    else {
-        unreachable!("editor renderer requires String or Int state");
-    };
-    let setting_key = *setting_key;
-    let buffer = editor.text();
-    let validation_error = validation_error.as_deref();
+    let buffer = buffer_owned.as_str();
+    let validation_error = validation_error_owned.as_deref();
     let Some(meta) = state.registry.find(setting_key) else {
         return;
     };
@@ -1690,18 +1700,56 @@ pub(super) fn render_editing_value(
             1,
         );
     } else {
-        let viewport = editor.viewport(buffer_room);
-        let visible = &buffer[viewport.visible_byte_range];
-        let visible_width = (visible.width() as u16).min(buffer_room as u16);
+        // Cursor-following pan.
+        let cursor_col = buffer[..cursor_byte.min(buffer.len())].width();
+        let buffer_w = buffer.width();
+        let view_offset = if buffer_w <= visible_buffer_w {
+            0
+        } else if cursor_col >= visible_buffer_w {
+            cursor_col + 1 - visible_buffer_w
+        } else {
+            // Cursor fits within the first window; no scroll.
+            0
+        };
+
+        let start_byte = if view_offset == 0 {
+            0
+        } else {
+            let mut acc = 0usize;
+            buffer
+                .char_indices()
+                .find_map(|(idx, ch)| {
+                    if acc >= view_offset {
+                        Some(idx)
+                    } else {
+                        acc += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        None
+                    }
+                })
+                .unwrap_or(buffer.len())
+        };
+
+        // Render the visible tail.
+        let tail = &buffer[start_byte..];
+        // The visible portion may still be wider than the room when
+        // a wide grapheme straddles the right boundary; cap with
+        // `truncate_str` defensively.
+        let tail_text: std::borrow::Cow<'_, str> = if tail.width() <= visible_buffer_w {
+            std::borrow::Cow::Borrowed(tail)
+        } else {
+            std::borrow::Cow::Owned(truncate_str(tail, visible_buffer_w))
+        };
+        let tail_w = (tail_text.width() as u16).min(visible_buffer_w as u16);
         buf.set_span(
             input_x,
             input_y,
-            &Span::styled(visible, input_style),
-            visible_width,
+            &Span::styled(tail_text.as_ref(), input_style),
+            tail_w,
         );
 
-        let cursor_x =
-            input_x + (viewport.cursor_display_column as u16).min(buffer_room as u16 - 1);
+        // Cursor lands at the logical column relative to the view.
+        let cursor_visual_col = cursor_col.saturating_sub(view_offset);
+        let cursor_x = input_x + (cursor_visual_col as u16).min(buffer_room as u16 - 1);
         buf.set_span(
             cursor_x,
             input_y,
@@ -2226,37 +2274,6 @@ const ROW_CHEVRON_W: u16 = 2;
 /// Chevron column width — reserved for all rows for alignment.
 pub(super) const ROW_CHEVRON_COL_W: u16 = ROW_CHEVRON_W;
 const ROW_RESTART_PILL_W: u16 = 10; // " · restart" — used for layout budgeting only.
-/// Appended to the value column of a locked row (see `SettingsModalState::row_lock`).
-pub(super) const ROW_ADMIN_MANAGED_SUFFIX: &str = " \u{00B7} Admin Managed";
-/// Value column for ZDR-locked rows — replaces the opt-in/out value entirely.
-pub(super) const ROW_ZDR_VALUE: &str = "ZDR";
-
-/// Value-column text, shared by layout, scroll math, and paint.
-pub(super) fn value_display(
-    meta: &SettingMeta,
-    value: &SettingValue,
-    lock: Option<CodingDataSharingLock>,
-) -> String {
-    if lock == Some(CodingDataSharingLock::Zdr) {
-        return ROW_ZDR_VALUE.to_string();
-    }
-    let mut display = match value {
-        SettingValue::Bool(b) => if *b { "on" } else { "off" }.to_string(),
-        SettingValue::String(s) => {
-            if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                "(no override)".to_string()
-            } else {
-                s.clone()
-            }
-        }
-        SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
-        SettingValue::Int(i) => i.to_string(),
-    };
-    if lock == Some(CodingDataSharingLock::TeamManaged) {
-        display.push_str(ROW_ADMIN_MANAGED_SUFFIX);
-    }
-    display
-}
 
 /// Per-row layout decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2336,17 +2353,14 @@ pub(super) fn render_setting_row(
     theme: &Theme,
     is_expanded: bool,
     is_hovered: bool,
-    lock: Option<CodingDataSharingLock>,
 ) -> Rect {
     let bg = settings_list_row_bg(theme, is_selected, is_hovered);
-    // Paint the row bg across the full area (1 or 2 lines).
     buf.set_style(area, Style::default().bg(bg));
 
     let mut label_style = Style::default().fg(theme.text_primary).bg(bg);
     if is_selected {
         label_style = label_style.add_modifier(Modifier::BOLD);
     }
-    // Bool(false) renders muted; all other values use accent.
     let value_style = Style::default().fg(theme.accent_user).bg(bg);
     let chevron_style = Style::default().fg(theme.gray).bg(bg);
     let restart_style = Style::default()
@@ -2355,24 +2369,43 @@ pub(super) fn render_setting_row(
         .add_modifier(Modifier::ITALIC);
     let desc_style = Style::default().fg(theme.gray).bg(bg);
 
-    let value_text = value_display(meta, value, lock);
-    let value_text = value_text.as_str();
+    // Enum rows display the user-friendly name, not the canonical.
+    let value_text_owned;
+    let value_text: &str = match value {
+        SettingValue::Bool(b) => {
+            if *b {
+                "on"
+            } else {
+                "off"
+            }
+        }
+        SettingValue::String(s) => {
+            if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
+                "(no override)"
+            } else {
+                s.as_str()
+            }
+        }
+        SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e),
+        SettingValue::Int(i) => {
+            value_text_owned = i.to_string();
+            &value_text_owned
+        }
+    };
 
-    let value_style = if lock.is_some() || matches!(value, SettingValue::Bool(false)) {
+    let value_style = if matches!(value, SettingValue::Bool(false)) {
         Style::default().fg(theme.gray).bg(bg)
     } else {
         value_style
     };
 
     // Chevron for Enum/String/DynamicEnum (opens picker/editor).
-    // Locked rows can't be entered, so they drop the affordance.
-    let show_chevron = lock.is_none()
-        && matches!(
-            (&meta.kind, value),
-            (SettingKind::Enum { .. }, _)
-                | (SettingKind::String { .. }, _)
-                | (SettingKind::DynamicEnum { .. }, _)
-        );
+    let show_chevron = matches!(
+        (&meta.kind, value),
+        (SettingKind::Enum { .. }, _)
+            | (SettingKind::String { .. }, _)
+            | (SettingKind::DynamicEnum { .. }, _)
+    );
     let chevron_str = format!(" {}", crate::glyphs::chevron()); // › → > on legacy ConHost
     let chevron_w = if show_chevron {
         chevron_str.width() as u16
@@ -2598,13 +2631,7 @@ pub(super) fn render_setting_row(
 }
 
 /// Render the wrapped description for an expanded row.
-fn render_expanded_description(
-    buf: &mut Buffer,
-    area: Rect,
-    meta: &SettingMeta,
-    lock_reason: Option<&'static str>,
-    theme: &Theme,
-) {
+fn render_expanded_description(buf: &mut Buffer, area: Rect, meta: &SettingMeta, theme: &Theme) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -2612,14 +2639,14 @@ fn render_expanded_description(
         .fg(theme.gray)
         .bg(theme.bg_base)
         .add_modifier(Modifier::ITALIC);
-    let desc_text = lock_reason.unwrap_or(meta.description);
+    let desc_src: &str = meta.description;
     // Indent 4 cols to nest under the label.
     let indent = 4u16.min(area.width);
     let wrap_w = area.width.saturating_sub(indent);
     if wrap_w == 0 {
         return;
     }
-    let line = Line::from(Span::styled(desc_text, desc_style));
+    let line = Line::from(Span::styled(desc_src, desc_style));
     let wrapped = crate::render::wrapping::word_wrap_line(&line, wrap_w as usize);
     for (i, wrapped_line) in wrapped.iter().enumerate() {
         if (i as u16) >= area.height {
@@ -2728,20 +2755,10 @@ fn render_setting_group_row(
     }
 }
 
-/// Build the footer shortcut row. Enter label varies by focused row kind.
+/// Browse footer is fixed (same wrap height on every focused row kind).
 pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'static>> {
-    match &state.state.mode {
-        SettingsMode::Browse => {
-            // A locked row (ZDR / team-managed) accepts neither the edit keys
-            // nor `d`, so it advertises neither. `→ expand` stays — that is
-            // how the user reads the lock reason.
-            let locked = state
-                .focused_setting()
-                .is_some_and(|(key, _)| state.row_lock(key).is_some());
-            let enter_label = match state.focused_setting() {
-                Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => "Enter toggle",
-                _ => "Enter edit",
-            };
+    match state.mode {
+        SettingsModalMode::Browse => {
             let mut shortcuts = vec![
                 Shortcut {
                     label: "\u{2191}/\u{2193}/j/k nav",
@@ -2753,20 +2770,11 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     clickable: false,
                     id: 0,
                 },
-            ];
-            if !locked {
-                shortcuts.push(Shortcut {
-                    label: "Space toggle",
+                Shortcut {
+                    label: "Space/Enter",
                     clickable: false,
                     id: 0,
-                });
-                shortcuts.push(Shortcut {
-                    label: enter_label,
-                    clickable: false,
-                    id: 0,
-                });
-            }
-            shortcuts.extend([
+                },
                 Shortcut {
                     label: "\u{2192} expand",
                     clickable: false,
@@ -2777,25 +2785,23 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     clickable: false,
                     id: 0,
                 },
-            ]);
-            if !locked {
-                shortcuts.push(Shortcut {
+                Shortcut {
                     label: "d reset",
                     clickable: false,
                     id: 0,
-                });
-            }
-            shortcuts.push(Shortcut {
-                label: "F2/Esc close",
-                clickable: false,
-                id: 0,
-            });
+                },
+                Shortcut {
+                    label: "F2/Esc close",
+                    clickable: false,
+                    id: 0,
+                },
+            ];
             // Browse is nav mode (filter inactive), so append `i search` last
             // (matching the shared pickers).
             modal_window::push_vim_nav_search_hint(&mut shortcuts, false);
             shortcuts
         }
-        SettingsMode::FilterFocused => vec![
+        SettingsModalMode::FilterFocused => vec![
             Shortcut {
                 label: "type to filter",
                 clickable: false,
@@ -2822,30 +2828,25 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                 id: 0,
             },
         ],
-        SettingsMode::PickingEnum {
+        SettingsModalMode::PickingEnum {
             supports_preview: sp,
-            key,
             ..
         } => {
             // Labels depend on whether the Enum supports live preview.
-            let nav_label = if *sp {
+            let nav_label = if sp {
                 "\u{2191}/\u{2193} try"
             } else {
                 "\u{2191}/\u{2193} nav"
             };
-            let esc_label = if *sp { "Esc revert" } else { "Esc cancel" };
-            let consent = crate::settings::is_consent_chooser(key);
-            let mut shortcuts = vec![
+            let esc_label = if sp { "Esc revert" } else { "Esc cancel" };
+            vec![
                 Shortcut {
                     label: nav_label,
                     clickable: false,
                     id: 0,
                 },
-                // A chooser picks one of the offered answers, so Enter
-                // "selects". The filter bar and the value editors, where
-                // Enter really does commit typed input, keep that wording.
                 Shortcut {
-                    label: "Enter select",
+                    label: "Enter commit",
                     clickable: false,
                     id: 0,
                 },
@@ -2854,29 +2855,56 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     clickable: false,
                     id: 0,
                 },
-            ];
-            // Consent choosers hide reset; the key is disabled there too, so
-            // this stays a description of what actually works on the pane.
-            if !consent {
-                shortcuts.push(Shortcut {
+                Shortcut {
                     label: "d reset",
                     clickable: false,
                     id: 0,
-                });
-            }
-            shortcuts
+                },
+            ]
         }
 
-        SettingsMode::EditingInt { min, max, .. } => {
-            let (small_label, large_label) = int_step_footer_labels(*min, *max);
+        SettingsModalMode::EditingValue { key, .. } => {
+            // Int stepper: step-only hints with range-aware deltas.
+            if let Some(SettingKind::Int { min, max, .. }) =
+                state.registry.find(key).map(|m| &m.kind)
+            {
+                let (small_label, large_label) = int_step_footer_labels(*min, *max);
+                return vec![
+                    Shortcut {
+                        label: small_label,
+                        clickable: false,
+                        id: 0,
+                    },
+                    Shortcut {
+                        label: large_label,
+                        clickable: false,
+                        id: 0,
+                    },
+                    Shortcut {
+                        label: "Enter commit",
+                        clickable: false,
+                        id: 0,
+                    },
+                    Shortcut {
+                        label: "Esc cancel",
+                        clickable: false,
+                        id: 0,
+                    },
+                    Shortcut {
+                        label: "d reset",
+                        clickable: false,
+                        id: 0,
+                    },
+                ];
+            }
             vec![
                 Shortcut {
-                    label: small_label,
+                    label: "type to edit",
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: large_label,
+                    label: "\u{2190}/\u{2192} cursor",
                     clickable: false,
                     id: 0,
                 },
@@ -2890,36 +2918,9 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     clickable: false,
                     id: 0,
                 },
-                Shortcut {
-                    label: "d reset",
-                    clickable: false,
-                    id: 0,
-                },
             ]
         }
-        SettingsMode::EditingString { .. } => vec![
-            Shortcut {
-                label: "type to edit",
-                clickable: false,
-                id: 0,
-            },
-            Shortcut {
-                label: "\u{2190}/\u{2192} cursor",
-                clickable: false,
-                id: 0,
-            },
-            Shortcut {
-                label: "Enter commit",
-                clickable: false,
-                id: 0,
-            },
-            Shortcut {
-                label: "Esc cancel",
-                clickable: false,
-                id: 0,
-            },
-        ],
-        SettingsMode::PickingGroup { .. } => vec![
+        SettingsModalMode::PickingGroup { .. } => vec![
             Shortcut {
                 label: "\u{2191}/\u{2193}/j/k nav",
                 clickable: false,
@@ -2938,3 +2939,5 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         ],
     }
 }
+
+// ---------------------------------------------------------------------------

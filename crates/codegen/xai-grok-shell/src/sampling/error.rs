@@ -13,9 +13,11 @@ use agent_client_protocol as acp;
 /// Uses the JSON-RPC implementation-defined server error range (-32000 to -32099).
 ///
 /// Contract: set only for actual HTTP 429 responses from the sampling client.
-/// Clients derive user-facing text via [`format_rate_limited_user_message`].
-/// The desktop path is unchanged: `prompt_complete_fields` still reports the
-/// stop reason with no detail.
+/// User-facing text is produced by [`format_rate_limited_user_message`] (free-usage
+/// paywall rewrite, else server body, else a generic fallback). Pager/headless
+/// use that helper. Desktop may still special-case `stopReason: rate_limit` with
+/// its own UI and ignore the body — that is a client choice, not a shell
+/// requirement to suppress detail.
 pub const RATE_LIMITED_ERROR_CODE: i32 = -32003;
 
 /// OAuth / session rate-limit copy (personal plan upgrade path).
@@ -26,6 +28,20 @@ pub const RATE_LIMITED_USER_MESSAGE_OAUTH: &str =
 /// team limits; admins purchase credits or a higher spend-based tier.
 /// See https://docs.x.ai/developers/rate-limits#rate-limit-tiers
 pub const RATE_LIMITED_USER_MESSAGE_API_KEY: &str = "You\u{2019}ve hit your team\u{2019}s API rate limit. Ask a team admin to purchase more credits for higher limits, or try again later. See https://docs.x.ai/developers/rate-limits#rate-limit-tiers";
+
+/// Pick rate-limit copy from the *active* auth method.
+///
+/// Pass the real `is_api_key_auth` flag (pager `AppView`, `AuthMethodKind::is_api_key`
+/// for the selected method). Do **not** decide from `has_xai_api_key_env()` alone:
+/// when both an env key and a cached OAuth session exist, auth prefers the
+/// cached session over the API key.
+pub fn rate_limited_user_message(is_api_key_auth: bool) -> &'static str {
+    if is_api_key_auth {
+        RATE_LIMITED_USER_MESSAGE_API_KEY
+    } else {
+        RATE_LIMITED_USER_MESSAGE_OAUTH
+    }
+}
 
 /// Well-known free-usage exhaustion code CCP returns on HTTP 429.
 /// Matches `prod_util_well_known_errors::SUBSCRIPTION_FREE_USAGE_EXHAUSTED`.
@@ -46,45 +62,29 @@ pub fn is_free_usage_exhausted_error(detail: &str) -> bool {
 
 /// User-facing text for an ACP -32003 rate-limit error.
 ///
-/// Free-usage code first (consumer-only; intentional before API-key rewrite).
-/// API-key + personal SuperGrok upsell → team credits copy. Else the body
-/// after stripping `API error (status …):` (SamplingError Display prefix).
-/// Empty → OAuth vs API-key fallback. Callers that show this in UI should
-/// still run their usual sanitizer (scrub/cap).
+/// 1. Free-usage well-known code → [`FREE_USAGE_USER_MESSAGE`] (OAuth product paywall).
+/// 2. Non-empty body that pushes a **personal** Grok subscription, when the
+///    caller is on **API key** auth → [`RATE_LIMITED_USER_MESSAGE_API_KEY`]
+///    (team credits / console rate-limit tiers; not grok.com SuperGrok).
+/// 3. Any other non-empty body → shown as-is (capacity, team RPS limits, etc.).
+/// 4. Empty body → [`rate_limited_user_message`].
+///
+/// Pass the real active auth method (`AppView.is_api_key_auth` /
+/// `AuthMethodKind::is_api_key`), not env-only key presence.
 pub fn format_rate_limited_user_message(
     server_detail: Option<&str>,
     is_api_key_auth: bool,
 ) -> String {
-    // Free-usage sniff works on the prefixed wire string (`contains` the code).
     if server_detail.is_some_and(is_free_usage_exhausted_error) {
         return FREE_USAGE_USER_MESSAGE.to_string();
     }
     if let Some(detail) = server_detail.map(str::trim).filter(|s| !s.is_empty()) {
-        let detail = strip_sampling_api_error_prefix(detail);
         if is_api_key_auth && pushes_consumer_subscription_upsell(detail) {
             return RATE_LIMITED_USER_MESSAGE_API_KEY.to_string();
         }
         return detail.to_string();
     }
-    if is_api_key_auth {
-        RATE_LIMITED_USER_MESSAGE_API_KEY
-    } else {
-        RATE_LIMITED_USER_MESSAGE_OAUTH
-    }
-    .to_string()
-}
-
-/// Drop `SamplingError::Api`'s Display prefix so users see the IC body, not
-/// `API error (status 429 Too Many Requests): …`.
-fn strip_sampling_api_error_prefix(detail: &str) -> &str {
-    const PREFIX: &str = "API error (status ";
-    const SEP: &str = "): ";
-    if let Some(rest) = detail.strip_prefix(PREFIX)
-        && let Some(idx) = rest.find(SEP)
-    {
-        return rest[idx + SEP.len()..].trim();
-    }
-    detail.trim()
+    rate_limited_user_message(is_api_key_auth).to_string()
 }
 
 /// IC sometimes reuses OAuth free-tier upsell copy on 429s ("upgrade to a Grok
@@ -96,25 +96,12 @@ fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
     d.contains("grok.com/supergrok") || d.contains("upgrade to a grok subscription")
 }
 
-/// User-facing copy for capacity/overload failures (stream `overloaded_error`,
-/// HTTP 529, proxy-wrapped 5xx). See [`SamplingError::is_overloaded`].
-pub const OVERLOADED_USER_MESSAGE: &str = "Model is temporarily overloaded. Try again in a moment.";
-
 /// Map a `SamplingError` to an ACP `Error` for client-facing responses.
 /// This stays in xai-grok-shell because it depends on `agent_client_protocol::Error`.
-pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
+pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
     use reqwest::StatusCode;
-    // Capacity/overload gets the same short copy on every surface. Message
-    // only, `data` deliberately unset: `Display` appends JSON-encoded `data`,
-    // and this string is meant for direct display.
-    if err.is_overloaded() {
-        return acp::Error::new(
-            acp::ErrorCode::InternalError.into(),
-            OVERLOADED_USER_MESSAGE,
-        );
-    }
     match err {
-        SamplingError::Auth { message, .. } => acp::Error::auth_required().data(message),
+        SamplingError::Auth(msg) => acp::Error::auth_required().data(msg),
         SamplingError::InvalidConfiguration(msg) => acp::Error::invalid_params().data(msg),
         SamplingError::Http(e) => {
             acp::Error::internal_error().data(format!("http client init failed: {e}"))
@@ -142,8 +129,6 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
                 } else {
                     message
                 };
-                // 403 is content-safety, never auth: on this setup path it stays
-                // `internal_error` → `server_error`.
                 acp::Error::internal_error().data(message)
             }
             StatusCode::BAD_REQUEST => acp::Error::invalid_params().data(message),
@@ -152,10 +137,7 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             StatusCode::TOO_MANY_REQUESTS => {
                 acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited".to_string()).data(message)
             }
-            // Preserve the HTTP status in data so the classifier folds capacity
-            // errors (503/529) into `rate_limit`.
-            _ => acp::Error::internal_error()
-                .data(error_data_with_status(message, Some(status.as_u16()))),
+            _ => acp::Error::internal_error().data(message),
         },
         SamplingError::EventStreamError(message) => acp::Error::internal_error().data(message),
         SamplingError::StreamError {
@@ -188,10 +170,7 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
     }
 }
 
-pub(crate) fn error_data_with_status(
-    message: String,
-    http_status: Option<u16>,
-) -> serde_json::Value {
+pub fn error_data_with_status(message: String, http_status: Option<u16>) -> serde_json::Value {
     match http_status {
         Some(sc) => serde_json::json!({ "message": message, "http_status": sc }),
         None => serde_json::Value::String(message),
@@ -199,7 +178,7 @@ pub(crate) fn error_data_with_status(
 }
 
 /// Terminal-failure `acp::Error.data`: max-tokens truncation carries an `error_kind` marker (the kind's stable `as_str` name); other kinds keep the legacy shape.
-pub(crate) fn terminal_error_data(
+pub fn terminal_error_data(
     message: String,
     http_status: Option<u16>,
     kind: xai_grok_sampler::SamplingErrorKind,
@@ -301,7 +280,7 @@ pub fn prompt_usage_from_error(
 /// notification from a prompt result. Rate-limit errors produce
 /// `("rate_limit", null)` so the client shows its own upgrade message;
 /// other errors produce `("error", <detail>)`.
-pub(crate) fn prompt_complete_fields(
+pub fn prompt_complete_fields(
     result: &std::result::Result<acp::StopReason, acp::Error>,
 ) -> (serde_json::Value, serde_json::Value) {
     match result {
@@ -338,7 +317,6 @@ mod tests {
                 total_tokens: 4,
                 reasoning_tokens: 0,
                 cached_prompt_tokens: 0,
-                cache_creation_prompt_tokens: 0,
             },
             None,
             Some(10),
@@ -394,13 +372,13 @@ mod tests {
     }
 
     #[test]
-    fn rate_limited_fallback_oauth_vs_api_key() {
+    fn rate_limited_user_message_oauth_vs_api_key() {
         assert_eq!(
-            format_rate_limited_user_message(None, false),
+            rate_limited_user_message(false),
             RATE_LIMITED_USER_MESSAGE_OAUTH
         );
         assert_eq!(
-            format_rate_limited_user_message(None, true),
+            rate_limited_user_message(true),
             RATE_LIMITED_USER_MESSAGE_API_KEY
         );
         assert!(RATE_LIMITED_USER_MESSAGE_OAUTH.contains("Upgrade your account"));
@@ -415,19 +393,19 @@ mod tests {
 
     #[test]
     fn format_rate_limited_surfaces_nonempty_server_detail() {
-        let body = "The service is temporarily at capacity. Please retry your request shortly.";
-        // Production detail is SamplingError::Api Display (prefixed).
-        let wire = format!("API error (status 429 Too Many Requests): {body}");
-        assert_eq!(format_rate_limited_user_message(Some(&wire), false), body);
-        assert_eq!(format_rate_limited_user_message(Some(&wire), true), body);
+        let service = "The service is temporarily at capacity. Please retry your request shortly.";
+        assert_eq!(
+            format_rate_limited_user_message(Some(service), false),
+            service
+        );
+        assert_eq!(
+            format_rate_limited_user_message(Some(service), true),
+            service
+        );
 
         // Team console rate-limit copy has no personal SuperGrok upsell — surface as-is.
         let team = "resource-exhausted: Too many requests for team abc. See https://console.x.ai/team/default/rate-limits.";
-        let team_wire = format!("API error (status 429 Too Many Requests): {team}");
-        assert_eq!(
-            format_rate_limited_user_message(Some(&team_wire), true),
-            team
-        );
+        assert_eq!(format_rate_limited_user_message(Some(team), true), team);
         assert_eq!(
             format_rate_limited_user_message(Some("slow down"), false),
             "slow down"
@@ -436,25 +414,21 @@ mod tests {
 
     #[test]
     fn format_rate_limited_api_key_rewrites_consumer_subscription_upsell() {
-        let body = "Some resource has been exhausted: You are sending requests too quickly. \
+        let rpm = "Some resource has been exhausted: You are sending requests too quickly. \
              Please slow down, or upgrade to a Grok subscription for higher limits: \
              https://grok.com/supergrok";
-        let wire = format!("API error (status 429 Too Many Requests): {body}");
         // OAuth keeps the IC body (personal plan upgrade is correct).
-        assert_eq!(format_rate_limited_user_message(Some(&wire), false), body);
+        assert_eq!(format_rate_limited_user_message(Some(rpm), false), rpm);
         // API key must not push grok.com SuperGrok — team credits / rate-limit tiers.
         assert_eq!(
-            format_rate_limited_user_message(Some(&wire), true),
+            format_rate_limited_user_message(Some(rpm), true),
             RATE_LIMITED_USER_MESSAGE_API_KEY
         );
-    }
-
-    #[test]
-    fn format_rate_limited_strips_api_error_display_prefix() {
-        let body = "The service is temporarily at capacity.";
-        let wire = format!("API error (status 429 Too Many Requests): {body}");
-        assert_eq!(format_rate_limited_user_message(Some(&wire), false), body);
-        assert!(!format_rate_limited_user_message(Some(&wire), false).contains("API error"));
+        assert!(
+            RATE_LIMITED_USER_MESSAGE_API_KEY
+                .contains("https://docs.x.ai/developers/rate-limits#rate-limit-tiers")
+        );
+        assert!(!RATE_LIMITED_USER_MESSAGE_API_KEY.contains("grok.com/supergrok"));
     }
 
     #[test]
@@ -473,15 +447,13 @@ mod tests {
 
     #[test]
     fn format_rate_limited_free_usage_uses_paywall_copy() {
-        let wire = "API error (status 429 Too Many Requests): \
-            subscription:free-usage-exhausted: You have used all your free usage.";
+        let detail = "subscription:free-usage-exhausted: You have used all your free usage.";
         assert_eq!(
-            format_rate_limited_user_message(Some(wire), false),
+            format_rate_limited_user_message(Some(detail), false),
             FREE_USAGE_USER_MESSAGE
         );
-        // Free-usage code is consumer-only; still wins for API-key callers.
         assert_eq!(
-            format_rate_limited_user_message(Some(wire), true),
+            format_rate_limited_user_message(Some(detail), true),
             FREE_USAGE_USER_MESSAGE
         );
     }

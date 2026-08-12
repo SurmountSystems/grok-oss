@@ -7,9 +7,8 @@ description = "Backend environment presets for the Grok CLI crate family: endpoi
 
 [features]
 # Exposes `EnvVarGuard` (and its process-wide env lock) to downstream
-# crates' test targets. `cfg(test)` alone does not enable this for dependents.
+# crates' test targets.
 test-support = []
-# Bazel CI shared rlib: compile test helpers into the default library.
 default-bazel = ["test-support"]
 
 [dependencies]

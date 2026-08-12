@@ -160,14 +160,8 @@ enum TerminalCommand {
         reply: oneshot::Sender<Option<PathBuf>>,
     },
 
-    WarmShell {
-        cwd: PathBuf,
-    },
-
     /// Kill all running foreground processes owned by a specific session.
-    KillForegroundCommandsByOwner {
-        owner_session_id: String,
-    },
+    KillForegroundCommandsByOwner { owner_session_id: String },
 
     /// Kill all running background tasks owned by a specific session.
     KillTasksByOwner {
@@ -774,7 +768,20 @@ impl LocalTerminalActor {
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
-        self.ensure_persistent_shell_initialized(cwd).await;
+        if self.shell_state.is_none() {
+            let shell = shell_state::ShellKind::detect();
+            match shell_state::ShellState::init(shell, cwd).await {
+                Ok(state) => self.shell_state = Some(state),
+                Err(e) => {
+                    tracing::warn!("persistent shell init failed, using empty state: {e}");
+                    self.shell_state = Some(shell_state::ShellState {
+                        cwd: cwd.to_path_buf(),
+                        snapshot: String::new(),
+                        shell,
+                    });
+                }
+            }
+        }
 
         let shell_state = self.shell_state.as_ref().unwrap();
         let tracked_cwd_alive = match tokio::fs::metadata(&shell_state.cwd).await {

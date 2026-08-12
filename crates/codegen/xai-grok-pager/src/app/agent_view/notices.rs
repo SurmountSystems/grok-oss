@@ -16,7 +16,8 @@ impl AgentView {
     /// is replaced; [`Self::sticky_toast`] is preserved and returns after this
     /// expires or is dismissed.
     pub fn show_toast(&mut self, msg: &str) {
-        self.toast = Some((crate::glyphs::sanitize_toast_message(msg).into_owned(), 90));
+        let msg = crate::glyphs::legacy_glyph_fallback(msg).into_owned();
+        self.toast = Some((msg, 90));
     }
 
     /// Show an ephemeral tip in the banner row above the prompt, gated by the
@@ -88,7 +89,6 @@ impl AgentView {
     pub(crate) fn ephemeral_tip_needs_tick(&self) -> bool {
         self.ephemeral_tip.is_active()
             && !self.session_banner_active
-            && !self.privacy_banner.active
             && (!self.ephemeral_tip.active_is_ambient() || self.ephemeral_tip_can_render())
     }
 
@@ -144,9 +144,6 @@ impl AgentView {
         let occluded = !self.permission_queue.is_empty()
             || self.question_view.is_some()
             || self.active_modal.is_some()
-            // Privacy upsell banner owns the slot until acted on — a
-            // session-long occluder like the session announcement banner.
-            || self.privacy_banner.active
             // Subagent fullscreen takeover: draw early-returns into
             // draw_subagent_fullscreen and never paints the parent banner.
             || self.active_subagent.is_some()
@@ -174,7 +171,6 @@ impl AgentView {
             // modals and line_viewer) since a tip during goal reading is
             // unwanted regardless.
             || (self.show_goal_detail && self.goal_state.is_some())
-            || self.show_workflows
             // Prompt dropdowns (@/slash/completion/history) render in the
             // row directly above the prompt — the banner row — clearing it.
             || self.prompt.any_dropdown_open()
@@ -215,7 +211,7 @@ impl AgentView {
     /// Set or clear the sticky status banner (process-wide indicators should
     /// use [`Self::set_sticky_toast_recursive`] on every agent view).
     pub fn set_sticky_toast(&mut self, msg: Option<&str>) {
-        self.sticky_toast = msg.map(|m| crate::glyphs::sanitize_toast_message(m).into_owned());
+        self.sticky_toast = msg.map(|m| crate::glyphs::legacy_glyph_fallback(m).into_owned());
     }
 
     /// Propagate sticky status to this view and every nested subagent view.
@@ -228,10 +224,8 @@ impl AgentView {
 
     /// Show a toast with an explicit tick duration.
     pub fn show_toast_ticks(&mut self, msg: &str, ticks: u8) {
-        self.toast = Some((
-            crate::glyphs::sanitize_toast_message(msg).into_owned(),
-            ticks,
-        ));
+        let msg = crate::glyphs::legacy_glyph_fallback(msg).into_owned();
+        self.toast = Some((msg, ticks));
     }
 
     /// Message currently drawn in the toast slot: transient wins while active,
@@ -275,18 +269,11 @@ impl AgentView {
         false
     }
 
-    /// Copy text to clipboard (a backup file is always written too — see
-    /// `copy_text_or_file`) and show the result toast.
-    ///
-    /// When every trusted clipboard backend fails (common on Apple Terminal
-    /// over SSH), the toast points at the backup file
-    /// (`~/.grok/last-copy.txt`, or `GROK_COPY_FILE`) instead. The returned
-    /// [`CopyDelivery`](crate::clipboard::CopyDelivery) tells callers where
-    /// the copy actually landed (clipboard, backup file, or nowhere).
-    pub fn copy_to_clipboard(&mut self, text: &str) -> crate::clipboard::CopyDelivery {
-        let delivery = crate::clipboard::copy_text_or_file(text);
-        self.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
-        delivery
+    /// Copy text to clipboard and show the result toast.
+    pub fn copy_to_clipboard(&mut self, text: &str) -> crate::clipboard::ClipboardDelivery {
+        let result = crate::clipboard::copy_text(text);
+        self.show_toast_ticks(result.message, result.ticks);
+        result.delivery
     }
 
     /// Like [`copy_to_clipboard`] but debounces the toast to prevent
@@ -297,8 +284,8 @@ impl AgentView {
             .last_clipboard_toast_at
             .is_some_and(|t| now.duration_since(t).as_millis() < CLIPBOARD_TOAST_DEBOUNCE_MS);
         if too_soon {
-            // Still deliver (clipboard or file fallback), just skip the toast.
-            let _ = crate::clipboard::copy_text_or_file(text);
+            // Still copy, just skip the toast.
+            let _ = crate::clipboard::copy_text(text);
             return;
         }
         self.last_clipboard_toast_at = Some(now);
@@ -401,39 +388,5 @@ mod mouse_off_banner_tests {
         view.set_sticky_toast(Some("Reconnecting"));
         view.active_pane = AgentPane::Prompt;
         assert_eq!(view.active_toast_message(), Some("Reconnecting"));
-    }
-
-    #[test]
-    fn show_toast_scrubs_control_chars() {
-        let mut view = make_running_agent();
-        view.show_toast("a\nb\rc\thttps://x.ai");
-        let msg = view.toast.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
-        assert!(
-            !msg.chars().any(char::is_control),
-            "show_toast must scrub controls: {msg:?}"
-        );
-        assert!(msg.contains("https://x.ai"), "{msg:?}");
-    }
-
-    #[test]
-    fn show_toast_ticks_scrubs_control_chars() {
-        let mut view = make_running_agent();
-        view.show_toast_ticks("x\ny\tz", 10);
-        let msg = view.toast.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
-        assert!(
-            !msg.chars().any(char::is_control),
-            "show_toast_ticks must scrub controls: {msg:?}"
-        );
-    }
-
-    #[test]
-    fn set_sticky_toast_scrubs_control_chars() {
-        let mut view = make_running_agent();
-        view.set_sticky_toast(Some("sticky\nline"));
-        let msg = view.sticky_toast.as_deref().unwrap_or("");
-        assert!(
-            !msg.chars().any(char::is_control),
-            "sticky toast must scrub controls: {msg:?}"
-        );
     }
 }

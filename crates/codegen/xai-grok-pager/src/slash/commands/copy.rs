@@ -1,17 +1,9 @@
 //! `/copy` -- copy the last (or Nth) assistant message to the clipboard.
-//!
-//! Optional file path writes instead of (or when) the clipboard is unreachable:
-//! - `/copy` — latest → clipboard (file fallback on failure)
-//! - `/copy 2` — 2nd-latest → clipboard
-//! - `/copy out.txt` — latest → file
-//! - `/copy 2 out.txt` — 2nd-latest → file
-
-use std::path::PathBuf;
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-/// Copy an assistant message to the clipboard (or an optional file).
+/// Copy an assistant message to the clipboard.
 pub struct CopyCommand;
 
 impl SlashCommand for CopyCommand {
@@ -20,7 +12,7 @@ impl SlashCommand for CopyCommand {
     }
 
     fn description(&self) -> &str {
-        "Copy last response to clipboard or file (/copy [N] [file])"
+        "Copy last response to clipboard (/copy N for Nth-latest)"
     }
 
     fn session_scoped(&self) -> bool {
@@ -28,7 +20,7 @@ impl SlashCommand for CopyCommand {
     }
 
     fn usage(&self) -> &str {
-        "/copy [N] [file]"
+        "/copy [N]"
     }
 
     fn takes_args(&self) -> bool {
@@ -36,42 +28,29 @@ impl SlashCommand for CopyCommand {
     }
 
     fn arg_placeholder(&self) -> Option<&str> {
-        Some("[N] [file]")
+        Some("[N]")
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        match parse_copy_args(args) {
-            Ok((n, file_path)) => {
-                CommandResult::Action(Action::CopyAssistantMessage { n, file_path })
+        let trimmed = args.trim();
+        let n = if trimmed.is_empty() {
+            1
+        } else {
+            match trimmed.parse::<usize>() {
+                Ok(0) => {
+                    return CommandResult::Error(
+                        "Usage: /copy [N] where N is 1 (latest), 2, 3, ...".to_string(),
+                    );
+                }
+                Ok(v) => v,
+                Err(_) => {
+                    return CommandResult::Error(format!(
+                        "/copy {trimmed} (invalid number)\nUsage: /copy [N] where N is 1 (latest), 2, 3, ..."
+                    ));
+                }
             }
-            Err(msg) => CommandResult::Error(msg),
-        }
-    }
-}
-
-/// Parse `/copy` args into `(n, optional_file_path)`.
-///
-/// - empty → `(1, None)`
-/// - `2` → `(2, None)`
-/// - `out.txt` → `(1, Some(out.txt))`
-/// - `2 out.txt` → `(2, Some(out.txt))` (rest of line is the path, spaces ok)
-fn parse_copy_args(args: &str) -> Result<(usize, Option<PathBuf>), String> {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        return Ok((1, None));
-    }
-
-    let mut parts = trimmed.splitn(2, char::is_whitespace);
-    let first = parts.next().unwrap_or("");
-    let rest = parts.next().map(str::trim).filter(|s| !s.is_empty());
-
-    match first.parse::<usize>() {
-        Ok(0) => Err("Usage: /copy [N] [file] where N is 1 (latest), 2, 3, ...".to_string()),
-        Ok(n) => Ok((n, rest.map(PathBuf::from))),
-        Err(_) => {
-            // Non-numeric first token: treat the whole args string as a path.
-            Ok((1, Some(PathBuf::from(trimmed))))
-        }
+        };
+        CommandResult::Action(Action::CopyAssistantMessage { n })
     }
 }
 
@@ -99,8 +78,6 @@ mod tests {
             session_id: None,
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
-            billing_surface_visible: true,
-            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         }
     }
@@ -111,10 +88,7 @@ mod tests {
         let mut ctx = make_ctx(&models);
         let cmd = CopyCommand;
         match cmd.run(&mut ctx, "") {
-            CommandResult::Action(Action::CopyAssistantMessage { n, file_path }) => {
-                assert_eq!(n, 1);
-                assert!(file_path.is_none());
-            }
+            CommandResult::Action(Action::CopyAssistantMessage { n }) => assert_eq!(n, 1),
             other => panic!("expected Action(CopyAssistantMessage), got {other:?}"),
         }
     }
@@ -125,10 +99,7 @@ mod tests {
         let mut ctx = make_ctx(&models);
         let cmd = CopyCommand;
         match cmd.run(&mut ctx, "1") {
-            CommandResult::Action(Action::CopyAssistantMessage { n, file_path }) => {
-                assert_eq!(n, 1);
-                assert!(file_path.is_none());
-            }
+            CommandResult::Action(Action::CopyAssistantMessage { n }) => assert_eq!(n, 1),
             other => panic!("expected Action(CopyAssistantMessage), got {other:?}"),
         }
     }
@@ -139,10 +110,7 @@ mod tests {
         let mut ctx = make_ctx(&models);
         let cmd = CopyCommand;
         match cmd.run(&mut ctx, "3") {
-            CommandResult::Action(Action::CopyAssistantMessage { n, file_path }) => {
-                assert_eq!(n, 3);
-                assert!(file_path.is_none());
-            }
+            CommandResult::Action(Action::CopyAssistantMessage { n }) => assert_eq!(n, 3),
             other => panic!("expected Action(CopyAssistantMessage), got {other:?}"),
         }
     }
@@ -156,25 +124,14 @@ mod tests {
     }
 
     #[test]
-    fn path_only_writes_latest_to_file() {
+    fn non_numeric_returns_error() {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
         let cmd = CopyCommand;
-        match cmd.run(&mut ctx, "out.txt") {
-            CommandResult::Action(Action::CopyAssistantMessage { n, file_path }) => {
-                assert_eq!(n, 1);
-                assert_eq!(file_path.as_deref(), Some(std::path::Path::new("out.txt")));
-            }
-            other => panic!("expected Action(CopyAssistantMessage), got {other:?}"),
+        match cmd.run(&mut ctx, "abc") {
+            CommandResult::Error(msg) => assert!(msg.contains("invalid number")),
+            other => panic!("expected Error, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn n_and_path_with_spaces() {
-        assert_eq!(
-            parse_copy_args("2 ~/exports/my note.txt").unwrap(),
-            (2, Some(PathBuf::from("~/exports/my note.txt")))
-        );
     }
 
     #[test]
@@ -183,11 +140,16 @@ mod tests {
         let mut ctx = make_ctx(&models);
         let cmd = CopyCommand;
         match cmd.run(&mut ctx, "   ") {
-            CommandResult::Action(Action::CopyAssistantMessage { n, file_path }) => {
-                assert_eq!(n, 1);
-                assert!(file_path.is_none());
-            }
+            CommandResult::Action(Action::CopyAssistantMessage { n }) => assert_eq!(n, 1),
             other => panic!("expected Action(CopyAssistantMessage), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn available_in_minimal_by_default() {
+        // Clipboard copy from scrollback does not need the fullscreen pane —
+        // same path as `/export` and useful when native selection is awkward
+        // for multi-page assistant messages.
+        assert!(CopyCommand.available_in_minimal());
     }
 }

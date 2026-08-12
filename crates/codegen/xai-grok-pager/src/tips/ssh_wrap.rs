@@ -1,4 +1,6 @@
-//! SSH tip shown over an unwrapped remote session.
+//! SSH wrap tip: over SSH without `grok wrap`, advertise that wrapping the
+//! ssh command on the local machine forwards clipboard copies and restores
+//! the terminal when the connection drops.
 //!
 //! Shown once per run, at the first stable agent-view draw — the welcome
 //! screen has no ephemeral-tip row, so the first agent render is the
@@ -13,7 +15,7 @@ use ratatui::text::{Line, Span};
 use super::EphemeralTip;
 use crate::theme::Theme;
 
-/// Ephemeral-tip dedup key for the SSH doctor hint.
+/// Ephemeral-tip dedup key for the SSH `grok wrap` hint.
 pub(crate) const SSH_WRAP_TIP_KEY: &str = "ssh_wrap_tip";
 
 /// Key into the per-session in-memory seen-count map for this tip.
@@ -28,13 +30,15 @@ const SSH_WRAP_TIP_SEEN_CAP: u32 = 1;
 /// the TTL pauses while occluded instead of burning off-screen.
 pub(crate) const SSH_WRAP_TIP_TICKS: u16 = 300;
 
-/// Build the `/doctor` discovery notice, seen-gated to
-/// [`SSH_WRAP_TIP_SEEN_CAP`] show per session. It is about the transport, not
+/// Build "Over SSH? Run `grok wrap ssh <host>` locally for clipboard +
+/// terminal restore", seen-gated to [`SSH_WRAP_TIP_SEEN_CAP`] show per
+/// session (in-memory). Ambient: it is about the session's transport, not
 /// the draft, so submitting a prompt right after session load must not
 /// retire it, and occlusion pauses (not burns) its TTL.
 pub fn ssh_wrap_tip() -> EphemeralTip {
     let theme = Theme::current();
     let dim = Style::default().fg(theme.gray);
+    // Command token styled like the other tips style their chord/key tokens.
     let command = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
@@ -43,9 +47,9 @@ pub fn ssh_wrap_tip() -> EphemeralTip {
         ..EphemeralTip::new(
             SSH_WRAP_TIP_KEY,
             Line::from(vec![
-                Span::styled("Run ", dim),
-                Span::styled("/doctor", command),
-                Span::styled(" for details and fixes.", dim),
+                Span::styled("Over SSH? Run ", dim),
+                Span::styled("grok wrap ssh <host>", command),
+                Span::styled(" locally for clipboard + terminal restore", dim),
             ]),
         )
         .with_session_seen_cap(SSH_WRAP_TIP_SEEN_KEY, SSH_WRAP_TIP_SEEN_CAP)
@@ -66,11 +70,14 @@ mod tests {
     }
 
     #[test]
-    fn ssh_wrap_tip_points_to_doctor() {
+    fn ssh_wrap_tip_advertises_local_wrap() {
         let tip = ssh_wrap_tip();
         assert_eq!(tip.key, SSH_WRAP_TIP_KEY);
         let text: String = tip.line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Run /doctor for details and fixes.");
+        assert_eq!(
+            text,
+            "Over SSH? Run grok wrap ssh <host> locally for clipboard + terminal restore"
+        );
     }
 
     #[test]

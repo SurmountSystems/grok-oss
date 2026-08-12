@@ -26,6 +26,11 @@ pub fn is_server_nonce_shape(nonce: &str) -> bool {
     nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Domain-separation tags inside the signed bytes: both message types share one
+/// signing key, so each verifier requires its own tag (no cross-substitution).
+pub const MANAGED_POLICY_TYP: &str = "grok.managed_policy.v1";
+pub const MANAGED_IDENTITY_TYP: &str = "grok.managed_identity.v1";
+
 /// The exact bytes the server signs: the served policy, the principal it is
 /// bound to, and an expiry. Serialized once on the server and shipped verbatim
 /// as `signed_payload`, so the client verifies the received bytes directly

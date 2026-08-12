@@ -43,14 +43,6 @@ pub struct UiConfig {
     /// `None` = off (client default; opt-in). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_timeline: Option<bool>,
-    /// Snap a just-sent prompt to the viewport top. `None` = on (default).
-    /// Written by the pager's settings modal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page_flip_on_send: Option<bool>,
-    /// Ask before rewinding conversation history. `None` = on (default).
-    /// Written by the pager's settings modal / rewind "Yes, and don't ask again".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirm_before_rewind: Option<bool>,
     /// Theme to use when the OS is in dark mode. Written by the pager's theme persist module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_dark_theme: Option<String>,
@@ -96,11 +88,6 @@ pub struct UiConfig {
     /// `[voice].language` for the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_stt_language: Option<String>,
-    /// Whether the Ctrl+Space / F8 voice-dictation shortcut is active. Written
-    /// by the settings modal; unset defaults to `true` (shortcut on). When
-    /// `false` the chord is ignored — `/voice` still starts dictation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice_keybind_enabled: Option<bool>,
     /// When `true`, registers `Ctrl+R` (while scrollback is focused) to toggle
     /// terminal mouse reporting (mouse capture) so users can hand selection back
     /// to the terminal for native click-drag copy/paste. Opt-in only; unset/false
@@ -175,9 +162,6 @@ pub struct UiConfig {
     /// only appears once a user toggles a tip.
     #[serde(default, skip_serializing_if = "ContextualHints::is_default")]
     pub contextual_hints: ContextualHints,
-    /// Combine consecutive queued follow-ups into one turn. `None` = off.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub combine_queued_prompts: Option<bool>,
     /// Display-refresh probe + auto-cadence (`[ui.display_refresh]`). Per-field
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
@@ -266,8 +250,6 @@ impl Default for UiConfig {
             default_selected_permission: None,
             show_timestamps: None,
             show_timeline: None,
-            page_flip_on_send: None,
-            confirm_before_rewind: None,
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,
@@ -279,7 +261,6 @@ impl Default for UiConfig {
             hunk_tracker_mode: None,
             voice_capture_mode: None,
             voice_stt_language: None,
-            voice_keybind_enabled: None,
             mouse_reporting_toggle: None,
             remember_tool_approvals: None,
             cancel_subagents_on_turn_cancel: None,
@@ -294,7 +275,6 @@ impl Default for UiConfig {
             screen_mode: None,
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
-            combine_queued_prompts: None,
             display_refresh: DisplayRefreshSettings::default(),
         }
     }
@@ -319,22 +299,6 @@ impl UiConfig {
         self.show_timeline.unwrap_or(Self::SHOW_TIMELINE_DEFAULT)
     }
 
-    /// Default for [`Self::page_flip_on_send`] when unset.
-    pub const PAGE_FLIP_ON_SEND_DEFAULT: bool = true;
-
-    pub fn page_flip_on_send_enabled(&self) -> bool {
-        self.page_flip_on_send
-            .unwrap_or(Self::PAGE_FLIP_ON_SEND_DEFAULT)
-    }
-
-    /// Default for [`Self::confirm_before_rewind`] when unset.
-    pub const CONFIRM_BEFORE_REWIND_DEFAULT: bool = true;
-
-    pub fn confirm_before_rewind_enabled(&self) -> bool {
-        self.confirm_before_rewind
-            .unwrap_or(Self::CONFIRM_BEFORE_REWIND_DEFAULT)
-    }
-
     /// True when the highlight should not timer-dismiss (`hold` / `word_select`,
     /// or legacy duration 0).
     pub fn keep_text_selection_enabled(&self) -> bool {
@@ -348,26 +312,6 @@ impl UiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn page_flip_on_send_defaults_on() {
-        assert!(UiConfig::default().page_flip_on_send_enabled());
-        let off = UiConfig {
-            page_flip_on_send: Some(false),
-            ..Default::default()
-        };
-        assert!(!off.page_flip_on_send_enabled());
-    }
-
-    #[test]
-    fn confirm_before_rewind_defaults_on() {
-        assert!(UiConfig::default().confirm_before_rewind_enabled());
-        let off = UiConfig {
-            confirm_before_rewind: Some(false),
-            ..Default::default()
-        };
-        assert!(!off.confirm_before_rewind_enabled());
-    }
 
     #[test]
     fn keep_text_selection_enabled_precedence() {

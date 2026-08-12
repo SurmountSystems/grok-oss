@@ -5,11 +5,10 @@ use std::sync::Arc;
 use ratatui::layout::Rect;
 
 use crate::app::actions::Action;
-use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
-    SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
-    current_value_for, dynamic_enum_choices,
+    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind,
+    SettingMeta, SettingValue, SettingsRegistry, StringValidator, current_value_for,
+    dynamic_enum_choices,
 };
 use crate::views::modal_window::ModalWindowState;
 
@@ -54,8 +53,6 @@ pub enum SettingsKeyOutcome {
     /// Used by `d`-reset-in-picker to revert preview before opening
     /// the reset-confirm overlay.
     ActionPair(Action, Action),
-    /// Close the modal and dispatch `Action` (deep-link Esc revert or Enter commit).
-    ActionThenClose(Action),
     /// Internal state mutation, no action.
     Changed,
     /// No-op.
@@ -74,7 +71,7 @@ pub enum RowEntry {
     Setting { key: SettingKey, meta_index: usize },
 }
 
-/// Read-only projection of the modal's private discriminated state.
+/// Mode state for the modal.
 #[derive(Debug, Clone)]
 pub enum SettingsModalMode {
     Browse,
@@ -96,75 +93,16 @@ pub enum SettingsModalMode {
         key: SettingKey,
         child_idx: usize,
     },
-    /// Inline string/int editor. No live preview; Esc is a pure cancel.
+    /// Inline string/int editor. `cursor_byte` is always on a char
+    /// boundary. `validation_error` shows live feedback; commit
+    /// re-validates before dispatching. No `original_value` — these
+    /// settings have no live preview, so Esc is a pure cancel.
     EditingValue {
         key: SettingKey,
-    },
-}
-
-#[derive(Debug)]
-pub(super) struct SettingsState {
-    pub(super) filter: LineEditor,
-    pub(super) mode: SettingsMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SettingsModeKind {
-    Browse,
-    FilterFocused,
-    PickingEnum,
-    PickingGroup,
-    EditingString,
-    EditingInt,
-}
-
-impl SettingsState {
-    pub(super) fn mode_kind(&self) -> SettingsModeKind {
-        match &self.mode {
-            SettingsMode::Browse => SettingsModeKind::Browse,
-            SettingsMode::FilterFocused => SettingsModeKind::FilterFocused,
-            SettingsMode::PickingEnum { .. } => SettingsModeKind::PickingEnum,
-            SettingsMode::PickingGroup { .. } => SettingsModeKind::PickingGroup,
-            SettingsMode::EditingString { .. } => SettingsModeKind::EditingString,
-            SettingsMode::EditingInt { .. } => SettingsModeKind::EditingInt,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum SettingsMode {
-    Browse,
-    FilterFocused,
-    PickingEnum {
-        key: SettingKey,
-        choices_idx: usize,
-        original_value: SettingValue,
-        supports_preview: bool,
-    },
-    PickingGroup {
-        key: SettingKey,
-        child_idx: usize,
-    },
-    EditingString {
-        key: SettingKey,
-        editor: LineEditor,
-        validator: StringValidator,
+        buffer: String,
+        cursor_byte: usize,
         validation_error: Option<String>,
     },
-    EditingInt {
-        key: SettingKey,
-        buffer: String,
-        min: i64,
-        max: i64,
-    },
-}
-
-/// Is the open sub-pane a [`crate::settings::is_consent_chooser`] pane?
-pub(super) fn mode_is_consent_chooser(mode: &SettingsMode) -> bool {
-    matches!(
-        mode,
-        SettingsMode::PickingEnum { key, .. } if crate::settings::is_consent_chooser(key)
-    )
 }
 
 /// Settings modal state. Boxed inside `ActiveModal::Settings` to
@@ -181,7 +119,11 @@ pub struct SettingsModalState {
     pub selected: usize,
     /// Vertical scroll offset (line-granular).
     pub scroll_offset: usize,
-    pub(super) state: SettingsState,
+    pub mode: SettingsModalMode,
+    /// Filter query. Persists across FilterFocused→Browse on Enter; cleared by Esc.
+    pub query: String,
+    /// Byte offset of the editing cursor within `query`.
+    pub query_cursor: usize,
     /// Row indices matching `query`, recomputed per mutation (not per frame).
     pub(super) filtered_cache: Vec<usize>,
 
@@ -212,10 +154,6 @@ pub struct SettingsModalState {
     /// `rows` in Browse, `picker_choice_rects` in PickingEnum,
     /// always `None` in EditingValue.
     pub hover_row: Option<usize>,
-    /// When true, Esc/Enter from `PickingEnum` close the modal instead of
-    /// returning to Browse. Set by deep-link open (`OpenSettingsFocus`
-    /// / `/privacy`); cleared on leave from the picker.
-    pub close_on_picker_exit: bool,
 }
 
 impl SettingsModalState {
@@ -240,10 +178,9 @@ impl SettingsModalState {
             rows,
             selected,
             scroll_offset: 0,
-            state: SettingsState {
-                filter: LineEditor::default(),
-                mode: SettingsMode::Browse,
-            },
+            mode: SettingsModalMode::Browse,
+            query: String::new(),
+            query_cursor: 0,
             filtered_cache,
             list_area: Rect::default(),
             row_rects: Vec::new(),
@@ -254,17 +191,6 @@ impl SettingsModalState {
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
-            close_on_picker_exit: false,
-        }
-    }
-
-    /// Why a Browse row cannot be edited (`None` = editable). Consulted by
-    /// both render and input.
-    pub fn row_lock(&self, key: SettingKey) -> Option<CodingDataSharingLock> {
-        if key == "coding_data_sharing" {
-            self.pager_snapshot.coding_data_sharing_lock
-        } else {
-            None
         }
     }
 
@@ -279,21 +205,6 @@ impl SettingsModalState {
         }
     }
 
-    /// Focus a setting by registry key (Browse mode). Returns whether the
-    /// key was found; no-op if missing.
-    pub fn focus_key(&mut self, key: &str) -> bool {
-        if let Some(idx) = self
-            .rows
-            .iter()
-            .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
-        {
-            self.selected = idx;
-            self.clamp_selected_to_visible();
-            return true;
-        }
-        false
-    }
-
     /// Filtered row indices in render order.
     pub fn filtered_indices(&self) -> &[usize] {
         &self.filtered_cache
@@ -303,12 +214,11 @@ impl SettingsModalState {
     /// Keeps focus on the same key when possible; exits sub-panes if the key vanished.
     pub fn rebuild_rows(&mut self) {
         let prev_key = self.focused_setting().map(|(k, _)| k);
-        let subpane_key = match &self.state.mode {
-            SettingsMode::PickingEnum { key, .. }
-            | SettingsMode::PickingGroup { key, .. }
-            | SettingsMode::EditingString { key, .. }
-            | SettingsMode::EditingInt { key, .. } => Some(*key),
-            SettingsMode::Browse | SettingsMode::FilterFocused => None,
+        let subpane_key = match &self.mode {
+            SettingsModalMode::PickingEnum { key, .. }
+            | SettingsModalMode::PickingGroup { key, .. }
+            | SettingsModalMode::EditingValue { key, .. } => Some(*key),
+            SettingsModalMode::Browse | SettingsModalMode::FilterFocused => None,
         };
 
         self.rows = build_rows(&self.registry);
@@ -320,7 +230,9 @@ impl SettingsModalState {
                 .iter()
                 .any(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key));
             if !still_visible {
-                self.transition_to_browse();
+                self.mode = SettingsModalMode::Browse;
+                self.settings_breadcrumb_rect = None;
+                self.picker_choice_rects.clear();
             }
         }
 
@@ -343,73 +255,9 @@ impl SettingsModalState {
         }
     }
 
-    pub fn mode(&self) -> SettingsModalMode {
-        match &self.state.mode {
-            SettingsMode::Browse => SettingsModalMode::Browse,
-            SettingsMode::FilterFocused => SettingsModalMode::FilterFocused,
-            SettingsMode::PickingEnum {
-                key,
-                choices_idx,
-                original_value,
-                supports_preview,
-            } => SettingsModalMode::PickingEnum {
-                key,
-                choices_idx: *choices_idx,
-                original_value: original_value.clone(),
-                supports_preview: *supports_preview,
-            },
-            SettingsMode::PickingGroup { key, child_idx } => SettingsModalMode::PickingGroup {
-                key,
-                child_idx: *child_idx,
-            },
-            SettingsMode::EditingString { key, .. } | SettingsMode::EditingInt { key, .. } => {
-                SettingsModalMode::EditingValue { key }
-            }
-        }
-    }
-
-    pub fn query(&self) -> &str {
-        self.state.filter.text()
-    }
-
-    pub fn query_cursor(&self) -> usize {
-        self.state.filter.cursor_byte()
-    }
-
-    pub fn set_query(&mut self, query: impl Into<String>) {
-        self.state.filter.set_text(query);
-        self.invalidate_filter();
-        self.clamp_selected_to_visible();
-    }
-
-    pub fn editing_buffer(&self) -> Option<&str> {
-        match &self.state.mode {
-            SettingsMode::EditingString { editor, .. } => Some(editor.text()),
-            SettingsMode::EditingInt { buffer, .. } => Some(buffer),
-            _ => None,
-        }
-    }
-
-    pub fn editing_cursor_byte(&self) -> Option<usize> {
-        match &self.state.mode {
-            SettingsMode::EditingString { editor, .. } => Some(editor.cursor_byte()),
-            _ => None,
-        }
-    }
-
-    pub fn editing_validation_error(&self) -> Option<&str> {
-        match &self.state.mode {
-            SettingsMode::EditingString {
-                validation_error, ..
-            } => validation_error.as_deref(),
-            _ => None,
-        }
-    }
-
     /// Recompute `filtered_cache` from the current `query`.
     pub(super) fn invalidate_filter(&mut self) {
-        self.filtered_cache =
-            compute_filtered(&self.rows, &self.registry, self.state.filter.text());
+        self.filtered_cache = compute_filtered(&self.rows, &self.registry, &self.query);
     }
 
     /// Snap `selected` to the first visible setting if filtered out.
@@ -510,64 +358,10 @@ impl SettingsModalState {
     /// Transition to Browse, clearing sub-pane hover/breadcrumb state
     /// to prevent stale hit-rects across mode changes.
     pub(crate) fn transition_to_browse(&mut self) {
-        self.state.mode = SettingsMode::Browse;
+        self.mode = SettingsModalMode::Browse;
         self.hover_row = None;
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
-        self.close_on_picker_exit = false;
-    }
-
-    pub fn focus_filter(&mut self) {
-        self.state.mode = SettingsMode::FilterFocused;
-    }
-
-    pub(super) fn transition_to_picking_enum(
-        &mut self,
-        key: SettingKey,
-        choices_idx: usize,
-        original_value: SettingValue,
-        supports_preview: bool,
-    ) {
-        self.state.mode = SettingsMode::PickingEnum {
-            key,
-            choices_idx,
-            original_value,
-            supports_preview,
-        };
-    }
-
-    pub(super) fn transition_to_picking_group(&mut self, key: SettingKey, child_idx: usize) {
-        self.state.mode = SettingsMode::PickingGroup { key, child_idx };
-    }
-
-    pub(super) fn transition_to_editing_string(
-        &mut self,
-        key: SettingKey,
-        editor: LineEditor,
-        validator: StringValidator,
-        validation_error: Option<String>,
-    ) {
-        self.state.mode = SettingsMode::EditingString {
-            key,
-            editor,
-            validator,
-            validation_error,
-        };
-    }
-
-    pub(super) fn transition_to_editing_int(
-        &mut self,
-        key: SettingKey,
-        buffer: String,
-        min: i64,
-        max: i64,
-    ) {
-        self.state.mode = SettingsMode::EditingInt {
-            key,
-            buffer,
-            min,
-            max,
-        };
     }
 
     /// Transition to `PickingEnum` if the focused row is Enum/DynamicEnum.
@@ -577,9 +371,6 @@ impl SettingsModalState {
             let Some((key, meta)) = self.focused_setting() else {
                 return false;
             };
-            if self.row_lock(key).is_some() {
-                return false;
-            }
             // Handles both static `Enum` and `DynamicEnum` catalogs.
             let (supports_preview, resolved): (bool, Vec<OwnedEnumChoice>) = match &meta.kind {
                 SettingKind::Enum {
@@ -678,7 +469,12 @@ impl SettingsModalState {
                 _ => SettingValue::Enum(""),
             }
         });
-        self.transition_to_picking_enum(key, choices_idx, original_value, supports_preview);
+        self.mode = SettingsModalMode::PickingEnum {
+            key,
+            choices_idx,
+            supports_preview,
+            original_value,
+        };
         self.hover_row = None;
         true
     }
@@ -693,7 +489,7 @@ impl SettingsModalState {
         if !matches!(meta.kind, SettingKind::Group { .. }) {
             return false;
         }
-        self.transition_to_picking_group(key, 0);
+        self.mode = SettingsModalMode::PickingGroup { key, child_idx: 0 };
         self.hover_row = None;
         true
     }
@@ -703,36 +499,31 @@ impl SettingsModalState {
         let Some((key, meta)) = self.focused_setting() else {
             return false;
         };
-        let kind = meta.kind.clone();
-        let value = self.value_for(key);
-        match kind {
-            SettingKind::String {
-                default, validator, ..
-            } => {
-                let text = match value {
-                    Some(SettingValue::String(text)) => text,
-                    _ => default.to_string(),
-                };
-                let mut editor = LineEditor::default();
-                editor.set_text(text);
-                let validation_error = validate_string(
-                    validator,
-                    editor.text(),
-                    &self.pager_snapshot.available_models,
-                );
-                self.transition_to_editing_string(key, editor, validator, validation_error);
-            }
-            SettingKind::Int {
-                default, min, max, ..
-            } => {
-                let buffer = match value {
-                    Some(SettingValue::Int(value)) => value.to_string(),
-                    _ => default.to_string(),
-                };
-                self.transition_to_editing_int(key, buffer, min, max);
-            }
+        let buffer = match (&meta.kind, self.value_for(key)) {
+            (SettingKind::String { .. }, Some(SettingValue::String(s))) => s,
+            (SettingKind::Int { .. }, Some(SettingValue::Int(i))) => i.to_string(),
+            // Fallback for registry skew — seed from default.
+            (SettingKind::String { default, .. }, _) => default.to_string(),
+            (SettingKind::Int { default, .. }, _) => default.to_string(),
             _ => return false,
-        }
+        };
+        let cursor_byte = buffer.len();
+
+        // Validate the seed value upfront.
+        let validation_error = match &meta.kind {
+            SettingKind::String { validator, .. } => {
+                validate_string(*validator, &buffer, &self.pager_snapshot.available_models)
+            }
+            SettingKind::Int { min, max, .. } => validate_int(&buffer, *min, *max),
+            _ => None,
+        };
+
+        self.mode = SettingsModalMode::EditingValue {
+            key,
+            buffer,
+            cursor_byte,
+            validation_error,
+        };
         self.hover_row = None;
         true
     }
@@ -817,12 +608,7 @@ pub(super) fn setting_row_visible(
     minimal: bool,
     voice_mode: bool,
 ) -> bool {
-    if !voice_mode
-        && matches!(
-            meta.key,
-            "voice_keybind_enabled" | "voice_capture_mode" | "voice_stt_language"
-        )
-    {
+    if !voice_mode && matches!(meta.key, "voice_capture_mode" | "voice_stt_language") {
         return false;
     }
     if meta.key == "voice_capture_mode" && !kitty_releases {
@@ -835,7 +621,7 @@ pub(super) fn setting_row_visible(
 }
 
 fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
-    let kitty_releases = crate::app::kitty_releases_reported();
+    let kitty_releases = crate::app::kitty_flags_pushed();
     let minimal = crate::app::minimal_mode_active();
     let voice_mode = crate::app::voice_mode_enabled();
     // Keys that belong to a group sub-sheet are rendered only inside that
@@ -892,7 +678,6 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
-        "voice_keybind_enabled" => Some(Action::SetVoiceKeybindEnabled(new)),
         "remember_tool_approvals" => Some(Action::SetRememberToolApprovals(new)),
         "toolset.ask_user_question.timeout_enabled" => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
@@ -902,13 +687,11 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
-        "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
-        "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
-        "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
         "auto_update" => Some(Action::SetAutoUpdate(new)),
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
+        "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
         _ => None,
     }
 }
@@ -1074,6 +857,18 @@ pub(super) fn validate_string(
     }
 }
 
+/// Validate an Int buffer against `(min, max)` bounds.
+pub(super) fn validate_int(buffer: &str, min: i64, max: i64) -> Option<String> {
+    if buffer.is_empty() {
+        return Some("Value cannot be empty".to_string());
+    }
+    match buffer.parse::<i64>() {
+        Ok(v) if v >= min && v <= max => None,
+        Ok(v) => Some(format!("Value out of range ({min}\u{2013}{max}): {v}")),
+        Err(_) => Some(format!("Not a valid integer: \"{buffer}\"")),
+    }
+}
+
 /// Soft product cap on static Enum choices (settings unit tests enforce it).
 ///
 /// The chooser already scrolls within the viewport when the focused choice
@@ -1112,7 +907,7 @@ pub(super) fn effective_enum_choices<'a>(
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-    let kitty_releases = crate::app::kitty_releases_reported();
+    let kitty_releases = crate::app::kitty_flags_pushed();
     choices
         .iter()
         .filter(|c| {
