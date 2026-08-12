@@ -16,6 +16,7 @@ pub mod copy;
 pub mod dashboard;
 pub mod debug;
 pub mod docs;
+pub mod economic_mode;
 pub mod effort;
 pub mod effort_levels;
 pub mod exit;
@@ -81,6 +82,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(new::NewCommand),
         Arc::new(fork::ForkCommand),
         Arc::new(compact::CompactCommand),
+        Arc::new(economic_mode::EconomicModeCommand),
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),
         Arc::new(history::HistoryCommand),

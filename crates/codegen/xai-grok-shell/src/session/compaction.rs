@@ -180,8 +180,13 @@ impl SessionActor {
             return false;
         };
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
-        let threshold = self.compaction.threshold_percent.get() as u64;
-        let start_pct = threshold.saturating_sub(prefire_lead_percent());
+        // Prefire lead is percent-based; when the user pinned an absolute
+        // token threshold, derive an effective percent of the live window.
+        let threshold_pct = match self.compaction.threshold_tokens.get() {
+            Some(t) if cw > 0 => ((t.saturating_mul(100)) / cw).min(100) as u8,
+            _ => self.compaction.threshold_percent.get(),
+        };
+        let start_pct = (threshold_pct as u64).saturating_sub(prefire_lead_percent());
         xai_token_estimation::exceeds_threshold(estimated_total, cw, start_pct as u8)
     }
     /// Background pass-1: summarize the ~95% prefix → NOTE₁ and cache it for a
@@ -790,10 +795,11 @@ impl SessionActor {
                     tokens_before,
                     xai_chat_state::estimate_conversation_tokens(&full_conv),
                 );
-                if xai_token_estimation::exceeds_threshold(
+                if xai_token_estimation::exceeds_threshold_resolved(
                     projected_preserved,
                     context_window,
                     self.compaction.threshold_percent.get(),
+                    self.compaction.threshold_tokens.get(),
                 ) {
                     self.compaction
                         .prefix_released
@@ -1660,10 +1666,11 @@ impl SessionActor {
             .replace_conversation_for_compaction(compacted_history);
         if self.startup_hints.inherited_prefix_len.is_some() {
             let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
-            if xai_token_estimation::exceeds_threshold(
+            if xai_token_estimation::exceeds_threshold_resolved(
                 post_replace_tokens,
                 context_window,
                 self.compaction.threshold_percent.get(),
+                self.compaction.threshold_tokens.get(),
             ) {
                 self.compaction
                     .auto_compact_suppressed
@@ -1775,10 +1782,11 @@ impl SessionActor {
         context_window: std::num::NonZeroU64,
     ) -> Option<AutoCompactTriggerInfo> {
         let cw = context_window.get();
-        if xai_token_estimation::exceeds_threshold(
+        if xai_token_estimation::exceeds_threshold_resolved(
             total_tokens,
             cw,
             self.compaction.threshold_percent.get(),
+            self.compaction.threshold_tokens.get(),
         ) {
             let percentage = xai_token_estimation::usage_percentage_u8(total_tokens, cw);
             Some(AutoCompactTriggerInfo {

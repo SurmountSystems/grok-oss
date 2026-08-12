@@ -424,7 +424,11 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             &app.active_announcements,
             &app.tier_restricted_commands,
         );
-        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+        agent.apply_credit_balance(
+            app.credit_balance.clone(),
+            app.auto_topup.clone(),
+            app.openrouter_credit_balance,
+        );
         agent
             .prompt
             .slash_controller
@@ -460,7 +464,11 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             agent.workspace_mode = mode;
             agent.workspace_mode_cli_locked = locked;
         }
-        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+        agent.apply_credit_balance(
+            app.credit_balance.clone(),
+            app.auto_topup.clone(),
+            app.openrouter_credit_balance,
+        );
         agent.mcp_init_progress = Some(McpInitProgress {
             total: 0,
             connected: 0,
@@ -973,7 +981,11 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             agent.workspace_mode = mode;
             agent.workspace_mode_cli_locked = locked;
         }
-        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+        agent.apply_credit_balance(
+            app.credit_balance.clone(),
+            app.auto_topup.clone(),
+            app.openrouter_credit_balance,
+        );
         agent
             .prompt
             .slash_controller
@@ -1035,6 +1047,47 @@ pub(in crate::app::dispatch) fn refuse_chat_mode_build_agent(app: &mut AppView, 
             });
         }
     }
+}
+/// Dismiss the project picker and create a session in the current directory.
+pub(in crate::app::dispatch) fn skip_picker_and_create_session(
+    app: &mut AppView,
+    agent_id: AgentId,
+) -> Vec<Effect> {
+    if app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|a| a.session.session_id.is_some() || a.mcp_init_progress.is_some())
+    {
+        return vec![];
+    }
+    app.mark_project_picker_done();
+    let chat_kind = consume_chat_kind(app);
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.chat_kind = chat_kind;
+        agent.conversation_entry = chat_kind;
+        agent.apply_credit_balance(
+            app.credit_balance.clone(),
+            app.auto_topup.clone(),
+            app.openrouter_credit_balance,
+        );
+        agent.mcp_init_progress = Some(McpInitProgress {
+            total: 0,
+            connected: 0,
+            started_at: Instant::now(),
+        });
+        agent.session.prompt_history_loading = true;
+        if let Some(qv) = agent.question_view.take() {
+            agent.prompt.restore(qv.stashed_prompt);
+        }
+    }
+    let preferred_session_id = app.deferred_startup.preferred_session_id.take();
+    vec![Effect::CreateSession {
+        agent_id,
+        cwd: app.cwd.clone(),
+        model_id: None,
+        preferred_session_id,
+        chat_kind,
+    }]
 }
 pub(in crate::app::dispatch) fn handle_session_created(
     app: &mut AppView,

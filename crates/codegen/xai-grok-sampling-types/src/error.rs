@@ -7,9 +7,6 @@ use std::fmt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use xai_circuit_breaker::RetryPolicy;
-
-use crate::provider_error::{parse_provider_error, parse_provider_error_str};
 
 pub type Result<T> = std::result::Result<T, SamplingError>;
 
@@ -79,65 +76,6 @@ pub struct ResponseModelMetadata {
     pub models_etag: Option<String>,
 }
 
-/// Wire-credential provenance of a request that failed authentication.
-///
-/// A 401 for a request that went out with **no** credential header (a
-/// fail-closed send while the bearer resolver had nothing wire-valid) is
-/// not evidence against the credential itself; retry policies use this to
-/// avoid charging credential-rejection budgets for such sends.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum SentCredential {
-    /// The request carried a credential; the server rejected it.
-    Sent,
-    /// The request went out with no credential header at all.
-    Missing,
-    /// Provenance unknown (synthesized or legacy errors). Retry policies
-    /// treat this like [`SentCredential::Sent`] — fail closed toward
-    /// terminating rather than retrying forever.
-    #[default]
-    Unknown,
-}
-
-/// Hand-written so an unrecognized value from a newer peer degrades to
-/// `Unknown` instead of failing the whole containing payload
-/// (`#[serde(other)]` is not available on externally-tagged enums).
-impl<'de> Deserialize<'de> for SentCredential {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        Ok(
-            match std::borrow::Cow::<str>::deserialize(deserializer)?.as_ref() {
-                "sent" => Self::Sent,
-                "missing" => Self::Missing,
-                _ => Self::Unknown,
-            },
-        )
-    }
-}
-
-impl SentCredential {
-    /// Classify from the credential fragment captured when the request was
-    /// built (`None` = no credential header was stamped on the wire).
-    pub fn from_sent_fragment(fragment: Option<&str>) -> Self {
-        if fragment.is_some() {
-            Self::Sent
-        } else {
-            Self::Missing
-        }
-    }
-
-    pub fn is_missing(self) -> bool {
-        matches!(self, Self::Missing)
-    }
-
-    /// By reference so it can serve as a serde `skip_serializing_if`.
-    pub fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown)
-    }
-}
-
 /// Display prefix of [`SamplingError::Serialization`]. Shared with the
 /// variant's `#[error(...)]` template so [`SamplingError::serialization_from_rendered`]
 /// can never drift from what Display actually emits.
@@ -145,12 +83,8 @@ const SERIALIZATION_DISPLAY_PREFIX: &str = "serialization error: ";
 
 #[derive(Debug, Error)]
 pub enum SamplingError {
-    #[error("{message}")]
-    Auth {
-        message: String,
-        /// Whether the rejected request actually carried a credential.
-        credential: SentCredential,
-    },
+    #[error("{0}")]
+    Auth(String),
     #[error("invalid client configuration: {0}")]
     InvalidConfiguration(&'static str),
     #[error("request error: {0}")]
@@ -256,16 +190,6 @@ impl<'de> Deserialize<'de> for ApiErrorCode {
 }
 
 impl SamplingError {
-    /// Auth error of unknown wire provenance — for paths that never sent a
-    /// request (config validation, cancellation, actor teardown) or that
-    /// lost the provenance (legacy round trips).
-    pub fn auth_unknown(message: impl Into<String>) -> Self {
-        Self::Auth {
-            message: message.into(),
-            credential: SentCredential::Unknown,
-        }
-    }
-
     /// Rebuild a `Serialization` error from a rendered message for non-`Clone`
     /// contexts; it must stay `Serialization` so it remains non-retryable.
     pub fn serialization_message(msg: impl fmt::Display) -> Self {
@@ -295,7 +219,7 @@ impl SamplingError {
         // can race with invalid_grant_threshold to wipe auth.json.
         matches!(
             self,
-            SamplingError::Auth { .. }
+            SamplingError::Auth(_)
                 | SamplingError::Api {
                     status: StatusCode::UNAUTHORIZED,
                     ..
@@ -394,11 +318,13 @@ impl SamplingError {
 
     pub fn is_retryable(&self) -> bool {
         match self {
-            SamplingError::Auth { .. } => false,
+            SamplingError::Auth(_) => false,
             SamplingError::InvalidConfiguration(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
-            SamplingError::Api { status, .. } => is_retryable_api_status(*status),
+            SamplingError::Api { status, .. } => {
+                matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520)
+            }
             SamplingError::EventStreamError(_) => true,
             SamplingError::StreamError { .. } => true,
             SamplingError::IdleTimeout { .. } => false,
@@ -443,40 +369,21 @@ impl SamplingError {
         }
     }
 
-    /// Capacity / overload: HTTP 529, a 5xx whose message clearly says
-    /// overloaded (proxies wrap stream overloads in a 500), or a stream
-    /// error whose parsed `error_type` is a capacity type (`overloaded_error`
-    /// / `service_unavailable_error`). Never reachable from a 4xx or a
-    /// request-shaped stream error, whatever the message text. Transient —
-    /// worth a short, bounded retry at the call site.
-    pub fn is_overloaded(&self) -> bool {
+    /// True when the provider rejected the request because the account is out
+    /// of credits / over its spending limit (not a transient throttle).
+    ///
+    /// Used by multi-key failover: another credential with remaining balance
+    /// may still succeed. Matches 402 Payment Required and credit-flavored
+    /// 403/429 bodies (OpenRouter and xAI Build wording).
+    pub fn is_credit_exhausted(&self) -> bool {
         match self {
             SamplingError::Api {
                 status, message, ..
-            } => {
-                status.as_u16() == 529
-                    || (status.is_server_error() && message_looks_overloaded(message))
-            }
-            // `error_type` is already parsed from the stream payload — trust
-            // it alone; matching message text here would let a request-shaped
-            // error that merely mentions "overloaded" retry.
-            SamplingError::StreamError { error_type, .. } => {
-                error_type.eq_ignore_ascii_case("overloaded_error")
-                    || error_type.eq_ignore_ascii_case("service_unavailable_error")
-            }
+            } => is_credit_exhausted_status_and_message(status.as_u16(), message),
+            SamplingError::StreamError { message, .. } => is_credit_exhausted_message(message),
+            SamplingError::Auth(message) => is_credit_exhausted_message(message),
             _ => false,
         }
-    }
-
-    /// Retry vetoes shared by every retry loop — the sampler actor's
-    /// `classify_error` and one-shot callers like `/btw`. One definition so
-    /// a new veto lands everywhere at once:
-    /// - `x-should-retry: false` — the server says the failure is
-    ///   request-content-caused, not transient.
-    /// - Context-length overflow — deterministic; re-sending the same
-    ///   payload always fails.
-    pub fn is_retry_vetoed(&self) -> bool {
-        self.should_retry_header() == Some(false) || self.is_context_length_error()
     }
 }
 
@@ -666,16 +573,13 @@ fn structured_error_message(bytes: &[u8]) -> Option<String> {
 /// the raw bytes. Prefer [`user_facing_api_error_message`] when a status
 /// code is available.
 pub fn parse_error_bytes(bytes: &[u8]) -> String {
-    structured_error_message(bytes).unwrap_or_else(|| "upstream error".into())
-}
-
-/// User-facing message for a failed API call.
-///
-/// Structured JSON error envelopes keep their message. Everything else
-/// (including Cloudflare HTML) maps to a status-based string — no body
-/// content matching.
-pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String {
-    structured_error_message(bytes).unwrap_or_else(|| status_user_message(status))
+    if let Some((error_type, message)) = std::str::from_utf8(bytes).ok().and_then(try_parse_error) {
+        if error_type == "unknown" || error_type == "server_error" {
+            return message;
+        }
+        return format!("{error_type}: {message}");
+    }
+    String::from_utf8_lossy(bytes).trim().to_owned()
 }
 
 pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
@@ -702,15 +606,35 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("maximum prompt length")
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
-        || (m.contains("current message") && m.contains("exceeds budget"))
 }
 
-/// Whether an HTTP status is worth retrying: the same 429 + any 5xx rule CCP
-/// publishes in `x-should-retry`, minus Cloudflare's origin-TLS 525/526
-/// (requests reach CCP through the Cloudflare edge, which answers with its
-/// own 52x pages when the origin is unreachable).
-pub fn is_retryable_api_status(status: StatusCode) -> bool {
-    RetryPolicy::edge_client().should_retry(status.as_u16())
+/// Credit / spending-limit wording shared by xAI Build, OpenRouter, and proxies.
+pub fn is_credit_exhausted_message(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("out of credits")
+        || m.contains("run out of credits")
+        || m.contains("spending-limit")
+        || m.contains("spending limit")
+        || m.contains("usage balance exhausted")
+        || m.contains("usage limit reached")
+        || m.contains("insufficient credits")
+        || m.contains("insufficient_quota")
+        || m.contains("payment required")
+        || m.contains("credit balance is too low")
+        || m.contains("exceeded your current quota")
+        || m.contains("add credits")
+}
+
+fn is_credit_exhausted_status_and_message(status: u16, message: &str) -> bool {
+    if status == 402 {
+        return true;
+    }
+    // 403 is overloaded (policy, ZDR, credits). Only treat as credits when the
+    // body says so — never promote bare 403 into failover.
+    if matches!(status, 403 | 429 | 400) && is_credit_exhausted_message(message) {
+        return true;
+    }
+    is_credit_exhausted_message(message) && status != 401
 }
 
 /// Decide whether a [`reqwest::Error`] is worth retrying.
@@ -720,7 +644,10 @@ pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     }
 
     if err.is_status() {
-        return err.status().is_some_and(is_retryable_api_status);
+        return matches!(
+            err.status(),
+            Some(status) if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     if err.is_request() || err.is_body() {
@@ -728,13 +655,6 @@ pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     }
 
     false
-}
-
-/// Capacity-style provider text: "Overloaded" / `overloaded_error` (possibly
-/// proxy-wrapped) or `service_unavailable_error` (503-shaped capacity).
-fn message_looks_overloaded(message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    m.contains("overloaded") || m.contains("service_unavailable_error")
 }
 
 #[cfg(test)]
@@ -910,20 +830,10 @@ mod tests {
             "This model's maximum context length is 200000 tokens",
             "invalid_request_error: prompt is too long: 300000 tokens > 200000 maximum",
             "error type: context_length_exceeded",
-            "Failed to start sampling: [conversation] Current message (1000000 tokens) exceeds budget (500000 tokens)",
-            "API error (status 400 Bad Request): invalid-argument: Failed to start sampling: [conversation] Current message (1000000 tokens) exceeds budget (500000 tokens)",
-            "compact failed: API error (status 400 Bad Request): invalid-argument: Failed to start sampling: [conversation] Current message (1000000 tokens) exceeds budget (500000 tokens)",
-            "Current message (600000) exceeds budget (500000)",
         ] {
             assert!(is_context_length_error(msg), "should match: {msg}");
         }
-        for msg in [
-            "rate limited",
-            "internal server error",
-            "connection reset",
-            "Attached file content (300000 tokens) causes message to exceed budget",
-            "compact index estimate 2.0 GB exceeds budget 1.0 GB",
-        ] {
+        for msg in ["rate limited", "internal server error", "connection reset"] {
             assert!(!is_context_length_error(msg), "should not match: {msg}");
         }
         // The method delegates for the Api/StreamError variants.
@@ -944,7 +854,7 @@ mod tests {
             }
             .is_context_length_error()
         );
-        assert!(!SamplingError::auth_unknown("nope").is_context_length_error());
+        assert!(!SamplingError::Auth("nope".into()).is_context_length_error());
     }
 
     #[test]
@@ -1236,29 +1146,8 @@ mod tests {
 
     #[test]
     fn auth_variant_is_auth_error() {
-        let err = SamplingError::auth_unknown("bad key");
+        let err = SamplingError::Auth("bad key".into());
         assert!(err.is_auth_error());
-    }
-
-    /// Known values round-trip; an unrecognized value from a newer peer
-    /// degrades to `Unknown` instead of failing the containing payload.
-    #[test]
-    fn sent_credential_wire_compat() {
-        for (json, expected) in [
-            ("\"sent\"", SentCredential::Sent),
-            ("\"missing\"", SentCredential::Missing),
-            ("\"unknown\"", SentCredential::Unknown),
-            ("\"some-future-variant\"", SentCredential::Unknown),
-        ] {
-            assert_eq!(
-                serde_json::from_str::<SentCredential>(json).unwrap(),
-                expected
-            );
-        }
-        assert_eq!(
-            serde_json::to_string(&SentCredential::Missing).unwrap(),
-            "\"missing\""
-        );
     }
 
     #[test]
@@ -1275,6 +1164,63 @@ mod tests {
         assert!(err.is_retryable(), "429 should be retryable");
         assert!(!err.is_auth_error());
         assert!(!err.is_payload_too_large());
+        assert!(
+            !err.is_credit_exhausted(),
+            "plain 429 is throttle, not credits"
+        );
+    }
+
+    #[test]
+    fn credit_exhausted_detects_402_and_wording() {
+        let payment = SamplingError::Api {
+            status: StatusCode::PAYMENT_REQUIRED,
+            message: "Payment Required".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(payment.is_credit_exhausted());
+        assert!(!payment.is_auth_error());
+
+        let or_body = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "status 403: run out of credits".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(or_body.is_credit_exhausted());
+        assert!(!or_body.is_auth_error());
+
+        let build = SamplingError::Api {
+            status: StatusCode::PAYMENT_REQUIRED,
+            message: "Grok Build usage balance exhausted".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(build.is_credit_exhausted());
+
+        let plain_403 = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!plain_403.is_credit_exhausted());
+
+        let unauthorized = SamplingError::Api {
+            status: StatusCode::UNAUTHORIZED,
+            message: "out of credits".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            !unauthorized.is_credit_exhausted(),
+            "401 stays auth even if body mentions credits"
+        );
     }
 
     #[test]
@@ -1289,7 +1235,7 @@ mod tests {
         };
         assert!(!server_error.is_rate_limited());
 
-        let auth_error = SamplingError::auth_unknown("bad key");
+        let auth_error = SamplingError::Auth("bad key".into());
         assert!(!auth_error.is_rate_limited());
 
         let timeout = SamplingError::IdleTimeout { elapsed_secs: 30 };
@@ -1355,7 +1301,7 @@ mod tests {
 
     #[test]
     fn retry_after_returns_none_for_non_api_errors() {
-        assert_eq!(SamplingError::auth_unknown("x").retry_after(), None);
+        assert_eq!(SamplingError::Auth("x".into()).retry_after(), None);
         assert_eq!(
             SamplingError::IdleTimeout { elapsed_secs: 10 }.retry_after(),
             None

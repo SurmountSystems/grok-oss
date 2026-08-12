@@ -227,23 +227,6 @@ pub enum SettingValue {
     Int(i64),
 }
 
-/// Why `coding_data_sharing` cannot be changed in the settings modal.
-/// Computed by `AppView::coding_data_sharing_lock`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodingDataSharingLock {
-    Zdr,
-    TeamManaged,
-}
-
-impl CodingDataSharingLock {
-    pub fn reason(self) -> &'static str {
-        match self {
-            Self::Zdr => "Your team has Zero Data Retention.",
-            Self::TeamManaged => "Managed by your team admin.",
-        }
-    }
-}
-
 /// Snapshot of pager-local state captured when the modal opens.
 /// Used by `current_value_for` to render against LIVE state rather
 /// than the on-disk `UiConfig`. Refreshed by
@@ -267,11 +250,8 @@ pub struct PagerLocalSnapshot {
     pub available_models: Vec<(String, acp::ModelId)>,
     /// Whether the user has opted OUT of coding data sharing.
     /// Lives in auth metadata (no `UiConfig` field). Inverted mapping:
-    /// `opt_out == false` → canonical "opt-in". Snapshot default is
-    /// `true` (opted out) to match the safer consumer default.
+    /// `opt_out == false` → canonical "opt-in".
     pub coding_data_sharing_opt_out: bool,
-    /// Why `coding_data_sharing` cannot be changed here (`None` = editable).
-    pub coding_data_sharing_lock: Option<CodingDataSharingLock>,
     /// Whether plan mode is active. Uses effective state
     /// (`pending.unwrap_or(active)`) so rapid toggles don't double-send.
     /// Refreshed on all mutation paths including ACP `CurrentModeUpdate`.
@@ -280,6 +260,12 @@ pub struct PagerLocalSnapshot {
     pub show_tips: Option<bool>,
     /// `[cli].auto_update` mirror. `None` = no TOML override → default `true`.
     pub auto_update: Option<bool>,
+    /// `[session].auto_compact_threshold_percent` mirror.
+    /// `None` = no TOML override → default 95 (unless tokens are set).
+    pub auto_compact_threshold_percent: Option<u8>,
+    /// `[session].auto_compact_threshold_tokens` mirror.
+    /// When `Some`, absolute-token mode wins over percent for the session tier.
+    pub auto_compact_threshold_tokens: Option<u64>,
     /// Process-wide vim-mode scrollback flag. Mirrors
     /// `appearance::cache::load_vim_mode()` at snapshot time.
     pub vim_mode: bool,
@@ -300,11 +286,6 @@ pub struct PagerLocalSnapshot {
     /// language actually in effect when `[ui].voice_stt_language` is unset but
     /// an explicit `[voice].language` applies.
     pub voice_stt_language: String,
-    /// Mirrors `AgentView::scheduler_background_loops` — the value the shell
-    /// pinned for THIS session — falling back to
-    /// `AppView::scheduler_background_loops_seed` before the session response
-    /// lands. `/loop` reads it to describe where a scheduled fire runs.
-    pub scheduler_background_loops: bool,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -315,11 +296,12 @@ impl Default for PagerLocalSnapshot {
             auto_mode: false,
             current_model_name: None,
             available_models: Vec::new(),
-            coding_data_sharing_opt_out: true,
-            coding_data_sharing_lock: None,
+            coding_data_sharing_opt_out: false,
             plan_mode_active: false,
             show_tips: None,
             auto_update: None,
+            auto_compact_threshold_percent: None,
+            auto_compact_threshold_tokens: None,
             vim_mode: false,
             // Matches the registry default and
             // `appearance::cache::SCROLL_SPEED_DEFAULT`. Bare `u8::default()`
@@ -329,8 +311,6 @@ impl Default for PagerLocalSnapshot {
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
-            // Matches `resolve_scheduler_background_loops`'s default.
-            scheduler_background_loops: true,
         }
     }
 }
@@ -344,6 +324,111 @@ pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
     } else {
         "hold"
     }
+}
+
+/// Parsed auto-compact modal choice: percent of window or absolute tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoCompactThresholdChoice {
+    Percent(u8),
+    Tokens(u64),
+}
+
+impl AutoCompactThresholdChoice {
+    /// Registry / toast canonical string.
+    pub fn as_canonical(self) -> &'static str {
+        match self {
+            Self::Percent(p) => canonical_auto_compact_threshold_percent(p),
+            Self::Tokens(t) => canonical_auto_compact_threshold_tokens(t),
+        }
+    }
+}
+
+/// Map a numeric percent onto a modal enum canonical (`"85"`…`"98"`).
+///
+/// Exact matches pass through; any other value snaps to the nearest percent
+/// choice so the picker always has a selected row.
+pub fn canonical_auto_compact_threshold_percent(percent: u8) -> &'static str {
+    match percent {
+        85 => "85",
+        90 => "90",
+        95 => "95",
+        98 => "98",
+        other => {
+            const CHOICES: &[(u8, &str)] = &[(85, "85"), (90, "90"), (95, "95"), (98, "98")];
+            CHOICES
+                .iter()
+                .min_by_key(|(c, _)| c.abs_diff(other))
+                .map(|(_, s)| *s)
+                .unwrap_or("95")
+        }
+    }
+}
+
+/// Map an absolute token count onto a modal enum canonical (`"200k"` / `"475k"`).
+///
+/// Exact Grok 4.5 card presets pass through; other values snap to the nearest
+/// token preset so the picker has a selected row.
+pub fn canonical_auto_compact_threshold_tokens(tokens: u64) -> &'static str {
+    use xai_grok_shell::util::config::{
+        GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
+    };
+    match tokens {
+        t if t == GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS => "200k",
+        t if t == GROK_45_DEFAULT_AUTO_COMPACT_TOKENS => "475k",
+        other => {
+            const CHOICES: &[(u64, &str)] = &[
+                (GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS, "200k"),
+                (GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, "475k"),
+            ];
+            CHOICES
+                .iter()
+                .min_by_key(|(c, _)| c.abs_diff(other))
+                .map(|(_, s)| *s)
+                .unwrap_or("200k")
+        }
+    }
+}
+
+/// Resolve the live modal canonical from session percent and/or tokens mirrors.
+///
+/// Token mode wins when `tokens` is `Some` (matches shell resolver session tier).
+pub fn canonical_auto_compact_threshold(percent: Option<u8>, tokens: Option<u64>) -> &'static str {
+    if let Some(t) = tokens.filter(|&t| t > 0) {
+        return canonical_auto_compact_threshold_tokens(t);
+    }
+    let pct =
+        percent.unwrap_or(xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
+    canonical_auto_compact_threshold_percent(pct)
+}
+
+/// Parse a modal enum canonical into percent or absolute tokens.
+///
+/// Accepts `"85"`…`"98"` (percent) and `"200k"` / `"475k"` (Grok 4.5 card).
+pub fn parse_auto_compact_threshold_canonical(
+    canonical: &str,
+) -> Option<AutoCompactThresholdChoice> {
+    use xai_grok_shell::util::config::{
+        GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
+    };
+    let s = canonical.trim();
+    match s {
+        "200k" | "200K" => Some(AutoCompactThresholdChoice::Tokens(
+            GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
+        )),
+        "475k" | "475K" => Some(AutoCompactThresholdChoice::Tokens(
+            GROK_45_DEFAULT_AUTO_COMPACT_TOKENS,
+        )),
+        other => {
+            let n: u8 = other.parse().ok()?;
+            matches!(n, 85 | 90 | 95 | 98).then_some(AutoCompactThresholdChoice::Percent(n))
+        }
+    }
+}
+
+/// Backward-compatible alias: percent-only canonicalize (nearest of 85/90/95/98).
+#[inline]
+pub fn canonical_auto_compact_threshold_from_percent(percent: u8) -> &'static str {
+    canonical_auto_compact_threshold_percent(percent)
 }
 
 /// Canonicalize a raw voice STT language to a settings choice.
@@ -513,15 +598,6 @@ pub fn current_value_for(
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
-        // Cache is the send-path source of truth (same pattern as group_tool_verbs).
-        "page_flip_on_send" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_page_flip_on_send(),
-        )),
-        // Cache is the drain-path source of truth (same pattern as page_flip_on_send).
-        "combine_queued_prompts" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_combine_queued_prompts(),
-        )),
-        "confirm_before_rewind" => Some(SettingValue::Bool(ui.confirm_before_rewind_enabled())),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints — `None` (inherit) reads as the default ON.
         "contextual_hints.undo" => {
@@ -593,6 +669,9 @@ pub fn current_value_for(
         "auto_run_implement" => Some(SettingValue::Bool(
             crate::appearance::cache::load_auto_run_implement(),
         )),
+        "economic_mode" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_economic_mode(),
+        )),
         "respect_manual_folds" => Some(SettingValue::Bool(pager.respect_manual_folds)),
         // SHELL — canonicalized from `[ui].hunk_tracker_mode`.
         "hunk_tracker_mode" => Some(SettingValue::Enum(canonical_hunk_tracker_mode(
@@ -601,10 +680,6 @@ pub fn current_value_for(
         "screen_mode" => Some(SettingValue::Enum(canonical_screen_mode(
             ui.screen_mode.as_deref(),
         ))),
-        // SHELL — whether the Ctrl+Space / F8 chord is active; None → true.
-        "voice_keybind_enabled" => {
-            Some(SettingValue::Bool(ui.voice_keybind_enabled.unwrap_or(true)))
-        }
         // SHELL — canonicalized from `[ui].voice_capture_mode`; None → "hold".
         "voice_capture_mode" => Some(SettingValue::Enum(canonical_voice_capture_mode(
             ui.voice_capture_mode.as_deref(),
@@ -704,31 +779,25 @@ pub fn current_value_for(
         // CLI batch: snapshot mirrors; `None` → effective default `true`.
         "show_tips" => Some(SettingValue::Bool(pager.show_tips.unwrap_or(true))),
         "auto_update" => Some(SettingValue::Bool(pager.auto_update.unwrap_or(true))),
-        // fork_secondary_model: baseline value folds to empty string. The
-        // mirror persists the ModelId slug but the DynamicEnum canonicals
-        // are catalog display names, so resolve via the snapshot; a stale
-        // id passes through raw.
+        // Session auto-compact: token mode wins; else percent (default 95).
+        "auto_compact_threshold_percent" => {
+            Some(SettingValue::Enum(canonical_auto_compact_threshold(
+                pager.auto_compact_threshold_percent,
+                pager.auto_compact_threshold_tokens,
+            )))
+        }
+        // fork_secondary_model: baseline value folds to empty string.
         "fork_secondary_model" => Some(SettingValue::String({
             let baseline = xai_grok_shell::models::default_model();
             if ui.fork_secondary_model == baseline {
                 String::new()
             } else {
-                pager
-                    .available_models
-                    .iter()
-                    .find(|(_, id)| id.0.as_ref() == ui.fork_secondary_model.as_str())
-                    .map(|(name, _)| name.clone())
-                    .unwrap_or_else(|| ui.fork_secondary_model.clone())
+                ui.fork_secondary_model.clone()
             }
         })),
 
         _ => None,
     }
-}
-
-/// Consent chooser: no docs tip, and no `d` reset (hint or key).
-pub fn is_consent_chooser(key: &str) -> bool {
-    key == "coding_data_sharing"
 }
 
 /// Default value for `key`, derived from the registry metadata.
@@ -841,27 +910,6 @@ mod tests {
                         "show_timeline default drifts from UiConfig::default()"
                     );
                 }
-                ("page_flip_on_send", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.page_flip_on_send_enabled(),
-                        "page_flip_on_send default drifts from UiConfig::default()"
-                    );
-                }
-                ("confirm_before_rewind", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.confirm_before_rewind_enabled(),
-                        "confirm_before_rewind default drifts from UiConfig::default()"
-                    );
-                }
-                ("combine_queued_prompts", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.combine_queued_prompts.unwrap_or(false),
-                        "combine_queued_prompts default drifts from UiConfig::default()"
-                    );
-                }
                 ("simple_mode", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
@@ -947,15 +995,14 @@ mod tests {
                     );
                 }
                 // coding_data_sharing: no UiConfig field; default pinned
-                // against auth metadata (opt_out=true → "opt-out").
+                // against auth metadata (opt_out=false → "opt-in").
                 ("coding_data_sharing", SettingKind::Enum { default, .. }) => {
-                    let expected = "opt-out";
+                    let expected = "opt-in";
                     assert_eq!(
                         *default, expected,
-                        "coding_data_sharing registry default must be 'opt-out' — \
+                        "coding_data_sharing registry default must be 'opt-in' — \
                          the on-disk source of truth is `AuthEntry::coding_data_retention_opt_out: \
-                         bool` (defaults to `true`, i.e. user has opted out until they \
-                         explicitly share or the server opts them in)",
+                         bool` (defaults to `false`, i.e. user has NOT opted out)",
                     );
                 }
                 // CLI batch: fields live on CliConfig, not UiConfig.
@@ -968,6 +1015,20 @@ mod tests {
                         *default,
                         "auto_update registry default must be true \
                          (matches auto_update.rs's `.unwrap_or(true)`)"
+                    );
+                }
+                // Session auto-compact: no UiConfig field; default pinned to
+                // the shell/compaction crate constant (95).
+                ("auto_compact_threshold_percent", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL,
+                        "auto_compact_threshold_percent registry default must be \"95\""
+                    );
+                    assert_eq!(
+                        xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+                        95,
+                        "shell DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT drifted from 95"
                     );
                 }
                 // vim_mode: Option<bool>; None → false.
@@ -1039,6 +1100,15 @@ mod tests {
                     );
                     assert!(*default, "auto_run_implement must default ON");
                 }
+                // economic_mode: Option<bool>; None → true (client default).
+                ("economic_mode", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.economic_mode.unwrap_or(true),
+                        "economic_mode default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "economic_mode must default ON");
+                }
                 ("keep_text_selection", SettingKind::Enum { default, .. }) => {
                     let expected = if ui.keep_text_selection_enabled() {
                         "hold"
@@ -1046,14 +1116,6 @@ mod tests {
                         "flash"
                     };
                     assert_eq!(*default, expected);
-                }
-                // voice_keybind_enabled: Option<bool>; None → true.
-                ("voice_keybind_enabled", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.voice_keybind_enabled.unwrap_or(true),
-                        "voice_keybind_enabled default drifts from UiConfig::default()",
-                    );
                 }
                 // voice_capture_mode: Option<String>; None → "hold".
                 ("voice_capture_mode", SettingKind::Enum { default, .. }) => {
@@ -1318,6 +1380,79 @@ mod tests {
         assert_eq!(canonical_voice_capture_mode(None), "hold");
     }
 
+    #[test]
+    fn canonical_auto_compact_threshold_exact_and_nearest() {
+        assert_eq!(canonical_auto_compact_threshold_percent(85), "85");
+        assert_eq!(canonical_auto_compact_threshold_percent(90), "90");
+        assert_eq!(canonical_auto_compact_threshold_percent(95), "95");
+        assert_eq!(canonical_auto_compact_threshold_percent(98), "98");
+        // Midpoints / off-catalog snap to nearest discrete choice.
+        assert_eq!(canonical_auto_compact_threshold_percent(87), "85");
+        assert_eq!(canonical_auto_compact_threshold_percent(88), "90");
+        assert_eq!(canonical_auto_compact_threshold_percent(93), "95");
+        assert_eq!(canonical_auto_compact_threshold_percent(100), "98");
+        assert_eq!(canonical_auto_compact_threshold_percent(0), "85");
+        assert_eq!(
+            parse_auto_compact_threshold_canonical("98"),
+            Some(AutoCompactThresholdChoice::Percent(98))
+        );
+        assert_eq!(
+            parse_auto_compact_threshold_canonical("200k"),
+            Some(AutoCompactThresholdChoice::Tokens(200_000))
+        );
+        assert_eq!(
+            parse_auto_compact_threshold_canonical("475k"),
+            Some(AutoCompactThresholdChoice::Tokens(475_000))
+        );
+        assert_eq!(canonical_auto_compact_threshold_tokens(200_000), "200k");
+        assert_eq!(canonical_auto_compact_threshold_tokens(475_000), "475k");
+        assert_eq!(parse_auto_compact_threshold_canonical("91"), None);
+        assert_eq!(parse_auto_compact_threshold_canonical("bogus"), None);
+    }
+
+    /// Product contract: unset mirrors resolve to the 95% default choice.
+    #[test]
+    fn auto_compact_threshold_current_value_defaults_to_95() {
+        let pager = PagerLocalSnapshot::default();
+        let ui = UiConfig::default();
+        assert_eq!(
+            current_value_for("auto_compact_threshold_percent", &ui, &pager),
+            Some(SettingValue::Enum("95")),
+        );
+        assert_eq!(
+            canonical_auto_compact_threshold(None, None),
+            "95",
+            "default auto-compact preference must be 95%"
+        );
+        let pager = PagerLocalSnapshot {
+            auto_compact_threshold_percent: Some(98),
+            ..Default::default()
+        };
+        assert_eq!(
+            current_value_for("auto_compact_threshold_percent", &ui, &pager),
+            Some(SettingValue::Enum("98")),
+        );
+        // Token mode wins over percent when both are set.
+        let pager = PagerLocalSnapshot {
+            auto_compact_threshold_percent: Some(98),
+            auto_compact_threshold_tokens: Some(200_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            current_value_for("auto_compact_threshold_percent", &ui, &pager),
+            Some(SettingValue::Enum("200k")),
+        );
+        // Off-catalog numeric still snaps for the picker row.
+        let pager = PagerLocalSnapshot {
+            auto_compact_threshold_percent: Some(70),
+            ..Default::default()
+        };
+        assert_eq!(
+            current_value_for("auto_compact_threshold_percent", &ui, &pager),
+            Some(SettingValue::Enum("85")),
+        );
+    }
+
     /// With the UI key unset, `current_value_for` shows the live language
     /// (snapshot mirror of `voice_config.language` — e.g. an explicit
     /// `[voice].language`); a set UI key wins.
@@ -1478,51 +1613,6 @@ mod tests {
         let pager = PagerLocalSnapshot::default();
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
         assert_eq!(value, SettingValue::Enum("groknight"));
-    }
-
-    /// The persisted `fork_secondary_model` slug resolves to the catalog
-    /// display name (matching the `default_model` row and the DynamicEnum
-    /// picker canonicals); the baseline still folds to the empty sentinel
-    /// and a slug missing from the catalog passes through raw.
-    #[test]
-    fn fork_secondary_model_current_value_resolves_display_name() {
-        let slug = "grok-4.5-fast";
-        assert_ne!(
-            slug,
-            xai_grok_shell::models::default_model(),
-            "test slug must differ from the baseline or the empty-fold arm masks the lookup",
-        );
-        let pager = PagerLocalSnapshot {
-            available_models: vec![(
-                "Grok 4.5 Fast".to_string(),
-                acp::ModelId::new(std::sync::Arc::from(slug)),
-            )],
-            ..Default::default()
-        };
-        let ui = UiConfig {
-            fork_secondary_model: slug.to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            current_value_for("fork_secondary_model", &ui, &pager),
-            Some(SettingValue::String("Grok 4.5 Fast".to_string())),
-        );
-
-        // Baseline folds to the empty "no override" sentinel.
-        assert_eq!(
-            current_value_for("fork_secondary_model", &UiConfig::default(), &pager),
-            Some(SettingValue::String(String::new())),
-        );
-
-        // Stale slug (not in the catalog) passes through unresolved.
-        let stale_ui = UiConfig {
-            fork_secondary_model: "retired-model".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            current_value_for("fork_secondary_model", &stale_ui, &pager),
-            Some(SettingValue::String("retired-model".to_string())),
-        );
     }
 
     /// Keywords must be lowercase and non-empty.
