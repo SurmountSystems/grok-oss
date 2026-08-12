@@ -18,14 +18,82 @@ apply (`~/.grok/AGENTS.md`).
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
    replies, product docs, tests, or **filenames**.
+5. **Never ask permission to continue clear work.** If the goal is known
+   (finish the onto stack, resolve conflicts, keep going), **do the next step**
+   — do not end with “say the word,” “want me to continue?,” or similar. Ask
+   only when intent is genuinely ambiguous or an irreversible external action
+   needs confirmation (push/PR when not already requested). A dirty mid-pick
+   tree is unfinished work, not a pause for ceremony.
 
-## Regressions and deep diagnosis
+## Subagents — parent is HITL UX only (hard)
 
-- Do **not** investigate regressions or multi-file diagnosis in the parent
-  thread (no parent-marathon of greps, logs, or long code walks). Spawn tightly
-  scoped subagents; join on short on-disk summaries only.
-- Full rule: `~/.grok/AGENTS.md` § *Regressions and deep diagnosis — never in
-  the parent thread*.
+Pinned after repeated parent marathons on CI / onto / conflict work.
+
+The **main/parent thread is HITL UX only**: goals, spawn/wait, join **short
+on-disk notes** children wrote, hand human signed git commands, brief user
+status. **Research and implementation never run in the parent** — not even
+“just a quick look.” Full rule: `~/.grok/AGENTS.md` § *Regressions…* + § *Hard
+stop — parent is coordinator only*.
+
+- **CI fail, regression, multi-file diagnosis, non-trivial fix, skills-location
+  claims:** first tool turn is `spawn_subagent` — not parent `grep` / `gh` log
+  pull / test file reads / “I’ll check the docs.”
+- Parent may: goals, spawn/wait, read **short on-disk join notes**, hand signed
+  git commands, brief user status.
+- Parent must **not**: pull CI logs, open failing tests, re-run nextest, edit
+  product code, re-do the child’s greps “to be sure,” or research/implement in
+  the main thread.
+
+## Never assume without checking
+
+**There are lies, damned lies, and then there is documentation.** Docs in this
+repo (including this file, FORK, research notes) can be wrong or stale. Do
+**not** claim skills location, CI root cause, conflict intent, or recon
+survival from prose alone.
+
+- First tool turn for multi-file / CI / regression / “where do skills live?” is
+  **spawn_subagent** (explore or general-purpose as fits).
+- Verify against **code and load paths** (and live trees) before asserting.
+- Join on short on-disk notes; do not re-prove the child in the parent.
+
+## Skills (multi-source)
+
+Skills are **not** “off this branch only.”
+
+| Layer | Who owns it |
+|-------|-------------|
+| Discovery, load order, project skill roots (`.agents/skills`, `.grok/skills`), bundle install/sync, user-guide | **Product on this branch** |
+| Operator skill **bodies** (`implement`, `pr-babysit`, …) under `~/.agents/skills` | **Host** overlay (wins at User tier) |
+| Platform pack cache under `~/.grok/bundled/skills` | **Network** bundle (product writes the cache) |
+
+**Wrong:** “skills don’t live in this repo.”  
+**Right:** machinery + project roots + docs on the branch; skill *bodies* often
+host or server-bundle. Process that must survive recon: pin on **branch**
+(`AGENTS`, `FORK`, `docs/upstream-*`) **and** host when both apply. Detail:
+`doc/dev/research/where-skills-come-from-2026-07-24.md`, user-guide
+`08-skills.md`.
+
+## Survive recon (process pins on the branch)
+
+Chat is **not** enough. Import restores only `FORK_PATHS`; put-history
+cherry-picks product; join (`-s ours`) keeps the onto tip tree and does **not**
+fold missing files from `main`. Pins that must stay on the branch:
+
+- This file (`AGENTS.md`), [`FORK.md`](FORK.md), [`RESIDUAL.md`](RESIDUAL.md)
+- [`docs/upstream-history.md`](docs/upstream-history.md) and sibling upstream logs
+- Upstream scripts (`put-history`, import, join, hermetic PATH, assert pins, …)
+
+After import/onto land, **assert** those files still exist — do not trust
+memory:
+
+```bash
+./scripts/assert-process-pins.sh          # worktree
+./scripts/assert-process-pins.sh HEAD     # or a tip tree-ish
+just upstream-assert-process-pins
+```
+
+Import runs the assert after `FORK_PATHS` restore. See FORK § *What recon keeps*
+and upstream-history import checklist.
 
 ## When you ship product work
 
@@ -56,11 +124,83 @@ apply (`~/.grok/AGENTS.md`).
 - This fork exists because upstream does not accept external PRs. If that
   changes, open a PR to contribute.
 
+### Onto / put-history — recovery after compaction
+
+Living truth: **`docs/upstream-history.md`** § *HITL runbook* + § *Live stack*,
+and **`docs/upstream-onto-log.md`**.
+
+**Frozen mid-work (2026-07-24 — re-read Live stack first):**
+
+| Item | Value |
+|------|--------|
+| Branch | `onto-xai/6e386420825b` |
+| Product tip | `56d1fc2` #13 (stack complete) |
+| Join | staged (`MERGE_HEAD` = `origin/main` `8b933eb`); tree `2cbad23…` |
+| Human next | signed join commit → `just check` → push → PR → close #11+#14 |
+| Issues | close #11 + #14 when PR lands (tips superseded by `6e38642`) |
+
+**Do not invent** `MODE=overlay` / commit-tree modes — cherry-pick only.
+**Do not** `cherry-pick --abort` or `FORCE=1` rebuild while this stack is
+healthy mid-pick.
+
+**Conflict discipline:** tip APIs → keep HEAD; Grok OSS seams → re-apply
+product; union import/feature lists; never blind `--ours`/`--theirs` on the
+whole unmerged set; never strip markers without reading both sides; never
+fix tests to the wrong intent when ambiguous. Mega picks (#4 done, #12 next)
+are the same rule at larger scale.
+
+**Subagents (mandatory for multi-file conflict work — do not forget):**
+
+Conflict resolve and mega-pick diagnosis are **child work**, not a parent
+marathon of greps/reads across shell/pager/sampler. Parent coordinates only.
+
+| Do | Do not |
+|----|--------|
+| Spawn **tightly scoped** agents on **disjoint** path sets (e.g. shell session vs pager UI vs sampler) | Parent solo all 18 UU files |
+| Prefer `general-purpose` for actual resolve+stage; `explore` only to map | Fan out one agent per file “just because” (waste) |
+| Cap concurrency ~2–3 when scopes are clean and independent | Spin a large parallel swarm with overlapping files |
+| Join on short on-disk notes or a staged `git status` check | Re-run the child’s full reads in the parent “to be sure” |
+| Pass conflict rules + product seams in the prompt (self-contained) | Dump whole parent chat / invent nested subagents |
+
+Global token strategy still applies (`~/.grok/AGENTS.md` § subagents). Plain
+language: use subagents strategically; never wasteful mass spawn.
+
+**Human-only:** every `git cherry-pick --continue` and join merge is
+`git commit -S` on a real TTY. Agents stage and hand commands only.
+
+**Scripts:** `put-history-on-xai.sh` is on the branch after early product
+picks. `join-main-into-onto.sh` may still be missing until later — take from
+`origin/main` if needed. Early bare-tip recovery (temp `/tmp` script + `ROOT`
+patch) is in the HITL runbook if ever required again.
+
 ## Residual
 
 - [`RESIDUAL.md`](RESIDUAL.md) holds **open** human-intent or unfinished honesty
   items only. When something is finished, move the lasting truth into FORK or
   the right process doc — do not leave it only in residual.
+
+## Operator orchestration (task levels + worktrees)
+
+Campaign notes:
+[`doc/dev/campaigns/operator-orchestration-2026-07.md`](doc/dev/campaigns/operator-orchestration-2026-07.md)
+(join detail:
+[`doc/dev/research/task-worktree-pins-2026-07-24.md`](doc/dev/research/task-worktree-pins-2026-07-24.md)).
+
+| Layer | Where |
+|-------|--------|
+| Durable residual | `RESIDUAL.md` / campaign docs (L0) |
+| Session todos | Namespaced only: `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` — never wipe foreign prefixes. Product `todo_write` keeps unmentioned protected prefixes on `merge: false`; optional `priority` + `meta` (`kind` residual\|phase\|work\|child, `parentId`, `namespace`). Prefer `meta.kind`. Join: `doc/dev/research/todo-levels-product-2026-07-24.md` |
+| Child joins | Short on-disk notes (L2) |
+
+**Prefer no worktrees** for subagents unless isolation is required. Product
+default: `[subagents] allow_worktree = false` (empty config force-none; set
+`true` to opt in). When false, spawn forces `isolation = none`. Host skills
+(`/implement`, `/plan`, `/execute-plan`) prefer shared workspace by default.
+`/execute-plan` auto-adapts: default `isolation_mode=shared-cwd` (serial or
+disjoint writers; on-disk review files; no worktree handoff paths). Worktree
+only when allowed and needed; if spawn forces none or create fails, fall back.
+Join: `doc/dev/research/execute-plan-no-worktree-2026-07-24.md`,
+`doc/dev/research/task-worktree-pins-2026-07-24.md`.
 
 ## Naming
 

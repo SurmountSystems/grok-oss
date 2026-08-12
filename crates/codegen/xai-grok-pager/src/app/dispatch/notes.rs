@@ -1,4 +1,4 @@
-//! Feedback, remember-note, btw, and recap dispatchers.
+//! Feedback, remember-note, session-note, btw, and recap dispatchers.
 
 use super::ctx::with_active_agent;
 use crate::app::actions::Effect;
@@ -416,6 +416,78 @@ pub(crate) fn scrollback_has_user_messages(
     scrollback
         .iter_entries()
         .any(|(_, entry)| entry.block.is_user_prompt())
+}
+
+/// Store an operator mid-session note. Does **not** enqueue a user turn or
+/// touch `pending_prompts` / the shared queue.
+///
+/// Toast confirmation in full TUI; system line in minimal (same surface as
+/// `/queue` / `/tasks` list feedback).
+pub(super) fn dispatch_add_session_note(
+    app: &mut AppView,
+    text: String,
+    tags: Vec<String>,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    agent.prompt.set_text("");
+    agent.ephemeral_tip.clear_on_submit();
+
+    let Some(note) = agent.session.session_notes.add(text, tags) else {
+        agent.show_toast("Note text required — try /note <text>");
+        return vec![];
+    };
+    let note_text = note.text.clone();
+    let note_tags = note.tags.clone();
+    let n = agent.session.session_notes.len();
+    let preview: String = note_text
+        .chars()
+        .take(48)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let ellipsis = if note_text.chars().count() > 48 {
+        "…"
+    } else {
+        ""
+    };
+    let tag_suffix = if note_tags.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " [{}]",
+            note_tags
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    let msg = format!("Note saved ({n}): {preview}{ellipsis}{tag_suffix}");
+    // Minimal has no toast strip — commit a short system line so the save is
+    // visible. Full TUI prefers toast so we do not spam scrollback.
+    if app.screen_mode.is_minimal() {
+        agent.scrollback.push_block(RenderBlock::system(msg));
+    } else {
+        agent.show_toast(&msg);
+    }
+    vec![]
+}
+
+/// `/note` (no args) / `/notes` — list session notes as a system block.
+pub(super) fn dispatch_show_notes(app: &mut AppView) -> Vec<Effect> {
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.prompt.set_text("");
+        let text = crate::app::status_blocks::notes_block_text(agent);
+        agent.scrollback.push_block(RenderBlock::system(text));
+    }
+    vec![]
 }
 
 /// Request a session recap. Bypasses the prompt queue — works even while the

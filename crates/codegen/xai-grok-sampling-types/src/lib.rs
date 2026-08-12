@@ -29,6 +29,10 @@ pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,
     WebSearchOptions, XSearchOptions,
 };
+pub use self::tool_overrides::{
+    ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,
+    WebSearchOptions, XSearchOptions,
+};
 pub use self::types::*;
 
 // Re-export async-openai crate Responses API types under `rs` namespace

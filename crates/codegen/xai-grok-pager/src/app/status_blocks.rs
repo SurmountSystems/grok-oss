@@ -1,4 +1,4 @@
-//! Read-only system-block text for `/queue`, `/tasks`, and `/usage`.
+//! Read-only system-block text for `/queue`, `/tasks`, `/note`, and `/usage`.
 //!
 //! Plain text committed into scrollback — the primary inspection surface in
 //! minimal mode (no interactive panes). Kept out of `dispatch` for easy
@@ -43,7 +43,7 @@ pub(crate) fn queue_block_text(agent: &AgentView) -> String {
     }
 }
 
-///
+/// `/tasks` body — read-only inventory mirroring
 /// [`crate::views::tasks_pane::TasksPane`] without its styled rows.
 pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     let mut rows: Vec<String> = Vec::new();
@@ -165,6 +165,16 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         ));
     }
 
+    // ── Operator notes (not pending prompts) ──
+    let notes = agent.session.session_notes.list();
+    if !notes.is_empty() {
+        rows.push(format!(
+            "  notes    {} operator note{}  (see /note)",
+            notes.len(),
+            if notes.len() == 1 { "" } else { "s" }
+        ));
+    }
+
     if rows.is_empty() {
         "No background tasks, workflows, or subagents.".to_string()
     } else {
@@ -175,6 +185,48 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         );
         join_header_rows(header, rows)
     }
+}
+
+/// `/note` (list) body — operator mid-session notes (not pending prompts).
+pub(crate) fn notes_block_text(agent: &AgentView) -> String {
+    let notes = agent.session.session_notes.list();
+    if notes.is_empty() {
+        return "No session notes. Add one with /note <text>.".to_string();
+    }
+    let header = format!(
+        "Session note{} ({}):",
+        if notes.len() == 1 { "" } else { "s" },
+        notes.len()
+    );
+    let rows: Vec<String> = notes
+        .iter()
+        .map(|n| {
+            let first = first_nonempty_line(&n.text);
+            let extra = n.text.lines().count().saturating_sub(1);
+            let tag_suffix = if n.tags.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  {}",
+                    n.tags
+                        .iter()
+                        .map(|t| format!("#{t}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            };
+            if extra > 0 {
+                format!(
+                    "  #{}  {first}  (+{extra} more line{}){tag_suffix}",
+                    n.id + 1,
+                    if extra == 1 { "" } else { "s" },
+                )
+            } else {
+                format!("  #{}  {first}{tag_suffix}", n.id + 1)
+            }
+        })
+        .collect();
+    join_header_rows(header, rows)
 }
 
 /// `/usage` body — per-session token and cost totals, scoped to the ledger's
@@ -407,5 +459,43 @@ mod tests {
             format_queue_row(3, "first\nsecond\nthird"),
             "  #3  first  (+2 more lines)"
         );
+    }
+
+    #[test]
+    fn notes_block_empty() {
+        let agent = crate::test_util::make_agent_view(Some("s1"), "/tmp");
+        assert_eq!(
+            notes_block_text(&agent),
+            "No session notes. Add one with /note <text>."
+        );
+    }
+
+    #[test]
+    fn notes_block_lists_with_tags() {
+        let mut agent = crate::test_util::make_agent_view(Some("s1"), "/tmp");
+        agent
+            .session
+            .session_notes
+            .add("hold the queue", vec!["queue".into()])
+            .unwrap();
+        agent
+            .session
+            .session_notes
+            .add("line1\nline2", vec![])
+            .unwrap();
+        let text = notes_block_text(&agent);
+        assert!(text.contains("Session notes (2):"), "{text}");
+        assert!(text.contains("#1  hold the queue  #queue"), "{text}");
+        assert!(text.contains("#2  line1  (+1 more line)"), "{text}");
+    }
+
+    #[test]
+    fn tasks_block_mentions_notes_count() {
+        let mut agent = crate::test_util::make_agent_view(Some("s1"), "/tmp");
+        agent.session.session_notes.add("alone", vec![]).unwrap();
+        let text = tasks_block_text(&agent);
+        assert!(text.contains("notes"), "{text}");
+        assert!(text.contains("1 operator note"), "{text}");
+        assert!(text.contains("/note"), "{text}");
     }
 }

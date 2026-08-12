@@ -55,7 +55,7 @@ Show how the context window is being used: a category breakdown (system prompt, 
 
 ### `/session-info`
 
-Show session details — model, turn count, and context usage. Aliases: `/status`, `/info`.
+Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`.
 
 ### `/fork`
 
@@ -86,7 +86,7 @@ Copy the most recent response to the clipboard. Pass a number to copy the Nth-la
 /copy 2 ~/exports/last-reply.md
 ```
 
-Every copy is also written to a backup file — `~/.grok/last-copy.txt` by default, or `GROK_COPY_FILE` if set — and the toast tells you exactly where the text landed, so you can retrieve it even when the clipboard couldn't be reached or the copy went out as an OSC 52 escape this terminal couldn't confirm.
+Every copy is also written to a backup file — `~/.grok/last-copy.txt` by default, or `GROK_COPY_FILE` if set. Confirmed copies toast briefly (e.g. `Copied!`). Unverified OSC 52 deliveries and clipboard-unreachable fallbacks name the backup path so you can recover the text.
 
 ### `/export`
 
@@ -341,13 +341,30 @@ Send an aside to the agent without interrupting the current task. In minimal mod
 /btw also check the error handling
 ```
 
+### `/note`
+
+Leave a **mid-session operator note** that is **not** a pending main-turn prompt. Use this while a turn, plan approval, or background subagents are running when you want a personal annotation without enqueueing text that will hijack the agent when the parent becomes idle.
+
+```
+/note check queue hold when subagents finish
+/note follow up on flake PATH #ci #hermetic
+/note                  # list notes for this session
+```
+
+- Stores the note on the **current session only** (id, time, text, optional trailing `#tags`).
+- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for on-disk join notes that agents write for other agents.
+- Bare `/note` (or alias `/notes`) lists notes as a system block. `/tasks` also shows a count when notes exist.
+- Full TUI confirms a save with a toast; minimal mode writes a short system line.
+
+Promote-to-queue / promote-to-todo is intentionally deferred.
+
 ### `/mcps`
 
 Open the MCP servers management modal.
 
 ### `/doctor`
 
-Show the read-only terminal diagnostic report — color level, available themes, clipboard routes, live keyboard and screen evidence, and fixes for common issues. Aliases: `/terminal-setup`, `/terminal-check`, `/terminal-info`.
+Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
 
 ### `/release-notes`
 
@@ -366,6 +383,16 @@ Browse the in-TUI How-to Guides, open the online Build docs, or jump straight to
 - Bare `/docs` (or `/docs how-to`) opens the How-to Guides picker.
 - `/docs web` opens https://docs.x.ai/build/overview in your browser.
 - `/docs <title>` opens a specific guide by case-insensitive title match.
+
+### `/tutorial`
+
+Open the onboarding tutorial: a short list of topics (your first prompt, attaching context, navigation, slash commands, worktrees, plan mode, customization, switching from another agent tool) — each a ~30-second read, with `→` flowing straight to the next topic. Nothing auto-shows — this command (or the command palette) is the way in.
+
+```
+/tutorial
+```
+
+Aliases: `/tour`, `/onboarding`
 
 ### `/import-claude`
 

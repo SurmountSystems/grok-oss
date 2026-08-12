@@ -1195,7 +1195,7 @@ mod tests {
         assert!(matches!(result, HookRunnerResult::Success));
     }
 
-    /// Verify that setsid() prevents hook child processes from opening
+    /// Verify that TTY detach prevents hook child processes from opening
     /// `/dev/tty`. This is the core fix for GPG pinentry corruption.
     ///
     /// The hook tries `exec 3>/dev/tty` — if detached, this fails and the

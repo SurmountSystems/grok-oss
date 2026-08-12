@@ -1260,6 +1260,8 @@ mod tests {
         ));
 
         let state = manager.tracker.lock().get(&run_id).unwrap();
+        // Failed is intentionally resumable (tip): only terminal non-failed
+        // statuses must reject resume. See `WorkflowRunStatus::is_resumable`.
         for status in [
             crate::session::workflow::tracker::WorkflowRunStatus::Complete,
             crate::session::workflow::tracker::WorkflowRunStatus::Cancelled,

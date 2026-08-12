@@ -1765,6 +1765,7 @@ mod tests {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         };
         AgentView::new(session, ScrollbackState::new())
     }
