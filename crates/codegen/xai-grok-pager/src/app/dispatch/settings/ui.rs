@@ -1256,15 +1256,40 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
             super::setters::set_resume_canceled_turn_on_restart_inner(app, *b)
         }
-        // Token Economy lives on disk; live re-read — no in-memory rollback mirror.
-        ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(_))
-        | ("token_economy.show_period_pacing", SettingValue::Bool(_))
-        | ("token_economy.local_spend_ledger", SettingValue::Bool(_))
-        | ("token_economy.reconcile_management_usage", SettingValue::Bool(_))
-        | ("token_economy.max_implement_effort", SettingValue::Int(_))
-        | ("token_economy.min_implement_effort", SettingValue::Int(_))
-        | ("token_economy.desired_implement_effort", SettingValue::Int(_))
-        | ("token_economy.lock_implement_effort", SettingValue::Int(_)) => {}
+        // Token Economy: restore process live cache (optimistic mirror).
+        ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(b)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_bool(
+                "cap_implement_effort_when_economic",
+                *b,
+            );
+        }
+        ("token_economy.show_period_pacing", SettingValue::Bool(b)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_bool("show_period_pacing", *b);
+        }
+        ("token_economy.local_spend_ledger", SettingValue::Bool(b)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_bool("local_spend_ledger", *b);
+        }
+        ("token_economy.reconcile_management_usage", SettingValue::Bool(b)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_bool(
+                "reconcile_management_usage",
+                *b,
+            );
+        }
+        ("token_economy.max_implement_effort", SettingValue::Int(i)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_int("max_implement_effort", *i);
+        }
+        ("token_economy.min_implement_effort", SettingValue::Int(i)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_int("min_implement_effort", *i);
+        }
+        ("token_economy.desired_implement_effort", SettingValue::Int(i)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_int(
+                "desired_implement_effort",
+                *i,
+            );
+        }
+        ("token_economy.lock_implement_effort", SettingValue::Int(i)) => {
+            xai_grok_shell::token_economy::set_token_economy_live_int("lock_implement_effort", *i);
+        }
         // keep_text_selection: restore the cache mirror to the canonical value.
         ("keep_text_selection", SettingValue::Enum(s)) => {
             if let Some(kind) = crate::appearance::TextSelection::from_canonical(s) {

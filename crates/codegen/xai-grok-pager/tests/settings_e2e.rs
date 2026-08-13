@@ -142,6 +142,9 @@ fn make_state() -> SettingsModalState {
     xai_grok_pager::appearance::cache::set_render_mermaid(
         xai_grok_pager::appearance::RenderMermaid::Auto,
     );
+    // Token Economy live cache: same hermetic pin (operator may set
+    // min_implement_effort = 2 for always-a-reviewer).
+    xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
     SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
         UiConfig::default(),
@@ -2097,6 +2100,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_render_mermaid(
         xai_grok_pager::appearance::RenderMermaid::Auto,
     );
+    xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
 
     // Hard-coded per-key expectations (independent of registry).
     let expected = |key: &str| -> SettingValue {

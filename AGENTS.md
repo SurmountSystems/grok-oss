@@ -40,14 +40,22 @@ less than product code and tests. Do not invent long essays or git nags.
    `gpg.program`, hook disables, etc.).
 3. **Never bulk find-and-replace.** Bulk **find** (`rg`) is fine. Edits must
    be surgical and reviewed in context.
-3a. **Rustfmt after every Rust save (targeted).** When you create or edit
-   `*.rs` files, run **`cargo fmt` for the touched packages** before report /
-   handoff (e.g. `cargo fmt -p xai-grok-pager` or multiple `-p` crates). Prefer
-   package-scoped fmt over a full `cargo fmt --all` every micro-edit when
-   packages are known. Do **not** call bare `rustfmt path.rs` without cargo
-   (workspace is **edition 2024**; path-only rustfmt can fail on let-chains).
-   Goal: operator never needs a second `cargo fmt --all` that leaves unstaged
-   noise after `git add`.
+3a. **Post-impl verify (fmt + clippy + tests; pinned 2026-08-04).** When you
+   create or edit product code (especially `*.rs`), before report / handoff:
+   (1) **`cargo fmt -p <crate>`** for touched packages (not bare `rustfmt`;
+   workspace is **edition 2024**); (2) **`cargo clippy -p <crate>
+   --all-targets -- -D warnings`** (or package-equivalent) on those packages;
+   (3) **targeted tests** for contracts you touched (`cargo test -p …`
+   / nextest filters). Goal: no first-compile CI fail after “done,” no second
+   full fmt pass that re-dirties the tree after `git add`.
+3b. **Effort ≥ 2 process mop.** After the primary implementer finishes (and
+   after fix rounds that change code), spawn a **process mop** subagent
+   (`[process]` / `[process-mop]`) that only runs fmt → clippy → relevant
+   tests and **mops** fallout. Primary implementer still runs the three steps
+   first; mop is backup. Host law: `~/.grok/AGENTS.md` § *Post-impl verify*.
+3c. **Implementer ↔ reviewer swap each feature.** For each **new** feature or
+   independent implement slice, swap who implements and who reviews (roles
+   fixed within one feature’s fix/re-review loop). Host dual-pin: same section.
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
    replies, product docs, tests, or **filenames**. **No bare plan-step codes**
@@ -106,6 +114,12 @@ less than product code and tests. Do not invent long essays or git nags.
    only when intent is genuinely ambiguous or an irreversible external action
    needs confirmation (push/PR when not already requested). A dirty mid-pick
    tree is unfinished work, not a pause for ceremony.
+5a. **Complete plan verticals (pinned 2026-08-07).** Do **not** invent
+   “parked / enough for now / optional later” for steps that are in an
+   **approved** plan (or clearly in-scope residual) unless the operator
+   **explicitly** defers that slice. Surmount does complete work. True
+   *Ambiguity → park* stays for unclear intent only, not for optional-feeling
+   follow-ons on a locked plan. Host dual-pin: `~/.grok/AGENTS.md` same rule.
 6. **Prefer Rust tools over inventing Python/bash** when a product or host
    tool/bin already covers the job (token + security). Do not paste inventories
    into this file. Migration plan:

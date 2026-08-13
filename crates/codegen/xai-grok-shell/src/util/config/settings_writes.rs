@@ -283,7 +283,8 @@ async fn update_token_economy_key(field: &str, value: toml::Value) -> Result<()>
         *te = TomlValue::Table(te_tbl);
     }
     // Validate the resulting table so Settings cannot write an invalid policy.
-    crate::token_economy::token_economy_from_toml(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let validated =
+        crate::token_economy::token_economy_from_toml(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
     let toml_str = toml::to_string_pretty(&root)?;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -314,6 +315,8 @@ async fn update_token_economy_key(field: &str, value: toml::Value) -> Result<()>
     }
     let _ = prior_mode;
     tokio::fs::rename(&tmp, &path).await?;
+    // Keep process live cache aligned with what we wrote (CLI / effect path).
+    crate::token_economy::set_token_economy_live(validated);
     Ok(())
 }
 

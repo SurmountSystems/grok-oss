@@ -350,6 +350,7 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
                     period_end.as_deref(),
                     period_type,
                 );
+                crate::auth::remember_supergrok_billing_poll_ok(&target.identity_id);
                 if let Some(build_pct) = grok_build_usage_percent(config) {
                     crate::auth::remember_supergrok_build_usage(&target.identity_id, build_pct);
                 }
@@ -362,9 +363,13 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
                 );
             }
             Err(e) => {
+                let err_text = e.to_string();
+                crate::auth::remember_supergrok_billing_poll_failed(&target.identity_id, &err_text);
+                // Process outcome map is the operator surface for TUI /limits
+                // and doctor (not debug-only). Keep debug for active path.
                 tracing::debug!(
                     identity_id = %target.identity_id,
-                    error = %e,
+                    error = %err_text,
                     "sibling SuperGrok billing poll failed (active path unchanged)"
                 );
             }

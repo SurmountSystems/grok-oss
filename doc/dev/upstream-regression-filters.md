@@ -199,6 +199,10 @@ cargo test -p xai-grok-sampling-types --lib -- credit_exhausted
 cargo test -p xai-grok-shell --lib -- upsert_personal_then_business team_login_then_personal_keeps dual_supergrok load_supergrok_candidates two_principals_billing enrich_candidates principal_limits_label non_active_poll_targets remember_both_principals included_usage poll_non_active_remembers
 cargo test -p xai-grok-pager --lib -- format_dual_principals live_console_omits extra_principals_hook show_limits format_supergrok_session footer_names_live_principal
 
+# 2c. Dual SuperGrok billing poll honesty (role fail notes, fill provenance, rank, doctor)
+cargo test -p xai-grok-shell --lib -- auth_failed_poll billing_fail_note remember_poll_ok order_live_prefers_poll_ok format_human_dual_poll
+cargo test -p xai-grok-pager --lib -- dual_fill_provenance compact_status_active_auth_failed format_unified_fills format_dual limits_honesty
+
 # 3. DOGE default / Human green rail + role map / hide_header / window titles / title items + bubble + clear-done
 cargo test -p xai-grok-shared --lib -- hide_header stale_hide_title
 cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config theme doge doge_accent_user_is_pure_green doge_accent_system_is_pure_cyan

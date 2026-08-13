@@ -725,6 +725,46 @@ fn is_credit_exhausted_status_and_message(status: u16, message: &str) -> bool {
     is_credit_exhausted_message(message) && status != 401
 }
 
+/// Strip the [`SamplingError::Api`] Display wrap
+/// (`API error (status 403 Forbidden): ...`) so terminal copy is the body only.
+pub fn strip_api_error_status_prefix(raw: &str) -> &str {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix("API error (status ")
+        && let Some(idx) = rest.find("): ")
+    {
+        return rest[idx + 3..].trim();
+    }
+    s
+}
+
+/// Plain American English for team credit / monthly spending-limit failures.
+///
+/// Prefer the upstream team sentence when present. Never invent Internal error
+/// JSON. Operators get admin guidance (add credits / raise monthly spend limit)
+/// without confusing free SuperGrok period with console team credits.
+pub fn credit_exhausted_user_message(raw: &str) -> String {
+    let body = strip_api_error_status_prefix(raw).trim();
+    if body.is_empty() {
+        return TEAM_CREDIT_FALLBACK.to_string();
+    }
+    // Upstream already names team credits / monthly spending limit.
+    let lower = body.to_ascii_lowercase();
+    if lower.contains("monthly spending limit")
+        || lower.contains("used all available credits")
+        || (lower.contains("team") && lower.contains("credit"))
+    {
+        return body.to_string();
+    }
+    if is_credit_exhausted_message(body) {
+        // Short bodies ("out of credits") get a plain admin line.
+        return format!("{body}. {TEAM_CREDIT_FALLBACK}");
+    }
+    body.to_string()
+}
+
+const TEAM_CREDIT_FALLBACK: &str = "Your team has either used all available credits or \
+reached its monthly spending limit. Add credits or raise the monthly spend limit on console.x.ai.";
+
 /// Decide whether a [`reqwest::Error`] is worth retrying.
 pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     if err.is_timeout() || err.is_connect() {
@@ -1376,6 +1416,63 @@ mod tests {
         assert!(
             !guidelines.is_credit_exhausted(),
             "usage guidelines is not a credit/usage-limit cap"
+        );
+    }
+
+    /// Exact console team dogfood body (2026-08-05): credits **or** monthly
+    /// spending limit under HTTP 403 must classify as credit-exhausted hop.
+    #[test]
+    fn credit_exhausted_detects_console_team_monthly_spending_limit_403() {
+        let team_body = "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either \
+            used all available credits or reached its monthly spending limit. \
+            Please contact your team admin to purchase more credits or raise \
+            the spending limit.";
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: team_body.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            err.is_credit_exhausted(),
+            "console team credits/monthly spending limit 403 must hop as credit-exhausted"
+        );
+        assert!(!err.is_auth_error());
+
+        // Bare 403 / usage guidelines still false (policy / ZDR).
+        let bare = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Forbidden".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!bare.is_credit_exhausted());
+        let guidelines = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!guidelines.is_credit_exhausted());
+
+        // Plain terminal copy strips Display wrap and keeps the team sentence.
+        let wrapped = format!("API error (status 403 Forbidden): {team_body}");
+        let plain = credit_exhausted_user_message(&wrapped);
+        assert!(
+            plain.contains("used all available credits")
+                || plain.contains("monthly spending limit"),
+            "plain copy must keep team sentence: {plain}"
+        );
+        assert!(
+            !plain.contains("API error (status"),
+            "must not keep Display status prefix: {plain}"
+        );
+        assert!(
+            !plain.contains("Internal error"),
+            "must not invent Internal error chrome: {plain}"
         );
     }
 

@@ -214,10 +214,21 @@ fn parse_lock_effort(v: &TomlValue) -> Result<Option<u8>, TokenEconomyConfigErro
     Ok(Some(n as u8))
 }
 
-/// Load from disk-merged effective config. On parse/load failure or invalid
-/// table, log and return defaults (fail-open for live TUI; validation errors
-/// are loud in unit tests via [`token_economy_from_toml`]).
-pub fn token_economy_from_disk() -> TokenEconomyConfig {
+/// Process-wide live Token Economy config.
+///
+/// Seeded from disk on first [`token_economy_from_disk`] call. Settings
+/// dispatch updates this optimistically (same pattern as pager appearance
+/// caches) so `current_value_for` / implement-effort policy see the new
+/// value before async persist finishes. Tests pin product defaults via
+/// [`reset_token_economy_live_to_defaults`] so a developer `$GROK_HOME`
+/// cannot break settings registry e2e.
+fn live_token_economy_slot() -> &'static std::sync::Mutex<Option<TokenEconomyConfig>> {
+    static LIVE: std::sync::OnceLock<std::sync::Mutex<Option<TokenEconomyConfig>>> =
+        std::sync::OnceLock::new();
+    LIVE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn load_token_economy_from_disk_uncached() -> TokenEconomyConfig {
     let root = match crate::config::load_effective_config() {
         Ok(v) => v,
         Err(e) => {
@@ -232,6 +243,106 @@ pub fn token_economy_from_disk() -> TokenEconomyConfig {
             TokenEconomyConfig::default()
         }
     }
+}
+
+/// Live Token Economy config (seeded from disk-merged effective config).
+///
+/// On parse/load failure or invalid table, logs and returns defaults
+/// (fail-open for live TUI; validation errors are loud in unit tests via
+/// [`token_economy_from_toml`]). After the first call, returns the process
+/// live copy until [`set_token_economy_live`] / field setters update it or
+/// [`clear_token_economy_live`] drops the cache.
+pub fn token_economy_from_disk() -> TokenEconomyConfig {
+    let mut guard = live_token_economy_slot()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(cfg) = guard.as_ref() {
+        return cfg.clone();
+    }
+    let cfg = load_token_economy_from_disk_uncached();
+    *guard = Some(cfg.clone());
+    cfg
+}
+
+/// Replace the process-wide live Token Economy config.
+pub fn set_token_economy_live(cfg: TokenEconomyConfig) {
+    let mut guard = live_token_economy_slot()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    *guard = Some(cfg);
+}
+
+/// Pin live Token Economy to product defaults (hermetic settings tests).
+pub fn reset_token_economy_live_to_defaults() {
+    set_token_economy_live(TokenEconomyConfig::default());
+}
+
+/// Drop the live cache so the next [`token_economy_from_disk`] reloads disk.
+pub fn clear_token_economy_live() {
+    let mut guard = live_token_economy_slot()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    *guard = None;
+}
+
+/// Optimistic live update for a Token Economy boolean field.
+pub fn set_token_economy_live_bool(field: &str, value: bool) {
+    let mut cfg = token_economy_from_disk();
+    match field {
+        "cap_implement_effort_when_economic" => cfg.cap_implement_effort_when_economic = value,
+        "show_period_pacing" => cfg.show_period_pacing = value,
+        "local_spend_ledger" => cfg.local_spend_ledger = value,
+        "reconcile_management_usage" => cfg.reconcile_management_usage = value,
+        _ => return,
+    }
+    set_token_economy_live(cfg);
+}
+
+/// Optimistic live update for a Token Economy integer effort field.
+///
+/// `lock_implement_effort` uses `0` for unlocked (`None`). Out-of-range
+/// values are ignored (UI stepper / persist validation are the gates).
+pub fn set_token_economy_live_int(field: &str, value: i64) {
+    let mut cfg = token_economy_from_disk();
+    let in_effort = |n: i64| -> Option<u8> {
+        if n < i64::from(MIN_IMPLEMENT_EFFORT) || n > i64::from(MAX_IMPLEMENT_EFFORT) {
+            None
+        } else {
+            Some(n as u8)
+        }
+    };
+    match field {
+        "max_implement_effort" => {
+            let Some(v) = in_effort(value) else {
+                return;
+            };
+            cfg.max_implement_effort = v;
+        }
+        "min_implement_effort" => {
+            let Some(v) = in_effort(value) else {
+                return;
+            };
+            cfg.min_implement_effort = v;
+        }
+        "desired_implement_effort" => {
+            let Some(v) = in_effort(value) else {
+                return;
+            };
+            cfg.desired_implement_effort = v;
+        }
+        "lock_implement_effort" => {
+            if value == 0 {
+                cfg.lock_implement_effort = None;
+            } else {
+                let Some(v) = in_effort(value) else {
+                    return;
+                };
+                cfg.lock_implement_effort = Some(v);
+            }
+        }
+        _ => return,
+    }
+    set_token_economy_live(cfg);
 }
 
 /// Resolved path for uniquely grok-oss durable state (`grok_oss.db`).
@@ -265,6 +376,17 @@ mod tests {
         assert!(d.local_spend_ledger);
         assert!(d.reconcile_management_usage);
         assert!(d.grok_oss_database_path.is_none());
+    }
+
+    #[test]
+    fn live_cache_overrides_disk_seed() {
+        reset_token_economy_live_to_defaults();
+        assert_eq!(token_economy_from_disk().min_implement_effort, 1);
+        set_token_economy_live_int("min_implement_effort", 2);
+        assert_eq!(token_economy_from_disk().min_implement_effort, 2);
+        reset_token_economy_live_to_defaults();
+        assert_eq!(token_economy_from_disk().min_implement_effort, 1);
+        clear_token_economy_live();
     }
 
     #[test]

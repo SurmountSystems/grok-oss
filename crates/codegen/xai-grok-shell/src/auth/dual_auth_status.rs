@@ -33,7 +33,7 @@ pub struct DualAuthStatus {
     pub env_var_present: bool,
     /// True when env has ≥1 usable key after split (env wins for console paths).
     pub env_wins: bool,
-    /// Config pin label: `api_key`, `oauth`, or `None` (default session primary).
+    /// Config pin label: `api_key`, `oidc`, or `None` (default session primary).
     pub preferred_method: Option<&'static str>,
     /// `[auth] auto_use_included_limits` — prefer included SuperGrok limits
     /// before $ extras; rank multi-identity by included headroom.
@@ -88,6 +88,23 @@ impl DualAuthStatus {
             }
         }
 
+        // Dual SuperGrok billing poll health (process-local; no secrets).
+        // Shown whenever any SuperGrok principal is listed so doctor agrees
+        // with /limits on which login last polled OK vs auth-failed.
+        if !self.supergrok_principals.is_empty() {
+            out.push_str("  SuperGrok billing poll health (this process):\n");
+            for p in &self.supergrok_principals {
+                let outcome = super::supergrok_billing_poll_outcome(&p.identity_id);
+                let line = format_principal_poll_health_line(
+                    p.role_label,
+                    &p.fingerprint,
+                    outcome.kind,
+                    outcome.error_class,
+                );
+                out.push_str(&format!("    {line}\n"));
+            }
+        }
+
         if self.stored_console_key_count == 0 {
             out.push_str("  Console keys (store): 0\n");
         } else {
@@ -118,9 +135,9 @@ impl DualAuthStatus {
             Some("api_key") => {
                 out.push_str("  Preferred method: api_key (console primary when both exist)\n");
             }
-            Some("oidc") | Some("oauth") => {
+            Some("oidc") => {
                 out.push_str(
-                    "  Preferred method: oauth (SuperGrok login primary when both exist)\n",
+                    "  Preferred method: oidc (SuperGrok login primary when both exist)\n",
                 );
             }
             Some(other) => out.push_str(&format!("  Preferred method: {other}\n")),
@@ -130,7 +147,7 @@ impl DualAuthStatus {
         }
         if self.auto_use_included_limits {
             out.push_str(
-                "  Prefer free SuperGrok period allowance: yes (default for new installs; free SuperGrok period allowance before SuperGrok top-up dollars and the console API key; when free period is full, SuperGrok top-up dollars before console; set [auth] auto_use_included_limits = false for classic dual-auth without free-period-first ranking)\n",
+                "  Prefer free SuperGrok period allowance: yes (default for new installs; free SuperGrok period allowance before SuperGrok top-up dollars and the console API key; when free period is full, SuperGrok top-up dollars before console; status compact and limits Active driver follow the same order; run grok limits for Active: free SuperGrok period | SuperGrok extras | console key; sticky status must not show console · $ while free period has room; set [auth] auto_use_included_limits = false for classic dual-auth without free-period-first ranking)\n",
             );
         } else {
             out.push_str(
@@ -151,6 +168,40 @@ impl DualAuthStatus {
         }
 
         out
+    }
+}
+
+/// One doctor/human line for SuperGrok principal billing poll health.
+///
+/// Role · fingerprint · last poll · short fail class · re-login when auth failed.
+pub fn format_principal_poll_health_line(
+    role_label: &str,
+    fingerprint: &str,
+    kind: super::SupergrokBillingPollOutcomeKind,
+    error_class: Option<&str>,
+) -> String {
+    use super::SupergrokBillingPollOutcomeKind;
+    let role = role_label.trim();
+    let role = if role.is_empty() { "unknown" } else { role };
+    let fp = fingerprint.trim();
+    let fp_short = if fp.len() > 12 { &fp[..12] } else { fp };
+    match kind {
+        SupergrokBillingPollOutcomeKind::Ok => {
+            format!("{role} · fingerprint {fp_short} · last poll OK")
+        }
+        SupergrokBillingPollOutcomeKind::AuthFailed => {
+            format!(
+                "{role} · fingerprint {fp_short} · last poll auth failed \
+(re-login: grok login)"
+            )
+        }
+        SupergrokBillingPollOutcomeKind::OtherFailed => {
+            let class = error_class.unwrap_or("other");
+            format!("{role} · fingerprint {fp_short} · last poll failed ({class})")
+        }
+        SupergrokBillingPollOutcomeKind::Never => {
+            format!("{role} · fingerprint {fp_short} · last poll never this process")
+        }
     }
 }
 
@@ -229,7 +280,8 @@ fn probe_env_keys() -> (bool, bool, usize) {
 fn preferred_method_label() -> Option<&'static str> {
     // Fail-open: config load is optional for discoverability.
     let value = crate::config::load_effective_config_disk_only().ok()?;
-    // Config.toml: `[auth] preferred_method` (alias) or `[grok_com_config]`.
+    // Config.toml: `[auth] preferred_method` or `[grok_com_config]`.
+    // Stock-compatible wire only (`api_key` / `oidc`); no alias normalization.
     let method = value
         .get("auth")
         .and_then(|t| t.get("preferred_method"))
@@ -240,8 +292,8 @@ fn preferred_method_label() -> Option<&'static str> {
         })
         .and_then(|v| v.as_str())?;
     match method {
-        "api_key" | "console_api_key" | "api" | "key" => Some("api_key"),
-        "oidc" | "oauth" | "oauth_token" => Some("oauth"),
+        "api_key" => Some("api_key"),
+        "oidc" => Some("oidc"),
         _ => None,
     }
 }
@@ -346,6 +398,75 @@ mod tests {
         assert_eq!(st.supergrok_principals.len(), 1);
     }
 
+    /// Named contract: doctor dual-auth human block lists poll health for dual
+    /// SuperGrok principals (role + fail class + re-login when auth failed).
+    #[test]
+    #[serial_test::serial]
+    fn format_human_dual_poll_health_names_auth_failed_role() {
+        use crate::auth::model::upsert_supergrok_session;
+        use crate::auth::{
+            clear_included_billing_cache, remember_supergrok_billing_poll_failed,
+            remember_supergrok_billing_poll_ok,
+        };
+
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        clear_included_billing_cache();
+
+        let dir = TempDir::new().unwrap();
+        let mut map = AuthStore::default();
+        let base = "https://auth.x.ai::dual-poll";
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-dual-poll".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-personal-dual".into(),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-business-dual-poll".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-biz-dual".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-dual-poll".into()),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        remember_supergrok_billing_poll_failed(
+            "user-personal-dual",
+            "Billing service error: no auth context",
+        );
+        remember_supergrok_billing_poll_ok("team-dual-poll");
+
+        let st = collect_dual_auth_status_with(dir.path(), None, true);
+        assert!(st.supergrok_principals.len() >= 2, "{st:?}");
+        let text = st.format_human();
+        assert!(
+            text.contains("SuperGrok billing poll health"),
+            "doctor must surface dual poll health: {text}"
+        );
+        assert!(
+            text.contains("personal")
+                && text.contains("auth failed")
+                && text.to_ascii_lowercase().contains("grok login"),
+            "auth-failed personal + re-login: {text}"
+        );
+        assert!(
+            text.contains("business") && text.contains("last poll OK"),
+            "business poll OK: {text}"
+        );
+        clear_included_billing_cache();
+    }
+
     #[test]
     #[serial_test::serial]
     fn env_wins_counted_without_raw_key() {
@@ -427,6 +548,16 @@ mod tests {
             text.contains("SuperGrok top-up dollars before console")
                 || text.contains("when free period is full"),
             "doctor dual-auth must name top-ups-before-console after free period full: {text}"
+        );
+        assert!(
+            text.contains("Active:")
+                || text.contains("active driver")
+                || text.contains("grok limits"),
+            "doctor must point at Active driver / grok limits: {text}"
+        );
+        assert!(
+            text.contains("console · $") || text.contains("free period has room"),
+            "doctor must name sticky chrome law (no console $ while free period has room): {text}"
         );
         assert!(
             text.contains("auto_use_included_limits = false"),

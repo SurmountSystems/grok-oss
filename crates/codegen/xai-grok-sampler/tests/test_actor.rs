@@ -876,6 +876,397 @@ async fn rate_limit_exhausts_when_policy_caps_retries() {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-identity failover: plain 429 hops; credit hops; bare 401 does not
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_429_with_failover_hops_to_next_identity() {
+    // Memo policy (no 1h sticky) is unit-tested; process-global memo races across
+    // parallel integration tests, so this test asserts hop reason + success only.
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap| {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let key = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .unwrap_or("")
+                    .to_owned();
+                if key == "primary-key" {
+                    return Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        json!({ "error": { "message": "Rate limit exceeded" } }).to_string(),
+                    ));
+                }
+                assert_eq!(key, "backup-key", "expected hop to backup key, got {key}");
+                let events = sse::chat_completion_events("hopped-ok", "test-model");
+                Ok(Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                )))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some("primary-key".into());
+    cfg.failover_api_keys = vec!["backup-key".into()];
+    // Cap same-key budget so a failed hop would not hang forever.
+    let policy = RetryPolicy {
+        max_retries: 3,
+        rate_limit_retry_threshold: 3,
+        retry_only_before_output: false,
+    };
+    let handle = SamplerActor::spawn(cfg, policy, event_tx);
+
+    let rid = RequestId::from("req-rl-hop");
+    handle.submit(rid.clone(), user_request("hi"));
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    let hop_reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        hop_reasons
+            .iter()
+            .any(|r| r.contains("rate limited") && r.contains("console key")),
+        "expected rate-limit hop toast reason, got {hop_reasons:?}"
+    );
+    assert!(
+        hop_reasons.iter().all(|r| !r.contains("out of allowance")),
+        "must not claim allowance hop: {hop_reasons:?}"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            if let Some(a) = response.assistant() {
+                assert_eq!(a.content.as_ref(), "hopped-ok");
+            }
+        }
+        other => panic!("expected Completed after rate-limit hop, got {other:?}"),
+    }
+    assert!(
+        counter.load(Ordering::SeqCst) >= 2,
+        "primary 429 + backup success"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_exhausted_with_failover_still_hops() {
+    // Sticky credit memo is unit-tested under with_memo_lock; here assert mid-request
+    // hop chrome. Isolate $GROK_HOME so a prior run's durable memo for "credit-dead"
+    // cannot silent-skip primary (prefer_live) and erase Retrying chrome.
+    let _memo_home = {
+        let dir = tempfile::TempDir::new().expect("temp GROK_HOME for credit hop test");
+        let guard = EnvGuard::set("GROK_HOME", dir.path());
+        clear_all_including_durable();
+        // Keep TempDir alive for the test body via leak-to-guard pattern:
+        // store path inside EnvGuard lifetime by holding both.
+        (dir, guard)
+    };
+    clear_all_including_durable();
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap| {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let key = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .unwrap_or("")
+                    .to_owned();
+                if key == "credit-dead" {
+                    return Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::PAYMENT_REQUIRED,
+                        json!({ "error": { "message": "out of credits" } }).to_string(),
+                    ));
+                }
+                assert_eq!(key, "credit-live", "expected hop to live key, got {key}");
+                let events = sse::chat_completion_events("credit-hop-ok", "test-model");
+                Ok(Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                )))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some("credit-dead".into());
+    cfg.failover_api_keys = vec!["credit-live".into()];
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(RequestId::from("req-credit-hop"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+    clear_all_including_durable();
+
+    let hop_reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        hop_reasons.iter().any(|r| r.contains("out of allowance")),
+        "expected allowance hop reason, got {hop_reasons:?}"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            if let Some(a) = response.assistant() {
+                assert_eq!(a.content.as_ref(), "credit-hop-ok");
+            }
+        }
+        other => panic!("expected Completed after credit hop, got {other:?}"),
+    }
+    assert!(
+        counter.load(Ordering::SeqCst) >= 2,
+        "dead key + live key after credit hop"
+    );
+}
+
+/// Named contract: console team credit/spend 403 hops to SuperGrok recovery
+/// (session_identity_key + dual hosts), even when SuperGrok was preemptive-
+/// memoized out of allowance under free-period-first ExhaustedAll.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_team_credit_403_hops_to_supergrok_recovery() {
+    let _memo_home = {
+        let dir = tempfile::TempDir::new().expect("temp GROK_HOME for console recovery hop");
+        let guard = EnvGuard::set("GROK_HOME", dir.path());
+        clear_all_including_durable();
+        (dir, guard)
+    };
+    clear_all_including_durable();
+
+    let console = "console-team-credit-dead";
+    let session = "supergrok-recovery-jwt";
+    // Preemptive included-full memo (ExhaustedAll path).
+    xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(session));
+    assert!(xai_grok_sampler::is_credential_exhausted(session));
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let console_key = console.to_string();
+    let session_key = session.to_string();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap| {
+            let counter = Arc::clone(&counter_handler);
+            let console_key = console_key.clone();
+            let session_key = session_key.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let key = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .unwrap_or("")
+                    .to_owned();
+                if key == console_key {
+                    return Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::FORBIDDEN,
+                        json!({
+                            "error": {
+                                "message": "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either used all available credits or reached its monthly spending limit."
+                            }
+                        })
+                        .to_string(),
+                    ));
+                }
+                assert_eq!(key, session_key, "expected hop to SuperGrok recovery, got {key}");
+                let events = sse::chat_completion_events("recovery-hop-ok", "test-model");
+                Ok(Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                )))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    // Console primary (ExhaustedAll); SuperGrok only via session identity
+    // (failover empty after prefer_live prune). Recovery helper reinjects.
+    cfg.api_key = Some(console.into());
+    cfg.failover_api_keys = vec![];
+    cfg.session_identity_key = Some(session.into());
+    cfg.session_base_url = Some(server.base_url());
+    cfg.failover_base_url = Some(server.base_url());
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(RequestId::from("req-console-recovery"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+    clear_all_including_durable();
+
+    let hop_reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        hop_reasons.iter().any(|r| r.contains("out of allowance")),
+        "expected SuperGrok recovery hop reason, got {hop_reasons:?}"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            if let Some(a) = response.assistant() {
+                assert_eq!(a.content.as_ref(), "recovery-hop-ok");
+            }
+        }
+        other => panic!("expected Completed after SuperGrok recovery hop, got {other:?}"),
+    }
+    assert!(
+        counter.load(Ordering::SeqCst) >= 2,
+        "console 403 + SuperGrok recovery success"
+    );
+}
+
+/// Named contract: when SuperGrok is also dead (no session identity / no live
+/// recovery), console team credit 403 is fatal (no false hop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_team_credit_403_no_hop_when_supergrok_also_dead() {
+    let _memo_home = {
+        let dir = tempfile::TempDir::new().expect("temp GROK_HOME for no-hop");
+        let guard = EnvGuard::set("GROK_HOME", dir.path());
+        clear_all_including_durable();
+        (dir, guard)
+    };
+    clear_all_including_durable();
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<
+                    Sse<
+                        futures_util::stream::Iter<
+                            std::vec::IntoIter<Result<Event, std::convert::Infallible>>,
+                        >,
+                    >,
+                    (StatusCode, String),
+                >((
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "error": {
+                            "message": "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either used all available credits or reached its monthly spending limit."
+                        }
+                    })
+                    .to_string(),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some("console-only-dead".into());
+    cfg.failover_api_keys = vec![];
+    cfg.session_identity_key = None;
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(RequestId::from("req-no-recovery"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+    clear_all_including_durable();
+
+    let hop_reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        hop_reasons.is_empty(),
+        "no SuperGrok recovery must not invent hop: {hop_reasons:?}"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { .. } => {}
+        other => panic!("expected terminal fail without hop, got {other:?}"),
+    }
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "single console attempt when SuperGrok also dead"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bare_401_with_failover_does_not_hop() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<
+                    Sse<
+                        futures_util::stream::Iter<
+                            std::vec::IntoIter<Result<Event, std::convert::Infallible>>,
+                        >,
+                    >,
+                    (StatusCode, String),
+                >((StatusCode::UNAUTHORIZED, "unauthorized".to_string()))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some("bad-key".into());
+    cfg.failover_api_keys = vec!["other-key".into()];
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(RequestId::from("req-401-no-hop"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(5)).await;
+    server.shutdown();
+
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            SamplingEvent::Retrying { reason, .. }
+                if xai_grok_sampler::is_credential_hop_reason(reason)
+        )),
+        "401 must not trigger identity hop"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind, SamplingErrorKind::Auth);
+        }
+        other => panic!("expected Failed(Auth), got {other:?}"),
+    }
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "401 must not retry or hop to second key"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Auth error -> EmitToSession (immediate)
 // ---------------------------------------------------------------------------
 

@@ -63,24 +63,31 @@ pub const MANAGEMENT_KEY_VALIDATION_PATH: &str = "/auth/management-keys/validati
 /// Default day window for spend series on `/limits` (rolling calendar days).
 pub const USAGE_SERIES_DEFAULT_DAY_WINDOW: i64 = 7;
 
-/// Shared soft window (seconds) for Management **prepaid** and **postpaid**
-/// process caches.
+/// Shared soft window (seconds) for Management **prepaid**, **postpaid**, and
+/// **usage series** process caches.
 ///
 /// Background TUI billing polls reuse a warm entry for this long. Explicit
-/// `grok limits` collect busts both caches so dollars are not stuck until TTL
-/// expiry or process restart. Honesty surfaces may cite this value.
+/// `grok limits` collect / TUI `/limits` open busts these caches so dollars
+/// are not stuck until TTL expiry or process restart. Honesty surfaces may
+/// cite this value.
 pub const CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS: u64 = 60;
 
 /// Alias of [`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`] for prepaid lag copy
-/// and older call sites. Same 60s window as postpaid process cache.
+/// and older call sites. Same 60s window as postpaid and usage series caches.
 pub const CONSOLE_TEAM_PREPAID_CACHE_TTL_SECS: u64 = CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS;
 
 /// How long a successful prepaid balance stays in the process cache.
 const PREPAID_CACHE_TTL: Duration = Duration::from_secs(CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS);
 
 /// How long a successful postpaid preview stays in the process cache (same
-/// soft window as prepaid; explicit limits collect busts both).
+/// soft window as prepaid; explicit limits collect busts all billing meters).
 const POSTPAID_CACHE_TTL: Duration = Duration::from_secs(CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS);
+
+/// How long a successful usage series (POST analytics) stays in the process
+/// cache. Same soft window as prepaid/postpaid; explicit limits force-refresh
+/// clears it with the other Management billing meters.
+const USAGE_SERIES_CACHE_TTL: Duration =
+    Duration::from_secs(CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS);
 
 /// How long a discovered team id from key validation stays in process cache.
 const TEAM_ID_CACHE_TTL: Duration = Duration::from_secs(3600);
@@ -188,12 +195,14 @@ pub fn clear_management_api_key(store: &CredentialsStore) -> Result<(), Credenti
     store.delete(&management_credential_url())
 }
 
-/// Drop Management billing process caches (prepaid, postpaid, discovered team id).
+/// Drop Management billing process caches (prepaid, postpaid, usage series,
+/// discovered team id).
 ///
 /// Called when the management key is cleared or replaced. Safe for tests.
 pub fn clear_management_billing_process_caches() {
     clear_console_team_prepaid_cache();
     clear_console_team_postpaid_cache();
+    clear_console_team_usage_series_cache();
     clear_discovered_team_id_cache();
 }
 
@@ -701,14 +710,17 @@ pub fn clear_console_team_prepaid_cache() {
     }
 }
 
-/// Bust prepaid + postpaid process caches without dropping discovered team id.
+/// Bust prepaid + postpaid + usage series process caches without dropping
+/// discovered team id.
 ///
-/// Used by explicit `grok limits` collect so Management dollars are not served
-/// from a ≤[`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`]s warm entry. Background
-/// TUI `FetchBilling` polls must **not** call this (they honor the TTL).
+/// Used by explicit `grok limits` collect and TUI `/limits` open so Management
+/// dollars are not served from a ≤[`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`]s
+/// warm entry. Background TUI `FetchBilling` polls must **not** call this (they
+/// honor the TTL).
 pub fn clear_console_team_billing_meter_caches() {
     clear_console_team_prepaid_cache();
     clear_console_team_postpaid_cache();
+    clear_console_team_usage_series_cache();
 }
 
 /// Last successful prepaid meter from process cache, if still fresh.
@@ -1550,7 +1562,71 @@ pub fn management_usage_series_success_log_fields(
     })
 }
 
+struct UsageSeriesCacheEntry {
+    series: ConsoleTeamUsageSeries,
+    /// Day window used for the request (cache key; different windows must not
+    /// reuse each other).
+    day_window: i64,
+    fetched_at: Instant,
+}
+
+static USAGE_SERIES_CACHE: Mutex<Option<UsageSeriesCacheEntry>> = Mutex::new(None);
+
+/// Clear the process usage series cache (tests / management key clear / force
+/// refresh with other Management billing meters).
+pub fn clear_console_team_usage_series_cache() {
+    if let Ok(mut g) = USAGE_SERIES_CACHE.lock() {
+        *g = None;
+    }
+}
+
+/// Last successful usage series from process cache for this team + day window,
+/// if still fresh within [`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`].
+pub fn cached_console_team_usage_series(
+    team_id: &str,
+    day_window: i64,
+) -> Option<ConsoleTeamUsageSeries> {
+    let team = team_id.trim();
+    if team.is_empty() {
+        return None;
+    }
+    let days = day_window.max(1);
+    let g = USAGE_SERIES_CACHE.lock().ok()?;
+    let entry = g.as_ref()?;
+    if entry.series.team_id != team {
+        return None;
+    }
+    if entry.day_window != days {
+        return None;
+    }
+    if entry.fetched_at.elapsed() > USAGE_SERIES_CACHE_TTL {
+        return None;
+    }
+    Some(entry.series.clone())
+}
+
+/// Process-cache usage series when team id is known and the entry is still fresh.
+pub fn cached_console_team_usage_series_default(day_window: i64) -> Option<ConsoleTeamUsageSeries> {
+    let team = resolve_management_team_id_default()?;
+    cached_console_team_usage_series(&team, day_window)
+}
+
+fn remember_usage_series(series: &ConsoleTeamUsageSeries, day_window: i64) {
+    if let Ok(mut g) = USAGE_SERIES_CACHE.lock() {
+        *g = Some(UsageSeriesCacheEntry {
+            series: series.clone(),
+            day_window: day_window.max(1),
+            fetched_at: Instant::now(),
+        });
+    }
+}
+
 /// Fetch console team usage series via documented POST usage analytics.
+///
+/// Honors the ≤[`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`]s process cache so
+/// background `FetchBilling` does not spam POST analytics. Explicit `grok
+/// limits` / TUI `/limits` open clear via
+/// [`clear_console_team_billing_meter_caches`] first.
 ///
 /// Returns `None` when key is missing, discovery fails, HTTP fails, or body is
 /// unusable. Never invents spend dollars.
@@ -1576,8 +1652,13 @@ pub async fn fetch_console_team_usage_series_at(
         Some(t) => t.to_owned(),
         None => resolve_management_team_id_with_discovery(base_url, Some(key), None).await?,
     };
+    let days = day_window.max(1);
 
-    let request = usage_analytics_day_sum_by_description_request(day_window);
+    if let Some(cached) = cached_console_team_usage_series(&team, days) {
+        return Some(cached);
+    }
+
+    let request = usage_analytics_day_sum_by_description_request(days);
     let base = management_api_base(Some(base_url));
     let url = format!("{base}{}", usage_analytics_path(&team));
     let rate_key = crate::shared_http_rate_limit::management_provider_key(&base, key);
@@ -1606,6 +1687,7 @@ pub async fn fetch_console_team_usage_series_at(
     }
     let parsed: UsageAnalyticsResponse = response.json().await.ok()?;
     let series = console_team_usage_series_from_response(&team, &parsed, &request);
+    remember_usage_series(&series, days);
     let log_fields = management_usage_series_success_log_fields(&series);
     tracing::info!(
         team_id = %series.team_id,
@@ -2888,6 +2970,8 @@ mod tests {
         });
 
         let base = format!("http://{addr}");
+        // Cold process: prior tests may have left a warm series entry.
+        clear_console_team_usage_series_cache();
         let series = fetch_console_team_usage_series_at(
             &base,
             Some("hermetic-mgmt-key"),
@@ -2901,7 +2985,50 @@ mod tests {
         assert!((series.api_class_usd - 2.0).abs() < 1e-9);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
 
-        clear_console_team_postpaid_cache();
+        // Process cache: second call (background FetchBilling path) does not
+        // POST analytics again within TTL.
+        let again = fetch_console_team_usage_series_at(
+            &base,
+            Some("hermetic-mgmt-key"),
+            Some("team-usage-1"),
+            7,
+        )
+        .await
+        .expect("cached usage series");
+        assert!((again.oauth_class_usd - 15.0).abs() < 1e-9);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "usage series cache must skip second HTTP"
+        );
+        assert!(
+            cached_console_team_usage_series("team-usage-1", 7).is_some(),
+            "warm series must be readable from process cache for /limits attach"
+        );
+
+        // Named contract: combined clear (explicit `grok limits` / TUI
+        // `/limits` open) busts usage series warm entry with prepaid/postpaid.
+        clear_console_team_billing_meter_caches();
+        assert!(
+            cached_console_team_usage_series("team-usage-1", 7).is_none(),
+            "combined clear must drop warm usage series entry"
+        );
+        let forced = fetch_console_team_usage_series_at(
+            &base,
+            Some("hermetic-mgmt-key"),
+            Some("team-usage-1"),
+            7,
+        )
+        .await
+        .expect("force re-fetch series after combined clear");
+        assert!((forced.oauth_class_usd - 15.0).abs() < 1e-9);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "after clear_console_team_billing_meter_caches, next series fetch must hit HTTP"
+        );
+
+        clear_console_team_usage_series_cache();
         server.abort();
     }
 

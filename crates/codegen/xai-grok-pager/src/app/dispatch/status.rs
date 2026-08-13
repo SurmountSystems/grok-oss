@@ -259,11 +259,12 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
 /// `/limits` — SuperGrok included / dollar extras / console path detail.
 ///
 /// Opens a **dismissible popup modal** (not a scrollback dump) from the last
-/// good snapshot, then force-busts Management prepaid+postpaid process caches
-/// (when a management key is present) and silent-`FetchBilling` so live meters
-/// match CLI `grok limits`. Background turn-end polls still honor ≤60s TTL.
-/// While open, the modal ticks a d/h/m/s countdown and re-samples billing when
-/// the countdown hits zero (HonorProcessTtl, not another force-bust).
+/// good snapshot, then force-busts Management prepaid+postpaid+usage-series
+/// process caches (when a management key is present) and silent-`FetchBilling`
+/// so live meters match CLI `grok limits`. Background turn-end polls still
+/// honor ≤60s TTL (including usage series). While open, the modal ticks a
+/// d/h/m/s countdown and re-samples billing when the countdown hits zero
+/// (HonorProcessTtl, not another force-bust).
 ///
 /// When two SuperGrok principals exist in `auth.json`, stacks dual rows
 /// (active principal gets the polled billing cache; siblings honest absence
@@ -271,6 +272,8 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
 /// Console team prepaid cents come from agent/app cache or Management process
 /// cache; missing → honest not-configured / loading / unavailable (never a soft
 /// "no $ meter yet" placeholder). Empty SuperGrok cache → "no data yet".
+/// Warm usage series (OAuth / Grok Build class window) attaches from process
+/// cache when FetchBilling or CLI collect has filled it.
 pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -325,9 +328,10 @@ pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
         });
     }
     // Explicit `/limits` open: same force class as CLI `grok limits` collect.
-    // Bust Management prepaid+postpaid process caches when key present, then
-    // always silent-FetchBilling so live prepaid (+ postpaid into process
-    // cache) follows. Background turn-end FetchBilling still honors TTL.
+    // Bust Management prepaid+postpaid+usage-series process caches when key
+    // present, then always silent-FetchBilling so live prepaid (+ postpaid
+    // and usage series into process cache) follows. Background turn-end
+    // FetchBilling still honors TTL.
     let policy = crate::limits_cmd::management_meter_cache_policy_for_explicit_limits_open();
     if crate::limits_cmd::should_clear_management_meter_caches(policy, has_mgmt_key) {
         xai_grok_shell::auth::clear_console_team_billing_meter_caches();
@@ -550,13 +554,16 @@ pub(super) fn rebuild_limits_snapshot_for_agent(
     ))
 }
 
-/// Attach Management postpaid preview from process cache when warm (CLI
-/// `limits`, explicit `/limits` FetchBilling live-fill, or prior background
-/// poll). Distinct from prepaid remaining. Does not invent $.
+/// Attach Management postpaid preview and usage series from process cache when
+/// warm (CLI `limits`, explicit `/limits` FetchBilling live-fill, or prior
+/// background poll). Distinct from prepaid remaining and from free SuperGrok
+/// period %. Does not invent $.
 fn attach_console_postpaid_from_cache(
     snap: crate::views::limits_snapshot::LimitsSnapshot,
 ) -> crate::views::limits_snapshot::LimitsSnapshot {
-    use crate::views::limits_snapshot::{ConsoleTeamPostpaidGap, ConsoleTeamPostpaidMeter};
+    use crate::views::limits_snapshot::{
+        ConsoleTeamPostpaidGap, ConsoleTeamPostpaidMeter, ConsoleTeamUsageSeriesSummary,
+    };
 
     let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
     let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
@@ -567,8 +574,13 @@ fn attach_console_postpaid_from_cache(
     } else {
         ConsoleTeamPostpaidGap::after_billing_fetch(has_mgmt_key, has_mgmt_team)
     };
+    let usage_series = xai_grok_shell::auth::cached_console_team_usage_series_default(
+        xai_grok_shell::auth::USAGE_SERIES_DEFAULT_DAY_WINDOW,
+    )
+    .map(|s| ConsoleTeamUsageSeriesSummary::from_series(&s));
     snap.with_console_postpaid(postpaid)
         .with_console_postpaid_gap(gap)
+        .with_console_usage_series(usage_series)
 }
 
 /// Build `/limits` view-model: dual SuperGrok rows when multi-principal store.
@@ -669,12 +681,34 @@ fn build_limits_snapshot(
                 // for dollar extras). Unified fill + silent FetchBilling fill later.
                 (None, None, true)
             };
+            let outcome = xai_grok_shell::auth::supergrok_billing_poll_outcome(&p.identity_id);
+            let (poll_succeeded, poll_error_class) = match outcome.kind {
+                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::Ok => (Some(true), None),
+                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::AuthFailed => {
+                    (Some(false), Some("auth"))
+                }
+                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::OtherFailed => {
+                    (Some(false), outcome.error_class)
+                }
+                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::Never => {
+                    if bal.is_some() && !included_billing_only {
+                        (Some(true), None)
+                    } else if bal.is_some() {
+                        // Process-cache sibling reading.
+                        (Some(true), None)
+                    } else {
+                        (Some(false), None)
+                    }
+                }
+            };
             PrincipalLimitsInput {
                 label: principal_limits_label(role),
                 role_label: Some(p.role_label.to_string()),
                 balance: bal,
                 autotopup: topup,
                 included_billing_only,
+                poll_succeeded,
+                poll_error_class,
             }
         })
         .collect();

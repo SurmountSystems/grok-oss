@@ -518,13 +518,26 @@ Keeps each meter distinct:
   never looks missing just because SuperGrok is live.
 - **Console team prepaid** (Management API balance when a **management** key and
   `management_team_id` / `XAI_MANAGEMENT_TEAM_ID` are set, or team id is
-  discovered from the management key). Otherwise distinct honest gaps:
+  discovered from the management key). Shown under **Console API** even when
+  SuperGrok is live (`console.isLive` false). Otherwise distinct honest gaps:
   `no management key`, `no management team id`, `loading team prepaid...`, or
-  `team prepaid unavailable`). Store the key with `grok login --management-key`
+  `team prepaid unavailable`. Store the key with `grok login --management-key`
   (or `XAI_MANAGEMENT_API_KEY`). The management key is **not** the same as the
   console inference API key and is **not** part of the Key line above. This is
   **not** SuperGrok extras and **not** a Business SuperGrok OIDC login.
   Setup: [Authentication → Console team prepaid](02-authentication.md#console-team-prepaid-management-api).
+- **Team postpaid** (OAuth vs API class) and **usage series** day window when
+  Management credentials work. Dollar class only, not license message counts.
+  Series refreshes on the same path as prepaid/postpaid: TUI `/limits` open,
+  background billing refresh (about every 60s soft cache), and `grok limits`.
+  When OAuth / **Grok Build class** is known and positive, that line is near the
+  top of the Console block (dogfood settlement proof), still separate from team
+  prepaid **Balance**.
+- Honesty notes include: SuperGrok included % is a poll reading (not proven burn);
+  the console **Platforms → Grok Business licenses** page (messages /
+  conversations) is **not dogfood proof** (zeros expected for CLI SuperGrok).
+  Real burn is **team Usage** dollars (browser team Usage / spend / Grok Build)
+  and Management postpaid / series plus SuperGrok meters.
 - A short **double-entry spend** section (local book vs remote); full view is
   `/spend`.
 
@@ -552,10 +565,20 @@ consumer billing. Meters stay distinct:
 
 Gateway/chat sessions hide the coding-credits meter. Click that meter to open
 this same `/limits` popup. The prompt footer stays a one-line warning summary
-when usage is high (console live shows `Console key · team prepaid: $N` when
-known, else the honest gap strings above). Billing refresh (session start, turn
-end, `/usage`, force-refresh on `/limits`) fills SuperGrok cache and, when
-configured, Management team prepaid.
+when usage is high or team prepaid is known:
+
+- **Console live:** `Console key · team prepaid: $N` (or honest gap strings);
+  optional `team Grok Build class: $N` when postpaid OAuth class is in cache
+- **SuperGrok live + team prepaid known:** SuperGrok % / extras when those warn,
+  plus `team prepaid: $N` (or standalone team prepaid when SuperGrok alone is
+  quiet). When Management postpaid OAuth / Grok Build class is known, a second
+  chip `team Grok Build class: $N` (period class spend, not prepaid remaining).
+  Does not re-label live sampling as console. Compact status bar stays free
+  SuperGrok period `%` under Design A (not replaced by team `$`).
+
+Billing refresh (session start, turn end, `/usage`, force-refresh on `/limits`)
+fills SuperGrok cache and, when configured, Management team prepaid **and**
+postpaid into process cache regardless of which principal is live.
 
 ```
 /limits
@@ -565,15 +588,21 @@ configured, Management team prepaid.
 **`/limits --json`** skips the popup and prints the same machine-readable
 JSON as CLI `grok limits --json` into the **conversation transcript** (pretty
 JSON in a fenced code block). Both you and the agent can see it in session
-history. Fields include `schemaVersion`, `liveSampling`, SuperGrok principal
-meters, and console team prepaid (no secrets).
+history. Fields include `schemaVersion`, `liveSampling`, **`activeDriver`**
+(`supergrok_free_period` | `supergrok_extras` | `console_key`), SuperGrok
+principal meters, and console team prepaid (no secrets).
+
+Human `/limits` and `grok limits` lead with **Live sampling** then **Active:**
+(free SuperGrok period | SuperGrok extras | console key), matching status
+compact chrome under Design A. Free SuperGrok period always comes before
+SuperGrok dollar extras and console credits while free period has headroom.
 
 Outside the TUI, agents and scripts can query the same meters (live sampling
 principal + SuperGrok included % / dollar extras + console team prepaid when
 configured) without pasting a screenshot:
 
 ```bash
-grok limits           # human multi-line report
+grok limits           # human multi-line report (includes Active: driver)
 grok limits --json    # machine-readable JSON (schemaVersion 1; no secrets)
 ```
 

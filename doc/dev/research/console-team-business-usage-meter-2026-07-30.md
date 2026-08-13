@@ -170,6 +170,31 @@ Do **not** claim inference `XAI_API_KEY` can return console.x.ai business remain
 - Treating SuperGrok Business OIDC as console team prepaid
 - Claiming full Business Usage **charts** done (core prepaid balance is shipped; series is not)
 
+## Grok Business **licenses** Usage (messages / conversations) — research pin (2026-08-04)
+
+**Question:** Is there a public Management (or other) API for Platforms → Grok
+Business → **licenses** Usage charts (messages, conversations, active users)?
+
+**Answer (public docs only; accessed 2026-08-04):**
+
+| Source | Finding |
+|--------|---------|
+| [Management API overview](https://docs.x.ai/developers/rest-api-reference/management) | Management key + team-scoped billing routes |
+| [Billing Management](https://docs.x.ai/developers/rest-api-reference/management/billing) | Prepaid balance, postpaid preview/limits, invoices, **POST usage analytics (USD sum by description)** |
+| Console browser UI | `…/grok-business/usage` (session cookie) is a separate product surface |
+
+**No public API** for license seat **message / conversation counts** or active
+license users was found in the Management billing reference. Product must
+**not** invent a client or scrape console.x.ai HTML.
+
+**Product non-goal:** make license charts non-zero via CLI SuperGrok dogfood.
+Success for team visibility = SuperGrok meters + Management prepaid / postpaid
+/ USD series, not Platforms → Grok Business licenses.
+
+**Naming trap:** residual "console Grok Business Usage **class**" (Half B) means
+team API prepaid / postpaid / USD series. The dropdown **Grok Business**
+licenses page is a different product (seat messages/conversations).
+
 ## Suggested product constants (for implementer)
 
 ```text

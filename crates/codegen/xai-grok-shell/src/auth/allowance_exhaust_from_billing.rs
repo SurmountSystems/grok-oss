@@ -33,6 +33,235 @@ use super::supergrok_identity_rank::{
 static INCLUDED_BILLING_BY_IDENTITY: Mutex<BTreeMap<String, IncludedBillingFields>> =
     Mutex::new(BTreeMap::new());
 
+/// Last SuperGrok billing poll result for one principal (process-local).
+///
+/// No tokens, secrets, or full HTTP bodies. Used so dual `/limits`, doctor, and
+/// rank can tell **which** SuperGrok login polled OK vs auth-failed vs other
+/// fail, without inventing a successful remember for a dead JWT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SupergrokBillingPollOutcomeKind {
+    /// Credits poll succeeded for this identity this process.
+    Ok,
+    /// Auth-class failure (expired JWT, no auth context, 401, …).
+    AuthFailed,
+    /// Non-auth failure (network, 5xx, parse, …).
+    OtherFailed,
+    /// Never polled this process (or cleared).
+    Never,
+}
+
+/// Short process-local poll record (no secrets).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupergrokBillingPollOutcome {
+    pub kind: SupergrokBillingPollOutcomeKind,
+    /// Short fail class for notes / doctor (`auth`, `network`, `other`).
+    /// `None` when [`SupergrokBillingPollOutcomeKind::Ok`] or `Never`.
+    pub error_class: Option<&'static str>,
+}
+
+impl SupergrokBillingPollOutcome {
+    pub fn never() -> Self {
+        Self {
+            kind: SupergrokBillingPollOutcomeKind::Never,
+            error_class: None,
+        }
+    }
+
+    pub fn ok() -> Self {
+        Self {
+            kind: SupergrokBillingPollOutcomeKind::Ok,
+            error_class: None,
+        }
+    }
+
+    pub fn auth_failed() -> Self {
+        Self {
+            kind: SupergrokBillingPollOutcomeKind::AuthFailed,
+            error_class: Some("auth"),
+        }
+    }
+
+    pub fn other_failed(error_class: &'static str) -> Self {
+        Self {
+            kind: SupergrokBillingPollOutcomeKind::OtherFailed,
+            error_class: Some(error_class),
+        }
+    }
+
+    pub fn is_ok(self) -> bool {
+        self.kind == SupergrokBillingPollOutcomeKind::Ok
+    }
+
+    pub fn is_auth_failed(self) -> bool {
+        self.kind == SupergrokBillingPollOutcomeKind::AuthFailed
+    }
+}
+
+/// Process-local last billing poll outcome per SuperGrok identity_id.
+///
+/// Never stores tokens. Cleared with [`clear_included_billing_cache`].
+static POLL_OUTCOME_BY_IDENTITY: Mutex<BTreeMap<String, SupergrokBillingPollOutcome>> =
+    Mutex::new(BTreeMap::new());
+
+/// Classify a billing poll error string into auth vs other (no secrets).
+///
+/// Auth class: expired / no auth context / unauthorized / 401-style messages
+/// from the SuperGrok credits path. Everything else is other (network, 5xx, …).
+pub fn classify_supergrok_billing_poll_error(err: &str) -> SupergrokBillingPollOutcomeKind {
+    let e = err.to_ascii_lowercase();
+    if e.contains("no auth context")
+        || e.contains("invalid or expired")
+        || e.contains("expired credential")
+        || e.contains("unauthorized")
+        || e.contains("authentication")
+        || e.contains(" 401")
+        || e.contains("status: 401")
+        || e.contains("http 401")
+        || e.contains("status code 401")
+        || e.contains("(401)")
+    {
+        SupergrokBillingPollOutcomeKind::AuthFailed
+    } else {
+        SupergrokBillingPollOutcomeKind::OtherFailed
+    }
+}
+
+/// Remember a successful SuperGrok credits poll for `identity_id`.
+///
+/// Call only after a real Ok response for that principal's JWT. Does not
+/// invent meters; pair with [`remember_supergrok_included_billing`] when %.
+pub fn remember_supergrok_billing_poll_ok(identity_id: &str) {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut map = POLL_OUTCOME_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    map.insert(id.to_owned(), SupergrokBillingPollOutcome::ok());
+}
+
+/// Remember a failed SuperGrok credits poll and demote stale included cache on
+/// auth-class fails.
+///
+/// Auth fail: clear that identity's process-cache free-period `usage_pct` so
+/// rank does not treat it as **fresh** headroom. Does **not** delete
+/// `auth.json` secrets. Other fail: record outcome only (keep prior cache).
+pub fn remember_supergrok_billing_poll_failed(identity_id: &str, err: &str) {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let kind = classify_supergrok_billing_poll_error(err);
+    let outcome = match kind {
+        SupergrokBillingPollOutcomeKind::AuthFailed => SupergrokBillingPollOutcome::auth_failed(),
+        SupergrokBillingPollOutcomeKind::OtherFailed => {
+            // Prefer network when message looks like transport; else other.
+            let e = err.to_ascii_lowercase();
+            let class = if e.contains("timeout")
+                || e.contains("connection")
+                || e.contains("dns")
+                || e.contains("network")
+                || e.contains("connect")
+            {
+                "network"
+            } else {
+                "other"
+            };
+            SupergrokBillingPollOutcome::other_failed(class)
+        }
+        SupergrokBillingPollOutcomeKind::Ok | SupergrokBillingPollOutcomeKind::Never => {
+            SupergrokBillingPollOutcome::other_failed("other")
+        }
+    };
+    {
+        let mut map = POLL_OUTCOME_BY_IDENTITY
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        map.insert(id.to_owned(), outcome);
+    }
+    if kind == SupergrokBillingPollOutcomeKind::AuthFailed {
+        demote_included_billing_on_auth_fail(id);
+    }
+}
+
+/// Clear free SuperGrok period `usage_pct` (and reset) for an identity after
+/// auth-class poll fail so enrich/rank do not treat stale cache as fresh.
+///
+/// Leaves SuperGrok $ extras and Build product % alone (not free-period
+/// headroom). No secrets; process map only.
+pub fn demote_included_billing_on_auth_fail(identity_id: &str) {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut map = INCLUDED_BILLING_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(entry) = map.get_mut(id) {
+        entry.usage_pct = None;
+        entry.reset_at = None;
+        // period_type left: cosmetic for /limits if a later path re-fills
+    }
+}
+
+/// Last poll outcome for one SuperGrok identity (`Never` when unrecorded).
+pub fn supergrok_billing_poll_outcome(identity_id: &str) -> SupergrokBillingPollOutcome {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return SupergrokBillingPollOutcome::never();
+    }
+    POLL_OUTCOME_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(id)
+        .cloned()
+        .unwrap_or_else(SupergrokBillingPollOutcome::never)
+}
+
+/// Snapshot of all known poll outcomes (tests / doctor / limits honesty).
+pub fn supergrok_billing_poll_outcomes_snapshot() -> BTreeMap<String, SupergrokBillingPollOutcome> {
+    POLL_OUTCOME_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// True when this identity's last poll was auth-class fail.
+pub fn supergrok_identity_last_poll_auth_failed(identity_id: &str) -> bool {
+    supergrok_billing_poll_outcome(identity_id).is_auth_failed()
+}
+
+/// True when this identity's last poll succeeded.
+pub fn supergrok_identity_last_poll_ok(identity_id: &str) -> bool {
+    supergrok_billing_poll_outcome(identity_id).is_ok()
+}
+
+/// Plain English fail note for dual SuperGrok billing (CLI / doctor / limits).
+///
+/// Role is primary; fingerprint is secondary; always includes re-login CTA.
+/// Does **not** use a bare 12-char identity id as the only label.
+pub fn format_supergrok_billing_fail_note(
+    role_label: &str,
+    fingerprint: &str,
+    err: &str,
+) -> String {
+    let role = role_label.trim();
+    let role = if role.is_empty() { "unknown" } else { role };
+    let fp = fingerprint.trim();
+    let fp_short = if fp.len() > 12 { &fp[..12] } else { fp };
+    let err = err.trim();
+    let err = if err.is_empty() {
+        "billing poll failed"
+    } else {
+        err
+    };
+    format!(
+        "SuperGrok ({role}) billing failed (fingerprint {fp_short}): {err}. \
+Re-login that SuperGrok account with: grok login"
+    )
+}
+
 /// Remember included usage + optional reset for one SuperGrok principal.
 ///
 /// Pure-ish side effect on process cache only. `period_end_rfc3339` is parsed
@@ -131,6 +360,8 @@ pub fn remember_active_supergrok_included_billing(
         return;
     };
     remember_supergrok_included_billing(&identity_id, usage_pct, period_end_rfc3339, period_type);
+    // Active path credits success → poll OK for this identity (status/rank).
+    remember_supergrok_billing_poll_ok(&identity_id);
 }
 
 /// Identity id of the first SuperGrok session in `auth.json` (active/base first).
@@ -270,9 +501,13 @@ pub fn included_billing_fields_snapshot() -> BTreeMap<String, IncludedBillingFie
         .clone()
 }
 
-/// Clear process included-billing cache (tests).
+/// Clear process included-billing cache and poll outcomes (tests / reset).
 pub fn clear_included_billing_cache() {
     INCLUDED_BILLING_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    POLL_OUTCOME_BY_IDENTITY
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clear();
@@ -673,6 +908,90 @@ mod tests {
         let out = f(dir.path());
         clear_all_including_durable();
         out
+    }
+
+    /// Named contract: auth-class billing fail demotes free-period process cache
+    /// so rank does not treat stale usage % as fresh headroom.
+    #[test]
+    #[serial_test::serial]
+    fn auth_failed_poll_demotes_included_usage_pct_not_fresh_headroom() {
+        clear_included_billing_cache();
+        remember_supergrok_included_billing(
+            "user-dead",
+            6.0,
+            Some("2026-08-10T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("user-dead", 500);
+        assert_eq!(
+            included_billing_fields_snapshot()
+                .get("user-dead")
+                .and_then(|f| f.usage_pct),
+            Some(6.0)
+        );
+        remember_supergrok_billing_poll_failed(
+            "user-dead",
+            "Billing service error: no auth context",
+        );
+        let outcome = supergrok_billing_poll_outcome("user-dead");
+        assert_eq!(outcome.kind, SupergrokBillingPollOutcomeKind::AuthFailed);
+        assert_eq!(outcome.error_class, Some("auth"));
+        let fields = included_billing_fields_snapshot()
+            .get("user-dead")
+            .cloned()
+            .expect("entry remains for extras");
+        assert_eq!(
+            fields.usage_pct, None,
+            "auth fail must demote free-period usage_pct"
+        );
+        assert_eq!(
+            fields.prepaid_balance_cents,
+            Some(500),
+            "auth fail must not wipe SuperGrok $ extras memory"
+        );
+        clear_included_billing_cache();
+    }
+
+    /// Named contract: fail note names role + re-login CTA (not only 12-char id).
+    #[test]
+    fn billing_fail_note_names_role_fingerprint_and_relogin() {
+        let note = format_supergrok_billing_fail_note(
+            "personal",
+            "abcdef0123456789ffff",
+            "Invalid or expired credentials",
+        );
+        assert!(
+            note.contains("SuperGrok (personal)"),
+            "role primary: {note}"
+        );
+        assert!(
+            note.contains("fingerprint abcdef012345"),
+            "fingerprint secondary: {note}"
+        );
+        assert!(
+            note.to_ascii_lowercase().contains("grok login"),
+            "re-login CTA: {note}"
+        );
+        assert!(
+            note.contains("Invalid or expired credentials"),
+            "error text: {note}"
+        );
+        // Must not be the old soft shape that only used a bare short identity id.
+        assert!(
+            !note.starts_with("SuperGrok billing poll failed for "),
+            "must not be short-id-only note: {note}"
+        );
+    }
+
+    /// Named contract: successful poll records Ok; never invents fail.
+    #[test]
+    #[serial_test::serial]
+    fn remember_poll_ok_sets_outcome_ok() {
+        clear_included_billing_cache();
+        remember_supergrok_billing_poll_ok("team-live");
+        assert!(supergrok_identity_last_poll_ok("team-live"));
+        assert!(!supergrok_identity_last_poll_auth_failed("team-live"));
+        clear_included_billing_cache();
     }
 
     /// Named contract: sibling/full credits poll can remember SuperGrok Extra

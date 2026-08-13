@@ -1108,9 +1108,13 @@ fn sampling_config_uses_fallback_when_no_model_api_key() {
         &model,
         ResolvedCredentials {
             api_key: Some("fallback-key".to_string()),
+            failover_api_keys: Vec::new(),
             base_url: model.info().base_url.clone(),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: AuthScheme::Bearer,
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
         },
         None,
         None,
@@ -1183,12 +1187,16 @@ fn default_models_dual_endpoint_routing() {
         );
         let api_key_creds = ResolvedCredentials {
             api_key: Some("key".into()),
+            failover_api_keys: Vec::new(),
             base_url: entry
                 .api_base_url
                 .clone()
                 .unwrap_or(entry.info().base_url.clone()),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: AuthScheme::Bearer,
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
         };
         assert_eq!(
             api_key_creds.base_url, endpoints.xai_api_base_url,
@@ -1557,9 +1565,13 @@ fn inject_url_derived_headers_adds_openrouter_attribution() {
 fn api_key_creds(base_url: &str) -> ResolvedCredentials {
     ResolvedCredentials {
         api_key: Some("xai-secret".to_string()),
+        failover_api_keys: Vec::new(),
         base_url: base_url.to_string(),
         auth_type: xai_chat_state::AuthType::ApiKey,
         auth_scheme: Default::default(),
+        failover_base_url: None,
+        session_base_url: None,
+        session_identity_key: None,
     }
 }
 /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).

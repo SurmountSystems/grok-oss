@@ -764,6 +764,8 @@ impl SessionActor {
         }
         // Edge / gateway outages: plain English for RetryFailed + ACP data,
         // not raw "API error (status 521 <unknown status code>)" Internal JSON.
+        // Team credit / monthly spending limit 403: same plain-English path
+        // (not Internal error JSON envelope).
         let detailed_message = match error.status_code {
             Some(code)
                 if xai_grok_sampling_types::is_edge_outage_status(code)
@@ -773,8 +775,16 @@ impl SessionActor {
                     reqwest::StatusCode::from_u16(code).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
                 xai_grok_sampling_types::outage_exhausted_user_message(status, 1)
             }
+            Some(code)
+                if matches!(code, 402 | 403 | 429 | 400)
+                    && xai_grok_sampling_types::is_credit_exhausted_message(&error.message) =>
+            {
+                xai_grok_sampling_types::credit_exhausted_user_message(&error.message)
+            }
             _ => error.message.clone(),
         };
+        let credit_exhausted_terminal = matches!(error.status_code, Some(402 | 403 | 429 | 400))
+            && xai_grok_sampling_types::is_credit_exhausted_message(&error.message);
         if matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
             && error.message.contains("encrypted_content")
@@ -1033,6 +1043,11 @@ impl SessionActor {
             },
         ))
         .await;
+        // Credit-exhausted team 403: plain string data (operator-readable), not
+        // `{"message":"API error (status …)","http_status":403}` envelope only.
+        if credit_exhausted_terminal {
+            return Err(acp::Error::internal_error().data(detailed_message));
+        }
         Err(
             acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
                 detailed_message,

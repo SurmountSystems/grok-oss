@@ -528,24 +528,27 @@ async fn apply_retry_decision(
     // another key with balance is configured. Rotate before classify so we
     // do not surface a billing failure while failover keys remain.
     // Credit-worded 429 is also is_rate_limited(); credit path runs first.
-    if err.is_credit_exhausted()
-        && let Some(hop_reason) = try_rotate_to_failover_key(
+    // Console team credit/spend death: reinject SuperGrok recovery (clears
+    // preemptive included-full memo once) so free SuperGrok period can hop.
+    if err.is_credit_exhausted() {
+        crate::prefer_live_primary::ensure_supergrok_recovery_after_console_credit_exhaust(config);
+        if let Some(hop_reason) = try_rotate_to_failover_key(
             config,
             client,
             crate::exhausted_identity::HopCause::CreditExhausted,
-        )
-    {
-        *retry_count += 1;
-        emit_retrying_with_reason(
-            event_tx,
-            request_id,
-            *retry_count,
-            max_retries,
-            err,
-            config,
-            hop_reason,
-        );
-        return true;
+        ) {
+            *retry_count += 1;
+            emit_retrying_with_reason(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                hop_reason,
+            );
+            return true;
+        }
     }
 
     // Plain HTTP 429: hop to the next configured identity first (when any),

@@ -218,6 +218,30 @@ pub fn render_limits_modal(
     for raw in state.content_lines(now) {
         display_lines.extend(wrap_plain_line(&raw, width));
     }
+
+    // Progress bar under primary included allowance when known. Inject a
+    // sentinel into the display stream so scroll max and viewport layout
+    // reserve a row for the bar (painting only after the text line left the
+    // bar off-screen when the allowance line was the last content row).
+    let primary_bar = state.snapshot.primary.included.as_ref().map(|inc| {
+        let rem = inc.remaining_fraction();
+        let tone = AllowanceMeterTone::from_used_pct(inc.used_pct);
+        (rem, tone)
+    });
+    if primary_bar.is_some() {
+        let mut with_bar = Vec::with_capacity(display_lines.len() + 1);
+        let mut injected = false;
+        for line in display_lines {
+            let is_allowance_meter = is_included_allowance_used_line(&line);
+            with_bar.push(line);
+            if !injected && is_allowance_meter {
+                with_bar.push(REMAINING_BAR_SENTINEL.to_string());
+                injected = true;
+            }
+        }
+        display_lines = with_bar;
+    }
+
     let max_scroll = display_lines.len().saturating_sub(content.height as usize) as u16;
     if state.scroll > max_scroll {
         state.scroll = max_scroll;
@@ -225,48 +249,42 @@ pub fn render_limits_modal(
     let start = state.scroll as usize;
     let end = (start + content.height as usize).min(display_lines.len());
 
-    // Progress bar under primary included allowance when known.
-    let primary_bar = state.snapshot.primary.included.as_ref().map(|inc| {
-        let rem = inc.remaining_fraction();
-        let tone = AllowanceMeterTone::from_used_pct(inc.used_pct);
-        (rem, tone)
-    });
-    // Paint the bar only once, after the first unwrapped-style allowance line.
-    let mut painted_primary_bar = false;
-
     let mut y = content.y;
     for text in display_lines[start..end].iter() {
         if y >= content.y + content.height {
             break;
         }
+        if text.as_str() == REMAINING_BAR_SENTINEL {
+            if let Some((rem, tone)) = primary_bar {
+                // Tracked bar: brackets + ░ empty so remaining extent is obvious.
+                let bar_w = content.width.saturating_sub(2).min(34);
+                if bar_w >= 4 {
+                    let fg = tone_color(tone, theme);
+                    let spans =
+                        progress_bar_tracked_spans(bar_w, rem, fg, theme.gray_dim, theme.bg_dark);
+                    let mut bar_line =
+                        vec![Span::styled("  ", Style::default().fg(theme.text_primary))];
+                    bar_line.extend(spans);
+                    buf.set_line(content.x, y, &Line::from(bar_line), content.width);
+                }
+            }
+            y = y.saturating_add(1);
+            continue;
+        }
         let style = line_style(text, theme);
         let line = Line::from(Span::styled(text.clone(), style));
         buf.set_line(content.x, y, &line, content.width);
         y = y.saturating_add(1);
-
-        // After first "Included … allowance" line, paint a remaining bar.
-        if !painted_primary_bar
-            && let Some((rem, tone)) = primary_bar
-            && text.contains("Included")
-            && text.contains("allowance:")
-            && text.contains("% used")
-            && y < content.y + content.height
-        {
-            // Tracked bar: brackets + ░ empty so remaining extent is obvious.
-            let bar_w = content.width.saturating_sub(2).min(34);
-            if bar_w >= 4 {
-                let fg = tone_color(tone, theme);
-                let spans =
-                    progress_bar_tracked_spans(bar_w, rem, fg, theme.gray_dim, theme.bg_dark);
-                let mut bar_line =
-                    vec![Span::styled("  ", Style::default().fg(theme.text_primary))];
-                bar_line.extend(spans);
-                buf.set_line(content.x, y, &Line::from(bar_line), content.width);
-                y = y.saturating_add(1);
-                painted_primary_bar = true;
-            }
-        }
     }
+}
+
+/// Sentinel row for the primary remaining bar (not user-visible text).
+const REMAINING_BAR_SENTINEL: &str = "\u{0}limits-remaining-bar";
+
+/// True when a wrapped display line is the SuperGrok included allowance meter
+/// (has used %), not the "no data yet" placeholder.
+fn is_included_allowance_used_line(text: &str) -> bool {
+    text.contains("Included") && text.contains("allowance:") && text.contains("% used")
 }
 
 /// Word-wrap a single plain line to `width` columns (space breaks preferred).

@@ -14,7 +14,10 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::views::credit_bar::{ConsoleTeamPrepaidGap, CreditBalance, SamplingIdentityKind};
+use crate::views::credit_bar::{
+    ActiveSpendDriver, ConsoleTeamPrepaidGap, CreditBalance, SamplingIdentityKind,
+    active_spend_driver,
+};
 use crate::views::limits_snapshot::{
     ConsoleTeamPostpaidGap, ConsoleTeamPostpaidMeter, ConsoleTeamUsageSeriesSummary,
     LimitsSnapshot, PrincipalLimitsInput, format_limits_detail, honesty_notes_for_snapshot,
@@ -28,14 +31,15 @@ pub struct LimitsArgs {
     pub json: bool,
 }
 
-/// Management prepaid/postpaid process-cache policy for a product path.
+/// Management prepaid/postpaid/usage-series process-cache policy for a product
+/// path.
 ///
 /// Pure contract so unit tests lock "explicit collect/open busts / background
 /// poll does not" without an app harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementMeterCachePolicy {
     /// Explicit `grok limits` collect **or** TUI `/limits` open/refresh: clear
-    /// prepaid+postpaid process caches before Management fetch.
+    /// prepaid+postpaid+usage-series process caches before Management fetch.
     ForceRefresh,
     /// TUI silent/background `FetchBilling` (turn end, session start, modal
     /// zero-countdown): honor ≤Ns process TTL (do **not** clear).
@@ -61,7 +65,8 @@ pub fn management_meter_cache_policy_for_background_billing_poll() -> Management
     ManagementMeterCachePolicy::HonorProcessTtl
 }
 
-/// Whether product should clear Management prepaid+postpaid process caches.
+/// Whether product should clear Management prepaid+postpaid+usage-series
+/// process caches.
 ///
 /// True only for [`ManagementMeterCachePolicy::ForceRefresh`] when a management
 /// key is present. Background HonorProcessTtl never clears.
@@ -93,6 +98,17 @@ pub fn should_live_fetch_console_team_postpaid_with_billing(has_management_key: 
     has_management_key
 }
 
+/// Whether a billing fetch path should live-call Management usage series
+/// (POST analytics; result lands in process cache; TTL honored unless caches
+/// were cleared).
+///
+/// Same gate as postpaid: management key present. Background `FetchBilling`
+/// and TUI `/limits` silent refresh both use this so series is not CLI-only.
+/// Does **not** invent unbounded spam: shell honors the 60s process TTL.
+pub fn should_live_fetch_console_team_usage_series_with_billing(has_management_key: bool) -> bool {
+    has_management_key
+}
+
 /// JSON schema version for `grok limits --json`.
 pub const SCHEMA_VERSION: &str = "1";
 
@@ -108,11 +124,41 @@ pub struct LimitsCliReport {
     /// SuperGrok principal role when live is SuperGrok and known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_principal_role: Option<String>,
+    /// Active spend driver for free-period-first token economy (Design A).
+    ///
+    /// Wire: `supergrok_free_period` | `supergrok_extras` | `console_key`.
+    /// Distinct from [`Self::live_sampling`] when SuperGrok session is live
+    /// but free period is full and SuperGrok dollar extras drive after-burner.
+    pub active_driver: &'static str,
+    /// Human label for the active driver (matches `/limits` **Active:** line).
+    pub active_driver_label: String,
     pub supergrok: SuperGrokCliSection,
     pub console: ConsoleCliSection,
     /// Non-secret warnings (fetch failures, no auth, …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+}
+
+/// Active spend driver from a `/limits` snapshot (same Design A logic as status).
+///
+/// Uses primary SuperGrok free-period % and SuperGrok dollar extras when live
+/// is SuperGrok. Console live always returns console key. Team prepaid and
+/// team Grok Build settlement are never the active driver label here.
+pub fn active_spend_driver_from_snapshot(snap: &LimitsSnapshot) -> ActiveSpendDriver {
+    let included_known = snap.primary.included.is_some();
+    let included_pct = snap
+        .primary
+        .included
+        .as_ref()
+        .map(|i| i.used_pct)
+        .unwrap_or(0.0);
+    let extras_cents = snap.primary.dollar_extras.as_ref().map(|d| d.balance_cents);
+    active_spend_driver(
+        snap.live_identity,
+        included_known,
+        included_pct,
+        extras_cents,
+    )
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -147,6 +193,16 @@ pub struct PrincipalCliMeter {
     /// Distinct from top-level `includedUsedPct` (account-level included %).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grok_build_usage_pct: Option<f64>,
+    /// True when this principal's JWT polled credits successfully.
+    /// False when poll failed or the free-period row was only shared-pool fill.
+    pub poll_succeeded: bool,
+    /// Free SuperGrok period included % provenance:
+    /// `live_poll` | `process_cache` | `shared_pool_fill`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub included_source: Option<&'static str>,
+    /// Short poll fail class when known (`auth`, `network`, `other`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_error_class: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -334,18 +390,27 @@ pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> Limits
 
     // Slice 3: machine-readable notes get the same honesty phrases as human
     // `/limits` body (dedupe if a collector already pushed the same text).
+    // Dual poll fail + shared-pool fill lines match human format_limits_detail.
     let mut notes = notes;
+    for honesty in crate::views::limits_snapshot::dual_poll_honesty_notes_for_snapshot(snap) {
+        if !notes.iter().any(|n| n == &honesty) {
+            notes.push(honesty);
+        }
+    }
     for honesty in honesty_notes_for_snapshot(snap) {
         if !notes.iter().any(|n| n == &honesty) {
             notes.push(honesty);
         }
     }
 
+    let driver = active_spend_driver_from_snapshot(snap);
     LimitsCliReport {
         schema_version: SCHEMA_VERSION,
         live_sampling: live_sampling_wire(snap.live_identity),
         live_sampling_label: snap.live_sampling_line(),
         live_principal_role: snap.live_principal_label.clone(),
+        active_driver: driver.as_wire(),
+        active_driver_label: format!("Active: {}", driver.as_human()),
         supergrok: SuperGrokCliSection {
             principals,
             shared_unified_pool: snap.shared_unified_supergrok_pool,
@@ -431,6 +496,9 @@ fn principal_cli(
         // From snapshot (CreditBalance after FetchBilling / live collect).
         // Live CLI collect may also `apply_grok_build_usage_pcts` by index.
         grok_build_usage_pct: p.grok_build_usage_pct,
+        poll_succeeded: p.poll_succeeded,
+        included_source: p.included_source.as_wire(),
+        poll_error_class: p.poll_error_class,
     }
 }
 
@@ -685,19 +753,44 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
                         config,
                     );
                     balances.insert(target.identity_id.clone(), bal);
+                    xai_grok_shell::auth::remember_supergrok_billing_poll_ok(&target.identity_id);
                 } else {
                     notes.push(format!(
                         "SuperGrok billing for {} returned no config",
                         target.identity_id
                     ));
+                    xai_grok_shell::auth::remember_supergrok_billing_poll_failed(
+                        &target.identity_id,
+                        "billing returned no config",
+                    );
                 }
             }
             Err(e) => {
                 // Never include tokens from the error path; shell errors are status/body.
-                notes.push(format!(
-                    "SuperGrok billing poll failed for {}: {e}",
-                    short_id(&target.identity_id)
-                ));
+                let err_text = e.to_string();
+                xai_grok_shell::auth::remember_supergrok_billing_poll_failed(
+                    &target.identity_id,
+                    &err_text,
+                );
+                // Role + fingerprint primary; re-login CTA. Short id only as
+                // fallback when listing is missing for this identity.
+                let listing = listings
+                    .iter()
+                    .find(|p| p.identity_id == target.identity_id);
+                let note = if let Some(p) = listing {
+                    xai_grok_shell::auth::format_supergrok_billing_fail_note(
+                        p.role_label,
+                        &p.fingerprint,
+                        &err_text,
+                    )
+                } else {
+                    xai_grok_shell::auth::format_supergrok_billing_fail_note(
+                        "unknown",
+                        short_id(&target.identity_id),
+                        &err_text,
+                    )
+                };
+                notes.push(note);
             }
         }
     }
@@ -848,6 +941,8 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
                         balance: Some(bal.clone()),
                         autotopup: None,
                         included_billing_only: false,
+                        poll_succeeded: Some(true),
+                        poll_error_class: None,
                     }],
                     vec![Some(id.clone())],
                 )
@@ -869,12 +964,33 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
                 } else {
                     (None, !is_active)
                 };
+                let outcome = xai_grok_shell::auth::supergrok_billing_poll_outcome(&p.identity_id);
+                let (poll_succeeded, poll_error_class) = match outcome.kind {
+                    xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::Ok => (Some(true), None),
+                    xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::AuthFailed => {
+                        (Some(false), Some("auth"))
+                    }
+                    xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::OtherFailed => {
+                        (Some(false), outcome.error_class)
+                    }
+                    xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::Never => {
+                        // Balance present without outcome → live this collect
+                        // before outcome writers ran; empty → cold/fill path.
+                        if bal.is_some() && !included_only {
+                            (Some(true), None)
+                        } else {
+                            (Some(false), None)
+                        }
+                    }
+                };
                 rows.push(PrincipalLimitsInput {
                     label: xai_grok_shell::auth::principal_limits_label(role),
                     role_label: Some(p.role_label.to_string()),
                     balance: bal,
                     autotopup: None,
                     included_billing_only: included_only,
+                    poll_succeeded,
+                    poll_error_class,
                 });
                 ids.push(Some(p.identity_id.clone()));
             }
@@ -1195,6 +1311,30 @@ mod tests {
         );
     }
 
+    /// Named contract (P2): usage series live-fetch rides the same
+    /// FetchBilling / silent `/limits` refresh path as postpaid when a
+    /// management key is present (TTL still honored unless caches cleared).
+    #[test]
+    fn should_live_fetch_usage_series_with_billing_when_management_key() {
+        assert!(
+            should_live_fetch_console_team_usage_series_with_billing(true),
+            "key present → live-call usage series into process cache (cache or HTTP)"
+        );
+        assert!(
+            !should_live_fetch_console_team_usage_series_with_billing(false),
+            "no key → skip usage series Management call"
+        );
+        // Same gate as postpaid so series is not a thinner CLI-only path.
+        assert_eq!(
+            should_live_fetch_console_team_usage_series_with_billing(true),
+            should_live_fetch_console_team_postpaid_with_billing(true),
+        );
+        assert_eq!(
+            should_live_fetch_console_team_usage_series_with_billing(false),
+            should_live_fetch_console_team_postpaid_with_billing(false),
+        );
+    }
+
     #[test]
     fn predict_live_session_when_only_session() {
         assert_eq!(
@@ -1243,6 +1383,8 @@ mod tests {
             balance: Some(bal(24.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (report, snap) = build_limits_cli_from_parts(
             SamplingIdentityKind::SuperGrokSession,
@@ -1305,6 +1447,7 @@ mod tests {
     /// S1 poll history via [`attach_flat_poll_from_history`], not only the
     /// test-only `with_flat_poll_unproven_debit(true)` setter.
     #[test]
+    #[serial_test::serial]
     fn limits_snapshot_sets_flat_poll_from_history_not_only_tests() {
         use crate::views::limits_honesty::flat_poll_unproven_debit_note;
         use chrono::{TimeZone, Utc};
@@ -1329,6 +1472,8 @@ mod tests {
             balance: Some(bal(65.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         // build_limits_cli_from_parts attaches history (product path).
         let (report, snap) = build_limits_cli_from_parts(
@@ -1362,6 +1507,8 @@ mod tests {
             balance: Some(bal(65.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (_, snap_cold) = build_limits_cli_from_parts(
             SamplingIdentityKind::SuperGrokSession,
@@ -1394,6 +1541,8 @@ mod tests {
             balance: Some(bal(65.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (_, mut snap) = build_limits_cli_from_parts(
             SamplingIdentityKind::SuperGrokSession,
@@ -1460,6 +1609,8 @@ mod tests {
             balance: Some(bal(90.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (report, snap) = build_limits_cli_from_parts(
             SamplingIdentityKind::ConsoleKey,
@@ -1496,6 +1647,8 @@ mod tests {
                 max_amount_cents: None,
             }),
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (report, snap) = build_limits_cli_from_parts(
             SamplingIdentityKind::SuperGrokSession,
@@ -1520,6 +1673,14 @@ mod tests {
             "label: {v}"
         );
         assert_eq!(v["livePrincipalRole"], "personal");
+        assert_eq!(v["activeDriver"], "supergrok_free_period");
+        assert!(
+            v["activeDriverLabel"]
+                .as_str()
+                .unwrap_or("")
+                .contains("free SuperGrok period"),
+            "active driver label: {v}"
+        );
         assert_eq!(v["supergrok"]["principals"][0]["includedUsedPct"], 42.5);
         assert_eq!(v["supergrok"]["principals"][0]["includedRemainingPct"], 58);
         assert_eq!(v["console"]["teamPrepaidGap"], "no_management_team_id");
@@ -1544,6 +1705,80 @@ mod tests {
         assert!(!s.contains("sk-"));
     }
 
+    /// Named contract (P3/P5): free period headroom + SuperGrok extras on account
+    /// → `activeDriver` is free SuperGrok period (not extras, not console).
+    #[test]
+    fn limits_json_active_driver_free_period_with_extras_on_account() {
+        let mut b = bal(6.0);
+        b.prepaid_balance_cents = Some(10_029);
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok (business)".into(),
+            role_label: Some("business".into()),
+            balance: Some(b),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let (report, snap) = build_limits_cli_from_parts(
+            SamplingIdentityKind::SuperGrokSession,
+            Some("business"),
+            &[input],
+            true,
+            Some(34_000), // team prepaid known; not active driver
+            ConsoleTeamPrepaidGap::Loading,
+            vec![],
+        );
+        assert_eq!(report.active_driver, "supergrok_free_period");
+        assert!(
+            report.active_driver_label.contains("free SuperGrok period"),
+            "label: {}",
+            report.active_driver_label
+        );
+        assert_eq!(report.live_sampling, "supergrok_session");
+        assert!(!report.console.is_live);
+        let human = format_limits_human(&snap, &report.notes);
+        assert!(
+            human.contains("Active: free SuperGrok period"),
+            "human must lead with active free period: {human}"
+        );
+        assert!(
+            !human.contains("Active: SuperGrok extras") && !human.contains("Active: console key"),
+            "must not claim extras/console active with free-period headroom: {human}"
+        );
+    }
+
+    /// Named contract: free period full + extras → activeDriver SuperGrok extras.
+    #[test]
+    fn limits_json_active_driver_extras_afterburner() {
+        let mut b = bal(100.0);
+        b.prepaid_balance_cents = Some(453);
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok".into(),
+            role_label: None,
+            balance: Some(b),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let (report, snap) = build_limits_cli_from_parts(
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            &[input],
+            true,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            vec![],
+        );
+        assert_eq!(report.active_driver, "supergrok_extras");
+        let human = format_limits_human(&snap, &report.notes);
+        assert!(
+            human.contains("Active: SuperGrok extras"),
+            "after-burner human: {human}"
+        );
+    }
+
     /// Named contract: wire productUsage Build % surfaces on limits JSON when set.
     #[test]
     fn json_report_includes_grok_build_usage_pct_when_applied() {
@@ -1553,6 +1788,8 @@ mod tests {
             balance: Some(bal(65.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (mut report, _snap) = build_limits_cli_from_parts(
             SamplingIdentityKind::SuperGrokSession,
@@ -1586,6 +1823,8 @@ mod tests {
             balance: Some(balance),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (report, _snap) = build_limits_cli_from_parts(
             SamplingIdentityKind::SuperGrokSession,
@@ -1615,6 +1854,8 @@ mod tests {
             balance: Some(bal(10.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let business = PrincipalLimitsInput {
             label: "SuperGrok (business)".into(),
@@ -1622,6 +1863,8 @@ mod tests {
             balance: Some(bal(90.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (mut report, _snap) = build_limits_cli_from_parts(
             SamplingIdentityKind::SuperGrokSession,
@@ -1660,6 +1903,8 @@ mod tests {
                     balance: Some(bal(10.0)),
                     autotopup: None,
                     included_billing_only: false,
+                    poll_succeeded: None,
+                    poll_error_class: None,
                 },
                 PrincipalLimitsInput {
                     label: "SuperGrok (business)".into(),
@@ -1667,6 +1912,8 @@ mod tests {
                     balance: Some(bal(20.0)),
                     autotopup: None,
                     included_billing_only: false,
+                    poll_succeeded: None,
+                    poll_error_class: None,
                 },
             ],
             false,
@@ -1699,6 +1946,8 @@ mod tests {
             balance: Some(bal(10.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let business = PrincipalLimitsInput {
             label: "SuperGrok (business)".into(),
@@ -1709,6 +1958,8 @@ mod tests {
             }),
             autotopup: None,
             included_billing_only: true,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (report, snap) = build_limits_cli_from_parts(
             SamplingIdentityKind::SuperGrokSession,
@@ -1738,6 +1989,8 @@ mod tests {
             balance: Some(bal(65.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let postpaid = ConsoleTeamPostpaidMeter {
             period_total_cents: 20_756,
@@ -1789,7 +2042,8 @@ mod tests {
 
         let human = format_limits_human(&snap, &report.notes);
         assert!(
-            human.contains("Team postpaid OAuth class:"),
+            human.contains("Team postpaid OAuth / Grok Build class:")
+                || human.contains("Team postpaid OAuth class:"),
             "human names OAuth class: {human}"
         );
         assert!(
@@ -1830,6 +2084,8 @@ mod tests {
             balance: Some(bal(65.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let postpaid = ConsoleTeamPostpaidMeter {
             period_total_cents: 20_756,
@@ -1913,6 +2169,8 @@ mod tests {
             balance: Some(bal(10.0)),
             autotopup: None,
             included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
         };
         let (report, snap) = build_limits_cli_from_parts_with_postpaid(
             SamplingIdentityKind::SuperGrokSession,
@@ -1937,12 +2195,13 @@ mod tests {
             human.contains("Team postpaid: needs management key"),
             "human postpaid gap: {human}"
         );
-        // No C6 without OAuth evidence.
+        // No C6 without OAuth evidence (C6 phrase, not the always-on license note
+        // that also mentions team Usage dollars as the real settlement surface).
         assert!(
             !report
                 .notes
                 .iter()
-                .any(|n| n.contains("team Usage dollars")),
+                .any(|n| n.contains("can still move team Usage dollars")),
             "must not invent C6 without postpaid: {:?}",
             report.notes
         );
