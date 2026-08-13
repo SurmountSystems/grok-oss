@@ -3550,5 +3550,6 @@ fn truncate_line_display(line: &Line<'static>, max_width: usize) -> Line<'static
     Line::from(new_spans)
 }
 
+#[cfg(test)]
 #[path = "textarea_tests.rs"]
 mod tests;
