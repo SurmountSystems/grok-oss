@@ -34,7 +34,24 @@ Grok stores each session in its own directory, grouped by working directory. It 
   feedback.jsonl          # user feedback and ratings
   compaction_checkpoints/ # saved state from compaction (manual or auto)
   subagents/              # per-subagent metadata (meta.json); the child sessions live in the normal sessions tree
+  unsent_prompt_draft     # durable unsent composer text (not submitted history)
+  canceled_turn_resume.json  # optional: last explicit user cancel (prompt text + id) for auto-resume
 ```
+
+### Resume canceled turn on restart
+
+When you **explicitly cancel** a running turn (Esc / stop), Grok may write
+`canceled_turn_resume.json` with the in-flight prompt identity (not secrets).
+On the next open of that same session, if **`[ui] resume_canceled_turn_on_restart`**
+is on (default **true**, Settings → Session), Grok re-queues that prompt **once**,
+shows **“Resuming canceled turn...”**, and clears the marker.
+
+- **Does not** invent work that finished successfully or was never canceled.
+- A later **successful** turn clears any leftover marker.
+- **Fearless global pause** (`Ctrl+Shift+Space`) uses its own in-process resume
+  stash and does **not** write this restart marker.
+- **Soft stop** (`Ctrl+Shift+S`) holds the queue after the current turn; it is
+  not cancel and does not write this marker.
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
 

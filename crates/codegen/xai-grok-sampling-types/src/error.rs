@@ -7,6 +7,9 @@ use std::fmt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use xai_circuit_breaker::RetryPolicy;
+
+use crate::provider_error::{parse_provider_error, parse_provider_error_str};
 
 pub type Result<T> = std::result::Result<T, SamplingError>;
 
@@ -91,7 +94,9 @@ pub enum SamplingError {
     Http(reqwest::Error),
     #[error("{prefix}{0}", prefix = SERIALIZATION_DISPLAY_PREFIX)]
     Serialization(serde_json::Error),
-    #[error("API error (status {status}): {message}")]
+    /// `status` is formatted via [`format_http_status`] so Cloudflare edge
+    /// codes (521, …) never render as `<unknown status code>`.
+    #[error("API error (status {}): {message}", format_http_status(*status))]
     Api {
         status: StatusCode,
         message: String,
@@ -322,9 +327,7 @@ impl SamplingError {
             SamplingError::InvalidConfiguration(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
-            SamplingError::Api { status, .. } => {
-                matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520)
-            }
+            SamplingError::Api { status, .. } => is_retryable_api_status(*status),
             SamplingError::EventStreamError(_) => true,
             SamplingError::StreamError { .. } => true,
             SamplingError::IdleTimeout { .. } => false,
@@ -493,6 +496,77 @@ pub fn parse_error_code(bytes: &[u8]) -> Option<ApiErrorCode> {
 /// Max chars of a structured (JSON) error message shown to users.
 pub const MAX_USER_ERROR_BODY_CHARS: usize = 280;
 
+/// Known status phrases for non-IANA / Cloudflare edge codes that
+/// [`StatusCode::canonical_reason`] does not know. Used so Display never
+/// prints `<unknown status code>` for these outages.
+///
+/// See [Cloudflare HTTP status codes](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/)
+/// (accessed: 2026-08-04).
+pub fn http_status_label(code: u16) -> Option<&'static str> {
+    match code {
+        520 => Some("Web Server Returned an Unknown Error"),
+        521 => Some("Web Server Is Down"),
+        522 => Some("Connection Timed Out"),
+        523 => Some("Origin Is Unreachable"),
+        524 => Some("A Timeout Occurred"),
+        525 => Some("SSL Handshake Failed"),
+        526 => Some("Invalid SSL Certificate"),
+        527 => Some("Railgun Error"),
+        530 => Some("Origin DNS Error"),
+        _ => None,
+    }
+}
+
+/// Format an HTTP status for user-facing Display.
+///
+/// Prefers the IANA reason phrase, then our Cloudflare edge map, then the
+/// bare code. Never emits `<unknown status code>`.
+pub fn format_http_status(status: StatusCode) -> String {
+    let code = status.as_u16();
+    if let Some(reason) = status.canonical_reason() {
+        format!("{code} {reason}")
+    } else if let Some(label) = http_status_label(code) {
+        format!("{code} {label}")
+    } else {
+        format!("{code}")
+    }
+}
+
+/// Transient API / gateway statuses worth retrying with backoff.
+///
+/// Includes 429, common 5xx gateways, and Cloudflare edge 52x outage codes
+/// (origin down, connect fail, timeout, …). Not every 5xx: 501 Not Implemented
+/// stays non-retryable.
+pub fn is_transient_api_status(code: u16) -> bool {
+    matches!(code, 429 | 500 | 502..=504 | 520..=527 | 530)
+}
+
+/// Whether an HTTP status is worth retrying: the same 429 + any 5xx rule CCP
+/// publishes in `x-should-retry`, minus Cloudflare's origin-TLS 525/526.
+/// See [xAI Rate Limits](https://docs.x.ai/developers/rate-limits)
+/// (accessed: 2026-08-12) for retry-after / 429; 52x pages are Cloudflare edge.
+pub fn is_retryable_api_status(status: StatusCode) -> bool {
+    RetryPolicy::edge_client().should_retry(status.as_u16())
+}
+
+/// True when the status is a Cloudflare-style origin/edge outage (52x), not
+/// a normal app 5xx. Used for operator messaging.
+pub fn is_edge_outage_status(code: u16) -> bool {
+    matches!(code, 520..=527 | 530)
+}
+
+/// Plain-English terminal copy when retries on a connection/outage status
+/// are exhausted (or the failure is surfaced after soft retries).
+///
+/// Prefer this over raw `API error (status …)` / Internal error JSON for
+/// operator-facing toasts and RetryFailed chrome.
+pub fn outage_exhausted_user_message(status: StatusCode, attempts: u32) -> String {
+    let code = status.as_u16();
+    let tries = attempts.max(1);
+    let try_word = if tries == 1 { "try" } else { "tries" };
+    format!("xAI connection failed after {tries} {try_word} (HTTP {code}). Try again shortly.")
+}
+
 /// Short status-based copy when the body is not a structured JSON error.
 ///
 /// Edge proxies (Cloudflare 52x, 502/503/504) return HTML pages; we never
@@ -502,20 +576,25 @@ pub fn status_user_message(status: StatusCode) -> String {
         code @ 502..=504 => {
             format!("Grok is temporarily unavailable. Please try again in a moment. (HTTP {code}).")
         }
+        // Cloudflare 521 origin down — Surmount product copy (accessed: 2026-08-12).
+        521 => {
+            "xAI is temporarily unreachable (origin down). Please try again shortly. (HTTP 521)."
+                .to_string()
+        }
         // Upstream capacity, not an edge failure — see [`SamplingError::is_overloaded`].
         code @ 529 => {
             format!("Grok is temporarily overloaded. Please try again in a moment. (HTTP {code}).")
         }
-        // Cloudflare edge: origin unreachable or timed out (520–524), or an
-        // edge-side 1xxx failure (530).
-        code @ 520..=524 | code @ 530 => {
-            format!(
-                "Connection to Grok timed out or was interrupted. Please try again. (HTTP {code})."
-            )
-        }
         // Cloudflare origin TLS (handshake / invalid certificate) — not transient.
         code @ 525 | code @ 526 => {
             format!("Secure connection to Grok failed. (HTTP {code}).")
+        }
+        // Cloudflare edge: origin unreachable or timed out (520–524, 527), or
+        // an edge-side 1xxx failure (530). 521 / 525 / 526 match above.
+        code @ 520..=527 | code @ 530 => {
+            format!(
+                "Connection to Grok timed out or was interrupted. Please try again. (HTTP {code})."
+            )
         }
         code if status.is_server_error() => {
             format!("Something went wrong on the server (HTTP {code}).")
@@ -653,10 +732,7 @@ pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     }
 
     if err.is_status() {
-        return matches!(
-            err.status(),
-            Some(status) if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
-        );
+        return err.status().is_some_and(is_retryable_api_status);
     }
 
     if err.is_request() || err.is_body() {
@@ -1522,15 +1598,19 @@ mod tests {
         );
     }
 
-    fn api_400(message: &str) -> SamplingError {
+    fn api_status(code: u16, message: &str) -> SamplingError {
         SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
+            status: StatusCode::from_u16(code).expect("valid status"),
             message: message.into(),
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
             error_code: None,
         }
+    }
+
+    fn api_400(message: &str) -> SamplingError {
+        api_status(400, message)
     }
 
     fn api_400_with_code(message: &str, code: &str) -> SamplingError {
@@ -1668,5 +1748,100 @@ mod tests {
                 "origin-TLS {code} must not be retried"
             );
         }
+    }
+
+    /// Cloudflare 521 (origin down) and sibling edge outages must soft-retry
+    /// with backoff — not Fatal on first sight as "unknown status".
+    ///
+    /// `is_transient_api_status` covers the classify helper used by the
+    /// sampler (includes 525/526). `SamplingError::is_retryable` follows the
+    /// 1.0.3 edge-client policy: 525/526 origin TLS is not retried.
+    #[test]
+    fn cloudflare_edge_outage_statuses_are_retryable() {
+        for code in [520u16, 521, 522, 523, 524, 527, 530] {
+            assert!(
+                is_transient_api_status(code),
+                "status {code} must be transient"
+            );
+            let err = api_status(code, "edge outage");
+            assert!(
+                err.is_retryable(),
+                "HTTP {code} must be retryable (was only 520 historically)"
+            );
+            assert!(
+                !err.is_credit_exhausted(),
+                "HTTP {code} is network/outage, not credit exhaust"
+            );
+            assert!(!err.is_rate_limited(), "HTTP {code} is not a 429 throttle");
+        }
+        for code in [525u16, 526] {
+            assert!(
+                is_transient_api_status(code),
+                "status {code} must stay transient for sampler classify"
+            );
+            assert!(
+                !api_status(code, "tls").is_retryable(),
+                "origin-TLS {code} must not be SamplingError::is_retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn http_521_display_uses_known_label_not_unknown_status() {
+        let body = status_user_message(StatusCode::from_u16(521).unwrap());
+        let err = api_status(521, &body);
+        let s = err.to_string();
+        assert!(
+            !s.contains("unknown status"),
+            "must not print unknown status code: {s}"
+        );
+        assert!(
+            s.contains("521") && s.contains("Web Server Is Down"),
+            "expected known 521 label in Display: {s}"
+        );
+        assert_eq!(
+            http_status_label(521),
+            Some("Web Server Is Down"),
+            "status map entry for 521"
+        );
+        assert_eq!(
+            format_http_status(StatusCode::from_u16(521).unwrap()),
+            "521 Web Server Is Down"
+        );
+    }
+
+    #[test]
+    fn outage_exhausted_message_is_plain_english() {
+        let msg = outage_exhausted_user_message(StatusCode::from_u16(521).unwrap(), 4);
+        assert_eq!(
+            msg,
+            "xAI connection failed after 4 tries (HTTP 521). Try again shortly."
+        );
+        // attempts=0 still reads as one try (surface never claims zero tries).
+        let once = outage_exhausted_user_message(StatusCode::from_u16(521).unwrap(), 0);
+        assert_eq!(
+            once,
+            "xAI connection failed after 1 try (HTTP 521). Try again shortly."
+        );
+    }
+
+    #[test]
+    fn format_http_status_keeps_iana_reason_for_standard_codes() {
+        assert_eq!(
+            format_http_status(StatusCode::TOO_MANY_REQUESTS),
+            "429 Too Many Requests"
+        );
+        assert_eq!(
+            format_http_status(StatusCode::BAD_GATEWAY),
+            "502 Bad Gateway"
+        );
+    }
+
+    #[test]
+    fn non_transient_helper_does_not_list_501() {
+        // Sampler classify helper is a narrower list than 1.0.3 edge-client
+        // is_retryable (any 5xx except origin TLS).
+        assert!(!is_transient_api_status(501));
+        assert!(api_status(501, "not implemented").is_retryable());
     }
 }

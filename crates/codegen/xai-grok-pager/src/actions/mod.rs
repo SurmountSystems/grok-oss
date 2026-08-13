@@ -74,6 +74,8 @@ pub enum ActionId {
     CancelTurn,
     /// Pause or resume all in-process agent work (Ctrl+Shift+Space).
     ToggleGlobalPause,
+    /// Soft stop: finish current turn then hold the queue (Ctrl+Shift+S).
+    ToggleSoftStop,
     ToggleYolo,
     ToggleMultiline,
 
@@ -992,6 +994,37 @@ mod tests {
         assert_eq!(
             registry.lookup(&voice, When::Always),
             Some(ActionId::VoiceToggle)
+        );
+    }
+
+    /// Named contract: Ctrl+Shift+S is soft stop (finish turn, hold queue).
+    /// Distinct from fearless pause Ctrl+Shift+Space.
+    #[test]
+    fn soft_stop_bound_to_ctrl_shift_s_always() {
+        let registry = ActionRegistry::defaults();
+        let def = registry
+            .find(ActionId::ToggleSoftStop)
+            .expect("ToggleSoftStop must be registered");
+        assert_eq!(def.label, "soft stop");
+        assert_eq!(def.context, When::Always);
+        assert_eq!(def.hint_key_display, Some("Ctrl+Shift+S"));
+
+        let chord = KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            registry.lookup(&chord, When::Always),
+            Some(ActionId::ToggleSoftStop)
+        );
+        // Must not steal the pause chord.
+        let pause = KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            registry.lookup(&pause, When::Always),
+            Some(ActionId::ToggleGlobalPause)
         );
     }
 

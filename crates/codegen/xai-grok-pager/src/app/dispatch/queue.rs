@@ -187,7 +187,7 @@ pub(super) struct QueueDrain {
 }
 
 impl QueueDrain {
-    fn blocked() -> Self {
+    pub(crate) fn blocked() -> Self {
         Self {
             effects: Vec::new(),
             page_flip_entry: None,
@@ -1017,6 +1017,10 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
     if app.global_work_pause.is_active() {
         return vec![];
     }
+    // Soft stop holding: current turn finished; do not start further queue items.
+    if app.soft_stop.blocks_drain() {
+        return vec![];
+    }
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
@@ -1034,6 +1038,12 @@ pub(crate) fn force_drain_queue_past_background_and_note_peek(
 ) -> Vec<Effect> {
     if app.global_work_pause.is_active() {
         return vec![];
+    }
+    // Explicit send-now while soft-stop holds: release the hold (user intent
+    // to start work) then drain.
+    if app.soft_stop.is_holding() {
+        let _ = app.soft_stop.toggle();
+        app.show_toast("Soft stop cleared for send-now");
     }
     let drain = {
         let Some(agent) = app.agents.get_mut(&agent_id) else {

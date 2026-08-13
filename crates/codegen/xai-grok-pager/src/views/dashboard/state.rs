@@ -4449,7 +4449,8 @@ fn dashboard_action_for_id(
         | ActionId::DashboardOverlayExit
         | ActionId::DashboardOverlayPrev
         | ActionId::DashboardOverlayNext
-        | ActionId::DashboardOverlayStop => None,
+        | ActionId::DashboardOverlayStop
+        | ActionId::ToggleSoftStop => None,
     }
 }
 

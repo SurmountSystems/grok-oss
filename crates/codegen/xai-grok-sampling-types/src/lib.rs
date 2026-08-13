@@ -22,12 +22,10 @@ pub use self::doom_loop::{
 };
 pub use self::error::{
     ApiErrorCode, EmptyReason, EmptyResponseContext, INVALID_IMAGE_ERROR_CODE,
-    ResponseModelMetadata, Result, SamplingError, SentCredential, is_context_length_error,
-    is_retryable_api_status, parse_error_code, status_user_message, user_facing_api_error_message,
-};
-pub use self::tool_overrides::{
-    ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,
-    WebSearchOptions, XSearchOptions,
+    ResponseModelMetadata, Result, SamplingError, SentCredential, format_http_status,
+    http_status_label, is_context_length_error, is_edge_outage_status, is_retryable_api_status,
+    is_transient_api_status, outage_exhausted_user_message, parse_error_code, status_user_message,
+    user_facing_api_error_message,
 };
 pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,

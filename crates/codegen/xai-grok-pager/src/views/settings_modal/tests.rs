@@ -696,6 +696,15 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "auto_run_implement",
             // SHELL-owned economic_mode (Agent; after auto_run_implement).
             "economic_mode",
+            // Token Economy ([token_economy]) — implement-effort policy + pacing.
+            "token_economy.cap_implement_effort_when_economic",
+            "token_economy.max_implement_effort",
+            "token_economy.min_implement_effort",
+            "token_economy.desired_implement_effort",
+            "token_economy.lock_implement_effort",
+            "token_economy.show_period_pacing",
+            "token_economy.local_spend_ledger",
+            "token_economy.reconcile_management_usage",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
@@ -704,7 +713,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
-            // Session category — recap knobs before auto-compact.
+            // Session category — resume canceled turn, then recap knobs.
+            "resume_canceled_turn_on_restart",
             // SHELL notifications.session_recap (auto return-from-away).
             "notifications.session_recap",
             // SHELL notifications.session_recap_threshold_secs (debounce).
@@ -4306,14 +4316,15 @@ fn find_text_col(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
 #[test]
 fn section_headers_have_blank_line_above_except_first() {
     let mut s = make_state();
-    // Allocate a generous viewport so every category fits — the
-    // default registry contains 6 categories with 16 settings;
-    // the blank lines push us to ~23 lines, fits in 60.
+    // Generous viewport so every category + blank gap fits. Token Economy
+    // and Session knobs grew the default registry past the old 60-line
+    // budget (blank lines above headers are skipped when the cursor is
+    // one row from the bottom of the list area).
     let area = Rect {
         x: 0,
         y: 0,
         width: 80,
-        height: 60,
+        height: 120,
     };
     let mut buf = Buffer::empty(area);
     let theme = Theme::current();
@@ -4325,8 +4336,7 @@ fn section_headers_have_blank_line_above_except_first() {
     // searching for its label as the row content.
     let mut header_ys: Vec<(u16, &'static str)> = Vec::new();
     for cat in SettingCategory::ALL {
-        // Skip categories the default registry doesn't populate
-        // (e.g. Session — no settings registered).
+        // Skip categories the default registry doesn't populate.
         let has_setting = s
             .rows
             .iter()

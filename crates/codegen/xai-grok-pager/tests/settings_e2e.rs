@@ -65,6 +65,16 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "prompt_suggestions",
     "auto_run_implement",
     "economic_mode",
+    // Token Economy ([token_economy]) + resume canceled turn.
+    "token_economy.cap_implement_effort_when_economic",
+    "token_economy.max_implement_effort",
+    "token_economy.min_implement_effort",
+    "token_economy.desired_implement_effort",
+    "token_economy.lock_implement_effort",
+    "token_economy.show_period_pacing",
+    "token_economy.local_spend_ledger",
+    "token_economy.reconcile_management_usage",
+    "resume_canceled_turn_on_restart",
     "auto_compact_threshold_percent",
     "group_tool_verbs",
     "collapsed_edit_blocks",
@@ -328,6 +338,46 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("economic_mode", Action::SetEconomicMode(b)) => {
             assert_eq!(b, expected, "SetEconomicMode value differs from expected")
+        }
+        ("resume_canceled_turn_on_restart", Action::SetResumeCanceledTurnOnRestart(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetResumeCanceledTurnOnRestart value differs from expected"
+            )
+        }
+        (
+            "token_economy.cap_implement_effort_when_economic",
+            Action::SetTokenEconomyBool { field, value },
+        ) => {
+            assert_eq!(field, "cap_implement_effort_when_economic");
+            assert_eq!(
+                value, expected,
+                "SetTokenEconomyBool(cap_implement_effort_when_economic) value differs"
+            );
+        }
+        ("token_economy.show_period_pacing", Action::SetTokenEconomyBool { field, value }) => {
+            assert_eq!(field, "show_period_pacing");
+            assert_eq!(
+                value, expected,
+                "SetTokenEconomyBool(show_period_pacing) value differs"
+            );
+        }
+        ("token_economy.local_spend_ledger", Action::SetTokenEconomyBool { field, value }) => {
+            assert_eq!(field, "local_spend_ledger");
+            assert_eq!(
+                value, expected,
+                "SetTokenEconomyBool(local_spend_ledger) value differs"
+            );
+        }
+        (
+            "token_economy.reconcile_management_usage",
+            Action::SetTokenEconomyBool { field, value },
+        ) => {
+            assert_eq!(field, "reconcile_management_usage");
+            assert_eq!(
+                value, expected,
+                "SetTokenEconomyBool(reconcile_management_usage) value differs"
+            );
         }
         ("group_tool_verbs", Action::SetGroupToolVerbs(b)) => {
             assert_eq!(b, expected, "SetGroupToolVerbs value differs from expected")
@@ -1872,6 +1922,11 @@ fn registry_kind_membership_through_pr_14() {
             "prompt_suggestions",
             "auto_run_implement",
             "economic_mode",
+            "resume_canceled_turn_on_restart",
+            "token_economy.cap_implement_effort_when_economic",
+            "token_economy.show_period_pacing",
+            "token_economy.local_spend_ledger",
+            "token_economy.reconcile_management_usage",
             "respect_manual_folds",
             "bubble_copy_buttons",
             "show_thinking_blocks",
@@ -1955,8 +2010,12 @@ fn registry_kind_membership_through_pr_14() {
             "notifications.session_recap_threshold_secs",
             "scroll_lines",
             "scroll_speed",
+            "token_economy.desired_implement_effort",
+            "token_economy.lock_implement_effort",
+            "token_economy.max_implement_effort",
+            "token_economy.min_implement_effort",
         ],
-        "Int kind membership drift (PR 8)",
+        "Int kind membership drift (PR 8 + Token Economy)",
     );
 
     let group_keys = by_kind.remove("Group").unwrap_or_default();
@@ -2083,6 +2142,16 @@ fn defaults_round_trip_through_registry() {
             "prompt_suggestions" => SettingValue::Bool(true),
             "auto_run_implement" => SettingValue::Bool(true),
             "economic_mode" => SettingValue::Bool(true),
+            "resume_canceled_turn_on_restart" => SettingValue::Bool(true),
+            // Token Economy — TokenEconomyConfig::default() / registry meta.
+            "token_economy.cap_implement_effort_when_economic" => SettingValue::Bool(true),
+            "token_economy.show_period_pacing" => SettingValue::Bool(true),
+            "token_economy.local_spend_ledger" => SettingValue::Bool(true),
+            "token_economy.reconcile_management_usage" => SettingValue::Bool(true),
+            "token_economy.max_implement_effort" => SettingValue::Int(3),
+            "token_economy.min_implement_effort" => SettingValue::Int(1),
+            "token_economy.desired_implement_effort" => SettingValue::Int(2),
+            "token_economy.lock_implement_effort" => SettingValue::Int(0),
             "auto_compact_threshold_percent" => SettingValue::Enum("95"),
             "group_tool_verbs" => SettingValue::Bool(true),
             "collapsed_edit_blocks" => SettingValue::Bool(false),
@@ -2173,6 +2242,8 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetPromptSuggestions(_))
             | SettingsKeyOutcome::Action(Action::SetAutoRunImplement(_))
             | SettingsKeyOutcome::Action(Action::SetEconomicMode(_))
+            | SettingsKeyOutcome::Action(Action::SetResumeCanceledTurnOnRestart(_))
+            | SettingsKeyOutcome::Action(Action::SetTokenEconomyBool { .. })
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
@@ -8456,5 +8527,192 @@ fn session_recap_threshold_int_stepper_commits() {
             assert!(v > 30, "stepper should bump above default 30, got {v}");
         }
         other => panic!("expected SetNotificationsSessionRecapThresholdSecs, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Token Economy + resume canceled turn (Settings GUI wiring)
+// ---------------------------------------------------------------------------
+
+/// Bool keys under Token Economy + resume. Default ON → Space emits false.
+const TOKEN_ECONOMY_BOOL_KEYS: &[&str] = &[
+    "token_economy.cap_implement_effort_when_economic",
+    "token_economy.show_period_pacing",
+    "token_economy.local_spend_ledger",
+    "token_economy.reconcile_management_usage",
+    "resume_canceled_turn_on_restart",
+];
+
+/// Int keys under Token Economy: (key, default, field name).
+const TOKEN_ECONOMY_INT_KEYS: &[(&str, i64, &str)] = &[
+    (
+        "token_economy.max_implement_effort",
+        3,
+        "max_implement_effort",
+    ),
+    (
+        "token_economy.min_implement_effort",
+        1,
+        "min_implement_effort",
+    ),
+    (
+        "token_economy.desired_implement_effort",
+        2,
+        "desired_implement_effort",
+    ),
+    (
+        "token_economy.lock_implement_effort",
+        0,
+        "lock_implement_effort",
+    ),
+];
+
+#[test]
+fn token_economy_and_resume_bools_space_dispatch_typed_setters() {
+    for &key in TOKEN_ECONOMY_BOOL_KEYS {
+        let mut s = make_state();
+        navigate_to(&mut s, key);
+        let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+        // All of these default ON.
+        assert_set_bool_action(outcome, key, false);
+    }
+}
+
+#[test]
+fn token_economy_and_resume_bools_mouse_two_stage_toggles() {
+    for &key in TOKEN_ECONOMY_BOOL_KEYS {
+        let mut s = make_state();
+        synth_rects(&mut s);
+        let row_y = row_idx_for(&s, key) as u16;
+
+        let outcome = handle_settings_mouse(
+            &mut s,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            10,
+            row_y,
+        );
+        assert!(
+            matches!(outcome, SettingsKeyOutcome::Changed),
+            "first click on `{key}` should only select, got {outcome:?}"
+        );
+        assert_eq!(s.selected, row_y as usize);
+
+        let outcome = handle_settings_mouse(
+            &mut s,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            10,
+            row_y,
+        );
+        assert_set_bool_action(outcome, key, false);
+    }
+}
+
+#[test]
+fn token_economy_ints_stepper_commit_dispatches_typed_setters() {
+    for &(key, default, field) in TOKEN_ECONOMY_INT_KEYS {
+        let mut s = make_state();
+        navigate_to(&mut s, key);
+        let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+        assert!(
+            matches!(outcome, SettingsKeyOutcome::Changed),
+            "Enter on `{key}` must open int stepper, got {outcome:?}"
+        );
+        let default_s = default.to_string();
+        assert_eq!(
+            s.editing_buffer(),
+            Some(default_s.as_str()),
+            "buffer for `{key}` must seed from default {default}"
+        );
+
+        // Up = +1.
+        let _ = handle_settings_key(&mut s, &press(KeyCode::Up));
+        let expected = default + 1;
+        let expected_s = expected.to_string();
+        assert_eq!(s.editing_buffer(), Some(expected_s.as_str()));
+
+        let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+        match outcome {
+            SettingsKeyOutcome::Action(Action::SetTokenEconomyInt { field: f, value: v }) => {
+                assert_eq!(f, field, "field for `{key}`");
+                assert_eq!(v, expected, "value for `{key}`");
+            }
+            other => panic!("expected SetTokenEconomyInt for `{key}`, got {other:?}"),
+        }
+        assert!(matches!(s.mode(), SettingsModalMode::Browse));
+    }
+}
+
+#[test]
+fn token_economy_ints_mouse_click_opens_editor() {
+    for &(key, _default, _field) in TOKEN_ECONOMY_INT_KEYS {
+        let mut s = make_state();
+        synth_rects(&mut s);
+        let row_y = row_idx_for(&s, key) as u16;
+
+        let _ = handle_settings_mouse(
+            &mut s,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            10,
+            row_y,
+        );
+        let outcome = handle_settings_mouse(
+            &mut s,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            10,
+            row_y,
+        );
+        assert!(
+            matches!(outcome, SettingsKeyOutcome::Changed),
+            "second click on `{key}` must enter the editor, got {outcome:?}"
+        );
+        assert!(
+            matches!(s.mode(), SettingsModalMode::EditingValue { key: k, .. } if k == key),
+            "mode must be EditingValue({key}), got {:?}",
+            s.mode(),
+        );
+    }
+}
+
+#[test]
+fn token_economy_and_resume_meta_categories_and_bounds() {
+    let reg = SettingsRegistry::defaults();
+
+    for &key in TOKEN_ECONOMY_BOOL_KEYS {
+        let meta = reg
+            .find(key)
+            .unwrap_or_else(|| panic!("`{key}` registered"));
+        if key == "resume_canceled_turn_on_restart" {
+            assert_eq!(meta.category, SettingCategory::Session);
+        } else {
+            assert_eq!(meta.category, SettingCategory::Agent, "{key}");
+        }
+        assert_eq!(meta.owner, SettingOwner::Shell, "{key}");
+        match &meta.kind {
+            SettingKind::Bool { default } => assert!(*default, "{key} default ON"),
+            other => panic!("expected Bool for `{key}`, got {other:?}"),
+        }
+    }
+
+    for &(key, default, _field) in TOKEN_ECONOMY_INT_KEYS {
+        let meta = reg
+            .find(key)
+            .unwrap_or_else(|| panic!("`{key}` registered"));
+        assert_eq!(meta.category, SettingCategory::Agent, "{key}");
+        assert_eq!(meta.owner, SettingOwner::Shell, "{key}");
+        match &meta.kind {
+            SettingKind::Int {
+                default: d,
+                min,
+                max,
+            } => {
+                assert_eq!(*d, default, "{key} default");
+                if key == "token_economy.lock_implement_effort" {
+                    assert_eq!((*min, *max), (0, 5), "{key} bounds");
+                } else {
+                    assert_eq!((*min, *max), (1, 5), "{key} bounds");
+                }
+            }
+            other => panic!("expected Int for `{key}`, got {other:?}"),
+        }
     }
 }

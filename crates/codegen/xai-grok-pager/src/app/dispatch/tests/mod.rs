@@ -13,6 +13,7 @@ mod rewind;
 mod router;
 mod session;
 mod settings;
+mod soft_stop;
 mod status;
 mod task_result;
 mod transcript;
@@ -81,6 +82,7 @@ fn test_app() -> AppView {
         auth_return_view: None,
         agents: IndexMap::new(),
         global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
+        soft_stop: crate::app::soft_stop::SoftStop::new(),
         next_agent_id: 0,
         models: ModelState::default(),
         registry: crate::actions::ActionRegistry::defaults(),
