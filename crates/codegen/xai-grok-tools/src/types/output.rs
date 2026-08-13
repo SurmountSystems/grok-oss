@@ -794,7 +794,7 @@ impl ToolOutput {
             ToolOutput::WebFetch(o) => o.to_prompt_format(),
             ToolOutput::MCP(mcp_output) => match &mcp_output.output {
                 MCPOutputDetails::Error(error) => {
-                    format!("Failed to call {}: {}", &mcp_output.tool_name, error)
+                    format!("Failed to call {}: {}", mcp_output.tool_name, error)
                 }
                 MCPOutputDetails::OkayOutput(output) => output.to_owned(),
             },

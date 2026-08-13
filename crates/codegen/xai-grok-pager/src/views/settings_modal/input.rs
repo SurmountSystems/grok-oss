@@ -142,41 +142,53 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
             // `action_for_string` already knows how to resolve via
             // `snapshot.resolve_model_name` AND treats the empty
             // canonical as a `Clear*` sentinel.
+            //
+            // Deep-link open (`close_on_picker_exit`) dismisses the
+            // whole modal instead of returning to Browse.
+            let close = std::mem::take(&mut state.close_on_picker_exit);
+            if !close {
+                state.transition_to_browse();
+            }
             let kind_is_dynamic = matches!(
                 state.registry.find(setting_key).map(|m| &m.kind),
                 Some(SettingKind::DynamicEnum { .. })
             );
-            state.transition_to_browse();
-            if kind_is_dynamic {
-                let Some(canonical) = picker_choice_at_owned(state, setting_key, choices_idx)
-                else {
-                    return SettingsKeyOutcome::Changed;
-                };
-                if let Some(action) =
+            let commit = if kind_is_dynamic {
+                picker_choice_at_owned(state, setting_key, choices_idx).and_then(|canonical| {
                     action_for_string(setting_key, canonical, &state.pager_snapshot)
-                {
-                    return SettingsKeyOutcome::Action(action);
-                }
-                return SettingsKeyOutcome::Changed;
-            }
-            let Some(current_canonical) = picker_choice_at(state, setting_key, choices_idx) else {
-                return SettingsKeyOutcome::Changed;
+                })
+            } else {
+                picker_choice_at(state, setting_key, choices_idx)
+                    .and_then(|c| action_for_enum_commit(setting_key, c))
             };
-            if let Some(action) = action_for_enum_commit(setting_key, current_canonical) {
-                return SettingsKeyOutcome::Action(action);
+            match (close, commit) {
+                (true, Some(action)) => SettingsKeyOutcome::ActionThenClose(action),
+                (true, None) => SettingsKeyOutcome::Close,
+                (false, Some(action)) => SettingsKeyOutcome::Action(action),
+                (false, None) => SettingsKeyOutcome::Changed,
             }
-            SettingsKeyOutcome::Changed
         }
         KeyCode::Esc => {
-            // Revert preview and return to Browse. Non-preview Enums
-            // skip the revert (no live visual was applied).
-            state.transition_to_browse();
+            // Revert preview and return to Browse (or close when deep-linked).
+            // Non-preview Enums skip the revert (no live visual was applied).
+            let close = std::mem::take(&mut state.close_on_picker_exit);
+            if !close {
+                state.transition_to_browse();
+            }
             if let SettingValue::Enum(orig) = &original_value
                 && let Some(action) = action_for_enum(setting_key, orig)
             {
-                return SettingsKeyOutcome::Action(action);
+                return if close {
+                    SettingsKeyOutcome::ActionThenClose(action)
+                } else {
+                    SettingsKeyOutcome::Action(action)
+                };
             }
-            SettingsKeyOutcome::Changed
+            if close {
+                SettingsKeyOutcome::Close
+            } else {
+                SettingsKeyOutcome::Changed
+            }
         }
         // `d` reset: close picker, revert preview if applicable,
         // then open the reset-confirm overlay.
@@ -732,6 +744,11 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
                 Some((_, meta)) if matches!(meta.kind, SettingKind::Group { .. }) => {
                     SettingsKeyOutcome::Unchanged
                 }
+                // A locked row isn't the user's to change, by `d` any more
+                // than by Enter (which `try_enter_picking_enum` refuses).
+                Some((key, _meta)) if state.row_lock(key).is_some() => {
+                    SettingsKeyOutcome::Unchanged
+                }
                 Some((key, _meta)) => SettingsKeyOutcome::Action(Action::OpenResetConfirm { key }),
                 // Focused row is a header (or out-of-bounds) — `d`
                 // has nothing to reset. Unchanged so the user can
@@ -865,12 +882,16 @@ pub fn handle_settings_mouse(
     // for keyboard Esc — `handle_picking_enum` reverts the
     // preview action, and `handle_editing_value` just transitions
     // back.
+    // Breadcrumb is hierarchical "up": always return to Browse (never
+    // dismiss via `close_on_picker_exit`). Reuse sub-pane Esc handlers for
+    // preview revert after clearing the deep-link flag.
     if matches!(
         kind,
         MouseEventKind::Down(crossterm::event::MouseButton::Left)
     ) && let Some(rect) = state.settings_breadcrumb_rect
         && rect_contains(rect, column, row)
     {
+        state.close_on_picker_exit = false;
         let synthetic = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         match state.state.mode_kind() {
             SettingsModeKind::PickingEnum => {

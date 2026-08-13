@@ -624,6 +624,9 @@ fn turn_end_after_park_pushes_single_marker() {
 
     let mut agent = running_driver("p1");
     super::super::agent_view::test_fixtures::simulate_task_output_wait(&mut agent, "bg-1");
+    // Production parks via ACP/draw (`maybe_push_parked_marker`); the wait
+    // alone only sets activity — consume the parked-marker slot like those paths.
+    agent.maybe_push_parked_marker();
     assert!(agent.renders_parked());
     assert_eq!(count_turn_markers(&agent), 0, "the park writes no marker");
 

@@ -19,9 +19,17 @@ const DEFAULT_LOCALE: &str = "en";
 /// and early UI seed the chat `/rest/modes` catalog instead of build models.
 pub const GROK_CHAT_MODE_ENV: &str = "GROK_CHAT_MODE";
 /// True when the process is a gateway light-frontend (`--chat`) agent.
-/// Hard-off in release builds so it can't be enabled via env.
+///
+/// Set by the pager via [`GROK_CHAT_MODE_ENV`] when started with `--chat`.
+/// Empty / `0` / `false` leave the flag off.
 pub fn process_chat_mode_enabled() -> bool {
-    false
+    match std::env::var(GROK_CHAT_MODE_ENV) {
+        Ok(v) => {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        }
+        Err(_) => false,
+    }
 }
 #[derive(Clone)]
 struct CachedModes {

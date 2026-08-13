@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -229,7 +230,7 @@ pub(super) fn recent_date_dirs(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    dates.sort_by(|a, b| b.cmp(a));
+    dates.sort_by_key(|&d| Reverse(d));
     dates.truncate(MAX_DATE_DIRS);
     dates
         .into_iter()

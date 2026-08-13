@@ -23,7 +23,8 @@ fn test_actor_with_remote_sync(
     remote_sync: Option<RemoteSync>,
 ) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
-    let summary_tx = tx.clone();
+    let summary_tx = tx.downgrade();
+    let (disk_full_tx, disk_full_rx) = tokio::sync::watch::channel(false);
     let sampling_client = OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap();
     let task = tokio::spawn(
         SessionPersistence {
@@ -32,6 +33,7 @@ fn test_actor_with_remote_sync(
             pending_notification: None,
             rx,
             remote_sync,
+            created_fresh: true,
             relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
@@ -42,11 +44,17 @@ fn test_actor_with_remote_sync(
             ),
             registry_title_sync: None,
             gateway: None,
+            disk_full_tx,
+            disk_full_notified: false,
         }
         .run(),
     );
     ActorGuard {
-        handle: PersistenceHandle { tx, noop: false },
+        handle: PersistenceHandle {
+            tx,
+            noop: false,
+            disk_full_rx,
+        },
         task,
     }
 }

@@ -229,6 +229,7 @@ fn minimal_btw_response_after_esc_is_ignored() {
             agent_id: id,
             result: Ok("late".into()),
             minimal_request_id: Some(request_id),
+            btw_session_id: None,
         }),
         &mut app,
     );
@@ -248,6 +249,7 @@ fn minimal_done_dismisses_to_exactly_one_btw_block() {
             agent_id: id,
             result: Ok("original answer".into()),
             minimal_request_id: Some(request_id),
+            btw_session_id: None,
         }),
         &mut app,
     );
@@ -287,12 +289,13 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
             agent_id: first,
             result: Ok("stale first answer".into()),
             minimal_request_id: Some(first_old),
+            btw_session_id: None,
         }),
         &mut app,
     );
     assert!(matches!(
         app.agents[&first].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Loading { ref question })
+        Some(crate::views::btw_overlay::BtwOverlayState::Loading { ref question, .. })
             if question == "first new"
     ));
     dispatch(
@@ -300,17 +303,18 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
             agent_id: first,
             result: Ok("current first answer".into()),
             minimal_request_id: Some(first_current),
+            btw_session_id: None,
         }),
         &mut app,
     );
     assert!(matches!(
         app.agents[&first].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question == "first new"
+        Some(ref s @ crate::views::btw_overlay::BtwOverlayState::Done { .. })
+            if s.question() == "first new"
     ));
     assert!(matches!(
         app.agents[&second].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Loading { ref question })
+        Some(crate::views::btw_overlay::BtwOverlayState::Loading { ref question, .. })
             if question == "second"
     ));
 
@@ -322,6 +326,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
             agent_id: second,
             result: Ok("late second answer".into()),
             minimal_request_id: Some(second_request),
+            btw_session_id: None,
         }),
         &mut app,
     );
@@ -329,8 +334,8 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
     assert!(app.agents[&second].minimal_btw_lifecycle.is_none());
     assert!(matches!(
         app.agents[&first].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question == "first new"
+        Some(ref s @ crate::views::btw_overlay::BtwOverlayState::Done { .. })
+            if s.question() == "first new"
     ));
 
     // Reverse delivery order on fresh requests: active second completes first,
@@ -344,6 +349,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
             agent_id: second,
             result: Ok("second reverse answer".into()),
             minimal_request_id: Some(second_request),
+            btw_session_id: None,
         }),
         &mut app,
     );
@@ -352,18 +358,19 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
             agent_id: first,
             result: Ok("first reverse answer".into()),
             minimal_request_id: Some(first_request),
+            btw_session_id: None,
         }),
         &mut app,
     );
     assert!(matches!(
         app.agents[&second].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question == "second reverse"
+        Some(ref s @ crate::views::btw_overlay::BtwOverlayState::Done { .. })
+            if s.question() == "second reverse"
     ));
     assert!(matches!(
         app.agents[&first].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question == "first reverse"
+        Some(ref s @ crate::views::btw_overlay::BtwOverlayState::Done { .. })
+            if s.question() == "first reverse"
     ));
 }
 
@@ -386,14 +393,15 @@ fn fullscreen_btw_response_after_dismiss_keeps_existing_behavior() {
             agent_id: id,
             result: Ok("late".into()),
             minimal_request_id: None,
+            btw_session_id: None,
         }),
         &mut app,
     );
 
     assert!(matches!(
         app.agents[&id].btw_state,
-        Some(crate::views::btw_overlay::BtwOverlayState::Done { ref question, .. })
-            if question.is_empty()
+        Some(ref s @ crate::views::btw_overlay::BtwOverlayState::Done { .. })
+            if s.question().is_empty()
     ));
 }
 
@@ -424,7 +432,7 @@ fn btw_no_session_feedback_is_mode_specific() {
 /// Bare `/feedback` opens a freeform ask-user-style pane (not prompt chrome).
 #[test]
 fn enter_feedback_mode_opens_local_question_pane() {
-    use crate::app::dispatch::FEEDBACK_QUESTION_LABEL;
+    use crate::app::dispatch::notes::FEEDBACK_QUESTION_LABEL;
     use crate::views::question_view::{LocalQuestionKind, QuestionFocus};
 
     let mut app = test_app_with_agent();

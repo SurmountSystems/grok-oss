@@ -51,6 +51,8 @@ mod subagent_activity;
 mod workflow_ingest;
 
 #[cfg(test)]
+use permissions::should_drop_duplicate_auto_recap;
+#[cfg(test)]
 use permissions::{MCP_ARGS_MAX_LINE_CHARS, MCP_ARGS_MAX_LINES, mcp_args_lines};
 use permissions::{apply_recap_block, handle_permission_request, should_drop_late_auto_recap};
 

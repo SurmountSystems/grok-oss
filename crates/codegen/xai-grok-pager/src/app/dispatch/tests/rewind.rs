@@ -166,7 +166,10 @@ fn drive_inline_submit_to_execute(app: &mut AppView) -> Vec<Effect> {
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Confirm { .. }
     ));
-    dispatch(Action::RewindConfirm(0), app)
+    dispatch(
+        Action::RewindConfirm(0, crate::views::rewind::RewindMode::All),
+        app,
+    )
 }
 
 /// Submitting an inline edit enters the exact same flow as `/rewind`: a
@@ -361,7 +364,8 @@ fn picker_select_nonzero_target_executes_immediately_when_confirm_off() {
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Executing {
-            target_prompt_index: 1
+            target_prompt_index: 1,
+            mode: _,
         }
     ));
 }
@@ -450,7 +454,10 @@ fn confirm_yes_executes_rewind() {
         }
     ));
 
-    let effects = dispatch(Action::RewindConfirm(1), &mut app);
+    let effects = dispatch(
+        Action::RewindConfirm(1, crate::views::rewind::RewindMode::All),
+        &mut app,
+    );
     assert!(
         matches!(
             &effects[0],
@@ -464,7 +471,8 @@ fn confirm_yes_executes_rewind() {
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Executing {
-            target_prompt_index: 1
+            target_prompt_index: 1,
+            mode: _,
         }
     ));
 }
@@ -518,7 +526,8 @@ fn confirm_never_ask_persists_setting_off_and_executes() {
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Executing {
-            target_prompt_index: 1
+            target_prompt_index: 1,
+            mode: _,
         }
     ));
 }
@@ -553,7 +562,8 @@ fn picker_select_target_zero_executes_immediately_when_confirm_off() {
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Executing {
-            target_prompt_index: 0
+            target_prompt_index: 0,
+            mode: _,
         }
     ));
 }
@@ -612,7 +622,10 @@ fn inline_edit_conversation_only_success_resubmits_and_closes_editor() {
         crate::views::rewind::RewindPhase::Confirm { .. }
     ));
 
-    let effects = dispatch(Action::RewindConfirm(0), &mut app);
+    let effects = dispatch(
+        Action::RewindConfirm(0, crate::views::rewind::RewindMode::All),
+        &mut app,
+    );
     assert!(matches!(
         &effects[0],
         Effect::RewindExecute {
@@ -752,7 +765,8 @@ fn inline_edit_nonzero_target_points_loaded_executes_immediately_when_confirm_of
     assert!(matches!(
         agent.rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Executing {
-            target_prompt_index: 1
+            target_prompt_index: 1,
+            mode: _,
         }
     ));
     assert_eq!(
@@ -834,7 +848,8 @@ fn inline_edit_target_zero_executes_immediately_when_confirm_off() {
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Executing {
-            target_prompt_index: 0
+            target_prompt_index: 0,
+            mode: _,
         }
     ));
     assert_eq!(
@@ -876,7 +891,8 @@ fn classic_points_loaded_target_zero_executes_when_confirm_off() {
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Executing {
-            target_prompt_index: 0
+            target_prompt_index: 0,
+            mode: _,
         }
     ));
 }

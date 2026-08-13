@@ -1,5 +1,7 @@
 //! Session loading, session pickers, and deep-search dispatchers.
-use super::foreign::{dispatch_fetch_session_list, invalidate_foreign_picker};
+use super::foreign::{
+    dispatch_fetch_session_list, invalidate_foreign_picker, welcome_history_kind_filter,
+};
 use super::fork::build_child_fork_marker;
 use super::lifecycle::{
     clear_startup_actions, dispatch_new_session_inner, dispatch_new_worktree_session,
@@ -113,6 +115,23 @@ pub(in crate::app::dispatch) fn focus_if_session_already_open(
     switch_to_agent(app, existing_id, SwitchCause::Load);
     Some(existing_id)
 }
+/// Whether a session open should stamp rename-kind / `conversation_entry` as chat.
+///
+/// - Picker/list conversation rows pass `chat_kind = true` → always chat.
+/// - Sticky `--chat` with no conversation-entry bit still opens as chat for
+///   rename kind (UI `chat_kind` already ORs sticky; this matches that).
+/// - Under `local-workspace`, a welcome history "open as build" intent forces
+///   build even when sticky chat is on.
+pub(in crate::app::dispatch) fn session_opens_as_chat(app: &AppView, chat_kind: bool) -> bool {
+    if chat_kind {
+        return true;
+    }
+    #[cfg(feature = "local-workspace")]
+    if app.welcome_history_load_as_build {
+        return false;
+    }
+    app.chat_mode
+}
 fn dispatch_load_session_ungated(
     app: &mut AppView,
     session_id: String,
@@ -140,11 +159,12 @@ fn dispatch_load_session_ungated(
     let mut scrollback = ScrollbackState::new();
     scrollback.set_appearance(app.appearance.clone());
     let loading_msg = if matches!(app.restore_code, Some(true)) {
-        format!("Restoring code for session {}...", &session_id)
+        format!("Restoring code for session {}...", session_id)
     } else {
-        format!("Loading session {}...", &session_id)
+        format!("Loading session {}...", session_id)
     };
     let loading_placeholder_id = scrollback.push_block(RenderBlock::system(loading_msg));
+    let load_cwd = session_cwd.clone().unwrap_or_else(|| app.cwd.clone());
     let agent = AgentView::new(
         AgentSession {
             id: agent_id,
@@ -153,8 +173,11 @@ fn dispatch_load_session_ungated(
             models: app.models.clone(),
             state: AgentState::Idle,
             tracker: AcpUpdateTracker::new(),
-            cwd: session_cwd.clone().unwrap_or_else(|| app.cwd.clone()),
-            is_worktree: false,
+            cwd: load_cwd.clone(),
+            is_worktree: crate::app::session_startup::parent_session_is_worktree(
+                &session_id,
+                &load_cwd,
+            ),
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
@@ -187,6 +210,7 @@ fn dispatch_load_session_ungated(
         scrollback,
     );
     app.agents.insert(agent_id, agent);
+    let conversation_entry = session_opens_as_chat(app, chat_kind);
     let agent_mut = app.agents.get_mut(&agent_id).unwrap();
     agent_mut.attached_as_viewer = true;
     agent_mut.begin_replay_window();
@@ -215,6 +239,7 @@ fn dispatch_load_session_ungated(
         &app.tier_restricted_commands,
     );
     agent_mut.chat_kind = chat_kind || app.chat_mode;
+    agent_mut.conversation_entry = conversation_entry;
     agent_mut.apply_credit_balance(
         app.credit_balance.clone(),
         app.auto_topup.clone(),
@@ -647,15 +672,21 @@ fn dispatch_chat_search_refetch(app: &mut AppView, force: bool) -> Vec<Effect> {
     };
     app.session_picker_list_seq += 1;
     let seq = app.session_picker_list_seq;
+    let kind_filter = welcome_history_kind_filter(app);
     if query.is_empty() {
         set_chat_search_loading(app, false);
-        return vec![Effect::FetchSessionList { query: None, seq }];
+        return vec![Effect::FetchSessionList {
+            query: None,
+            seq,
+            kind_filter,
+        }];
     }
     set_chat_search_loading(app, true);
     if force {
         vec![Effect::FetchSessionList {
             query: Some(query),
             seq,
+            kind_filter,
         }]
     } else {
         vec![Effect::DebounceSessionSearch { query, seq }]
@@ -813,7 +844,10 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             state: AgentState::Idle,
             tracker: AcpUpdateTracker::new(),
             cwd: app.cwd.clone(),
-            is_worktree: false,
+            is_worktree: crate::app::session_startup::parent_session_is_worktree(
+                &session_id,
+                &app.cwd,
+            ),
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
@@ -846,6 +880,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
         scrollback,
     );
     app.agents.insert(agent_id, agent);
+    let conversation_entry = session_opens_as_chat(app, false);
     {
         let agent = app.agents.get_mut(&agent_id).unwrap();
         agent.attached_as_viewer = true;
@@ -867,6 +902,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             &app.tier_restricted_commands,
         );
         agent.chat_kind = app.chat_mode;
+        agent.conversation_entry = conversation_entry;
         agent.apply_credit_balance(
             app.credit_balance.clone(),
             app.auto_topup.clone(),
@@ -1197,18 +1233,26 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     restore_summary: Option<String>,
     restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
     running_prompt_id: Option<String>,
+    scheduler_background_loops: Option<bool>,
 ) -> Vec<Effect> {
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
         agent_id,
         session_id,
     );
+    let loops_seed = app.scheduler_background_loops_seed;
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
             return vec![];
         }
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
+        // Resume adopts the shell-pinned fire mode from this load response.
+        if let Some(v) = scheduler_background_loops {
+            agent.scheduler_background_loops = Some(v);
+        } else if agent.scheduler_background_loops.is_none() {
+            agent.scheduler_background_loops = Some(loops_seed);
+        }
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
         agent.session.restore_degree = restore_degree;
@@ -1520,7 +1564,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             agent.show_toast(&toast);
         }
         let cwd = agent.session.cwd.clone();
-        effects.push(Effect::HydrateSessionTitleFromDisk {
+        effects.push(Effect::HydrateSessionMetaFromDisk {
             agent_id,
             session_id: hydrate_sid.clone(),
             cwd: cwd.clone(),
@@ -1544,15 +1588,16 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
         });
-        if let Some((model_id, effort)) = deferred {
+        if let Some(switch) = deferred {
             agent.session.model_switch_pending = true;
             effects.push(Effect::SwitchModel {
                 agent_id,
                 session_id: hydrate_sid.clone(),
-                model_id,
-                effort,
-                prev_model_id: None,
+                model_id: switch.model_id,
+                effort: switch.effort,
+                prev_model_id: switch.prev_model_id,
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch)
@@ -1615,6 +1660,7 @@ pub(in crate::app::dispatch) fn handle_session_search_debounce_expired(
         return vec![Effect::FetchSessionList {
             query: (!query.is_empty()).then_some(query),
             seq,
+            kind_filter: welcome_history_kind_filter(app),
         }];
     }
     if live_deep_search_seq(app) != Some(seq) {
@@ -1693,10 +1739,12 @@ pub(in crate::app::dispatch) fn handle_session_restored(
         return vec![];
     }
     let sid = clear_stale_session_id(app, &local_session_id);
+    let conversation_entry = session_opens_as_chat(app, false);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "SessionRestored");
         agent.bind_session_id(sid);
         agent.chat_kind = app.chat_mode;
+        agent.conversation_entry = conversation_entry;
         agent.apply_credit_balance(
             app.credit_balance.clone(),
             app.auto_topup.clone(),

@@ -31,6 +31,13 @@ mod dispatch;
 /// Display-refresh probe + motion cadence + terminal telemetry at startup.
 mod display_refresh_startup;
 mod effects;
+pub(crate) mod error_display;
+pub mod session_startup;
+pub(crate) mod session_title_resolve;
+pub mod status_blocks;
+pub mod subagent;
+pub mod subscription;
+pub(crate) use effects::sanitize_user_error;
 mod event_loop;
 mod foreign_sessions;
 mod inline_edit;
@@ -46,7 +53,7 @@ pub mod signal_handler;
 mod startup_failure;
 mod turn_completion;
 mod xt_filter;
-pub(crate) use crate::terminal::kitty_flags_pushed;
+pub(crate) use crate::terminal::{kitty_flags_pushed, kitty_releases_reported};
 pub use cli::{
     AgentArgs, AgentCmd, Command, HeadlessArgs, LeaderArgs, LeaderMgmtArgs, LeaderMgmtCommand,
     LeaderTargetArgs, OutputFormat, PagerArgs, ServeArgs, WrapArgs,
@@ -1390,7 +1397,7 @@ fn init_terminal(
                     _ => Some("unsupported"),
                 });
         let use_keyboard_enhancement = skip_reason.is_none();
-        if use_keyboard_enhancement {
+        let flags = if use_keyboard_enhancement {
             let flags = event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
             xai_grok_shell::util::with_locked_stderr(|stderr| {
@@ -1401,14 +1408,16 @@ fn init_terminal(
                 .report_event_types = true, kitty.report_all_keys = false,
                 "kitty keyboard protocol pushed"
             );
+            flags
         } else {
             tracing::info!(
                 kitty.flags = "none",
                 kitty.skipped_reason = skip_reason.unwrap_or("unknown"),
                 "kitty keyboard protocol skipped"
             );
-        }
-        crate::terminal::set_kitty_flags_pushed(use_keyboard_enhancement);
+            event::KeyboardEnhancementFlags::empty()
+        };
+        crate::terminal::set_pushed_kitty_flags(flags);
         if mode.is_fullscreen() {
             let backend =
                 CrosstermBackend::new(crate::render::draw::TermWriter::new(frame_tx, writer_sync));

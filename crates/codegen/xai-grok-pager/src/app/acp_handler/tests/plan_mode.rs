@@ -63,7 +63,7 @@
         );
         // Option C: transcript card present with plan preview + CTA legend.
         assert!(
-            agent.scrollback.len() >= 1,
+            !agent.scrollback.is_empty(),
             "soft park must commit an inline plan card"
         );
         assert_eq!(

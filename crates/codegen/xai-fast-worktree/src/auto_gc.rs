@@ -746,55 +746,14 @@ mod tests {
 
     /// Git repo + stale linked-worktree registration (working tree deleted).
     fn plant_stale_git_worktree(repo: &Path, wt: &Path) {
+        xai_test_utils::require_git!();
         std::fs::create_dir_all(repo).unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["init"])
-                .current_dir(repo)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-        for (k, v) in [("user.email", "t@test"), ("user.name", "t")] {
-            assert!(
-                std::process::Command::new("git")
-                    .args(["config", k, v])
-                    .current_dir(repo)
-                    .output()
-                    .unwrap()
-                    .status
-                    .success()
-            );
-        }
+        xai_test_utils::git::init_git_repo(repo);
         std::fs::write(repo.join("f.txt"), b"x").unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["add", "f.txt"])
-                .current_dir(repo)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args(["commit", "-m", "i"])
-                .current_dir(repo)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-        let add_wt = std::process::Command::new("git")
-            .args(["worktree", "add", "--detach", wt.to_str().unwrap(), "HEAD"])
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        assert!(
-            add_wt.status.success(),
-            "worktree add failed: {}",
-            String::from_utf8_lossy(&add_wt.stderr)
+        xai_test_utils::git::git_commit_all(repo, "i");
+        xai_test_utils::git::run_git(
+            repo,
+            &["worktree", "add", "--detach", wt.to_str().unwrap(), "HEAD"],
         );
         std::fs::remove_dir_all(wt).unwrap();
     }

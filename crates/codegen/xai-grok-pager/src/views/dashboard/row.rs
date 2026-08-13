@@ -1595,6 +1595,7 @@ mod tests {
         RosterEntry {
             title: title.map(String::from),
             activity,
+            last_turn_summary: None,
             ..roster_entry(session_id, now_unix_ms())
         }
     }

@@ -240,10 +240,7 @@ async fn drain_reader(
         return Vec::new();
     };
     let mut buf = Vec::new();
-    loop {
-        let Some(remaining) = drain_deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
+    while let Some(remaining) = drain_deadline.checked_duration_since(Instant::now()) {
         let wait = POST_EXIT_QUIET.min(remaining);
         match tokio::time::timeout(wait, rx.recv()).await {
             Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
@@ -253,6 +250,11 @@ async fn drain_reader(
         }
     }
     buf
+}
+
+/// Alias kept for call sites still using the old name.
+pub(crate) fn shell_c(script: &str) -> Command {
+    sh_c(script)
 }
 
 #[cfg(test)]
@@ -391,9 +393,4 @@ mod tests {
             start.elapsed()
         );
     }
-}
-
-/// Alias kept for call sites still using the old name.
-pub(crate) fn shell_c(script: &str) -> Command {
-    sh_c(script)
 }

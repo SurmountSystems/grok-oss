@@ -1364,6 +1364,7 @@ mod cancel_turn_mouse_tests {
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
+                session_notes: crate::app::agent::SessionNotes::default(),
             },
             ScrollbackState::new(),
         )
@@ -2090,7 +2091,6 @@ mod question_no_freeform_tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             &bundle,
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),

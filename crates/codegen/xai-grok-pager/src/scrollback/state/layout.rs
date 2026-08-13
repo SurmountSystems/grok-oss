@@ -31,7 +31,7 @@ pub(crate) struct ScrollAnchor {
 /// its raw row offset is only meaningful at an unchanged width, so width
 /// changes re-anchor via [`ScrollAnchor`]'s logical-line mapping instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct StructuralScrollAnchor {
+pub(crate) struct StructuralScrollAnchor {
     /// Entry at the viewport top when the arming mutation happened.
     id: EntryId,
     /// Wrapped rows from that entry's top down to the viewport top, measured
@@ -626,6 +626,52 @@ impl ScrollbackState {
         // under-estimate and jump within an entry whose content never changed.
         self.measure_span_and_rebuild(entry_idx, entry_idx, width);
         self.repin_viewport_top_to_entry(entry_idx, anchor.rows_into_span);
+    }
+
+    /// Case 2 (streaming height patch): when a height delta is fully above the
+    /// manual viewport top, bump `scroll_offset` by that delta so the parked
+    /// content holds its screen row. Below-viewport and straddle changes leave
+    /// the offset alone (straddle re-wrap is rare on the streaming path).
+    pub(super) fn compensate_scroll_for_upstream_height_deltas(
+        &mut self,
+        changes: &[(usize, i32)],
+    ) {
+        if self.follow_mode || self.scroll_offset == 0 || changes.is_empty() {
+            return;
+        }
+        let Some(cache) = self.layout_cache.as_ref() else {
+            return;
+        };
+        let range = self.visible_entry_range();
+        let Some(&base_y) = cache.virtual_y.get(range.start) else {
+            return;
+        };
+        let top = base_y.saturating_add(self.scroll_offset);
+        let mut delta_sum: i64 = 0;
+        for &(idx, d) in changes {
+            if !range.contains(&idx) {
+                continue;
+            }
+            let Some(&entry_y) = cache.virtual_y.get(idx) else {
+                continue;
+            };
+            let height = cache
+                .entries
+                .get(idx)
+                .map(|e| e.height as usize)
+                .unwrap_or(0);
+            // Heights already reflect the post-change value; recover pre-bottom.
+            let pre_height = (height as i32 - d).max(0) as usize;
+            let pre_bottom = entry_y.saturating_add(pre_height);
+            if pre_bottom <= top {
+                delta_sum += i64::from(d);
+            }
+        }
+        if delta_sum == 0 {
+            return;
+        }
+        let new_off = (self.scroll_offset as i64 + delta_sum).max(0) as usize;
+        self.scroll_offset = new_off.min(self.max_scroll_offset());
     }
 
     /// Identity of the viewport-top row as `(entry_idx, rows_into_span)`: the

@@ -3521,12 +3521,15 @@ mod tests {
             })
             .collect();
         contracts.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        // Snapshot of finalized non-PI contracts. Refresh when todo_write /
+        // write wire description or schema intentionally changes (product
+        // board fib fields, protected-prefix merge copy, …).
         let expected: serde_json::Value = serde_json::from_str(
                 r##"
         [
           {
             "name": "todo_write",
-            "description": "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.",
+            "description": "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.\n\nPrefer merge: true upsert only (never casually wipe with merge: false). Fibonacci work leaves size 1 or 2 only — anything larger must split into children; parents/containers omit size. Progress totals only leaf sizes. Prefer namespaced ids (plan:, impl:, feat:, bug:, …) and meta.kind + parentId for structure. After spawning a subagent, set meta.taskId to that subagent_id so the board owns the live track. Do not demote a bound in_progress item to pending while that subagent is still running (complete or cancel instead; a second user ask is additive, not a pivot).",
             "parameters": {
               "$schema": "http://json-schema.org/draft-07/schema#",
               "required": [
@@ -3535,12 +3538,12 @@ mod tests {
               "type": "object",
               "properties": {
                 "merge": {
-                  "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list.",
+                  "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list. Protected-prefix ids (plan:, impl:, pr-, recon:, residual:, ask:, feat:, bug:) not mentioned in the replace set are preserved so foreign namespaces are not silently wiped. Prefer merge:true always; avoid casual full replace.",
                   "type": "boolean",
                   "default": true
                 },
                 "todos": {
-                  "description": "Array of todo items to write to the workspace",
+                  "description": "Array of todo items to write. Prefer namespaced ids. Fib leaves size 1|2 only; parents unsized.",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -3569,6 +3572,32 @@ mod tests {
                           "cancelled",
                           null
                         ]
+                      },
+                      "priority": {
+                        "description": "Optional priority: high, medium, or low",
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "high",
+                          "medium",
+                          "low",
+                          null
+                        ]
+                      },
+                      "meta": {
+                        "description": "Optional metadata JSON object. Documented keys: kind (residual|phase|work|child), parentId, namespace, taskId (bind live subagent; demote to pending rejected while Running)."
+                      },
+                      "size": {
+                        "description": "Optional Fibonacci leaf size: only 1 or 2. Larger work must split into children. Parents omit size.",
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "format": "uint8",
+                        "minimum": 0,
+                        "maximum": 255
                       }
                     },
                     "required": [

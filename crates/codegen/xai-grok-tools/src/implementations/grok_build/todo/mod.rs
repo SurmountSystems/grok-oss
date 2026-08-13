@@ -197,11 +197,7 @@ pub struct TodoProgress {
 impl TodoProgress {
     /// Percent complete 0–100 (0 when total is 0).
     pub fn pct(&self) -> u32 {
-        if self.total == 0 {
-            0
-        } else {
-            (self.completed * 100) / self.total
-        }
+        (self.completed * 100).checked_div(self.total).unwrap_or(0)
     }
 
     /// One-line summary for tool output / prompts.

@@ -1,7 +1,7 @@
-use xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer;
 use super::*;
 use crate::upload::trace::PromptMetadataParams;
 use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer;
 use xai_grok_tools::implementations::{grok_build, opencode};
 pub(super) fn canonical_total_tokens(totals: &xai_chat_state::UsageTotals) -> u64 {
     totals.total_tokens()

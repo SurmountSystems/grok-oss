@@ -43,6 +43,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
+        session_notes: crate::app::agent::SessionNotes::default(),
     };
     crate::app::agent_view::AgentView::new(
         session,

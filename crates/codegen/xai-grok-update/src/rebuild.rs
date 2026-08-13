@@ -663,6 +663,10 @@ fn run_command_captured(
     engine: &mut RebuildProgressEngine,
     on_progress: &mut dyn FnMut(RebuildProgressEvent),
 ) -> Result<(std::process::ExitStatus, String)> {
+    use std::sync::Arc;
+
+    use xai_grok_tools::util::{ProcessGroup, detach_std_command, global_process_scope};
+
     debug_assert_eq!(
         install_stdio_policy(),
         InstallStdioPolicy::Capture,
@@ -672,8 +676,22 @@ fn run_command_captured(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group so session kill_all can reap the install tree.
+    detach_std_command(&mut cmd);
 
+    #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
     let mut child = cmd.spawn().with_context(|| format!("spawn `{label}`"))?;
+    let group = ProcessGroup::new()
+        .and_then(|mut group| {
+            group.attach_std(&child)?;
+            Ok(Arc::new(group))
+        })
+        .with_context(|| format!("enroll process group for `{label}`"))?;
+    if !global_process_scope().register(&group) {
+        let _ = group.kill();
+        let _ = child.wait();
+        bail!("process scope closed; `{label}` aborted");
+    }
 
     let stdout = child
         .stdout
@@ -747,6 +765,7 @@ fn run_command_captured(
     let status = child
         .wait()
         .with_context(|| format!("wait for `{label}`"))?;
+    drop(group); // drop strong handle after reap so Weak cannot killpg a reused PID
     Ok((status, combined))
 }
 

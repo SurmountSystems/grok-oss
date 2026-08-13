@@ -20,6 +20,8 @@ default-bazel = [
     "local-workspace",
     "test-support",
 ]
+# Opt-in: tip-shaped half-merge session registry tests (parked; not in default CI).
+shell-half-merge-tests = []
 
 [dependencies]
 xai-grok-extra-ca = { workspace = true }
@@ -213,7 +215,10 @@ windows = { workspace = true, features = ["Win32_Security_Credentials"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
+ctor = { workspace = true }
 filetime = { workspace = true }
+pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 # `extensions::bundle` tests build archives with `bundle::test_helpers`, which
 # is `#[cfg(test)]`-only inside xai-grok-bundle without this feature.

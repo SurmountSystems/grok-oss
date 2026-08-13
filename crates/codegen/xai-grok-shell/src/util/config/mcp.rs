@@ -223,18 +223,41 @@ pub(crate) fn load_mcp_servers_toml_only(cwd: &std::path::Path) -> Vec<acp::McpS
     load_all_mcp_configs(cwd)
         .into_iter()
         .filter_map(|(name, config)| {
-            let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
-                McpSetupResolution::Resolved(config) => config,
-                McpSetupResolution::Required(_) => return None,
-                McpSetupResolution::Invalid(reason) => {
-                    tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
-                    return None;
-                }
-            };
-            config.expand_strings(sub);
-            config.to_acp_mcp_server(name)
+            materialize_mcp_config(&name, config, &preferences, sub, McpEnabledFilter::Respect)
         })
         .collect()
+}
+
+/// Whether materialization respects the config `enabled` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpEnabledFilter {
+    /// Drop when `enabled = false` (live merge / load).
+    Respect,
+    /// Materialize even when `enabled = false` (list stubs / reenable probe).
+    Ignore,
+}
+
+/// Resolve setup, expand strings, and convert to ACP.
+pub(crate) fn materialize_mcp_config(
+    name: &str,
+    mut config: McpServerConfig,
+    preferences: &McpPreferencesFile,
+    sub: &dyn Fn(&str) -> String,
+    enabled_filter: McpEnabledFilter,
+) -> Option<acp::McpServer> {
+    if matches!(enabled_filter, McpEnabledFilter::Ignore) {
+        config.enabled = true;
+    }
+    let mut config = match config.resolve_setup(preferences.servers.get(name)) {
+        McpSetupResolution::Resolved(config) => config,
+        McpSetupResolution::Required(_) => return None,
+        McpSetupResolution::Invalid(reason) => {
+            tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
+            return None;
+        }
+    };
+    config.expand_strings(sub);
+    config.to_acp_mcp_server(name)
 }
 
 /// Merge MCP servers from a pre-parsed global config with project-scoped overrides.
@@ -356,6 +379,14 @@ pub fn load_mcp_json_servers(cwd: &std::path::Path) -> Vec<acp::McpServer> {
 /// All server names from config.toml (including `enabled = false`).
 pub fn all_toml_mcp_server_names(cwd: &std::path::Path) -> std::collections::HashSet<String> {
     load_all_mcp_configs(cwd).keys().cloned().collect()
+}
+
+/// Names known to the CLI toggle path: disabled list + full TOML key set.
+/// Gateway connectors (`managed_gateway:…`) are not included.
+pub fn cli_known_mcp_server_names(cwd: &std::path::Path) -> std::collections::HashSet<String> {
+    let mut names = disabled_mcp_server_names(cwd);
+    names.extend(all_toml_mcp_server_names(cwd));
+    names
 }
 
 pub fn mcp_preferences_path() -> PathBuf {
@@ -2074,16 +2105,17 @@ enabled = false
     // === merge_section tests ===
 }
 
-
 /// Tip-shaped wrapper: persist MCP enabled flag (path argument ignored; uses config_path).
+/// Enable/disable a named MCP server for the given cwd (user + project layers).
+/// Returns paths that were written.
 pub async fn save_mcp_server_enabled_in(
-    _config_path: &std::path::Path,
     server_name: &str,
     enabled: bool,
-) -> Result<()> {
-    save_mcp_server_enabled(server_name, enabled).await
+    _cwd: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>> {
+    save_mcp_server_enabled(server_name, enabled).await?;
+    Ok(vec![user_config_path()])
 }
-
 
 /// Product inspect: severity of a loaded MCP server config issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

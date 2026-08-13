@@ -2253,10 +2253,12 @@ fn resolve_model_override_agent_config_auto_use_omits_console() {
     )
     .unwrap();
 
-    let mut agent_cfg = Config::default();
-    agent_cfg.grok_com_config = GrokComConfig {
-        auto_use_included_limits: true,
-        ..GrokComConfig::default()
+    let agent_cfg = Config {
+        grok_com_config: GrokComConfig {
+            auto_use_included_limits: true,
+            ..GrokComConfig::default()
+        },
+        ..Config::default()
     };
 
     let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
@@ -2412,11 +2414,13 @@ fn resolve_model_override_api_key_pin_keeps_console_primary() {
 
     let live = "tok-session-under-pin";
     let now = Utc::now();
-    let mut agent_cfg = Config::default();
-    agent_cfg.grok_com_config = GrokComConfig {
-        preferred_method: Some(PreferredAuthMethod::ApiKey),
-        auto_use_included_limits: true, // must not override pin
-        ..GrokComConfig::default()
+    let agent_cfg = Config {
+        grok_com_config: GrokComConfig {
+            preferred_method: Some(PreferredAuthMethod::ApiKey),
+            auto_use_included_limits: true, // must not override pin
+            ..GrokComConfig::default()
+        },
+        ..Config::default()
     };
 
     let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;

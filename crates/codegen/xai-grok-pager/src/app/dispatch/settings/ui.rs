@@ -52,6 +52,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let ui_snapshot = app.current_ui.clone();
     // Capture app-level fields before the mut-borrow loop.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
+    let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let auto_compact_from_app = app.auto_compact_threshold_percent;
@@ -94,6 +95,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                     .map(|(id, info)| (info.name.clone(), id.clone()))
                     .collect(),
                 coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
+                coding_data_sharing_lock: coding_data_sharing_lock_from_app,
                 // Prefer optimistic pending over confirmed active.
                 plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
                 show_tips: show_tips_from_app,
@@ -111,6 +113,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                     notifications_session_recap_threshold_from_app,
                 features_session_recap: features_session_recap_from_app,
                 bubble_copy_buttons: bubble_copy_buttons_from_app,
+                scheduler_background_loops: agent.scheduler_background_loops.unwrap_or(true),
             };
         }
     }
@@ -203,6 +206,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let ui_snapshot = app.current_ui.clone();
     // Capture app-level fields before the mut-borrow on the agent.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
+    let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let auto_compact_from_app = app.auto_compact_threshold_percent;
@@ -254,6 +258,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
             .map(|(id, info)| (info.name.clone(), id.clone()))
             .collect(),
         coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
+        coding_data_sharing_lock: coding_data_sharing_lock_from_app,
         // Prefer optimistic pending over confirmed active.
         plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
         show_tips: show_tips_from_app,
@@ -270,6 +275,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         notifications_session_recap_threshold_secs: notifications_session_recap_threshold_from_app,
         features_session_recap: features_session_recap_from_app,
         bubble_copy_buttons: bubble_copy_buttons_from_app,
+        scheduler_background_loops: agent.scheduler_background_loops.unwrap_or(true),
     };
     let mut state = Box::new(SettingsModalState::new(
         registry,
@@ -279,9 +285,11 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     if let Some(key) = focus_key
         && state.focus_key(key)
     {
-        // Land directly on the setting's chooser page (e.g. the coding data
-        // sharing opt-in/out picker), not just the focused browse row.
-        state.try_enter_picking_enum();
+        // Try the chooser; a locked row keeps Browse (`try_enter_picking_enum`
+        // refuses when `row_lock` is set).
+        if state.try_enter_picking_enum() {
+            state.close_on_picker_exit = true;
+        }
     }
     agent.active_modal = Some(ActiveModal::Settings { state });
     effects
@@ -738,6 +746,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         current_model_name: agent_current_model_name(app),
         available_models: agent_available_models(app),
         coding_data_sharing_opt_out: app.coding_data_retention_opt_out,
+        coding_data_sharing_lock: app.coding_data_sharing_lock(),
         plan_mode_active: agent_plan_mode(app),
         show_tips: app.show_tips,
         auto_update: app.auto_update,
@@ -756,6 +765,10 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
             .session_recap_threshold_secs,
         features_session_recap: app.features_session_recap,
         bubble_copy_buttons: app.appearance.scrollback.display.bubble_copy_buttons,
+        scheduler_background_loops: app
+            .active_agent()
+            .and_then(|a| a.scheduler_background_loops)
+            .unwrap_or(true),
     }
 }
 

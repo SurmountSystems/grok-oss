@@ -66,9 +66,11 @@ impl AgentView {
             models,
             cwd,
             has_session_announcements: slash_controller.has_session_announcements(),
+            usage_command_visible: slash_controller.billing_surface_visible(),
             billing_surface_visible: slash_controller.billing_surface_visible(),
             workflows_available: slash_controller.workflows_available(),
             screen_mode: slash_controller.screen_mode(),
+            current_title: None,
         };
         let Some(model_items) = cmd.suggest_args(&ctx, "") else {
             return false;
@@ -529,6 +531,7 @@ impl AgentView {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
+            | ActiveModal::UsageInfo { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. }
             | ActiveModal::Limits { .. } => unreachable!(),
@@ -1089,7 +1092,7 @@ impl AgentView {
                                     source,
                                     session_id,
                                     cwd,
-                                });
+                                }); // after decided by router (Stay for picker)
                             }
                             return InputOutcome::Changed;
                         }
@@ -2559,6 +2562,7 @@ mod session_picker_delete_tests {
             branch: None,
             repo_name: "repo".into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }
     }
@@ -3150,6 +3154,11 @@ mod command_palette_vim_input_tests {
     fn command_palette_search_bar_cursor_only_when_focused() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
+
+        // Pin non-Reset theme so inverse-cursor detection (bg == text_primary)
+        // does not false-positive on default Buffer cells under terminal-native.
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
 
         let render_palette_search_row = |search_active: bool| -> (bool, String) {
             let mut agent = make_agent();

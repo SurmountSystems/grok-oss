@@ -2083,9 +2083,11 @@ fn render_welcome_done(
                 height: tip_centered.height,
             };
             let rects = crate::views::privacy_banner::render(tip_inset, buf, theme, p.mouse_pos);
-            privacy_banner_accept_rect = Some(rects.accept);
-            privacy_banner_customize_rect = Some(rects.customize);
-            privacy_banner_legal_rect = Some(rects.legal);
+            // Welcome still exposes accept/customize/legal hit rect names; map
+            // monorepo Opt in / Opt out / Terms onto those slots.
+            privacy_banner_accept_rect = Some(rects.opt_in);
+            privacy_banner_customize_rect = Some(rects.opt_out);
+            privacy_banner_legal_rect = Some(rects.terms);
         } else if let Some(ver) = p.pending_update_version
             && layout.tip.height > 0
         {
@@ -2744,6 +2746,7 @@ mod tests {
             branch: None,
             repo_name: repo_name.into(),
             worktree_label: None,
+            last_turn_summary: None,
             card_detail: None,
         }
     }

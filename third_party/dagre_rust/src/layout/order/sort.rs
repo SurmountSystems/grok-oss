@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
 
 use crate::layout::order::resolve_conflicts::ResolvedBaryEntry;
 use crate::layout::order::sort_subgraph::SubgraphResult;
@@ -14,7 +14,7 @@ pub fn sort(entries: &Vec<ResolvedBaryEntry>, bias_right: &bool) -> SubgraphResu
     let mut unsortable = parts.rhs.clone();
 
     sortable.sort_by(|e1, e2| compare_with_bias(e1, e2, bias_right));
-    unsortable.sort_by(|e1, e2| e2.i.cmp(&e1.i));
+    unsortable.sort_by_key(|e| Reverse(e.i));
 
     let mut vs: Vec<Vec<String>> = vec![];
     let mut sum = 0.0;

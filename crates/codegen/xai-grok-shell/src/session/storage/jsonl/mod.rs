@@ -217,7 +217,7 @@ impl JsonlStorageAdapter {
                 candidates.push((summary_path, mtime));
             }
         }
-        candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
         candidates.truncate(limit);
         let mut summaries = Vec::with_capacity(candidates.len());
         for (summary_path, _) in candidates {

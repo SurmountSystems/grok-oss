@@ -404,6 +404,14 @@ impl UiConfig {
             .unwrap_or(Self::PAGE_FLIP_ON_SEND_DEFAULT)
     }
 
+    /// Default for [`Self::confirm_before_rewind`] when unset.
+    pub const CONFIRM_BEFORE_REWIND_DEFAULT: bool = true;
+
+    pub fn confirm_before_rewind_enabled(&self) -> bool {
+        self.confirm_before_rewind
+            .unwrap_or(Self::CONFIRM_BEFORE_REWIND_DEFAULT)
+    }
+
     /// Default for [`Self::resume_canceled_turn_on_restart`] when unset (on).
     pub const RESUME_CANCELED_TURN_ON_RESTART_DEFAULT: bool = true;
 

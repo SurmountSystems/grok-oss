@@ -100,6 +100,7 @@ list when you ship fork work.
 
 - [x] **AUR** sources under `packaging/aur/`
 - [x] **Nix flake** — `nix build .#grok-oss`, dev shells (human packaging, not GHA release artifacts)
+- [x] **Rust 1.97.1 (Surmount wins)** — project `rust-toolchain.toml` channel `1.97.1` plus matching fenix FOD in `flake.nix`. After an upstream export that still lists 1.94.x (or older), keep Surmount **1.97.1** unless the operator chooses a different channel. Report: [`.agents/reports/impl-toolchain-1971-2026-08-12.md`](.agents/reports/impl-toolchain-1971-2026-08-12.md)
 - [x] **justfile** — `just check` / `just ci` full quality gate; `just test` for the cargo quality suite
 - [x] **release-dist debug sidecar** — `just build-dist` / `just install-dist` build with `--profile release-dist` (strip=false, debug=1), extract DWARF to `grok-oss.debug` via `scripts/extract-debug-sidecar.sh`, strip the binary, embed GNU debuglink. Plain `just install` stays local `--release` + strip (no sidecar).
 

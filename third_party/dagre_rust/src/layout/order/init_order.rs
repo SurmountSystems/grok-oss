@@ -53,12 +53,7 @@ pub fn init_order(g: &Graph<GraphConfig, GraphNode, GraphEdge>) -> Vec<Vec<Strin
         }
     }
 
-    simple_nodes.sort_by(|v1, v2| {
-        let v1_rank = g.node(v1).unwrap().rank.clone().unwrap_or(0);
-        let v2_rank = g.node(v2).unwrap().rank.clone().unwrap_or(0);
-
-        v1_rank.cmp(&v2_rank)
-    });
+    simple_nodes.sort_by_key(|v| g.node(v).unwrap().rank.clone().unwrap_or(0));
 
     for v in simple_nodes.iter() {
         dfs(v, g, &mut visited, &mut layers);

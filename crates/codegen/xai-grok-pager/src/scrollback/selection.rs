@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(action.width, label.chars().count() as u16);
         assert_eq!(action.y, 1);
         // Reserved: [action][gap][1-cell close slot] against right edge.
-        let right_x = 0 + 40 - 1;
+        let right_x = 40 - 1;
         assert_eq!(action.x + action.width + 1 + 1 - 1, right_x);
     }
 

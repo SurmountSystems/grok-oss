@@ -137,13 +137,13 @@ pub(super) fn dispatch_send_prompt_now(
     let prompt_id = uuid::Uuid::new_v4().to_string();
     // Self-originated: the ACP gate must treat this prompt's deltas as ours.
     agent.note_self_originated_prompt(&prompt_id);
-    // Expect the shell's send-now cancel so the turn-end rails suppress its
-    // marker — only when the shell will actually cancel (goal turns promote
-    // without cancelling; a stale arm would mute a later real cancel marker).
-    if agent.expects_send_now_cancel() {
-        agent.arm_send_now_expectation(prompt_id.clone());
-        // The arm hides the queue echo pushed below — paint the block now.
-        super::queue::push_send_now_user_block(agent, &prompt_id, "prompt", &text, false);
+    // Paint the user block at dispatch (arm hides the queue echo; adoption
+    // reuses the block). Goal turns paint WITHOUT arming cancel so a stale
+    // arm cannot mute a later real cancel marker; canceling turns arm so the
+    // turn-end rails suppress the cancelled marker.
+    let expects_cancel = agent.expects_send_now_cancel();
+    super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
+    if expects_cancel {
         // Soft interject toasts; send-now used to clear the composer with no
         // chrome — say what happened so the draft vanishing doesn't feel like
         // a black hole.

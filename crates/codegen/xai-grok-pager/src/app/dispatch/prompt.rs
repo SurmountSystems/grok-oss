@@ -1,6 +1,9 @@
 //! Prompt and bash-command submission dispatchers and reload-window helpers.
 
-use super::auth::{scrollback_has_recent_context_too_large, scrollback_has_recent_reauth_prompt};
+use super::auth::{
+    scrollback_has_recent_context_too_large, scrollback_has_recent_disk_full,
+    scrollback_has_recent_reauth_prompt, scrollback_has_recent_request_failed,
+};
 use super::billing::is_credit_limit_error;
 use super::ctx::with_active_agent;
 use super::interject;
@@ -516,6 +519,7 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     // Capture app-level fields before the mut-borrow on `agent`.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
+    let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
@@ -601,6 +605,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 bundle_state: &app.bundle_state,
                 screen_mode: app.screen_mode,
                 billing_surface_visible: app.usage_visible,
+                usage_command_visible: agent.prompt.slash_controller.usage_command_visible(),
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,
@@ -615,6 +620,7 @@ pub(super) fn dispatch_send_prompt_inner(
                         .map(|(id, info)| (info.name.clone(), id.clone()))
                         .collect(),
                     coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
+                    coding_data_sharing_lock: coding_data_sharing_lock_from_app,
                     // Prefer optimistic pending over confirmed active.
                     plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
                     show_tips: show_tips_from_app,
@@ -634,6 +640,7 @@ pub(super) fn dispatch_send_prompt_inner(
                         .session_recap_threshold_secs,
                     features_session_recap: app.features_session_recap,
                     bubble_copy_buttons: app.appearance.scrollback.display.bubble_copy_buttons,
+                    scheduler_background_loops: agent.scheduler_background_loops.unwrap_or(true),
                 },
             };
 
@@ -660,15 +667,15 @@ pub(super) fn dispatch_send_prompt_inner(
                     });
                 }
                 if let Some(command) = command {
-                    if ctx.screen_mode.is_minimal() && !command.available_in_minimal() {
-                        // Central minimal gate: commands that drive the deleted
-                        // fullscreen pane / dashboard (/find, /dashboard, …)
-                        // have nothing to act on in scrollback-native mode.
-                        // Surface a friendly system block instead of running them.
-                        CommandResult::Message(format!(
-                            "/{} is not available in minimal mode",
-                            invocation.token
-                        ))
+                    // Central screen-mode gate. Such a command is already
+                    // filtered out of every completion surface, but it stays
+                    // resolvable so a fully-typed invocation earns a hint that
+                    // names the way out instead of leaking to the model.
+                    if let Some(refusal) = command
+                        .mode_support()
+                        .refusal(invocation.token, ctx.screen_mode)
+                    {
+                        CommandResult::Message(refusal)
                     } else {
                         agent
                             .prompt
@@ -913,11 +920,12 @@ pub(super) fn dispatch_send_prompt_inner(
             // treat its deltas as ours, not adopt them as another client's turn.
             agent.note_self_originated_prompt(&prompt_id);
 
-            // Empty-held park: cancel-and-send (not a hold). Occupied hold
-            // appends like a normal mid-turn queue.
+            // Plain image-free sends stay unarmed: shell queue state and
+            // cancelTrigger decide disposition. Occupied hold appends like a
+            // normal mid-turn queue; empty-held park is still an immediate
+            // server send without a client-side send-now arm.
             let cancel_and_send = parked_sendable_wait && !hold_behind_existing_queue;
             if cancel_and_send {
-                agent.arm_send_now_expectation(prompt_id.clone());
                 agent.suppress_parked_marker_on_interject();
             }
 
@@ -1055,16 +1063,10 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     };
     // Submitting a bash command retires any edit-contextual ephemeral tip.
     agent.ephemeral_tip.clear_on_submit();
-    if agent.session.session_id.is_none() {
-        let effects = skip_picker_and_create_session(app, id);
-        if let Some(agent) = app.agents.get_mut(&id) {
-            agent.session.enqueue_bash_command(command);
-            agent.prompt.set_text("");
-        }
-        return effects;
-    }
 
     // Store in prompt history with `! ` prefix for restore semantics.
+    // Record even before the session binds so up-arrow history keeps the
+    // command while it waits for drain.
     let history_key = format!("! {}", command.trim());
     agent
         .session
@@ -1080,7 +1082,9 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     // immediately (it's already a `session/prompt` with bash meta) and echoed
     // into the shared queue with `kind="bash"`. On `running_prompt_id`
     // adoption the turn-start shim sets `bash_turn` (no user block). The IDLE
-    // case is unchanged: enqueue locally + drain instantly.
+    // case is unchanged: enqueue locally + drain instantly. Unbound sessions
+    // fall through to local enqueue; `maybe_drain_queue` emits nothing until
+    // `SessionCreated` arrives.
     let bash_immediate = immediate_server_send_eligible(agent);
     tracing::debug!(
         target: "qtrace",
@@ -1277,7 +1281,15 @@ pub(super) fn handle_prompt_response(
                 }
                 // Resolved-without-running never adopts; explicit for the
                 // session-less arm (no note_queue_echo_retired above).
-                agent.retire_send_now_painted_block(response_pid);
+                // Exception: an active-goal Send Now painted block still awaiting
+                // its interjection claim stays put — the `RemovedFromQueue`
+                // response is the expected outcome of routing the Send Now as an
+                // interjection, and `handle_interjection` converts the block in
+                // place. Retiring it here (before that claim wins the race) would
+                // drop and re-push the message at the scrollback end.
+                if !agent.is_send_now_awaiting_interjection_claim(response_pid) {
+                    agent.retire_send_now_painted_block(response_pid);
+                }
                 return vec![];
             }
         }
@@ -1317,25 +1329,50 @@ pub(super) fn handle_prompt_response(
         // block, so the generic TurnFailed + error toast are redundant. Derived
         // from the scrollback (mirrors reauth), not a session flag.
         let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
+        let disk_full_from_error = result
+            .as_ref()
+            .err()
+            .is_some_and(|e| crate::app::effects::is_disk_full_error(e));
+        if disk_full_from_error && !scrollback_has_recent_disk_full(&agent.scrollback) {
+            agent
+                .scrollback
+                .push_block(RenderBlock::session_event(SessionEvent::DiskFull));
+        }
+        let disk_full = disk_full_from_error || scrollback_has_recent_disk_full(&agent.scrollback);
         // Fallback: if the retry notification didn't set the flag,
         // detect credit-limit denials (legacy 403 or pool 402) from
         // the PromptResponse error + HTTP status. Covers races where
         // the retry notification arrives after the PromptResponse.
+        // The error text is already banner-formatted ("Request failed (402) —
+        // …"), so recover the status from it when the field is absent.
         let credit_limit_blocked = agent.session.credit_limit_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| is_credit_limit_error(http_status, e));
+            || result.as_ref().err().is_some_and(|e| {
+                let status =
+                    http_status.or_else(|| crate::app::error_display::parse_http_status(e));
+                is_credit_limit_error(status, e)
+            });
         // A 401/auth failure already surfaced an actionable
         // `ReAuthRequired` prompt via the RetryState handler (which
         // runs before this PromptResponse). Suppress the redundant
         // "Turn failed" block + error toast so only the prompt shows.
+        // "(401)" matches both the raw "Unauthorized (401)" dump and the
+        // banner-formatted "Request failed (401) — …" text.
         let reauth_prompted = scrollback_has_recent_reauth_prompt(&agent.scrollback)
             || (http_status == Some(401)
-                && result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|e| e.contains("Unauthorized (401)")));
+                && result.as_ref().err().is_some_and(|e| e.contains("(401)")));
+        let request_failed_shown = scrollback_has_recent_request_failed(&agent.scrollback);
+        // A dedicated prompt/modal/banner replaces the generic TurnFailed
+        // marker and error toast (rate limit, free-usage paywall, model
+        // incompatibility, credit 402/403, 401 re-auth, context overflow,
+        // disk-full, or a formatted RequestFailed banner from RetryState).
+        let dedicated_ux_shown = rate_limited
+            || free_usage_blocked
+            || model_incompatible
+            || credit_limit_blocked
+            || reauth_prompted
+            || context_overflow
+            || disk_full
+            || request_failed_shown;
         let elapsed = agent.turn_elapsed();
 
         {
@@ -1421,20 +1458,15 @@ pub(super) fn handle_prompt_response(
                 // form here — only wake markers use the honest `None` form.
                 elapsed: Some(elapsed.unwrap_or_default()),
             }),
-            (Err(_), _)
-                if rate_limited
-                    || free_usage_blocked
-                    || model_incompatible
-                    || credit_limit_blocked
-                    || reauth_prompted
-                    || context_overflow =>
-            {
-                // Skip TurnFailed when a dedicated prompt/modal shows instead
-                // (rate limit, free-usage paywall, model incompatibility,
-                // credit 403, 401 re-auth, or a terminal context-window
-                // overflow).
+            (Err(_), _) if dedicated_ux_shown => {
+                // Skip TurnFailed when a dedicated prompt/modal/banner shows
+                // instead (rate limit, free-usage paywall, model
+                // incompatibility, credit 402/403, 401 re-auth, context
+                // overflow, disk-full, or RequestFailed).
                 None
             }
+            // `err` is already banner-formatted by `format_acp_error` at the
+            // producer — the single formatting owner. Don't re-format here.
             (Err(err), _) => Some(SessionEvent::TurnFailed {
                 error: err.clone(),
                 elapsed,
@@ -1456,14 +1488,7 @@ pub(super) fn handle_prompt_response(
                 };
                 Some((NotificationEventKind::TurnComplete, body))
             }
-            (Err(err), _)
-                if !rate_limited
-                    && !free_usage_blocked
-                    && !model_incompatible
-                    && !credit_limit_blocked
-                    && !reauth_prompted
-                    && !context_overflow =>
-            {
+            (Err(err), _) if !dedicated_ux_shown => {
                 Some((NotificationEventKind::AgentError, format!("Error: {err}")))
             }
             _ => None,
@@ -1778,6 +1803,7 @@ pub(super) fn handle_prompt_response(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
         });
         if let Some(toast) = soft_stop_toast {
             agent.show_toast(&toast);

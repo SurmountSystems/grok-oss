@@ -161,7 +161,7 @@ fn convert_text_exposition(text: &str, prefix: &str) -> Vec<Metric> {
             .iter()
             .map(|(k, v)| string_kv(k, v.clone()))
             .collect();
-        kv.sort_by(|a, b| a.key.cmp(&b.key));
+        kv.sort_by_key(|a| a.key.clone());
         kv
     };
 

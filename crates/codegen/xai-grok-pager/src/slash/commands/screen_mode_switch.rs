@@ -90,17 +90,6 @@ mod tests {
     use crate::app::ScreenMode;
     use crate::app::bundle::BundleState;
 
-    fn app_ctx<'a>(models: &'a ModelState, mode: ScreenMode) -> AppCtx<'a> {
-        AppCtx {
-            models,
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            billing_surface_visible: true,
-            workflows_available: true,
-            screen_mode: mode,
-        }
-    }
-
     fn exec_ctx<'a>(
         models: &'a ModelState,
         bundle: &'a BundleState,

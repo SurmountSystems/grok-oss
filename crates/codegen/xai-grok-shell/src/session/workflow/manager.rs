@@ -160,10 +160,10 @@ impl WorkflowManager {
                 execution_script = self.store.script_for(run_id).ok_or_else(|| {
                     LaunchError::Store("immutable workflow script is missing".into())
                 })?;
-                let mut journal = match existing
-                    .journal_path
+                let mut journal = match self
+                    .session_dir
                     .as_ref()
-                    .and_then(|p| self.session_dir.as_ref().map(|d| (d, p)))
+                    .zip(existing.journal_path.as_ref())
                 {
                     Some((session_dir, relative)) => {
                         let expected = format!("workflows/{run_id}/journal.jsonl");

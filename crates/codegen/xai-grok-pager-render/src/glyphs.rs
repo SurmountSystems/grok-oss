@@ -966,7 +966,7 @@ mod tests {
     fn cursor_box_blink_alternates_filled_and_hollow() {
         let half = CURSOR_BOX_BLINK_HALF_MS;
         assert!(
-            half >= 500 && half <= 800,
+            (500..=800).contains(&half),
             "half-period must be slow/readable"
         );
         assert!(cursor_box_filled_phase(0));

@@ -1619,6 +1619,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("hit".into()),
         seq: 7,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { sessions, scope, seq, query, .. } => {
@@ -1632,6 +1633,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: None,
         seq: 8,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { scope, seq, query, .. } => {
@@ -1647,6 +1649,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("fail-me".into()),
         seq: 9,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListFailed { error, seq, query } => {
@@ -2329,6 +2332,7 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         branch: None,
         repo_name: "repo-app".to_string(),
         worktree_label: Some("wt".to_string()),
+        last_turn_summary: None,
         card_detail: None,
     };
     let roster = session_picker_entry_to_roster(&entry);

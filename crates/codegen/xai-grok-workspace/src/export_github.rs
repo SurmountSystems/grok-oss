@@ -326,6 +326,13 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, ExportGithubFailure> {
         .env("GIT_AUTHOR_EMAIL", AUTHOR_EMAIL)
         .env("GIT_COMMITTER_NAME", AUTHOR_NAME)
         .env("GIT_COMMITTER_EMAIL", AUTHOR_EMAIL)
+        // Automated export must not inherit host commit.gpgsign or hooks.
+        // Local .git/config still applies.
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(args);
     let mut async_cmd = tokio::process::Command::from(cmd);
     async_cmd.kill_on_drop(true);

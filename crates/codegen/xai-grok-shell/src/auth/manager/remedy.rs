@@ -122,6 +122,21 @@ impl AuthManager {
             (true, false) => AuthRemedy::ManualLogin,
         }
     }
+
+    /// Same as [`Self::auth_remedy`] after the turn already spent its automatic
+    /// retries. A still-valid external token with no recorded verdict is
+    /// [`AuthRemedy::ProviderLogin`] here: the operator's binary is the only
+    /// mint, and "retry in a few seconds" is exactly what just failed.
+    pub(crate) fn auth_remedy_after_retries(&self) -> AuthRemedy {
+        match self.auth_remedy() {
+            AuthRemedy::SelfHealing if self.is_external_provider_refresh_authority() => {
+                AuthRemedy::ProviderLogin {
+                    label: self.grok_com_config().auth_provider_label.clone(),
+                }
+            }
+            other => other.after_retries_exhausted(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +186,24 @@ mod tests {
         assert!(!manager.has_permanent_failure());
         assert_eq!(
             manager.auth_remedy(),
+            AuthRemedy::ProviderLogin {
+                label: Some("Acme SSO".to_owned())
+            }
+        );
+    }
+
+    /// After the turn has already spent its retries, a still-valid external
+    /// token cannot stay "wait it out": the operator's binary is the only mint.
+    #[test]
+    fn after_retries_a_wire_valid_external_credential_needs_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = provider_manager(
+            dir.path(),
+            external_credential(Utc::now() + Duration::hours(1)),
+        );
+        assert_eq!(manager.auth_remedy(), AuthRemedy::SelfHealing);
+        assert_eq!(
+            manager.auth_remedy_after_retries(),
             AuthRemedy::ProviderLogin {
                 label: Some("Acme SSO".to_owned())
             }

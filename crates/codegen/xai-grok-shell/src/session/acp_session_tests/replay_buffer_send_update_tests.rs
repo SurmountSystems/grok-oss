@@ -1349,6 +1349,7 @@ static ASCII_SCRUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// AgentMessageChunk that `send_update` builds from the same string) when
 /// ASCII scrub is on (default).
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)] // ASCII_SCRUB_ENV_LOCK serializes env across test body
 async fn channel_token_text_scrubs_curly_punctuation_when_on() {
     use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
     use xai_grok_tools::util::ascii_scrub::ENV_SCRUB_ASCII_PUNCT;
@@ -1420,6 +1421,7 @@ async fn channel_token_text_scrubs_curly_punctuation_when_on() {
 /// S2: When scrub is off (env kill-switch), curly punctuation is preserved
 /// through the stream path.
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)] // ASCII_SCRUB_ENV_LOCK serializes env across test body
 async fn channel_token_text_preserves_unicode_when_scrub_off() {
     use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
     use xai_grok_tools::util::ascii_scrub::ENV_SCRUB_ASCII_PUNCT;

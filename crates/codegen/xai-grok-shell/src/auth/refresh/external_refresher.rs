@@ -20,15 +20,20 @@ impl ExternalBinaryRefresher {
         Self { runner, command }
     }
 
-    /// A failed or timed-out binary run is a single-strike `Other` permanent
-    /// failure. `Other` is non-sticky, so `PERMANENT_FAILURE_TTL` lets a flaky
-    /// or briefly slow binary self-heal without `/login`. The async runner
-    /// bounds every run and group-kills the child on timeout, so there is no
-    /// wedged-process case that would need a separate transient outcome.
+    /// A failed or timed-out headless run (`GROK_AUTH_EXPIRED=1`) means the
+    /// operator's binary could not mint without the user. That is
+    /// [`RefreshTokenFailedReason::ProviderInteractiveRequired`], not OIDC
+    /// `Other`: a still-valid local token plus this verdict is `ProviderLogin`
+    /// so the client offers `/login` instead of "wait it out".
+    ///
+    /// The reason is non-sticky, so `PERMANENT_FAILURE_TTL` still lets a
+    /// flaky or briefly slow binary self-heal. The async runner bounds every
+    /// run and group-kills the child on timeout, so there is no wedged-process
+    /// case that would need a separate transient outcome.
     fn record_failure(&self, message: &str) -> RefreshOutcome {
         tracing::warn!(%message, "auth: external binary refresh failed permanently");
         // No token key in the binary flow; the caller scopes the verdict.
-        RefreshOutcome::permanent(RefreshTokenFailedReason::Other, None)
+        RefreshOutcome::permanent(RefreshTokenFailedReason::ProviderInteractiveRequired, None)
     }
 }
 
@@ -69,10 +74,10 @@ mod tests {
         }
     }
 
-    /// A failed binary run is a single-strike `Other` permanent failure that is
-    /// NON-sticky: it must age out via the TTL, never lock an external-binary
-    /// user out forever. (Flipping this to a sticky reason would be a silent
-    /// lockout regression.)
+    /// A failed binary run is a single-strike `ProviderInteractiveRequired`
+    /// that is NON-sticky: it must age out via the TTL, never lock an
+    /// external-binary user out forever. (Flipping this to a sticky reason
+    /// would be a silent lockout regression.)
     #[tokio::test]
     async fn external_binary_failure_is_single_strike_non_sticky_permanent() {
         let refresher = ExternalBinaryRefresher::new(
@@ -83,13 +88,22 @@ mod tests {
         );
         match refresher.refresh(RefreshReason::ServerRejected).await {
             RefreshOutcome::PermanentFailure { error, .. } => {
-                assert_eq!(error.reason, RefreshTokenFailedReason::Other);
+                assert_eq!(
+                    error.reason,
+                    RefreshTokenFailedReason::ProviderInteractiveRequired
+                );
                 assert!(
                     !error.reason.is_sticky(),
                     "external-binary failure must age out, not strand the user forever",
                 );
+                assert!(
+                    error.reason.blocks_unattended_retry(),
+                    "a declined headless run must not keep classifying as SelfHealing"
+                );
             }
-            other => panic!("a failed binary run must be a permanent Other failure, got {other:?}"),
+            other => {
+                panic!("a failed binary run must be ProviderInteractiveRequired, got {other:?}")
+            }
         }
     }
 

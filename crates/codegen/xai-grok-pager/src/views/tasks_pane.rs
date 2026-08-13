@@ -611,7 +611,7 @@ impl TaskEntry {
         };
         let label = format!(
             "{} {} \u{b7} {}{}",
-            tag_display, info.human_schedule, &prompt_preview, &suffix
+            tag_display, info.human_schedule, prompt_preview, suffix
         );
 
         // Only the tag (e.g. `Loop`) carries color — the blue system accent.
@@ -2162,6 +2162,10 @@ mod tests {
 
     #[test]
     fn bg_task_styled_prefix_uses_secondary_color() {
+        // Pin across build + assert: from_bg_task samples Theme::current for
+        // the prefix span; a concurrent theme flip would make secondary/primary
+        // tokens disagree with Theme::current() at assert time.
+        let _pin = crate::theme::cache::pin_theme();
         let mut task = make_bg_task("t3a", "cargo test --release", BgTaskStatus::Running);
         task.description = Some("Run release tests".into());
         let mut cache = HashMap::new();

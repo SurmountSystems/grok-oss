@@ -1407,9 +1407,9 @@ pub(super) async fn run_session(
                             tokio::task::spawn_local(async move {
                                 session_for_mcp.ensure_mcp_tools_initialized().await;
                                 if let Err(e) = crate::util::config::save_mcp_server_enabled_in(
-                                    std::path::Path::new(&session_cwd),
                                     &sname,
                                     enabled,
+                                    std::path::Path::new(&session_cwd),
                                 )
                                 .await
                                 {

@@ -952,7 +952,6 @@ fn truncate_for_prompt_by<T>(
     items.len()
 }
 
-
 /// Calculate how many updates to keep for a given target prompt index (0-based, inclusive).
 ///
 /// Progressive: unmarked user runs before the first `_meta.promptIndex` count

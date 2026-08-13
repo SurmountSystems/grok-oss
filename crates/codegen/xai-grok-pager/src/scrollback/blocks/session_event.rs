@@ -375,6 +375,12 @@ pub struct SessionEventBlock {
     /// The prompt turn a terminal marker belongs to, when known. Gates
     /// which stop-hook batches may merge into it.
     pub prompt_id: Option<String>,
+    /// The marker was pushed at park time (user-interruptible blocking
+    /// wait): the turn is still running shell-side, so it must never accept
+    /// stop hooks. Rendering is unchanged — a parked wait reads as stopped.
+    /// Cleared when the completion folds into the uncommitted tail marker;
+    /// a committed tail (minimal print-once) gets a fresh row instead.
+    pub parked: bool,
 }
 
 impl SessionEventBlock {
@@ -384,6 +390,7 @@ impl SessionEventBlock {
             event,
             stop_hooks: Vec::new(),
             prompt_id: None,
+            parked: false,
         }
     }
 
@@ -398,7 +405,15 @@ impl SessionEventBlock {
             event,
             stop_hooks,
             prompt_id,
+            parked: false,
         }
+    }
+
+    /// Whether this marker may carry/accept stop-hook runs: a turn-terminal
+    /// event that is not a parked line (which renders while the turn is
+    /// still running shell-side, before any Stop hook fires).
+    pub fn accepts_stop_hooks(&self) -> bool {
+        self.event.is_turn_terminal() && !self.parked
     }
 
     /// Whether any attached stop hook actually ran (non-skipped). Gates the

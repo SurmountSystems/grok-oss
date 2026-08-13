@@ -13,6 +13,7 @@
 //! otherwise); tests/ shares a fixture prelude via `use super::*;`.
 
 mod auth;
+pub(in crate::app) use auth::scrollback_has_recent_error_banner;
 mod billing;
 mod cta;
 mod ctx;
@@ -68,6 +69,8 @@ pub(crate) use ctx::{SwitchCause, switch_to_agent};
 pub(crate) use settings::ui::{ROLLBACK_NO_ARM_TOAST, build_pager_snapshot};
 #[cfg(test)]
 pub(crate) use turn::TURN_END_RECONCILE_GRACE;
+#[cfg(test)]
+pub(crate) use turn::{CANCEL_RESEND_GRACE, reconcile_overdue_cancels};
 
 #[cfg(test)]
 mod tests;

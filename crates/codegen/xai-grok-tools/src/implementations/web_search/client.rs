@@ -135,8 +135,8 @@ impl WebSearchClient {
             .input(query.to_string())
             .tools(vec![rs::Tool::WebSearch(web_search)])
             .store(false)
-            .temperature(0.1)
-            .top_p(0.95)
+            .temperature(0.1_f32)
+            .top_p(0.95_f32)
             .max_output_tokens(8192u32)
             .build()
             .map_err(|e| {
@@ -247,8 +247,8 @@ impl WebSearchClient {
             .input(query.to_string())
             .tools(vec![rs::Tool::WebSearch(web_search)])
             .store(false)
-            .temperature(0.1)
-            .top_p(0.95)
+            .temperature(0.1_f32)
+            .top_p(0.95_f32)
             .max_output_tokens(8192u32)
             .build()
             .map_err(|e| {

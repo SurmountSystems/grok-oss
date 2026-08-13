@@ -2700,6 +2700,10 @@ fn picker_renders_choices_in_order() {
 /// low-contrast theme compatibility (parity with `cancel_turn_panel`).
 #[test]
 fn picker_highlights_current_choice() {
+    // Pin theme so process-global Theme::current / terminal-native lock from
+    // concurrent tests cannot flip row-bg tokens mid-assert (bg_visual vs
+    // DarkGray elevate path).
+    let _pin = crate::theme::cache::pin_theme();
     let mut s = picker_test_state();
     // Focus the second choice (index 1).
     s.transition_to_picking_enum("test_enum", 1, SettingValue::Enum("first"), true);

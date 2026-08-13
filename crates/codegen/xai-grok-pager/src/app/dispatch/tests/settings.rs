@@ -1028,7 +1028,9 @@ fn deep_link_preview_esc_closes_modal_and_forwards_revert_action() {
     );
     match outcome {
         InputOutcome::Action(Action::PreviewTheme(name)) => {
-            assert_eq!(name, "groknight");
+            // Revert uses the theme that was live when the chooser opened.
+            // Surmount product default is doge (not monorepo groknight).
+            assert_eq!(name, "doge");
         }
         other => panic!("expected Action(PreviewTheme), got {other:?}"),
     }
@@ -2010,6 +2012,37 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
+        "hide_header" => {
+            let _ = dispatch(Action::SetHideHeader(true), app);
+        }
+        "scrub_ascii_punct" => {
+            // Registry default is ON; flip off to leave default.
+            let _ = dispatch(Action::SetScrubAsciiPunct(false), app);
+        }
+        "bubble_copy_buttons" => {
+            let away = !crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons;
+            let _ = dispatch(Action::SetBubbleCopyButtons(away), app);
+        }
+        "plan_approval_park" => {
+            // Default is soft; force modal to leave default.
+            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_string()), app);
+        }
+        "cancel_subagents_on_turn_cancel" => {
+            // Default is ask; pick always_stop to leave default.
+            let _ = dispatch(
+                Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
+                app,
+            );
+        }
+        "notifications.session_recap" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecap(false), app);
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecapThresholdSecs(60), app);
+        }
+        "features.session_recap" => {
+            let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
+        }
         other => {
             panic!(
                 "move_setting_away_from_default: no arm for `{other}`. \
@@ -2113,6 +2146,7 @@ fn set_simple_mode_propagates_to_every_agent() {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         ScrollbackState::new(),
     );

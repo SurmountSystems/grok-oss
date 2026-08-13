@@ -66,8 +66,15 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
     cmd.env("GROK_OSC52_SINK", "1");
     cmd.env("LC_GROK_OSC52_SINK", "1");
 
-    // Spawn child in the PTY slave.
+    // Spawn child in the PTY slave. portable-pty calls setsid on Unix;
+    // enroll into ProcessScope so session teardown can reap the tree.
+    #[allow(clippy::disallowed_methods)] // enrolled via enroll_terminal_pid below
     let mut child = pair.slave.spawn_command(cmd)?;
+    let process_group = child.process_id().and_then(|pid| {
+        xai_tty_utils::global_process_scope()
+            .enroll_terminal_pid(pid)
+            .ok()
+    });
     // Drop the slave so we get EOF when child exits.
     drop(pair.slave);
 
@@ -204,6 +211,9 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
 
     // Wait for child and extract exit code.
     let status = child.wait()?;
+    // Drop the enrolled group after reap so the scope Weak cannot killpg a
+    // recycled PID.
+    drop(process_group);
     // Reaped: the pid is recyclable from here on, so the signal thread must
     // no longer forward to it.
     #[cfg(unix)]

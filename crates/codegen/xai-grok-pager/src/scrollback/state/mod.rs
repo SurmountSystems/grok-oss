@@ -37,6 +37,16 @@ use crate::appearance::AppearanceConfig;
 use crate::render::Renderable;
 use crate::theme::Theme;
 
+/// Defers expensive off-screen warm-measure across a drag resize until the
+/// width settles for a full frame (see [`ScrollbackState::begin_frame`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DeferredWarmAbove {
+    #[default]
+    Idle,
+    Deferred,
+    Armed,
+}
+
 /// Unified scrollback state for the v3 pager.
 #[derive(Debug)]
 pub struct ScrollbackState {
@@ -115,6 +125,10 @@ pub struct ScrollbackState {
     /// prompt at the viewport top while still enabling follow for new content.
     follow_preserve_scroll: bool,
 
+    /// Viewport-top pin across structural mutations (fold/expand/remove).
+    /// See [`layout::StructuralScrollAnchor`] and arm/consume helpers there.
+    pub(super) structural_scroll_anchor: Option<layout::StructuralScrollAnchor>,
+
     // Selection
     /// Currently selected entry index.
     selected: Option<usize>,
@@ -176,6 +190,10 @@ pub struct ScrollbackState {
     /// poster paints over the text below its (still banner-sized) reservation.
     ffmpeg_available_snapshot: bool,
 
+    /// Resize-drag deferral for `warm_measure_pages_above` (see
+    /// [`DeferredWarmAbove`] / [`Self::begin_frame`]).
+    warm_above: DeferredWarmAbove,
+
     /// Set of group-start EntryIds whose group has been manually expanded
     /// by the user (pressing l/Enter on the group header). When a group's
     /// first entry ID is in this set, the fold pass (`groups::apply`) marks
@@ -230,6 +248,7 @@ impl ScrollbackState {
             viewport_height: 0,
             follow_mode: true,
             follow_preserve_scroll: false,
+            structural_scroll_anchor: None,
             selected: None,
             selection_box: None,
             turns: Vec::new(),
@@ -247,6 +266,7 @@ impl ScrollbackState {
             batch_depth: 0,
             gaps_may_be_dirty: false,
             ffmpeg_available_snapshot: false,
+            warm_above: DeferredWarmAbove::Idle,
             expanded_groups: HashSet::new(),
             generation: 0,
             content_generation: 0,
@@ -648,6 +668,76 @@ impl ScrollbackState {
         self.push(ScrollbackEntry::new(block))
     }
 
+    /// Add a finalized block positioned immediately **before** the entry
+    /// `anchor`, instead of at the end. Falls back to [`Self::push_block`]
+    /// when `anchor` is no longer present.
+    ///
+    /// # Precondition
+    ///
+    /// **`anchor` must not already be committed.** A terminal's native
+    /// scrollback is append-only, so inserting above a block already printed
+    /// there would emit the new block below content that logically follows it.
+    pub fn insert_block_before(&mut self, anchor: EntryId, block: RenderBlock) -> EntryId {
+        let Some(index) = self.entries.get_index_of(&anchor) else {
+            return self.push_block(block);
+        };
+        debug_assert!(
+            !self.committed.contains(&anchor),
+            "insert_block_before: anchor {anchor:?} is already committed — the inserted \
+             block would print out of order in native scrollback"
+        );
+
+        // Anchor the viewport top before the insertion shifts indices.
+        self.arm_structural_scroll_anchor();
+        let id = EntryId::new(self.next_id);
+        self.next_id += 1;
+        let mut entry = ScrollbackEntry::new(block);
+        entry.id = id;
+
+        // Same materialize policy as [`Self::push`] for Edit defaults and
+        // always-expand-thinking.
+        if let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block
+            && entry.display_mode == DisplayMode::Collapsed
+        {
+            entry.display_mode = edit_default_display_mode(
+                self.appearance
+                    .scrollback
+                    .blocks
+                    .edit
+                    .effective_expanded(crate::appearance::cache::load_collapsed_edit_blocks()),
+                edit,
+            );
+        }
+        if matches!(entry.block, RenderBlock::Thinking(_))
+            && (self.thinking_display_mode == DisplayMode::Expanded
+                || crate::appearance::cache::load_always_expand_thinking())
+        {
+            entry.display_mode = DisplayMode::Expanded;
+        }
+
+        if entry.is_running {
+            self.running.insert(id);
+        }
+        self.entries.shift_insert(index, id, entry);
+
+        if let Some(selected) = self.selected.as_mut()
+            && *selected >= index
+        {
+            *selected += 1;
+        }
+        // Cursor may only move down freely; after a mid-list insert it must
+        // not sit past the new uncommitted entry (see field contract).
+        self.commit_scan_cursor = self.commit_scan_cursor.min(index);
+
+        if self.batch_depth == 0 {
+            self.rebuild_turns();
+        }
+        self.gaps_may_be_dirty = true;
+        self.invalidate_layout_cache();
+        self.bump_content_generation();
+        id
+    }
+
     /// Remove an entry by EntryId. No-op if the id is not present.
     ///
     /// Used by the cancel-with-restore flow to undo the user prompt block
@@ -655,6 +745,9 @@ impl ScrollbackState {
     pub fn remove_entry(&mut self, id: EntryId) -> bool {
         // Capture the index before the removal shifts everything after it down.
         let removed_index = self.entries.get_index_of(&id);
+        // Arm while entry indices and the layout cache still agree — the next
+        // `prepare_layout` Case 1 re-pins the pre-removal viewport top.
+        self.arm_structural_scroll_anchor();
         if self.entries.shift_remove(&id).is_none() {
             return false;
         }
@@ -662,6 +755,9 @@ impl ScrollbackState {
         self.dirty_heights.remove(&id);
         self.committed.remove(&id);
         self.expanded_groups.remove(&id);
+        if let Some(idx) = removed_index {
+            self.migrate_structural_anchor_past_removal(id, idx);
+        }
         if let Some(sel) = self.selected
             && sel >= self.entries.len()
         {
@@ -690,6 +786,10 @@ impl ScrollbackState {
     }
 
     pub fn remove_from(&mut self, index: usize) -> Vec<ScrollbackEntry> {
+        // Arm before the bulk pop so a manually parked viewport re-pins; after
+        // the tail is gone prune any anchor whose entry vanished with no
+        // later survivor.
+        self.arm_structural_scroll_anchor();
         let mut removed = Vec::new();
         while self.entries.len() > index {
             if let Some((id, entry)) = self.entries.pop() {
@@ -701,6 +801,7 @@ impl ScrollbackState {
             }
         }
         removed.reverse();
+        self.prune_dead_structural_anchor();
         if let Some(sel) = self.selected
             && sel >= self.entries.len()
         {
@@ -1670,8 +1771,19 @@ impl ScrollbackState {
                 } else {
                     None
                 };
+            // Same-width structural rebuild (removal/insert): consume the
+            // one-shot EntryId anchor armed by the mutation. Width changes drop
+            // it — rows_into_span is only meaningful at the armed width.
+            let width_changed = width != self.last_width;
+            let structural = if width_changed {
+                self.structural_scroll_anchor = None;
+                None
+            } else {
+                self.structural_scroll_anchor.take()
+            };
 
-            if width != self.last_width {
+            let resized = width_changed && self.last_width != 0;
+            if width_changed {
                 for entry in self.entries.values_mut() {
                     entry.invalidate_cache();
                 }
@@ -1685,6 +1797,7 @@ impl ScrollbackState {
             if let Some(anchor) = scroll_anchor {
                 self.restore_scroll_anchor(anchor);
             }
+            self.apply_structural_scroll_anchor(structural, width);
             self.fixup_hidden_selection();
             self.handle_follow_mode();
             // Upgrade the on-screen entries to EXACT heights (O(viewport), not
@@ -1692,7 +1805,16 @@ impl ScrollbackState {
             self.settle_visible_measurements(width);
             // Pre-measure a few pages above the bottom so the first scroll-up is
             // glitch-free (no-op unless bottom-pinned).
-            self.warm_measure_pages_above(width);
+            //
+            // Warming off-screen pages on every event of a drag, only to throw
+            // the work away at the next width, is the single largest cost of a
+            // resize — hence the deferral until width settles for a frame.
+            if resized {
+                self.warm_above = DeferredWarmAbove::Deferred;
+            } else {
+                self.warm_above = DeferredWarmAbove::Idle;
+                self.warm_measure_pages_above(width);
+            }
             self.dirty_heights.clear();
             self.gaps_may_be_dirty = false;
             return true;
@@ -1720,6 +1842,10 @@ impl ScrollbackState {
                     // usize, so tall sessions are not truncated).
                     let new_total = (self.total_height as i64 + total_delta as i64).max(0);
                     self.total_height = new_total as usize;
+                    // Manual viewport: growth/shrink fully above the top must
+                    // move scroll_offset with the content, or the parked marker
+                    // jolts down/up while virtual_y shifts under a sticky offset.
+                    self.compensate_scroll_for_upstream_height_deltas(&changes);
                 }
             } else if self.gaps_may_be_dirty {
                 // Heights didn't change, but structural state is dirty (e.g.,
@@ -1738,6 +1864,7 @@ impl ScrollbackState {
             // A scroll/content change may have brought estimated entries into
             // view (e.g. streaming while scrolled up); measure them exactly.
             self.settle_visible_measurements(width);
+            self.run_pending_warm_above(width);
             return !changes.is_empty();
         }
 
@@ -1755,7 +1882,24 @@ impl ScrollbackState {
         // Scroll-up (no dirty heights) reveals estimated off-screen entries —
         // this is the on-demand measurement path for plain scrolling.
         self.settle_visible_measurements(width);
+        self.run_pending_warm_above(width);
         false
+    }
+
+    /// Mark the start of a frame that will draw this scrollback. Hosts must
+    /// call this once per frame; it is the only signal of a frame boundary
+    /// [`DeferredWarmAbove`] has.
+    pub fn begin_frame(&mut self) {
+        if self.warm_above == DeferredWarmAbove::Deferred {
+            self.warm_above = DeferredWarmAbove::Armed;
+        }
+    }
+
+    fn run_pending_warm_above(&mut self, width: u16) {
+        if self.warm_above == DeferredWarmAbove::Armed {
+            self.warm_above = DeferredWarmAbove::Idle;
+            self.warm_measure_pages_above(width);
+        }
     }
 
     /// Invalidate caches if width changed.

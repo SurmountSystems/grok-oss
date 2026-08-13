@@ -83,6 +83,7 @@ pub(crate) fn handle_ask_user_question(
                 LocalQuestionKind::DoctorFix { .. } => "/doctor fix",
                 LocalQuestionKind::DeleteCurrentSession => "/delete",
                 LocalQuestionKind::Feedback => "/feedback",
+                LocalQuestionKind::ProjectSelect { .. } => "project picker",
             };
             let message = if matches!(kind, LocalQuestionKind::DoctorFix { .. }) {
                 "/doctor fix was cancelled because another question opened.".to_owned()

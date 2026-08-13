@@ -161,9 +161,7 @@ enum TerminalCommand {
     },
 
     /// Warm static login-shell / login-env capture for the non-persistent path.
-    WarmShell {
-        cwd: PathBuf,
-    },
+    WarmShell { cwd: PathBuf },
 
     /// Kill all running foreground processes owned by a specific session.
     KillForegroundCommandsByOwner { owner_session_id: String },
@@ -741,25 +739,6 @@ impl LocalTerminalActor {
             process_group,
             state_dump_handle: None,
         })
-    }
-
-    #[cfg(unix)]
-    async fn ensure_persistent_shell_initialized(&mut self, cwd: &std::path::Path) {
-        if self.shell_state.is_some() {
-            return;
-        }
-        let shell = shell_state::ShellKind::detect();
-        match shell_state::ShellState::init(shell, cwd, self.shell_env_policy.as_ref()).await {
-            Ok(state) => self.shell_state = Some(state),
-            Err(e) => {
-                tracing::warn!("persistent shell init failed, using empty state: {e}");
-                self.shell_state = Some(shell_state::ShellState {
-                    cwd: cwd.to_path_buf(),
-                    snapshot: String::new(),
-                    shell,
-                });
-            }
-        }
     }
 
     /// Spawn a command with persistent shell state: restore the prior snapshot
@@ -1920,7 +1899,7 @@ impl LocalTerminalActor {
     }
 
     async fn shutdown_all(&mut self) {
-        for (_, process) in self.processes.iter_mut() {
+        for process in self.processes.values_mut() {
             send_sigkill_to_group(process);
             // Abort the state dump reader so its spawn_blocking thread
             // doesn't outlive the actor.

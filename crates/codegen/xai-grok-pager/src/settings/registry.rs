@@ -227,6 +227,23 @@ pub enum SettingValue {
     Int(i64),
 }
 
+/// Why `coding_data_sharing` cannot be changed in the settings modal.
+/// Computed by `AppView::coding_data_sharing_lock`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodingDataSharingLock {
+    Zdr,
+    TeamManaged,
+}
+
+impl CodingDataSharingLock {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Zdr => "Your team has Zero Data Retention.",
+            Self::TeamManaged => "Managed by your team admin.",
+        }
+    }
+}
+
 /// Snapshot of pager-local state captured when the modal opens.
 /// Used by `current_value_for` to render against LIVE state rather
 /// than the on-disk `UiConfig`. Refreshed by
@@ -253,6 +270,8 @@ pub struct PagerLocalSnapshot {
     /// `opt_out == false` → canonical "opt-in". Snapshot default is
     /// `true` (opted out) to match the safer consumer default.
     pub coding_data_sharing_opt_out: bool,
+    /// Why `coding_data_sharing` cannot be changed here (`None` = editable).
+    pub coding_data_sharing_lock: Option<CodingDataSharingLock>,
     /// Whether plan mode is active. Uses effective state
     /// (`pending.unwrap_or(active)`) so rapid toggles don't double-send.
     /// Refreshed on all mutation paths including ACP `CurrentModeUpdate`.
@@ -296,6 +315,8 @@ pub struct PagerLocalSnapshot {
     pub features_session_recap: bool,
     /// Always-on bubble ⧉ chrome (`[scrollback.display] bubble_copy_buttons`).
     pub bubble_copy_buttons: bool,
+    /// Mirrors `AgentView::scheduler_background_loops` (fallback true).
+    pub scheduler_background_loops: bool,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -307,6 +328,7 @@ impl Default for PagerLocalSnapshot {
             current_model_name: None,
             available_models: Vec::new(),
             coding_data_sharing_opt_out: true,
+            coding_data_sharing_lock: None,
             plan_mode_active: false,
             show_tips: None,
             auto_update: None,
@@ -326,6 +348,7 @@ impl Default for PagerLocalSnapshot {
             features_session_recap: true,
             bubble_copy_buttons: crate::appearance::ScrollbackDisplayConfig::default()
                 .bubble_copy_buttons,
+            scheduler_background_loops: true,
         }
     }
 }

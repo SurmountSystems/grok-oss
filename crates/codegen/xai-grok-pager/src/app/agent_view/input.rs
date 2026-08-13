@@ -194,24 +194,25 @@ impl AgentView {
     /// keep their in-overlay meaning. Dashboard-overlay only; the overlay
     /// stays pending (no answer sent).
     pub(crate) fn overlay_esc_backs_out(&self) -> bool {
-        use crate::views::question_view::{LocalQuestionKind, QuestionFocus};
         if !self.in_dashboard_overlay {
             return false;
         }
         if self.modal_owns_input() {
             return false;
         }
+        // Parked surfaces (permission / question / plan over a bare scrollback)
+        // do not hold the keyboard, so Esc must still leave for the dashboard
+        // instead of dead-ending behind the turn-cancel swallow.
+        if !self.no_input_overlay_pending()
+            && self.is_bare_scrollback()
+            && self.no_esc_consumer_pending()
+        {
+            return true;
+        }
         if self.plan_approval_view.is_some() {
             return self.plan_overlay_at_back_out_top();
         }
-        if let Some(qv) = self.question_view.as_ref() {
-            return self.active_pane != AgentPane::Scrollback
-                && qv.focus == QuestionFocus::Navigation
-                && qv.active_tab == 0
-                && !matches!(qv.local_kind, Some(LocalQuestionKind::ProjectSelect { .. }))
-                && !qv.active_tab_has_selection();
-        }
-        false
+        self.card_esc() == Some(super::EscStep::BackOutOverlay)
     }
     /// Whether the pending plan-approval overlay is at a state where `Esc` /
     /// `Left` have nothing else to do, so they back out to the dashboard:

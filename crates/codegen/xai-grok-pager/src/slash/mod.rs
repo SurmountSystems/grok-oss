@@ -1400,6 +1400,7 @@ pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
 ///
 /// Accept turns `/doctor` into `/doctor ` and opens the arg menu. Skip accept
 /// only when the highlighted row is the typed command (or an alias of it).
+#[allow(dead_code)] // agent-prompt Enter path; accept-vs-send policy
 pub(crate) fn is_typed_slash_selected(
     snap: &SlashSnapshot,
     text: &str,

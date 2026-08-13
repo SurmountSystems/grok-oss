@@ -394,10 +394,6 @@ pub(super) fn extensions_modal_tab_fetches(
         },
         Effect::FetchWorkflowsList {
             agent_id,
-            session_id,
-        },
-        Effect::FetchWorkflowsList {
-            agent_id,
             session_id: session_id.clone(),
         },
     ];

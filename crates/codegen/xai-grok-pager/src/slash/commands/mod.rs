@@ -208,6 +208,7 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,
@@ -362,6 +363,7 @@ mod tests {
             "transcript",
             "tutorial",
             "t",
+            "undo",
             "usage",
             "view-plan",
             "vim-mode",
@@ -549,6 +551,8 @@ mod tests {
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            usage_command_visible: true,
+            current_title: None,
         };
         let cmd = model::ModelCommand;
         let items = cmd.suggest_args(&ctx, "").expect("should have suggestions");
@@ -574,6 +578,8 @@ mod tests {
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            usage_command_visible: true,
+            current_title: None,
         };
         let cmd = model::ModelCommand;
         assert!(cmd.suggest_args(&ctx, "").is_none());
@@ -657,6 +663,8 @@ mod tests {
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            usage_command_visible: true,
+            current_title: None,
         };
         let cmd = usage::UsageCommand;
         assert!(cmd.takes_args_now(&ctx));
@@ -673,6 +681,8 @@ mod tests {
             billing_surface_visible: true,
             workflows_available: false,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            usage_command_visible: true,
+            current_title: None,
         };
         let items = usage::UsageCommand.suggest_args(&ctx, "").unwrap();
         assert_eq!(
@@ -752,6 +762,8 @@ mod tests {
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            usage_command_visible: true,
+            current_title: None,
         };
         assert!(
             !gboom::GboomCommand.visible(&ctx),

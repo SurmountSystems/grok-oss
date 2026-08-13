@@ -196,6 +196,13 @@ impl FuzzySearchManager {
         }
     }
 
+    /// Open a fuzzy search rooted at `root`.
+    ///
+    /// Repeated opens for the same root reuse the existing matcher and search
+    /// id. Each open used to build a new nucleo pool (`Some(2)` workers), so a
+    /// client that opened without `close` grew an unbounded set of
+    /// `nucleo worker` threads. One live search per root keeps that count
+    /// constant.
     pub fn open(
         &mut self,
         root: &Path,
@@ -205,11 +212,44 @@ impl FuzzySearchManager {
         target_client_id: TargetClientId,
     ) -> FuzzySearchId {
         self.cleanup_stale();
-        let search_id = request_id.unwrap_or_else(|| Uuid::now_v7().to_string());
 
+        if let Some(existing_id) = self.search_id_for_root(root) {
+            self.reuse_existing(&existing_id, hidden, session_id, target_client_id);
+            return existing_id;
+        }
+
+        let search_id = request_id.unwrap_or_else(|| Uuid::now_v7().to_string());
         let context = FuzzySearchContext::new(root, hidden, session_id, target_client_id);
         self.searches.insert(search_id.clone(), context);
         search_id
+    }
+
+    fn search_id_for_root(&self, root: &Path) -> Option<FuzzySearchId> {
+        self.searches
+            .iter()
+            .find(|(_, ctx)| ctx.root == root)
+            .map(|(id, _)| id.clone())
+    }
+
+    fn reuse_existing(
+        &mut self,
+        search_id: &str,
+        hidden: bool,
+        session_id: Option<String>,
+        target_client_id: TargetClientId,
+    ) {
+        let Some(ctx) = self.searches.get_mut(search_id) else {
+            return;
+        };
+        ctx.last_activity = Instant::now();
+        ctx.session_id = session_id;
+        ctx.target_client_id = target_client_id;
+        // A new open supersedes any in-flight poll for the previous query.
+        ctx.query_version += 1;
+        if ctx.hidden != hidden {
+            ctx.hidden = hidden;
+            ctx.daemon.restart_walk(hidden);
+        }
     }
 
     /// Get the session ID for a search, if one was set.
@@ -262,10 +302,10 @@ impl FuzzySearchManager {
             .is_some_and(|ctx| ctx.query_version == query_version)
     }
 
-    pub fn get_results(&mut self, search_id: &str) -> Option<FuzzySearchData> {
-        let ctx = self.searches.get_mut(search_id)?;
-        ctx.last_activity = Instant::now();
-
+    pub fn get_results(&self, search_id: &str) -> Option<FuzzySearchData> {
+        // Poll-only reads must not reset the stale timer. A forgotten search
+        // that the hub still polls would otherwise never expire.
+        let ctx = self.searches.get(search_id)?;
         let results = ctx.daemon.get();
 
         Some(FuzzySearchData {
@@ -277,14 +317,12 @@ impl FuzzySearchManager {
     }
 
     pub fn get_results_filtered(
-        &mut self,
+        &self,
         search_id: &str,
         min_gen: usize,
         has_query: bool,
     ) -> Option<FuzzySearchData> {
-        let ctx = self.searches.get_mut(search_id)?;
-        ctx.last_activity = Instant::now();
-
+        let ctx = self.searches.get(search_id)?;
         let results = ctx.daemon.get();
 
         if results.generation < min_gen {
@@ -330,5 +368,85 @@ impl FuzzySearchManager {
 impl Default for FuzzySearchManager {
     fn default() -> Self {
         Self::new(Duration::from_secs(DEFAULT_SEARCH_TIMEOUT_SECS))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_root(mgr: &mut FuzzySearchManager, root: &Path) -> FuzzySearchId {
+        mgr.open(root, None, false, None, TargetClientId::None)
+    }
+
+    /// Named contract: many `open` calls on one root without `close` must keep
+    /// one live matcher, not one new nucleo pool per open.
+    #[test]
+    fn repeated_open_without_close_keeps_one_search_per_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), b"x").unwrap();
+        let mut mgr = FuzzySearchManager::new(Duration::from_secs(300));
+        let root = dir.path();
+
+        let ids: Vec<FuzzySearchId> = (0..20).map(|_| open_root(&mut mgr, root)).collect();
+
+        assert_eq!(
+            mgr.active_count(),
+            1,
+            "20 opens of the same root without close must keep 1 live search, not {}",
+            mgr.active_count()
+        );
+        let first = &ids[0];
+        assert!(
+            ids.iter().all(|id| id == first),
+            "reuse must return the same search id so clients do not pin extra matchers"
+        );
+        assert!(
+            mgr.change(first, "alpha", false).is_some(),
+            "the reused search must still accept a query"
+        );
+        assert!(mgr.get_results(first).is_some());
+    }
+
+    #[test]
+    fn distinct_roots_each_keep_one_search() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("a.txt"), b"x").unwrap();
+        std::fs::write(b.path().join("b.txt"), b"y").unwrap();
+        let mut mgr = FuzzySearchManager::new(Duration::from_secs(300));
+
+        for _ in 0..10 {
+            open_root(&mut mgr, a.path());
+            open_root(&mut mgr, b.path());
+        }
+
+        assert_eq!(
+            mgr.active_count(),
+            2,
+            "each root keeps one live search; 10 opens each must not grow past 2"
+        );
+    }
+
+    /// Poll-only `get_results` must not reset the stale timer. Otherwise a
+    /// forgotten search that the hub still polls never expires.
+    #[test]
+    fn get_results_does_not_keep_a_stale_search_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), b"x").unwrap();
+        let mut mgr = FuzzySearchManager::new(Duration::from_millis(40));
+        let id = open_root(&mut mgr, dir.path());
+
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            mgr.get_results(&id).is_some(),
+            "the search still exists until cleanup; poll must not create a new matcher"
+        );
+        mgr.cleanup_stale();
+        assert_eq!(
+            mgr.active_count(),
+            0,
+            "poll-only get_results must not refresh last_activity, so cleanup can drop it"
+        );
     }
 }

@@ -672,9 +672,12 @@ mod tests {
     fn env_theme_auto_dark_arms_watcher_and_resolves() {
         with_test_env(|| {
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Dark));
+            // Named contract: `GROK_THEME=auto` arms the watcher. Dark
+            // appearance maps to DOGE, same as unset `[ui].theme` and
+            // `to_theme_kind` when `auto_dark_theme` is unset.
             assert_eq!(
                 resolve_initial_theme_from(Some("auto"), Some(ThemeKind::TokyoNight), false),
-                ThemeKind::GrokNight
+                ThemeKind::Doge
             );
             assert!(is_auto_mode());
         });
@@ -813,13 +816,14 @@ mod tests {
         });
         with_test_env(|| {
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Dark));
+            // OSC 11 fallback path: same auto-dark → DOGE mapping.
             assert_eq!(
                 resolve_initial_theme_from(
                     env_theme_name_from(&theme_env(&[("LC_GROK_THEME", "auto")])),
                     Some(ThemeKind::TokyoNight),
                     true,
                 ),
-                ThemeKind::GrokNight
+                ThemeKind::Doge
             );
             assert!(is_auto_mode());
         });

@@ -41,7 +41,7 @@ fn worktree_forked_sets_session_id_eagerly_and_emits_load() {
             code_restored: false,
             restore_summary: None,
             restore_degree: None,
-            resume_session_id: Some("orig-sess".into()),
+            resume_session_id: None,
         }),
         &mut app,
     );
@@ -119,7 +119,7 @@ fn worktree_forked_clears_sticky_branch_from_main_repo() {
             code_restored: false,
             restore_summary: None,
             restore_degree: None,
-            resume_session_id: Some("orig-sess".into()),
+            resume_session_id: None,
         }),
         &mut app,
     );
@@ -161,7 +161,7 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
                 "checked out abc12345, staged: true, unstaged: false, untracked: 3".into(),
             ),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
-            resume_session_id: Some("orig-sess".into()),
+            resume_session_id: None,
         }),
         &mut app,
     );
@@ -217,7 +217,7 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
                 "restore aborted (checkout failed); stash skipped: MERGE_HEAD present".into(),
             ),
             restore_degree: None,
-            resume_session_id: Some("orig-fail".into()),
+            resume_session_id: None,
         }),
         &mut app,
     );
@@ -273,7 +273,7 @@ fn fork_initiation_supersedes_open_reload_window() {
             agent_id: id,
             new_session_id: acp::SessionId::new("sess-fork"),
             cwd: std::path::PathBuf::from("/tmp"),
-            parent_session_id: acp::SessionId::new("sess-old"),
+            parent_session_id: acp::SessionId::new("parent-sess"),
         }),
         &mut app,
     );

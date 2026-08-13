@@ -3390,6 +3390,11 @@ mod tests {
 
         // A `show_search_hint: false` picker (command palette / arg-picker family):
         // the cursor must track focus (`search_active`), not render always-on.
+        // Pin a non-Reset theme: inverse-cursor detection uses bg==text_primary,
+        // which collides with default Buffer cells when text_primary is Reset
+        // (terminal-native / terminal_default).
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
         let theme = Theme::current();
         let config = cfg(false, false);
         let area = Rect::new(0, 0, 60, 16);

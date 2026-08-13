@@ -29,7 +29,7 @@ fn backfill_session_summary(summary: &mut Summary) {
 }
 
 /// Router for x.ai/session/* and x.ai/session_summaries/* methods.
-pub async fn handle(
+pub(crate) async fn handle(
     agent: &MvpAgent,
     args: &acp::ExtRequest,
 ) -> Result<acp::ExtResponse, acp::Error> {

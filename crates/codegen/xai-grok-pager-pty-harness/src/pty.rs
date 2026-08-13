@@ -3,12 +3,13 @@
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 use xai_grok_test_support::{TestProcessTree, TestSandbox, process_has_exited_without_reap};
+use xai_tty_utils::ProcessGroup;
 
 const PTY_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 const PTY_REAP_POLL: Duration = Duration::from_millis(10);
@@ -28,6 +29,10 @@ pub mod keys {
     /// Ctrl+R (0x12) — prompt history search / scrollback mouse-reporting toggle.
     pub const CTRL_R: &[u8] = b"\x12";
     pub const ESC: &[u8] = b"\x1b";
+    /// Right arrow (CSI C).
+    pub const RIGHT: &[u8] = b"\x1b[C";
+    /// F2 (SS3 form used by other pager e2e).
+    pub const F2: &[u8] = b"\x1bOQ";
 }
 
 /// One explicit environment mutation applied after the TestSandbox baseline.
@@ -67,6 +72,8 @@ pub(crate) enum PtyRead {
 pub struct PtyController {
     child: Box<dyn portable_pty::Child + Send>,
     process_tree: Option<TestProcessTree>,
+    /// Strong handle for ProcessScope enrollment (Weak stays live while owned).
+    process_group: Option<Arc<ProcessGroup>>,
     exit_status: Option<ExitStatus>,
     exit_observed: bool,
     spawn_pid: Option<u32>,
@@ -131,9 +138,10 @@ impl PtyController {
         }
         apply_child_env(&mut cmd, sandbox, env);
 
-        // portable-pty calls setsid on Unix. Windows Job enrollment is a
-        // best-effort post-spawn attachment, so a very short-lived descendant
-        // may escape before enrollment; diagnostics preserve that downgrade.
+        // portable-pty calls setsid on Unix. Enroll into ProcessScope so session
+        // teardown can reap the tree. Windows Job enrollment is best-effort
+        // post-spawn; a very short-lived descendant may escape before attach.
+        #[allow(clippy::disallowed_methods)] // enrolled via enroll_terminal_pid below
         let child = pair.slave.spawn_command(cmd)?;
         #[cfg(unix)]
         let process_pid = child
@@ -142,8 +150,13 @@ impl PtyController {
         #[cfg(windows)]
         let process_pid = child.process_id();
         let process_tree = process_pid.map(|pid| TestProcessTree::attach(pid, "grok PTY child"));
-        // Attachment failures remain recorded by TestProcessTree and are
-        // surfaced through process_tree_diagnostics() on every harness timeout.
+        // Best-effort: short-lived children can race enroll; TestProcessTree still
+        // records attach failures for timeout diagnostics.
+        let process_group = process_pid.and_then(|pid| {
+            xai_tty_utils::global_process_scope()
+                .enroll_terminal_pid(pid)
+                .ok()
+        });
         // Drop the slave so we get EOF when the child exits.
         drop(pair.slave);
 
@@ -154,6 +167,7 @@ impl PtyController {
         Ok(Self {
             child,
             process_tree,
+            process_group,
             exit_status: None,
             exit_observed: false,
             spawn_pid: process_pid,
@@ -393,6 +407,8 @@ impl PtyController {
     }
 
     fn release_process_tree(&mut self) {
+        // Drop ProcessScope strong handle first so Weak cannot kill a reused PID.
+        self.process_group = None;
         if let Some(mut tree) = self.process_tree.take() {
             tree.release();
             #[cfg(test)]

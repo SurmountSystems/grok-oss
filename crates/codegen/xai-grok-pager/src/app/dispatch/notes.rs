@@ -59,6 +59,16 @@ fn feedback_pane_blocked(agent: &AgentView) -> Option<&'static str> {
     }
 }
 
+/// Enter feedback mode: visual change to prompt bar (teal accent, pencil prefix).
+/// No side effects — the user types feedback text and presses Enter to send.
+pub(super) fn dispatch_enter_feedback_mode(app: &mut AppView) -> Vec<Effect> {
+    with_active_agent(app, |agent| {
+        agent.prompt_input_mode = PromptInputMode::Feedback;
+        agent.prompt.set_text("");
+    });
+    vec![]
+}
+
 /// Open the freeform report pane for bare `/feedback`. Inline text never uses this.
 pub(super) fn dispatch_open_feedback_pane(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
@@ -290,22 +300,18 @@ fn extract_session_context(agent: &AgentView) -> String {
                     user_prompts.push(text);
                 }
             }
-            RenderBlock::ToolCall(tc) => {
-                if file_paths.len() < 20 {
-                    match tc {
-                        ToolCallBlock::Read(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        ToolCallBlock::Edit(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        ToolCallBlock::ListDir(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        _ => {}
-                    }
+            RenderBlock::ToolCall(tc) if file_paths.len() < 20 => match tc {
+                ToolCallBlock::Read(b) => {
+                    file_paths.push(b.path.clone());
                 }
-            }
+                ToolCallBlock::Edit(b) => {
+                    file_paths.push(b.path.clone());
+                }
+                ToolCallBlock::ListDir(b) => {
+                    file_paths.push(b.path.clone());
+                }
+                _ => {}
+            },
             _ => {}
         }
         // Stop early once we have enough context.

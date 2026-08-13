@@ -11,16 +11,17 @@ use super::ctx::{
 use super::dashboard::{
     dispatch_dashboard_attach, dispatch_dashboard_begin_rename, dispatch_dashboard_change_location,
     dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
-    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_dispatch,
-    dispatch_dashboard_dispatch_slash, dispatch_dashboard_open_location_picker,
-    dispatch_dashboard_open_shortcuts_help, dispatch_dashboard_overlay_cycle,
-    dispatch_dashboard_overlay_exit, dispatch_dashboard_overlay_stop,
-    dispatch_dashboard_peek_cycle_mode, dispatch_dashboard_peek_reply,
-    dispatch_dashboard_permission_followup, dispatch_dashboard_permission_select,
-    dispatch_dashboard_question_answer, dispatch_dashboard_reorder, dispatch_dashboard_select,
-    dispatch_dashboard_stop, dispatch_dashboard_toggle_auto_approve,
-    dispatch_dashboard_toggle_grouping, dispatch_dashboard_toggle_pin,
-    dispatch_dashboard_toggle_worktree, dispatch_exit_dashboard, dispatch_open_dashboard,
+    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_delete,
+    dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
+    dispatch_dashboard_open_location_picker, dispatch_dashboard_open_shortcuts_help,
+    dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit,
+    dispatch_dashboard_overlay_stop, dispatch_dashboard_peek_cycle_mode,
+    dispatch_dashboard_peek_reply, dispatch_dashboard_permission_followup,
+    dispatch_dashboard_permission_select, dispatch_dashboard_question_answer,
+    dispatch_dashboard_reorder, dispatch_dashboard_select, dispatch_dashboard_stop,
+    dispatch_dashboard_toggle_auto_approve, dispatch_dashboard_toggle_grouping,
+    dispatch_dashboard_toggle_pin, dispatch_dashboard_toggle_worktree, dispatch_exit_dashboard,
+    dispatch_open_dashboard,
 };
 use super::import_claude::{
     dispatch_dismiss_claude_import, dispatch_import_claude, dispatch_import_claude_cancel,
@@ -34,8 +35,9 @@ use super::modes::{
 };
 use super::notes::{
     dispatch_add_session_note, dispatch_enter_feedback_mode, dispatch_enter_remember_mode,
-    dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_btw_follow_up,
-    dispatch_send_feedback, dispatch_send_recap, dispatch_send_remember_note, dispatch_show_notes,
+    dispatch_open_feedback_pane, dispatch_save_remember_note_from_modal, dispatch_send_btw,
+    dispatch_send_btw_follow_up, dispatch_send_feedback, dispatch_send_recap,
+    dispatch_send_remember_note, dispatch_show_notes,
 };
 use super::permissions::{
     dispatch_permission_cancel, dispatch_permission_followup, dispatch_permission_select,
@@ -49,7 +51,7 @@ use super::queue;
 use super::queue::{dispatch_drain_queue, dispatch_force_drain_queue};
 use super::rewind::{
     dispatch_inline_edit_submit, dispatch_rewind, dispatch_rewind_back_to_mode_select,
-    dispatch_rewind_cancel_offer, dispatch_rewind_confirm,
+    dispatch_rewind_cancel_offer, dispatch_rewind_confirm, dispatch_rewind_confirm_never_ask,
     dispatch_rewind_conversation_only_confirm, dispatch_rewind_dismiss,
     dispatch_rewind_dismiss_error, dispatch_rewind_picker_select, dispatch_rewind_select_mode,
     dispatch_rewind_show_picker,
@@ -60,9 +62,10 @@ use super::session::fork::{
     dispatch_startup_fork_session,
 };
 use super::session::lifecycle::{
-    clear_startup_actions, dispatch_agent_type_mismatch_answered, dispatch_exit_session,
-    dispatch_new_session, dispatch_new_session_inner, dispatch_new_session_with_id,
-    dispatch_new_worktree_session, dispatch_trust_folder, open_new_session_question,
+    clear_startup_actions, dispatch_agent_type_mismatch_answered,
+    dispatch_delete_current_session_answered, dispatch_exit_session, dispatch_new_session,
+    dispatch_new_session_inner, dispatch_new_session_with_id, dispatch_new_worktree_session,
+    dispatch_trust_folder, open_delete_current_session_question, open_new_session_question,
 };
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
@@ -71,20 +74,20 @@ use super::session::load::{
     dispatch_show_session_picker, dispatch_trigger_deep_search, session_picker_entry_matches,
     session_picker_external_filter_active,
 };
-use super::session::modal::dispatch_rename_session;
+use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
 use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
     preview_auto_light_theme, preview_theme, set_always_expand_thinking,
     set_ask_user_question_timeout_enabled, set_auto_compact_threshold, set_auto_dark_theme,
     set_auto_light_theme, set_auto_run_implement, set_auto_update, set_bubble_copy_buttons,
     set_cancel_subagents_on_turn_cancel, set_collapsed_edit_blocks, set_combine_queued_prompts,
-    set_compact_mode, set_contextual_hint_image_input, set_contextual_hint_plan_mode,
-    set_contextual_hint_send_now, set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap,
-    set_contextual_hint_undo, set_contextual_hint_word_select, set_default_model,
-    set_default_selected_permission, set_display_refresh_auto_cadence, set_economic_mode,
-    set_features_session_recap, set_fork_secondary_model, set_group_tool_verbs, set_hide_header,
-    set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection, set_max_thoughts_width,
-    set_multiline_mode, set_notifications_session_recap,
+    set_compact_mode, set_confirm_before_rewind, set_contextual_hint_image_input,
+    set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
+    set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
+    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
+    set_economic_mode, set_features_session_recap, set_fork_secondary_model, set_group_tool_verbs,
+    set_hide_header, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
+    set_max_thoughts_width, set_multiline_mode, set_notifications_session_recap,
     set_notifications_session_recap_threshold_secs, set_page_flip_on_send, set_plan_approval_park,
     set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
     set_respect_manual_folds, set_resume_canceled_turn_on_restart, set_screen_mode,
@@ -101,8 +104,8 @@ use super::settings::ui::{
 };
 use super::status::{
     dispatch_clear_completed_todos, dispatch_copy_session_id, dispatch_manage_billing,
-    dispatch_open_gboom, dispatch_open_tutorial, dispatch_privacy_banner_accept,
-    dispatch_privacy_banner_customize, dispatch_share_session, dispatch_show_context_info,
+    dispatch_open_gboom, dispatch_open_tutorial, dispatch_privacy_banner_opt_in,
+    dispatch_privacy_banner_opt_out, dispatch_share_session, dispatch_show_context_info,
     dispatch_show_limits, dispatch_show_limits_json, dispatch_show_privacy_info,
     dispatch_show_queue, dispatch_show_release_notes, dispatch_show_session_info,
     dispatch_show_spend, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
@@ -230,6 +233,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::NewSession => dispatch_new_session(app),
         Action::ChooseNewSessionMode => open_new_session_question(app),
         Action::ExitSession | Action::ExitSessionConfirmed => dispatch_exit_session(app),
+        Action::DeleteCurrentSession => open_delete_current_session_question(app),
+        Action::DeleteCurrentSessionAnswered { confirmed } => {
+            dispatch_delete_current_session_answered(app, confirmed)
+        }
         Action::NewWorktreeSession {
             load_session_id,
             label,
@@ -904,8 +911,33 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             };
             let Some(session_id) = agent.session.session_id.clone() else {
-                agent.session.deferred_model_switch = Some((model_id, effort));
-                return vec![];
+                let prev_model = agent.session.models.current.clone();
+                let prev_effort = agent.session.models.reasoning_effort;
+                agent.session.models.set_current(model_id.clone(), effort);
+                let resolved_effort = agent.session.models.reasoning_effort;
+                let unchanged =
+                    prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;
+                // Keep the original rollback target across overwrite stashes.
+                // `.and_then(|p| p.prev_model_id).or(prev_model)` would drop a
+                // deliberate `None` and pick up the intermediate optimistic model.
+                let rollback_prev = match agent.session.deferred_model_switch.take() {
+                    Some(prior) => prior.prev_model_id,
+                    None => prev_model,
+                };
+                agent.session.deferred_model_switch =
+                    Some(crate::app::agent::DeferredModelSwitch {
+                        model_id: model_id.clone(),
+                        effort,
+                        prev_model_id: rollback_prev,
+                    });
+                return if unchanged {
+                    vec![]
+                } else {
+                    vec![Effect::PersistPreferredModel {
+                        model_id,
+                        reasoning_effort: resolved_effort,
+                    }]
+                };
             };
             agent.session.model_switch_pending = true;
             vec![Effect::SwitchModel {
@@ -998,6 +1030,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
         Action::EnterFeedbackMode => dispatch_enter_feedback_mode(app),
+        Action::OpenFeedbackPane => dispatch_open_feedback_pane(app),
+        Action::ResetSessionTitleToAuto => dispatch_reset_session_title(app),
         Action::SendFeedback(text) => dispatch_send_feedback(app, text),
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
@@ -1006,7 +1040,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SendBtwFollowUp(question) => dispatch_send_btw_follow_up(app, question),
         Action::SendRecap { auto } => dispatch_send_recap(app, auto),
         Action::ShowPrivacyInfo => dispatch_show_privacy_info(app),
-        Action::SetCodingDataSharing { opted_in } => set_coding_data_sharing(app, opted_in),
+        Action::SetCodingDataSharing { opted_in } => set_coding_data_sharing(
+            app,
+            opted_in,
+            xai_grok_telemetry::events::CodingDataConsentSource::Settings,
+        ),
         Action::ToggleYolo => dispatch_toggle_yolo(app),
         Action::ToggleMultiline => dispatch_toggle_multiline(app),
         Action::ToggleCompactMode => dispatch_toggle_compact_mode(app),
@@ -1055,6 +1093,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
         Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),
+        Action::SetConfirmBeforeRewind(v) => set_confirm_before_rewind(app, v),
         Action::SetScrubAsciiPunct(v) => set_scrub_ascii_punct(app, v),
         Action::SetPlanApprovalPark(v) => set_plan_approval_park(app, v),
         Action::SetCombineQueuedPrompts(v) => set_combine_queued_prompts(app, v),
@@ -1083,8 +1122,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PreviewAutoLightTheme(v) => preview_auto_light_theme(app, v),
         Action::OpenSettings => dispatch_open_settings(app, None),
         Action::OpenSettingsFocus { key } => dispatch_open_settings(app, Some(key)),
-        Action::PrivacyBannerAccept => dispatch_privacy_banner_accept(app),
-        Action::PrivacyBannerCustomize => dispatch_privacy_banner_customize(app),
+        Action::PrivacyBannerAccept => dispatch_privacy_banner_opt_in(app),
+        Action::PrivacyBannerCustomize => dispatch_privacy_banner_opt_out(app),
+        Action::PrivacyBannerOptIn => dispatch_privacy_banner_opt_in(app),
+        Action::PrivacyBannerOptOut => dispatch_privacy_banner_opt_out(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
@@ -1193,6 +1234,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 source,
                 session_id,
                 cwd,
+                after: crate::app::actions::AfterSessionDelete::Stay,
             }]
         }
         Action::Fork(args) => dispatch_fork(app, args),
@@ -1324,6 +1366,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::DashboardStop => dispatch_dashboard_stop(app),
+        Action::DashboardDelete => dispatch_dashboard_delete(app),
         Action::DashboardCycleMode => {
             let policy_block = app.yolo_policy_block;
             if let Some(d) = app.dashboard.as_mut() {
@@ -1445,6 +1488,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::RewindSelectMode(mode, target) => dispatch_rewind_select_mode(app, mode, target),
         Action::RewindConfirm(target, mode) => dispatch_rewind_confirm(app, target, mode),
+        Action::RewindConfirmNeverAsk(target) => dispatch_rewind_confirm_never_ask(app, target),
         Action::RewindConversationOnlyConfirm(target) => {
             dispatch_rewind_conversation_only_confirm(app, target)
         }

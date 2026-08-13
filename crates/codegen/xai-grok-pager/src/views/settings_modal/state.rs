@@ -7,9 +7,9 @@ use ratatui::layout::Rect;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind,
-    SettingMeta, SettingValue, SettingsRegistry, StringValidator, current_value_for,
-    dynamic_enum_choices,
+    CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
+    SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
+    current_value_for, dynamic_enum_choices,
 };
 use crate::views::modal_window::ModalWindowState;
 
@@ -54,6 +54,8 @@ pub enum SettingsKeyOutcome {
     /// Used by `d`-reset-in-picker to revert preview before opening
     /// the reset-confirm overlay.
     ActionPair(Action, Action),
+    /// Close the modal and dispatch `Action` (deep-link Esc revert or Enter commit).
+    ActionThenClose(Action),
     /// Internal state mutation, no action.
     Changed,
     /// No-op.
@@ -202,6 +204,10 @@ pub struct SettingsModalState {
     /// `rows` in Browse, `picker_choice_rects` in PickingEnum,
     /// always `None` in EditingValue.
     pub hover_row: Option<usize>,
+    /// When true, Esc/Enter from `PickingEnum` close the modal instead of
+    /// returning to Browse. Set by deep-link open (`OpenSettingsFocus`
+    /// / `/privacy`); cleared on leave from the picker.
+    pub close_on_picker_exit: bool,
 }
 
 impl SettingsModalState {
@@ -240,6 +246,17 @@ impl SettingsModalState {
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
+            close_on_picker_exit: false,
+        }
+    }
+
+    /// Why the focused row cannot be edited (`None` = editable).
+    /// Today only `coding_data_sharing` is lockable (ZDR / team-managed).
+    pub fn row_lock(&self, key: SettingKey) -> Option<CodingDataSharingLock> {
+        if key == "coding_data_sharing" {
+            self.pager_snapshot.coding_data_sharing_lock
+        } else {
+            None
         }
     }
 
@@ -489,6 +506,7 @@ impl SettingsModalState {
         self.hover_row = None;
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
+        self.close_on_picker_exit = false;
     }
 
     pub fn focus_filter(&mut self) {
@@ -551,6 +569,9 @@ impl SettingsModalState {
             let Some((key, meta)) = self.focused_setting() else {
                 return false;
             };
+            if self.row_lock(key).is_some() {
+                return false;
+            }
             // Handles both static `Enum` and `DynamicEnum` catalogs.
             let (supports_preview, resolved): (bool, Vec<OwnedEnumChoice>) = match &meta.kind {
                 SettingKind::Enum {

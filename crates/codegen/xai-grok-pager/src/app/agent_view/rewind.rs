@@ -37,6 +37,9 @@ impl AgentView {
         match &rw.phase {
             crate::views::rewind::RewindPhase::Picker { .. }
             | crate::views::rewind::RewindPhase::Confirm { .. }
+            | crate::views::rewind::RewindPhase::ModeSelect { .. }
+            | crate::views::rewind::RewindPhase::Previewing { .. }
+            | crate::views::rewind::RewindPhase::ConversationOnlyConfirm { .. }
             | crate::views::rewind::RewindPhase::Executing { .. } => Some(rw.anchor_entry_idx),
             crate::views::rewind::RewindPhase::Loading
             | crate::views::rewind::RewindPhase::CancelOffer { .. }
@@ -114,10 +117,16 @@ impl AgentView {
             RewindInput::Dismissed => InputOutcome::Action(Action::RewindDismiss),
             RewindInput::CancelTurnThenProceed => InputOutcome::Action(Action::RewindCancelOffer),
             RewindInput::DismissError => InputOutcome::Action(Action::RewindDismissError),
-            RewindInput::Confirm(target) => InputOutcome::Action(Action::RewindConfirm(target)),
-            RewindInput::ConfirmNeverAsk(target) => {
-                InputOutcome::Action(Action::RewindConfirmNeverAsk(target))
+            RewindInput::Confirm(target, mode) => {
+                InputOutcome::Action(Action::RewindConfirm(target, mode))
             }
+            RewindInput::ConversationOnlyConfirm(target) => {
+                InputOutcome::Action(Action::RewindConversationOnlyConfirm(target))
+            }
+            RewindInput::SelectMode(mode, prompt_index) => {
+                InputOutcome::Action(Action::RewindSelectMode(mode, prompt_index))
+            }
+            RewindInput::BackToModeSelect => InputOutcome::Action(Action::RewindBackToModeSelect),
             RewindInput::PickerSelect(prompt_index) => {
                 InputOutcome::Action(Action::RewindPickerSelect(prompt_index))
             }

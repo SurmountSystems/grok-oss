@@ -135,6 +135,14 @@ pub enum LocalQuestionKind {
     DeleteCurrentSession,
     /// Modal opened by bare `/feedback` (no inline text). Freeform-only; submit sends [`crate::app::actions::Action::SendFeedback`].
     Feedback,
+    /// Project-root picker before first create/bind on a cwd that is not a
+    /// project directory. Submit maps to [`crate::app::actions::Action::ProjectSelected`].
+    ProjectSelect {
+        resolved_paths: Vec<std::path::PathBuf>,
+        original_cwd: std::path::PathBuf,
+        stashed_prompt: String,
+        dont_ask_index: usize,
+    },
 }
 
 // ── State ──────────────────────────────────────────────────────────────

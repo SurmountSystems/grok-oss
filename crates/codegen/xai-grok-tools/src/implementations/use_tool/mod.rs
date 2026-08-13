@@ -1414,6 +1414,8 @@ mod tests {
     // ── run() wiring: extension, file, and the gated steer ──
 
     #[tokio::test]
+    // Process-env serialization across awaits is intentional for this hermetic test.
+    #[allow(clippy::await_holding_lock)]
     async fn json_dump_written_as_json_with_query_steer() {
         use crate::types::context::TruncationConfig;
         use crate::types::output::{MCPOutput, MCPOutputDetails};

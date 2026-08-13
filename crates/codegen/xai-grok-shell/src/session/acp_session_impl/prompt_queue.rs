@@ -653,11 +653,15 @@ impl SessionActor {
     /// interject AND later run as its own turn — the race the client-side
     /// "interject + queue/remove" pair could not avoid.
     ///
-    /// Mirrors [`handle_remove_queued_prompt`]'s versioned/owner gate and
-    /// [`SessionCommand::Interject`]'s broadcast-then-buffer. An uncommitted
-    /// front is never cancelled; the promoted row still runs next.
+    /// Soft-interject law: a plain mid-turn row **buffers** and **never**
+    /// cancels the running turn. Idle sessions and bash rows keep their place
+    /// (LWW `new_text` only). `turn_running` is the live `current_prompt_id`
+    /// pin, not `running_task` — after cancel, buffering would strand.
     ///
-    /// During an active goal, plain prompts become steering while bash stays queued.
+    /// Mirrors [`handle_remove_queued_prompt`]'s versioned/owner gate and
+    /// [`SessionCommand::Interject`]'s broadcast-then-buffer.
+    ///
+    /// During an active goal, a buffered plain row also steers the planner.
     /// Missing, stale, running, or foreign rows are benign no-ops.
     ///
     /// Always re-broadcasts `x.ai/queue/changed` so every client reconciles
@@ -668,6 +672,8 @@ impl SessionActor {
     /// Exception: when the interject no-ops but the row is still queued, a
     /// version-matching `new_text` is saved to the row as an LWW edit so the
     /// edit isn't silently lost when the row later drains as its own turn.
+    ///
+    /// Send-now cancel still lives on [`Self::queue_input`], not here.
     #[must_use = "true means the caller must cancel the running turn"]
     pub(super) async fn handle_interject_queued_prompt(
         &self,
@@ -677,13 +683,13 @@ impl SessionActor {
         new_text: Option<&str>,
     ) -> bool {
         let mut state = self.state.lock().await;
-        let running_front_id = state.running_prompt_id().map(str::to_string);
-        let turn_running = running_front_id.is_some();
+        let turn_running = self
+            .current_prompt_id
+            .lock()
+            .expect("current_prompt_id mutex poisoned")
+            .is_some();
         let goal_active = self.goal_tracker.lock().status()
             == Some(crate::session::goal_tracker::GoalStatus::Active);
-        // Sampled early; the insert below never displaces the front.
-        let cancel_decision = Self::send_now_cancels_running_turn(&state, goal_active);
-        let front_awaiting_commit_now = Self::front_awaiting_commit(&state);
         let row_matches = |item: &InputItem| {
             item.queue_meta.as_ref().is_some_and(|m| {
                 m.id == id
@@ -691,13 +697,18 @@ impl SessionActor {
                     && owner.is_none_or(|o| m.owner.as_deref() == Some(o))
             })
         };
-        let running_is_row = running_front_id.as_deref() == Some(id);
+        let running_is_row = state.running_prompt_id() == Some(id)
+            || self
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned")
+                .as_deref()
+                == Some(id);
         let pos = if running_is_row {
             None
         } else {
             state.pending_inputs.iter().position(row_matches)
         };
-        let mut cancel_running_turn = false;
         if let Some(pos) = pos
             && let Some(mut item) = state.pending_inputs.remove(pos)
         {
@@ -705,38 +716,30 @@ impl SessionActor {
             if let Some(new_text) = new_text.filter(|t| !t.trim().is_empty()) {
                 Self::apply_queued_prompt_edit(&mut item, new_text.to_string(), owner);
             }
-            let merge_into_goal = turn_running
-                && goal_active
-                && Self::extract_bash_command(&item.prompt_blocks).is_none();
-            if merge_into_goal {
-                self.enqueue_prompt_as_planner_steering(&item);
+            let is_bash = Self::extract_bash_command(&item.prompt_blocks).is_some();
+            if turn_running && !is_bash {
+                if goal_active {
+                    self.enqueue_prompt_as_planner_steering(&item);
+                }
                 self.enqueue_prompt_as_interjection(
                     item,
                     crate::session::events::InterjectionSource::Queue,
                 );
                 tracing::info!(
                     queued_id = %id,
-                    "send-now: queued row will steer the active goal turn"
+                    goal_active,
+                    "soft interject: buffered queued row into the running turn"
                 );
             } else {
-                item.send_now = true;
-                let insert_at = Self::send_now_insert_index(&state, running_front_id.as_deref());
-                state.pending_inputs.insert(insert_at, item);
-                cancel_running_turn = cancel_decision;
-                tracing::info!(queued_id = %id, cancel_running_turn, "send-now: promoted queued prompt to run next");
+                // Idle, or bash mid-turn: keep place + LWW edit.
+                state.pending_inputs.insert(pos, item);
+                tracing::info!(
+                    queued_id = %id,
+                    turn_running,
+                    is_bash,
+                    "soft interject: row stays queued (idle or bash)"
+                );
             }
-            xai_grok_telemetry::unified_log::info(
-                "shell.prompt.send_now_decision",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "prompt_id": id,
-                    "from_queue_row": true,
-                    "cancels_turn": cancel_running_turn,
-                    "goal_active": goal_active,
-                    "merged_as_interjection": merge_into_goal,
-                    "front_awaiting_commit": front_awaiting_commit_now,
-                })),
-            );
         } else if let Some(new_text) = new_text
             && !new_text.trim().is_empty()
             && !running_is_row
@@ -745,27 +748,27 @@ impl SessionActor {
                 .iter_mut()
                 .find(|item| row_matches(item))
         {
-            // The send-now no-opped but the row is still queued: keep the
+            // The interject no-opped but the row is still queued: keep the
             // edit as an LWW write so it isn't silently lost. Stale versions
             // get no fallback (LWW); the running turn is never edited.
             Self::apply_queued_prompt_edit(item, new_text.to_string(), owner);
             tracing::info!(
                 queued_id = %id,
-                "send-now no-opped; saved the edit to the queued row"
+                "soft interject no-opped; saved the edit to the queued row"
             );
         } else {
             tracing::debug!(
                 queued_id = %id,
                 expected_version,
                 turn_running,
-                "queue send-now no-op (running id / stale / drained / not owner); rebroadcasting"
+                "queue interject no-op (running id / stale / drained / not owner); rebroadcasting"
             );
         }
         // Every path clears: success, LWW fallback, and keep-hold no-op.
         state.edit_holds.remove(id);
         // Always re-broadcast the authoritative queue so the client reconciles.
         self.broadcast_queue_changed(&state);
-        cancel_running_turn
+        false
     }
 
     /// Reorder queued prompts to match `ordered_ids`. The

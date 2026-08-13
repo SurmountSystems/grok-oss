@@ -1054,7 +1054,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some("p-run".to_string()),
-            }),
+                            scheduler_background_loops: None,
+}),
             &mut app,
         );
 
@@ -1191,7 +1192,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some(synthetic_pid.to_string()),
-            }),
+                            scheduler_background_loops: None,
+}),
             &mut app,
         );
 
@@ -1237,7 +1239,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some(pid.to_string()),
-            }),
+                            scheduler_background_loops: None,
+}),
             &mut app,
         );
 
@@ -1274,7 +1277,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some("p-run".to_string()),
-            }),
+                            scheduler_background_loops: None,
+}),
             &mut app,
         );
         assert!(
@@ -1307,7 +1311,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: None,
-            }),
+                            scheduler_background_loops: None,
+}),
             &mut app,
         );
         let agent = &app.agents[&id];
@@ -2432,7 +2437,18 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         match last_session_event(&agent.scrollback) {
             Some(SessionEvent::TurnFailed { error, .. }) => {
-                assert_eq!(error, "boom", "agentResult must propagate into the marker")
+                // Product formats agentResult via format_request_failure (same as
+                // driver TurnFailed markers); raw text must still appear.
+                assert!(
+                    error.contains("boom"),
+                    "agentResult must propagate into the marker, got {error:?}"
+                );
+                assert_eq!(
+                    error,
+                    crate::app::error_display::format_request_failure(None, None, "boom")
+                        .message(),
+                    "viewer TurnFailed uses the same request-failure format as the driver"
+                );
             }
             other => panic!("expected TurnFailed marker, got {other:?}"),
         }
@@ -2556,7 +2572,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some("p-run".to_string()),
-            }),
+                            scheduler_background_loops: None,
+}),
             &mut app,
         );
 

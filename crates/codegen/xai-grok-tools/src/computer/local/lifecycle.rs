@@ -178,8 +178,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_collection_claim_requires_the_child_to_have_been_waited_on() {
-        let mut child = tokio::process::Command::new("true")
-            .spawn()
+        // Enroll via ProcessScope::spawn (policy enroll primitive).
+        let (mut child, _group) = crate::util::global_process_scope()
+            .spawn(tokio::process::Command::new("true"))
             .expect("spawn `true`");
         let mut lifecycle = exiting();
 

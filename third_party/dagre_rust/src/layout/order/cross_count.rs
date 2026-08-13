@@ -58,7 +58,7 @@ pub fn two_layer_cross_count(
             })
             .collect();
 
-        out_edges.sort_by(|e1, e2| e1.0.cmp(&e2.0));
+        out_edges.sort_by_key(|e| e.0);
         south_entries.extend(out_edges);
     }
 

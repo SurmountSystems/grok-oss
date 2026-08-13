@@ -19,6 +19,21 @@ fn page_flip_on_send() -> bool {
     crate::appearance::cache::load_page_flip_on_send()
 }
 
+/// Push a system (or other) block and optionally page-flip so the new entry is
+/// at the top of the viewport when page-flip-on-send is enabled.
+pub(super) fn push_and_page_flip(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    block: crate::scrollback::block::RenderBlock,
+) {
+    scrollback.push_block(block);
+    if !page_flip_on_send() {
+        return;
+    }
+    let idx = scrollback.len() - 1;
+    scrollback.scroll_to_entry_top(idx);
+    scrollback.enable_follow_with_preserve();
+}
+
 fn combine_queued_prompts_enabled() -> bool {
     crate::appearance::cache::load_combine_queued_prompts()
 }
@@ -777,19 +792,54 @@ pub(super) fn push_send_now_user_block(
         .insert(prompt_id.to_string(), (entry_id, edited));
 }
 
-/// Arm the send-now cancel expectation for queue row `id` and paint its user
-/// block — the arm hides the row, so the paint must accompany it. No-op when
-/// the shell won't cancel-and-send (idle / goal turn); no paint for kinds the
-/// adoption renders no block for (bash). `new_text` = edit-interject override.
-///
-/// Soft mid-turn Interject no longer uses cancel-and-send; this remains for
-/// residual blocked-wait `SendPromptNow` paths and painted-pending unit tests.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn arm_send_now_and_paint(agent: &mut AgentView, id: &str, new_text: Option<&str>) {
-    if !agent.expects_send_now_cancel() {
+/// Whether a Send Now row should paint an optimistic block. Returns `false`
+/// unless the client expects a Send Now cancel, or the row belongs to an active
+/// goal on a committed, running turn. Arms the cancel expectation only on the
+/// expects-cancel path; an active goal paints WITHOUT arming so its interjection
+/// notification can claim the block. Bash rows and idle sessions do neither.
+fn paint_send_now_and_maybe_arm(agent: &mut AgentView, id: &str) -> bool {
+    let expects_cancel = agent.expects_send_now_cancel();
+    let goal_active = agent
+        .goal_state
+        .as_ref()
+        .is_some_and(|goal| matches!(goal.status, crate::app::agent::GoalDisplayStatus::Active));
+    if !(expects_cancel
+        || (goal_active && agent.session.state.is_turn_running() && agent.front_message_committed))
+    {
+        return false;
+    }
+    if expects_cancel {
+        agent.arm_send_now_expectation(id.to_string());
+    }
+    true
+}
+
+/// Active goals paint without arming cancellation so their authoritative
+/// interjection notification can claim the block.
+pub(super) fn arm_send_now_and_paint_dispatched(
+    agent: &mut AgentView,
+    prompt_id: &str,
+    text: &str,
+) {
+    if !paint_send_now_and_maybe_arm(agent, prompt_id) {
         return;
     }
-    agent.arm_send_now_expectation(id.to_string());
+    push_send_now_user_block(agent, prompt_id, "prompt", text, /* edited */ false);
+}
+
+/// Arm the send-now cancel expectation for queue row `id` and paint its user
+/// block — the arm hides the row, so the paint must accompany it. Active goals
+/// paint without arming; no paint for kinds the adoption renders no block for
+/// (bash) or idle sessions. `new_text` = edit-interject override.
+///
+/// Soft mid-turn `QueueInterjectShared` no longer uses cancel-and-send paint;
+/// this remains for residual blocked-wait `SendPromptNow` paths and painted-
+/// pending unit tests.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn arm_send_now_and_paint(agent: &mut AgentView, id: &str, new_text: Option<&str>) {
+    if !paint_send_now_and_maybe_arm(agent, id) {
+        return;
+    }
     let row = agent
         .shared_queue
         .iter()
@@ -1174,7 +1224,10 @@ pub(super) fn dispatch_queue_interject_shared(
                 }
                 // Soft: never arm send-now cancel. Multi-client paint comes from
                 // the shell's interjection broadcast (no optimistic block —
-                // matches `Action::QueueInterjectShared` docs).
+                // matches `Action::QueueInterjectShared` docs). Still mark the
+                // row self-originated so ACP gate + interjection claim treat
+                // its deltas as ours.
+                agent.note_self_originated_prompt(&id);
                 agent.suppress_parked_marker_on_interject();
                 // Success toast only when the client preconditions match what
                 // the shell will buffer (turn running + plain prompt). Idle /
@@ -1280,7 +1333,11 @@ mod tests {
         assert_eq!(effects.len(), 1);
         assert!(matches!(
             &effects[0],
-            Effect::FetchBilling { silent: true, .. }
+            Effect::FetchBilling {
+                silent: true,
+                nonce: 0,
+                ..
+            }
         ));
         assert!(app.agents[&id].session.state.is_idle());
         // "second" should still be in the queue.
@@ -1313,7 +1370,11 @@ mod tests {
         assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "second"));
         assert!(matches!(
             &effects[1],
-            Effect::FetchBilling { silent: true, .. }
+            Effect::FetchBilling {
+                silent: true,
+                nonce: 0,
+                ..
+            }
         ));
         // "third" should still be in queue.
         assert_eq!(app.agents[&id].session.queue_len(), 1);
@@ -2059,10 +2120,10 @@ mod tests {
         assert_eq!(user_prompt_count(&app.agents[&id], "idle row"), 0);
         assert!(
             app.agents[&id].toast.is_none()
-                || !app.agents[&id]
+                || app.agents[&id]
                     .toast
                     .as_ref()
-                    .is_some_and(|(m, _)| m == "Interjection sent"),
+                    .is_none_or(|(m, _)| m != "Interjection sent"),
             "idle soft interject must not claim success"
         );
 
@@ -2474,7 +2535,14 @@ mod tests {
         let effects = dispatch(end_turn(), &mut app);
         assert_eq!(effects.len(), 1);
         assert!(
-            matches!(&effects[0], Effect::FetchBilling { silent: true, .. }),
+            matches!(
+                &effects[0],
+                Effect::FetchBilling {
+                    silent: true,
+                    nonce: 0,
+                    ..
+                }
+            ),
             "drain should be blocked, only billing refresh"
         );
         assert_eq!(app.agents[&id].session.queue_len(), 2); // p3, p4

@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 use super::test_fixtures;
-use super::{AgentPane, AgentView, PromptMode, overlay_action_to_outcome};
+use super::{AgentPane, AgentView, ParkedMarkerSlot, PromptMode, overlay_action_to_outcome};
 use crate::actions::{ActionId, ActionRegistry};
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
@@ -25,11 +25,9 @@ impl AgentView {
         // BEFORE the removal so a potential auto-hide pane switch can't hit
         // the editing lock (see queue_edit.rs ordering invariant).
         if matches!(
-                    self.prompt_mode,
-                    PromptMode::EditingQueued { id: editing_id, server_id: None, .. }
-        if editing_id == id
-                )
-        {
+            self.prompt_mode,
+            PromptMode::EditingQueued { id: editing_id, server_id: None, .. } if editing_id == id
+        ) {
             self.exit_editing_mode();
         }
         self.queue.select_after_delete(id);
@@ -79,8 +77,8 @@ impl AgentView {
     /// the wait as user-interruptible would lie there).
     ///
     /// Gates Enter interjecting instead of queueing and the parked queue
-    /// drain. The stopped-session *rendering* additionally excludes subagent
-    /// waits — see [`Self::renders_parked`].
+    /// drain. The stopped-session *rendering* additionally requires the
+    /// parked-marker slot to be consumed — see [`Self::renders_parked`].
     /// Purely view-derived — reading it has no turn-lifecycle side effects.
     pub(crate) fn is_parked_on_sendable_wait(&self) -> bool {
         crate::views::turn_status::is_sendable_wait(&self.resolve_turn_activity_unenriched())
@@ -426,13 +424,24 @@ impl AgentView {
         );
     }
 
-    /// Whether the stopped-session look is active: the turn is parked in a
-    /// sendable wait that is not a foreground subagent await. Purely
-    /// view-derived — no transcript row is written for a park. Drives the
-    /// idle keybar and the parked turn-status cue; flips back off (the
-    /// running chrome returns) the moment the wait ends and the turn resumes.
+    /// Whether the stopped-session look is active: the parked-marker slot for
+    /// the current turn was consumed (marker pushed, or forgone because an
+    /// interjection continued the parked turn) and the turn is still in its
+    /// sendable wait. Drives hiding the turn-status row and the idle keybar;
+    /// flips back off (the running chrome returns) the moment the wait ends
+    /// and the turn resumes.
+    ///
+    /// Held-queue occupancy withholds the marker (`maybe_push_parked_marker`),
+    /// so a wait with held rows stays off the parked look until the last held
+    /// row drains or is deleted. Subagent waits keep running chrome.
     pub(crate) fn renders_parked(&self) -> bool {
-        self.is_parked_on_sendable_wait() && !self.is_waiting_on_subagent()
+        self.parked_wait_marker_for
+            .as_ref()
+            .zip(self.session.current_prompt_id.as_deref())
+            .is_some_and(|(slot, pid)| slot.prompt_id() == pid)
+            && self.is_parked_on_sendable_wait()
+            // Subagent waits keep running chrome — exclude them from the stopped look.
+            && !self.is_waiting_on_subagent()
     }
 
     /// Live counts for the turn-status watching cue; see
@@ -759,6 +768,10 @@ impl AgentView {
                             if self.visible_queue_is_empty() {
                                 self.hide_queue_pane();
                             }
+                            // Deleting the last held row can flip the parked
+                            // look on now (the ACP rebroadcast re-checks too,
+                            // but the optimistic remove shouldn't lag).
+                            self.maybe_push_parked_marker();
                             return InputOutcome::Action(Action::QueueRemoveShared {
                                 id: server_id,
                                 expected_version: row.version,
@@ -768,6 +781,11 @@ impl AgentView {
                     }
                     // No drain kick (cf. mouse [cancel]): queue focus is unreachable mid-edit.
                     self.remove_local_queue_row(id);
+                    // A LOCAL delete has no server rebroadcast to re-evaluate
+                    // the parked look — deleting the last held row must flip
+                    // the stopped chrome on immediately, not on the next
+                    // unrelated notification.
+                    self.maybe_push_parked_marker();
                 }
                 QueueEvent::EditSelected { id } => {
                     // Entry into editing mode lives in `queue_edit.rs`.

@@ -31,14 +31,13 @@ use super::ctx::{find_agent_by_session_id, get_active_agent, get_active_agent_mu
 use super::dashboard::{
     apply_pending_dispatch_config, dispatch_dashboard_attach, dispatch_dashboard_begin_rename,
     dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
-    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_delete,
-    dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
-    dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit,
-    dispatch_dashboard_overlay_stop, dispatch_dashboard_peek_reply,
-    dispatch_dashboard_permission_followup, dispatch_dashboard_permission_select,
-    dispatch_dashboard_question_answer, dispatch_dashboard_stop,
-    dispatch_dashboard_toggle_auto_approve, dispatch_exit_dashboard, dispatch_open_dashboard,
-    ensure_dashboard_state, resolve_location_input,
+    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_dispatch,
+    dispatch_dashboard_dispatch_slash, dispatch_dashboard_overlay_cycle,
+    dispatch_dashboard_overlay_exit, dispatch_dashboard_overlay_stop,
+    dispatch_dashboard_peek_reply, dispatch_dashboard_permission_followup,
+    dispatch_dashboard_permission_select, dispatch_dashboard_question_answer,
+    dispatch_dashboard_stop, dispatch_dashboard_toggle_auto_approve, dispatch_exit_dashboard,
+    dispatch_open_dashboard, ensure_dashboard_state, resolve_location_input,
 };
 use super::modes::{
     YOLO_ON_UNDER_PLAN_TOAST, active_agent_plan_nudge_state, dispatch_cycle_mode_and_sync,
@@ -89,6 +88,10 @@ fn test_app() -> AppView {
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
         cwd: PathBuf::from("/tmp"),
+        // Unit fixtures skip the project picker: `/tmp` is not a project dir,
+        // and the picker path needs a Tokio runtime (`block_in_place`).
+        project_picker_shown: true,
+        project_picker_disabled: false,
         cwd_has_git_ancestor: false,
         acp_tx: tx,
         scratch: crate::scrollback::render::ScratchBuffer::new(),
@@ -173,6 +176,7 @@ fn test_app() -> AppView {
         privacy_notice_rollout: false,
         privacy_banner_reshow_days: None,
         privacy_banner_acked: None,
+        privacy_banner_accept_inflight: false,
         privacy_banner_opt_in_inflight: false,
         coding_data_write_seq: 0,
         show_tips: None,
@@ -218,10 +222,9 @@ fn test_app() -> AppView {
         welcome_gate_url_rect: None,
         welcome_changelog_cta_rect: None,
         welcome_upgrade_cta_rect: None,
-        welcome_privacy_banner_opt_in_rect: None,
-        welcome_privacy_banner_opt_out_rect: None,
-        welcome_privacy_banner_terms_rect: None,
-        welcome_privacy_banner_policy_rect: None,
+        welcome_privacy_banner_accept_rect: None,
+        welcome_privacy_banner_customize_rect: None,
+        welcome_privacy_banner_legal_rect: None,
         #[cfg(feature = "local-workspace")]
         welcome_workspace_mode_rects: Default::default(),
         #[cfg(feature = "local-workspace")]
@@ -248,7 +251,7 @@ fn test_app() -> AppView {
         session_picker_lanes: Default::default(),
         session_picker_detail_generation: 0,
         session_picker_entries_query: None,
-        session_picker_pending_delete: None,
+
         welcome_tick: 0,
         welcome_shimmer_frame: 0,
         startup_warnings: Vec::new(),
@@ -349,6 +352,7 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
+        session_notes: crate::app::agent::SessionNotes::default(),
     }
 }
 pub(super) fn test_app_with_agent() -> AppView {
@@ -597,6 +601,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         ScrollbackState::new(),
     );
@@ -743,6 +748,7 @@ fn two_agent_app_with_bg_task() -> AppView {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         ScrollbackState::new(),
     );

@@ -1541,6 +1541,32 @@ pub struct CodingDataConsentSelected {
     pub changed: bool,
 }
 
+/// How the user resolved the project-directory picker.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectPickerOutcome {
+    RecentProject,
+    CustomPath,
+    CurrentDir,
+    DontAskAgain,
+    Dismissed,
+}
+
+impl ProjectPickerOutcome {
+    pub fn picked_project(self) -> bool {
+        matches!(self, Self::RecentProject | Self::CustomPath)
+    }
+}
+
+/// User resolved the project-directory picker. `picked_project` is the headline
+/// signal: did they actually choose a project directory?
+#[derive(Serialize)]
+pub struct ProjectPickerSelected {
+    pub outcome: ProjectPickerOutcome,
+    pub picked_project: bool,
+    pub project_dir_options: usize,
+}
+
 /// Flat snapshot of the terminal environment for telemetry.
 ///
 /// Shared across pager events so terminal fields are typed once.
@@ -2174,6 +2200,7 @@ telemetry_event!(SuperGrokUpsellClicked, "supergrok_upsell_clicked");
 telemetry_event!(AnnouncementCtaShown, "announcement_cta_shown");
 telemetry_event!(AnnouncementCtaClicked, "announcement_cta_clicked");
 telemetry_event!(CodingDataConsentSelected, "coding_data_consent_selected");
+telemetry_event!(ProjectPickerSelected, "project_picker_selected");
 telemetry_event!(TerminalTelemetry, "terminal_context");
 telemetry_event!(DisplayRefreshProbe, "display_refresh_probe");
 telemetry_event!(BackspaceNoEffect, "backspace_no_effect");

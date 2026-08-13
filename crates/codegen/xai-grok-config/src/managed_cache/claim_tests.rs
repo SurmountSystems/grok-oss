@@ -71,30 +71,32 @@ fn claim_not_consulted_on_sidecar_read_blip() {
 /// Dark build: a claim file on disk changes neither the gate nor staleness.
 #[test]
 fn claim_paths_are_inert_in_dark_build() {
-    assert!(!crate::signed_policy::verification_active());
-    let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
-    mark_managed_config_synced_at(
-        home,
-        SyncMarker {
-            principal: Some("team-a"),
-            had_managed_config: false,
-            had_requirements: false,
-            key_fingerprint: None,
-            fail_closed: false,
-        },
-    );
-    std::fs::write(
-        home.join(crate::signed_policy::MANAGED_IDENTITY_SIDECAR_FILE),
-        "{\"signed_payload\":\"{}\",\"signature\":\"\",\"key_id\":\"\"}",
-    )
-    .unwrap();
-    assert!(
-        !managed_policy_compromised_for_at(home, &team("team-a")),
-        "dark build: a claim file must not make the gate fail closed"
-    );
-    assert!(
-        !is_managed_config_hard_stale_for_at(home, &team("team-a")),
-        "dark build: a claim file must not force a refetch"
-    );
+    crate::signed_policy::test_seam::with_dark(|| {
+        assert!(!crate::signed_policy::verification_active());
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        mark_managed_config_synced_at(
+            home,
+            SyncMarker {
+                principal: Some("team-a"),
+                had_managed_config: false,
+                had_requirements: false,
+                key_fingerprint: None,
+                fail_closed: false,
+            },
+        );
+        std::fs::write(
+            home.join(crate::signed_policy::MANAGED_IDENTITY_SIDECAR_FILE),
+            "{\"signed_payload\":\"{}\",\"signature\":\"\",\"key_id\":\"\"}",
+        )
+        .unwrap();
+        assert!(
+            !managed_policy_compromised_for_at(home, &team("team-a")),
+            "dark build: a claim file must not make the gate fail closed"
+        );
+        assert!(
+            !is_managed_config_hard_stale_for_at(home, &team("team-a")),
+            "dark build: a claim file must not force a refetch"
+        );
+    });
 }

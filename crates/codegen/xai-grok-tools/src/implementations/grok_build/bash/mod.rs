@@ -3553,7 +3553,8 @@ mod tests {
             output_delta: None,
             was_bare_echo: false,
         };
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ false);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         bash
     }
 
@@ -3606,7 +3607,8 @@ mod tests {
         let mut bash = make_bash_output(-1, "partial\n");
         bash.signal = Some("timeout".to_string());
         bash.timed_out = true;
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ false);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         // Synthetic kill reasons render as `exit: killed (reason)` — no
         // redundant `[signal=…]` / `[timeout]` annotation.
         assert!(
@@ -3651,7 +3653,8 @@ mod tests {
         for reason in ["timeout", "max_runtime", "cancelled", "killed", "signal 15"] {
             let mut bash = make_bash_output(-1, "partial\n");
             bash.signal = Some(reason.to_string());
-            bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ false);
+            bash.output_for_prompt =
+                format_default_prompt(&bash, /* append_noop_reminder */ false);
             let expected = format!("exit: killed ({})", reason);
             assert!(
                 bash.output_for_prompt.starts_with(&expected),
@@ -3681,7 +3684,8 @@ mod tests {
         bash.signal = Some("backgrounded".to_string());
         bash.output_file = "/tmp/bg.log".to_string();
         bash.total_bytes = 10000;
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ false);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         assert!(
             bash.output_for_prompt
                 .starts_with("[Command moved to background]")

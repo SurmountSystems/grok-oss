@@ -3559,7 +3559,7 @@ mod approve_plan_flush_tests {
         );
         let names: Vec<&str> = snap.matches.iter().map(|r| r.display.as_str()).collect();
         assert!(
-            names.iter().any(|n| *n == "/view-plan"),
+            names.contains(&"/view-plan"),
             "/view-plan must appear in soft-park slash autocomplete, got {names:?}"
         );
     }

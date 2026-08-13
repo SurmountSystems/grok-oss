@@ -455,7 +455,7 @@ pub(super) mod paste_key_tests {
     use super::*;
     use crate::acp::model_state::ModelState;
     use crate::app::agent::{AgentId, AgentSession, AgentState};
-    use crate::app::agent_view::test_fixtures::{
+    pub use crate::app::agent_view::test_fixtures::{
         make_followup_permission_state, make_plan_approval_view_state,
     };
     use crate::app::app_view::InputOutcome;
@@ -2046,7 +2046,6 @@ pub(super) mod paste_key_tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             &bundle,
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),

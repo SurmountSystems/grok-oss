@@ -985,6 +985,9 @@ fn slash_enters_filter_mode_and_chars_go_to_query_no_action_leak() {
             SettingsKeyOutcome::ActionPair(a, b) => {
                 panic!("filter mode leaked ActionPair({a:?}, {b:?}) for char {c:?}");
             }
+            SettingsKeyOutcome::ActionThenClose(a) => {
+                panic!("filter mode leaked ActionThenClose({a:?}) for char {c:?}");
+            }
             SettingsKeyOutcome::Close => {
                 panic!("filter mode unexpectedly closed on char {c:?}");
             }
@@ -1811,7 +1814,7 @@ fn render_with_filter_active_and_small_viewport_clamps_scroll() {
     );
     let visible = s.filtered_indices().len();
     assert!(
-        s.scroll_offset <= visible.saturating_sub(1).max(0),
+        s.scroll_offset <= visible.saturating_sub(1),
         "scroll_offset ({}) must be within filtered_indices bounds ({})",
         s.scroll_offset,
         visible
@@ -5505,44 +5508,21 @@ fn default_selected_permission_mouse_click_on_indicator_opens_picker_in_one_clic
 /// (the parser is reachable from the slash command and produces the
 /// expected `Action`).
 ///
-/// Ambiguous aliases
-/// (`on/off/true/false/enable/disable`) were DROPPED because they
-/// could be read either as "turn on privacy" (=opt-out) or "turn on
-/// sharing" (=opt-in). For a privacy-critical setting we err on the
-/// side of explicit, unambiguous arguments. The test below verifies
-/// both the accept list AND the reject list.
+/// Product contract: `/privacy` only opens the coding-data settings row.
+/// Trailing args (including former opt-in/out aliases) are ignored, not
+/// applied as a preference change from the prompt.
+///
+/// `parse_privacy_arg` was removed with that product change. Integration
+/// tests cannot build `CommandExecCtx` (`screen_mode` is crate-private), so
+/// the contract is owned by unit tests in `slash::commands::privacy`
+/// (`arguments_are_ignored_not_honored`,
+/// `privacy_opens_settings_row_in_every_screen_mode`).
 #[test]
-fn pr9_privacy_slash_command_parses_aliases() {
-    use xai_grok_pager::slash::commands::privacy::parse_privacy_arg;
-
-    // Canonical names.
-    assert_eq!(parse_privacy_arg("opt-in"), Some(true));
-    assert_eq!(parse_privacy_arg("opt-out"), Some(false));
-
-    // Case-insensitive (sample).
-    assert_eq!(parse_privacy_arg("Opt-In"), Some(true));
-    assert_eq!(parse_privacy_arg("OPT-OUT"), Some(false));
-
-    // Unambiguous-semantic aliases (pruned list).
-    assert_eq!(parse_privacy_arg("in"), Some(true));
-    assert_eq!(parse_privacy_arg("out"), Some(false));
-    assert_eq!(parse_privacy_arg("share"), Some(true));
-    assert_eq!(parse_privacy_arg("private"), Some(false));
-
-    // Ambiguous aliases MUST be rejected. `/privacy on`
-    // could be read as "turn on privacy" (=opt-out, the OPPOSITE of
-    // what an earlier mapping returned). For a privacy
-    // setting, ambiguity = silent data-exfiltration risk.
-    for ambiguous in &["on", "off", "true", "false", "enable", "disable"] {
-        assert_eq!(
-            parse_privacy_arg(ambiguous),
-            None,
-            "ambiguous alias `{ambiguous}` MUST be rejected (PR 9 R1, Security Issue 10)",
-        );
-    }
-
-    // Unknown.
-    assert_eq!(parse_privacy_arg("maybe"), None);
+fn privacy_slash_command_no_longer_exports_parse_privacy_arg() {
+    // Compile-time residual: this test used to import
+    // `xai_grok_pager::slash::commands::privacy::parse_privacy_arg`.
+    // Keeping a named test documents the intentional export removal.
+    // Privacy arg parsing lives only as ignored trailing text in PrivacyCommand.
 }
 
 // ---------------------------------------------------------------------------

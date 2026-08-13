@@ -187,28 +187,17 @@ mod tests {
     use super::*;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("run git");
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        xai_test_utils::git::run_git(cwd, args);
     }
 
     fn init_repo_with_worktrees() -> (tempfile::TempDir, PathBuf) {
+        xai_test_utils::require_git!();
         let tmp = tempfile::TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
-        run_git(&repo, &["init"]);
-        run_git(&repo, &["config", "user.email", "t@test"]);
-        run_git(&repo, &["config", "user.name", "t"]);
+        xai_test_utils::git::init_git_repo(&repo);
         std::fs::write(repo.join("f.txt"), b"x").unwrap();
-        run_git(&repo, &["add", "f.txt"]);
-        run_git(&repo, &["commit", "-m", "init"]);
+        xai_test_utils::git::git_commit_all(&repo, "init");
         (tmp, repo)
     }
 

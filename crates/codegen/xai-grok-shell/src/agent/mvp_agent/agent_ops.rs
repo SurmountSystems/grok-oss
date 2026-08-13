@@ -4133,4 +4133,10 @@ impl MvpAgent {
         }
         events
     }
+
+    /// Send [`SessionCommand::Shutdown`] to every live session actor and wait
+    /// up to `grace` for them to exit (SessionEnd hooks, memory save, etc.).
+    pub async fn flush_all_sessions(&self, grace: std::time::Duration) {
+        self.activity.flush_all_sessions(grace).await;
+    }
 }

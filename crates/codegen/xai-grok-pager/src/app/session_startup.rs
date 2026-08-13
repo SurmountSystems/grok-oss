@@ -102,17 +102,26 @@ pub fn parent_session_is_worktree(session_id: &str, cwd: &Path) -> bool {
         {
             return true;
         }
+        if v.get("worktree_label")
+            .and_then(|k| k.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
+            return true;
+        }
     }
-    let mut cur = Some(cwd);
-    while let Some(dir) = cur {
+    if let Some(info) = crate::git_info::compute_cwd_git_info(cwd) {
+        return info.is_worktree;
+    }
+    for dir in cwd.ancestors() {
         let git = dir.join(".git");
         if git.is_file() {
             return true;
         }
         if git.is_dir() {
-            return false;
+            // Standalone grok CoW clone: `.git` is a directory plus source marker.
+            return std::fs::read_to_string(git.join("grok-worktree-source"))
+                .is_ok_and(|s| !s.trim().is_empty());
         }
-        cur = dir.parent();
     }
     false
 }
@@ -901,8 +910,11 @@ async fn restore_session_from_remote(
         &storage_client,
         session_id,
         cwd,
-        None,
-        Some(progress),
+        xai_grok_shell::session::restore::RestoreSessionOpts {
+            turn_override: None,
+            progress: Some(progress),
+            restore_code: true,
+        },
     )
     .await
     .map_err(|e| anyhow::anyhow!("Failed to restore session from remote: {:#}", e))?;
@@ -1283,10 +1295,7 @@ mod tests {
     /// hardcoded `false` here once disabled it everywhere.
     #[test]
     fn remote_restore_follows_compiled_restore_stack() {
-        assert_eq!(
-            MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore,
-            false
-        );
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore);
     }
     /// Explicit-id resume under `--chat` passes the id through untouched:
     /// no disk resolution, no GCS restore (the cwd does not even exist).

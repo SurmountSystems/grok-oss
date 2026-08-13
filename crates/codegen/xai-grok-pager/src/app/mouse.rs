@@ -19,6 +19,16 @@ use crate::views::prompt_widget::PromptEvent;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 impl AgentView {
+    /// Double-click detector for the main prompt textarea (freeform paste expand).
+    pub(super) fn prompt_click_is_double(&mut self) -> bool {
+        let now = Instant::now();
+        let is_double = self
+            .last_prompt_click_ms
+            .is_some_and(|last| now.duration_since(last).as_millis() < MULTI_CLICK_TIMEOUT_MS);
+        self.last_prompt_click_ms = Some(now);
+        is_double
+    }
+
     /// Handle mouse events: click-to-focus, forward to prompt textarea.
     ///
     /// Scroll events are handled at app level (not here).
@@ -147,28 +157,38 @@ impl AgentView {
                 }
                 if self
                     .privacy_banner
-                    .hit_accept
+                    .hit_opt_in
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
-                    return InputOutcome::Action(Action::PrivacyBannerAccept);
+                    return InputOutcome::Action(Action::PrivacyBannerOptIn);
                 }
                 if self
                     .privacy_banner
-                    .hit_customize
+                    .hit_opt_out
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
-                    return InputOutcome::Action(Action::PrivacyBannerCustomize);
+                    return InputOutcome::Action(Action::PrivacyBannerOptOut);
                 }
                 if self
                     .privacy_banner
-                    .hit_legal
+                    .hit_terms
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
                     return InputOutcome::Action(Action::OpenUrl(
-                        crate::views::privacy_banner::PRIVACY_BANNER_LEGAL_URL.to_string(),
+                        crate::views::privacy_banner::PRIVACY_BANNER_TERMS_URL.to_string(),
+                    ));
+                }
+                if self
+                    .privacy_banner
+                    .hit_policy
+                    .contains(mouse.column, mouse.row)
+                    && !self.pos_occluded(mouse.column, mouse.row)
+                {
+                    return InputOutcome::Action(Action::OpenUrl(
+                        crate::views::privacy_banner::PRIVACY_BANNER_POLICY_URL.to_string(),
                     ));
                 }
                 if self.hit_watching_cue.contains(mouse.column, mouse.row)
@@ -1022,15 +1042,19 @@ impl AgentView {
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_accept
+                    .hit_opt_in
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_customize
+                    .hit_opt_out
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_legal
+                    .hit_terms
+                    .update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .privacy_banner
+                    .hit_policy
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .plugin_cta

@@ -268,6 +268,16 @@ impl SamplingError {
         }
     }
 
+    /// Auth error with known wire provenance (request did / did not carry a
+    /// credential header). Prefer this over [`Self::auth_unknown`] at every
+    /// site that saw the outbound request headers.
+    pub fn auth(message: impl Into<String>, credential: SentCredential) -> Self {
+        Self::Auth {
+            message: message.into(),
+            credential,
+        }
+    }
+
     /// Rebuild a `Serialization` error from a rendered message for non-`Clone`
     /// contexts; it must stay `Serialization` so it remains non-retryable.
     pub fn serialization_message(msg: impl fmt::Display) -> Self {
@@ -418,7 +428,6 @@ impl SamplingError {
     pub fn is_retry_vetoed(&self) -> bool {
         matches!(self, Self::Auth { .. }) || self.is_credit_exhausted()
     }
-
 
     pub fn model_metadata(&self) -> Option<&ResponseModelMetadata> {
         match self {
@@ -659,20 +668,22 @@ pub fn status_user_message(status: StatusCode) -> String {
         code @ 502..=504 => {
             format!("Grok is temporarily unavailable. Please try again in a moment. (HTTP {code}).")
         }
-        // Cloudflare 521 origin down — Surmount product copy (accessed: 2026-08-12).
+        // Cloudflare 521 origin down. See
+        // https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/
+        // (accessed: 2026-08-12).
         521 => {
             "xAI is temporarily unreachable (origin down). Please try again shortly. (HTTP 521)."
                 .to_string()
         }
-        // Upstream capacity, not an edge failure — see [`SamplingError::is_overloaded`].
+        // Upstream capacity, not an edge failure. See [`SamplingError::is_overloaded`].
         code @ 529 => {
             format!("Grok is temporarily overloaded. Please try again in a moment. (HTTP {code}).")
         }
-        // Cloudflare origin TLS (handshake / invalid certificate) — not transient.
+        // Cloudflare origin TLS (handshake / invalid certificate) is not transient.
         code @ 525 | code @ 526 => {
             format!("Secure connection to Grok failed. (HTTP {code}).")
         }
-        // Cloudflare edge: origin unreachable or timed out (520–524, 527), or
+        // Cloudflare edge: origin unreachable or timed out (520-524, 527), or
         // an edge-side 1xxx failure (530). 521 / 525 / 526 match above.
         code @ 520..=527 | code @ 530 => {
             format!(

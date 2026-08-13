@@ -6,6 +6,19 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **Workspace fuzzy search reuses one matcher per root (2026-08-12, shipped).** Opening many workspace fuzzy searches without `close` no longer grows a new nucleo worker pair per `open`; `FuzzySearchManager` keeps one live search per cwd/root, and poll-only `get_results` does not reset the stale timer.
+
+- **Rust 1.97.1 + CI unit mop (2026-08-12, shipped, not open).**
+  Project pin is `rust-toolchain.toml` / fenix **1.97.1**. Surmount keeps that
+  pin even if an upstream export still lists 1.94.x (FORK packaging note).
+  Unit clusters greened this wave: worktree/export hermetic git, team-managed
+  dark seam, theme+hooks, shell stack/interject/usage/stream/external-auth.
+  Package clippy mop for shell / pager / tools / update / workflow is green
+  under `-D warnings`. **Still open (not this mop):** operator dogfood after
+  install (first Open bullet); PTY grandchild-kill flake reliability
+  (`close_pty_kills_a_background_grandchild`); a later second onto/join
+  after this mop is finalized. Do not start a second onto from residual.
+
 - **Dogfood / next-session gate (2026-08-09; open until install + dogfood done).**
   Tree work for the plan wave (A/B/C/E chrome, plan Revise, stale plan batch,
   OAuth 403 bad-credentials, rewind checkpoints, Ctrl+C rewind) is **in FORK**

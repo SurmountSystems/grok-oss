@@ -1198,15 +1198,17 @@ mod tests {
     /// Verify that TTY detach prevents hook child processes from opening
     /// `/dev/tty`. This is the core fix for GPG pinentry corruption.
     ///
-    /// The hook tries `exec 3>/dev/tty` — if detached, this fails and the
-    /// shell exits 1 (caught by `||`), making the overall command exit 0.
-    /// If NOT detached, the open succeeds and the command exits 1.
+    /// Prefer `(: >/dev/tty)` over bare `exec 3>/dev/tty`. POSIX `sh`
+    /// (bash invoked as `sh`) exits the whole shell on a failed `exec`
+    /// redirect, so `|| exit 0` never runs and the hook looks failed
+    /// even when detach worked. A failed group redirect is a normal
+    /// command failure and is caught by `||`.
     #[tokio::test]
     #[cfg(unix)]
     async fn test_hook_child_cannot_open_dev_tty() {
-        // Skip in CI / environments without a controlling terminal —
-        // setsid() gets EPERM when already a session leader and the
-        // setpgid fallback doesn't detach /dev/tty.
+        // Skip when this process has no controlling terminal: the child
+        // would already be unable to open `/dev/tty`, so the probe cannot
+        // tell detach from a parent that was already detached.
         if std::fs::OpenOptions::new()
             .write(true)
             .open("/dev/tty")
@@ -1217,7 +1219,7 @@ mod tests {
         }
 
         // exit 0 if /dev/tty is inaccessible (DETACHED), exit 1 if accessible
-        let spec = make_shell_spec("exec 3>/dev/tty 2>/dev/null && exit 1 || exit 0");
+        let spec = make_shell_spec("(: >/dev/tty) 2>/dev/null && exit 1 || exit 0");
         let envelope = make_envelope();
         let ctx = make_ctx();
 

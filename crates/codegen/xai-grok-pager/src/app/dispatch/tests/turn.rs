@@ -376,7 +376,7 @@ fn lost_cancel_is_resent_while_still_cancelling() {
             resent.as_slice(),
             [Effect::CancelTurn {
                 trigger: Some(CancelTrigger::Mouse),
-                rewind_if_no_output: false,
+                rewind_if_pristine: false,
                 ..
             }]
         ),
@@ -656,7 +656,7 @@ fn cancel_after_local_send_during_wake_does_not_arm_resend() {
             effects.as_slice(),
             [Effect::CancelTurn {
                 trigger: Some(CancelTrigger::Esc),
-                rewind_if_no_output: false,
+                rewind_if_pristine: false,
                 ..
             }]
         ),
@@ -726,7 +726,7 @@ fn do_cancel_turn_cancels_running_wake_turn() {
             effects.as_slice(),
             [Effect::CancelTurn {
                 cancel_subagents: true,
-                rewind_if_no_output: false,
+                rewind_if_pristine: false,
                 trigger: None,
                 ..
             }]
@@ -767,7 +767,7 @@ fn stop_click_cancels_running_wake_turn() {
             effects.as_slice(),
             [Effect::CancelTurn {
                 trigger: Some(CancelTrigger::Mouse),
-                rewind_if_no_output: false,
+                rewind_if_pristine: false,
                 ..
             }]
         ),
@@ -2964,6 +2964,7 @@ fn session_loaded_applies_cancel_resume_marker_and_toasts() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3076,6 +3077,7 @@ fn session_loaded_cancel_resume_starts_turn_despite_zombie_subagents() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3174,6 +3176,7 @@ fn session_loaded_recovers_interrupted_turn_without_marker() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3264,6 +3267,7 @@ fn session_loaded_clean_completed_does_not_auto_resume_without_marker() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3357,6 +3361,7 @@ fn session_loaded_replay_completed_without_session_event_does_not_auto_resume() 
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3440,6 +3445,7 @@ fn session_loaded_user_cancelled_terminal_does_not_history_resume() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3528,6 +3534,7 @@ fn session_loaded_error_terminal_auto_resumes_without_marker() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3618,6 +3625,7 @@ fn session_loaded_durable_error_flag_auto_resumes_without_session_event() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3689,6 +3697,7 @@ fn session_loaded_marker_after_error_terminal_still_resumes() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3911,6 +3920,7 @@ fn session_loaded_recovers_open_implement_turn_without_unfinished_subagent() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -3987,6 +3997,7 @@ fn session_loaded_interrupted_without_prompt_toasts_failure() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -4064,6 +4075,7 @@ fn session_loaded_marker_wins_over_history_recovery() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -4163,6 +4175,7 @@ fn session_loaded_stale_marker_after_completed_primary_does_not_resume() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -4283,6 +4296,7 @@ fn session_loaded_stale_marker_ignores_replay_running_residue_after_completed_pr
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -4378,6 +4392,7 @@ fn session_loaded_cancel_marker_without_completed_primary_still_resumes() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -4468,6 +4483,7 @@ fn session_loaded_marker_with_unfinished_child_resumes_despite_completed_primary
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );

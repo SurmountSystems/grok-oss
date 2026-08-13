@@ -168,6 +168,68 @@ pub(super) fn scrollback_has_recent_context_too_large(
     false
 }
 
+/// True if the trailing run already has a dedicated terminal error banner that
+/// replaces `TurnFailed` (re-auth, context overflow, disk-full, formatted
+/// request failure). `CompactionFailed` is deliberately excluded — it can
+/// appear mid-turn, and a stale one must not swallow an unrelated error's
+/// only surface on the reconcile/viewer rails.
+pub(in crate::app) fn scrollback_has_recent_error_banner(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    trailing_session_events(scrollback).any(|(_, ev)| {
+        matches!(
+            ev,
+            SessionEvent::ReAuthRequired
+                | SessionEvent::ContextTooLarge
+                | SessionEvent::DiskFull
+                | SessionEvent::RequestFailed { .. }
+        )
+    })
+}
+
+/// True if the trailing run already has a [`SessionEvent::DiskFull`] banner.
+/// Lets `PromptResponse` push at most one disk-full card and skip `TurnFailed`.
+pub(super) fn scrollback_has_recent_disk_full(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    trailing_session_events(scrollback).any(|(_, ev)| matches!(ev, SessionEvent::DiskFull))
+}
+
+/// True if the trailing run already has a formatted [`SessionEvent::RequestFailed`]
+/// banner. Lets `PromptResponse` skip the redundant `TurnFailed`. Deliberately
+/// does NOT match `RetryFailed`: the special cases that keep it (legacy_auth,
+/// encrypted_content_mismatch) keep their pre-existing marker behavior.
+pub(super) fn scrollback_has_recent_request_failed(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    trailing_session_events(scrollback)
+        .any(|(_, ev)| matches!(ev, SessionEvent::RequestFailed { .. }))
+}
+
+/// The trailing run of session events, newest first: yields `(index, event)`
+/// for each session-event block at the tail of the scrollback, skipping
+/// interleaved system messages and stopping at the first substantive block.
+/// Banners for the finishing turn live in this run — pushed just before its
+/// `PromptResponse` arrived.
+pub(super) fn trailing_session_events(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> impl Iterator<Item = (usize, &SessionEvent)> {
+    use crate::scrollback::block::RenderBlock;
+    (0..scrollback.len())
+        .rev()
+        .map(|idx| (idx, scrollback.entry(idx).map(|e| &e.block)))
+        .take_while(|(_, block)| {
+            matches!(
+                block,
+                Some(RenderBlock::SessionEvent(_) | RenderBlock::System(_))
+            )
+        })
+        .filter_map(|(idx, block)| match block {
+            Some(RenderBlock::SessionEvent(ev)) => Some((idx, &ev.event)),
+            _ => None,
+        })
+}
+
 /// Strip the trailing run of auth-error blocks — the `ReAuthRequired`
 /// prompt plus any stale `RetryFailed` / `TurnFailed` — from an agent's
 /// scrollback. Called after a successful mid-session re-auth so the prompt

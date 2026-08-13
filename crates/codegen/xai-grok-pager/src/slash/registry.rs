@@ -62,6 +62,8 @@ pub struct CommandTrigger {
     pub command_index: usize,
     /// Source of this command.
     pub source: CommandSource,
+    /// Origin for slash-menu provenance badge (builtin / skill / shell).
+    pub provenance: crate::slash::command::CommandProvenance,
 }
 
 impl CommandTrigger {
@@ -85,6 +87,7 @@ impl CommandTrigger {
             args_required: command.args_required(),
             command_index,
             source,
+            provenance: command.provenance(),
         }
     }
 }
@@ -154,13 +157,17 @@ impl CommandRegistry {
         hidden.insert("voice".to_string());
         // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
         hidden.insert("auto".to_string());
+        // `/share` is menu-only by default: typed `/share` still dispatches so
+        // the disable path can run when the temporary kill switch is on.
+        let mut menu_hidden = HashSet::new();
+        menu_hidden.insert("share".to_string());
         let mut reg = Self {
             commands: builtins,
             sources,
             key_to_index: HashMap::new(),
             triggers: Vec::new(),
             hidden,
-            menu_hidden: HashSet::new(),
+            menu_hidden,
             restricted: HashSet::new(),
             available_tools: None,
         };
@@ -368,10 +375,19 @@ impl CommandRegistry {
         self.available_tools = Some(tools);
     }
 
-    /// Show or hide the /share command.
-    /// When hidden, it won't appear in the dropdown or be executable.
+    /// Show or hide `/share` in the completion menu only.
+    ///
+    /// Never hard-hides: typed `/share` must stay dispatchable so the kill-switch
+    /// disable message can run. Use `menu_hidden` for the menu gate.
     pub fn set_share_visible(&mut self, visible: bool) {
-        self.set_command_visible("share", visible);
+        // Clear any legacy hard-hide so menu_hidden is the only gate.
+        self.hidden.remove("share");
+        if visible {
+            self.menu_hidden.remove("share");
+        } else {
+            self.menu_hidden.insert("share".to_string());
+        }
+        self.rebuild_triggers();
     }
 
     /// Show or hide the `/dashboard` command (feature-flag gating).
@@ -733,21 +749,23 @@ mod tests {
         });
         let mut registry = CommandRegistry::new(vec![share, other]);
 
-        // Default: /share is visible.
-        assert!(registry.get("share").is_some());
-        assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
-
-        // Hiding /share removes it from lookup and triggers.
-        registry.set_share_visible(false);
+        // Default: menu-hidden but still dispatchable (typed /share).
         assert!(registry.get("share").is_none());
+        assert!(registry.get_for_dispatch("share").is_some());
         assert!(!registry.triggers().iter().any(|t| t.canonical == "share"));
-        // Other commands are unaffected.
-        assert!(registry.get("exit").is_some());
 
-        // Re-enabling restores it.
+        // Reveal for the completion menu.
         registry.set_share_visible(true);
         assert!(registry.get("share").is_some());
         assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
+
+        // Hide again: menu-only, not hard-hide.
+        registry.set_share_visible(false);
+        assert!(registry.get("share").is_none());
+        assert!(registry.get_for_dispatch("share").is_some());
+        assert!(!registry.triggers().iter().any(|t| t.canonical == "share"));
+        // Other commands are unaffected.
+        assert!(registry.get("exit").is_some());
     }
 
     #[test]
@@ -1205,9 +1223,9 @@ mod tests {
     /// unresolvable for dispatch, exactly like `get()`.
     #[test]
     fn get_for_dispatch_respects_hard_gates() {
-        // Hard-hidden by name (e.g. /dashboard default, /share toggle).
-        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "share",
+        // Hard-hidden by name (e.g. /dashboard default fail-closed).
+        let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "dashboard",
             aliases: &[],
         });
         // Tier-restricted.
@@ -1220,11 +1238,13 @@ mod tests {
             name: "loop",
             required: &["scheduler_create"],
         });
-        let mut reg = CommandRegistry::new(vec![share, usage, gated]);
-        reg.set_share_visible(false);
+        let mut reg = CommandRegistry::new(vec![dashboard, usage, gated]);
         reg.set_restricted_commands(&["usage".to_string()]);
 
-        assert!(reg.get_for_dispatch("share").is_none(), "hidden stays hard");
+        assert!(
+            reg.get_for_dispatch("dashboard").is_none(),
+            "hard-hidden stays hard"
+        );
         assert!(
             reg.get_for_dispatch("usage").is_none(),
             "restricted stays blocked (upsell path owns it)"

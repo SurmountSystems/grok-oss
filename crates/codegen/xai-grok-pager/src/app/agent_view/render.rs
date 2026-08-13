@@ -1,9 +1,9 @@
 //! Frame rendering for [`AgentView`]: the `draw` entry point plus shortcut
 //! hints and the subagent fullscreen view.
 use super::{
-    ActivePane, AgentPane, AgentView, AgentViewLayout, CtaPhase, InlineMediaHitAreas,
-    MODE_BANNER_FADE_TICKS, PromptMode, collect_citation_links, dropdown_items_width,
-    record_dot_pulse, render_dropdown_chrome, supports_osc22,
+    ActivePane, AgentPane, AgentView, AgentViewLayout, BlockingCard, CtaPhase, EscStep,
+    InlineMediaHitAreas, KeyOwner, MODE_BANNER_FADE_TICKS, PromptMode, collect_citation_links,
+    dropdown_items_width, record_dot_pulse, render_dropdown_chrome, supports_osc22,
 };
 use crate::actions::{ActionId, ActionRegistry};
 use crate::key;
@@ -31,6 +31,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
+
+/// What the footer shortcuts row paints for the surface that holds the keys.
+enum ShortcutsBarContent {
+    /// A blocking surface (card / plan / viewer) with its own full hint list.
+    Surface(Vec<HintItem>),
+    /// Normal pane hints — may be compacted with a trailing help chord.
+    Pane(Vec<HintItem>),
+    /// The line viewer paints over this row; leave it quiet.
+    Hidden,
+}
+
 /// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
 /// view cannot see itself (the voice pipeline and app-level Esc ownership).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
@@ -152,13 +163,98 @@ impl AgentView {
                     ]
                 }
             }
-            // Soft-park Preview: mouse footer CTAs only — no exclusive key
-            // accelerators (L1 modal-free). Cheatsheet points at Tab/panel.
-            PlanApprovalFocus::Preview if self.line_viewer.is_none() => vec![
-                HintItem::new(key!(Tab), "plan"),
-                HintItem::new(key!(Esc), "back"),
+            // Soft-park / closed preview: monorepo bar names `y:copy plan` and
+            // `Tab:prompt` (same as an open plan viewer). Mouse CTAs still paint
+            // over this row when soft-park has no side panel.
+            PlanApprovalFocus::Preview => vec![
+                HintItem::new(key!('y'), "copy plan"),
+                HintItem::new(key!(Tab), "prompt"),
             ],
-            PlanApprovalFocus::Preview => vec![],
+        }
+    }
+    /// The `Esc` hint for the focused card, named by the rung the key actually
+    /// takes ([`EscStep`]).
+    fn card_esc_hint(&self) -> HintItem {
+        HintItem::new(key!(Esc), self.card_esc().map_or("back", EscStep::label))
+    }
+    fn question_shortcut_hints(
+        &self,
+        qv: &crate::views::question_view::QuestionViewState,
+    ) -> Vec<HintItem> {
+        use crate::views::question_view::QuestionFocus;
+        let esc = self.card_esc_hint();
+        match qv.focus {
+            QuestionFocus::InputMode if self.prompt.file_search_visible() => {
+                vec![
+                    HintItem::paired(key!(Up), key!(Down), "nav"),
+                    HintItem::new(key!(Tab), "accept"),
+                    HintItem::new(key!(Right), "drill"),
+                    esc,
+                ]
+            }
+            QuestionFocus::InputMode => vec![HintItem::new(key!(Enter), "submit"), esc],
+            QuestionFocus::Navigation => {
+                vec![
+                    HintItem::new(key!(Tab), "next answer"),
+                    esc,
+                    HintItem::new(key!('X'), "dismiss"),
+                ]
+            }
+        }
+    }
+    fn permission_shortcut_hints(
+        &self,
+        perm: &crate::views::permission_view::PermissionViewState,
+    ) -> Vec<HintItem> {
+        use crate::views::permission_view::PermissionFocus;
+        let perm_content_w = self
+            .pane_areas
+            .prompt
+            .width
+            .saturating_sub(QUESTION_VIEW_HPAD) as usize;
+        let ctrl_f_hint = perm.has_collapsible_display(perm_content_w).then(|| {
+            let label = if perm.args_expanded {
+                "collapse"
+            } else {
+                "expand"
+            };
+            HintItem::new(key!('f', CONTROL), label)
+        });
+        match perm.focus {
+            PermissionFocus::FollowupInput => {
+                let mut hints = vec![HintItem::new(key!(Enter), "send")];
+                hints.extend(ctrl_f_hint);
+                hints.push(self.card_esc_hint());
+                hints
+            }
+            PermissionFocus::PatternEdit => {
+                let mut hints = vec![HintItem::new(key!(Enter), "save")];
+                hints.extend(ctrl_f_hint);
+                hints.push(self.card_esc_hint());
+                hints
+            }
+            PermissionFocus::Options => {
+                use crate::input::key::KeyShortcut;
+                use crossterm::event::{KeyCode, KeyModifiers};
+                let n = perm.options.len().min(9) as u8;
+                let last_ch = char::from(b'0' + n.max(1));
+                let last_key = KeyShortcut::new(KeyCode::Char(last_ch), KeyModifiers::NONE);
+                let mut hints = vec![HintItem::paired(key!('1'), last_key, "select")];
+                if perm.options.len() > 1 {
+                    hints.push(HintItem::new(key!(Tab), "next option"));
+                }
+                if perm.has_adjustable_scope() {
+                    hints.push(HintItem::paired(key!(Left), key!(Right), "scope"));
+                }
+                if perm.has_editable_bash_pattern() {
+                    hints.push(HintItem::new(key!('e'), "edit pattern"));
+                }
+                hints.extend(ctrl_f_hint);
+                hints.push(HintItem::new(key!('o', CONTROL), "always-approve"));
+                hints.push(HintItem::new(key!('c', CONTROL), "cancel"));
+                hints.push(self.card_esc_hint());
+                hints
+            }
         }
     }
     /// Returns the *exact* hints the bottom shortcuts bar would render right now.
@@ -182,106 +278,83 @@ impl AgentView {
         registry: &ActionRegistry,
         esc_owned_before_agent: bool,
     ) -> Vec<HintItem> {
-        use crate::views::shortcuts_bar::HintItem;
-        if let Some(ref viewer) = self.block_viewer {
-            viewer.shortcuts_hints()
-        } else if !self.permission_queue.is_empty() {
-            use crate::views::permission_view::PermissionFocus;
-            if let Some(perm) = self.permission_queue.front() {
-                match perm.focus {
-                    PermissionFocus::FollowupInput => {
-                        vec![
-                            HintItem::new(key!(Enter), "send"),
-                            HintItem::new(key!(Esc), "back"),
-                        ]
-                    }
-                    PermissionFocus::Options => {
-                        use crate::input::key::KeyShortcut;
-                        use crossterm::event::{KeyCode, KeyModifiers};
-                        let n = perm.options.len().min(9) as u8;
-                        let last_ch = char::from(b'0' + n.max(1));
-                        let last_key = KeyShortcut::new(KeyCode::Char(last_ch), KeyModifiers::NONE);
-                        let mut hints = vec![HintItem::paired(key!('1'), last_key, "select")];
-                        if perm.has_adjustable_scope() {
-                            hints.push(HintItem::paired(key!(Left), key!(Right), "scope"));
-                        }
-                        if !perm.description.is_empty() {
-                            let label = if perm.args_expanded {
-                                "collapse"
-                            } else {
-                                "expand"
-                            };
-                            hints.push(HintItem::new(key!('f', CONTROL), label));
-                        }
-                        hints.push(HintItem::new(key!('o', CONTROL), "always-approve"));
-                        hints.push(HintItem::new(key!('c', CONTROL), "cancel"));
-                        hints
-                    }
-                }
-            } else {
-                unreachable!("permission_queue non-empty per outer guard")
-            }
-        } else if let Some(ref pav) = self.plan_approval_view {
-            self.plan_approval_shortcut_hints(pav)
-        } else if self.line_viewer.is_some() && self.is_plan_viewer() {
-            let suppress_shortcuts = self
-                .line_viewer
-                .as_ref()
-                .is_some_and(|v| v.fullscreen && v.list_state.input_mode().is_some());
-            if suppress_shortcuts {
-                vec![]
-            } else if self.is_casual_commenting() {
-                vec![
-                    HintItem::new(key!(Enter), "save comment"),
-                    HintItem::new(key!(Esc), "cancel"),
-                ]
-            } else {
-                let mut h = vec![
-                    HintItem::new(key!('c'), "comment"),
-                    HintItem::new(key!('f', CONTROL), "fullscreen"),
-                ];
-                if !self.plan_comments.is_empty() {
-                    h.push(HintItem::new(key!('s'), "send"));
-                }
-                h.push(HintItem::new(key!(Esc), "close"));
-                h
-            }
-        } else if let Some(ref qv) = self.question_view {
-            use crate::views::question_view::QuestionFocus;
-            match qv.focus {
-                QuestionFocus::InputMode => {
-                    if self.prompt.file_search_visible() {
-                        vec![
-                            HintItem::paired(key!(Up), key!(Down), "nav"),
-                            HintItem::new(key!(Tab), "accept"),
-                            HintItem::new(key!(Right), "drill"),
-                            HintItem::new(key!(Esc), "dismiss"),
-                        ]
-                    } else {
-                        vec![
-                            HintItem::new(key!(Enter), "submit"),
-                            HintItem::new(key!(Esc), "back"),
-                        ]
-                    }
-                }
-                QuestionFocus::Navigation => {
-                    vec![
-                        HintItem::new(key!(Esc), "unselect"),
-                        HintItem::new(key!(Tab), "scrollback"),
-                        HintItem::new(key!('X'), "dismiss"),
-                    ]
-                }
-            }
-        } else if self.cancel_turn_view.is_some() {
-            vec![
-                HintItem::paired(key!('1'), key!('4'), "select"),
-                HintItem::new(key!(Enter), "confirm"),
-                HintItem::new(key!(Esc), "keep running"),
-                HintItem::new(key!(Tab), "scrollback"),
-            ]
-        } else {
-            self.normal_pane_hints(registry, esc_owned_before_agent)
+        match self.shortcuts_bar_content(registry, esc_owned_before_agent) {
+            ShortcutsBarContent::Surface(hints) | ShortcutsBarContent::Pane(hints) => hints,
+            ShortcutsBarContent::Hidden => vec![],
         }
+    }
+    fn plan_approval_bar(
+        &self,
+        pav: &crate::views::plan_approval_view::PlanApprovalViewState,
+    ) -> ShortcutsBarContent {
+        let hints = self.plan_approval_shortcut_hints(pav);
+        if hints.is_empty() {
+            ShortcutsBarContent::Hidden
+        } else {
+            ShortcutsBarContent::Surface(hints)
+        }
+    }
+    /// The bar names the surface the keys actually reach, so it asks
+    /// [`AgentView::key_owner`] rather than keeping an order of its own.
+    fn shortcuts_bar_content(
+        &self,
+        registry: &ActionRegistry,
+        esc_owned_before_agent: bool,
+    ) -> ShortcutsBarContent {
+        match self.key_owner() {
+            KeyOwner::LineViewer => self.line_viewer_bar(),
+            KeyOwner::BlockViewer => ShortcutsBarContent::Surface(
+                self.block_viewer
+                    .as_ref()
+                    .map(|viewer| viewer.shortcuts_hints())
+                    .unwrap_or_default(),
+            ),
+            KeyOwner::Card(BlockingCard::Permission) => ShortcutsBarContent::Surface(
+                self.focused_permission()
+                    .map(|perm| self.permission_shortcut_hints(perm))
+                    .unwrap_or_default(),
+            ),
+            KeyOwner::PlanApproval => self
+                .plan_approval_view
+                .as_ref()
+                .map_or(ShortcutsBarContent::Hidden, |pav| {
+                    self.plan_approval_bar(pav)
+                }),
+            KeyOwner::Card(BlockingCard::CancelTurn) => ShortcutsBarContent::Surface(vec![
+                HintItem::paired(key!('1'), key!('4'), "select"),
+                HintItem::new(key!(Tab), "next choice"),
+                HintItem::new(key!(Enter), "confirm"),
+                self.card_esc_hint(),
+            ]),
+            KeyOwner::Card(BlockingCard::Question) => ShortcutsBarContent::Surface(
+                self.focused_question()
+                    .map(|qv| self.question_shortcut_hints(qv))
+                    .unwrap_or_default(),
+            ),
+            KeyOwner::Pane => {
+                ShortcutsBarContent::Pane(self.normal_pane_hints(registry, esc_owned_before_agent))
+            }
+        }
+    }
+    /// An open line viewer paints its own hints over this row further down
+    /// `draw`, so the bar is silent — except in the two states where the
+    /// viewer defers: the plan-approval prompt, whose keys the viewer's
+    /// intercept forwards, and a casual comment draft.
+    fn line_viewer_bar(&self) -> ShortcutsBarContent {
+        if let Some(pav) = self
+            .plan_approval_view
+            .as_ref()
+            .filter(|pav| pav.focus != PlanApprovalFocus::Preview)
+        {
+            return self.plan_approval_bar(pav);
+        }
+        if self.is_casual_commenting() {
+            return ShortcutsBarContent::Surface(vec![
+                HintItem::new(key!(Enter), "save comment"),
+                HintItem::new(key!(Esc), "cancel"),
+            ]);
+        }
+        ShortcutsBarContent::Hidden
     }
     /// Shared "normal pane" hints: flag computation + `build_hints` + queue hint.
     /// Single source of truth for the two former duplicated blocks in
@@ -399,6 +472,8 @@ impl AgentView {
         let selected_is_credit_limit = selected_entry.is_some_and(|e| e.block.is_credit_limit());
         let mut hints = agent::build_hints(
             self.active_pane,
+            self.parked_card()
+                .map_or_else(agent::prompt_focus_hint, BlockingCard::focus_hint),
             &self.prompt,
             registry,
             is_editing,
@@ -450,6 +525,31 @@ impl AgentView {
             let mut hint = def.hint();
             hint.label = std::borrow::Cow::Borrowed("resume");
             hints.push(hint);
+        }
+        // Dashboard overlay chrome lives here so cheatsheet Current matches
+        // the bar (draw used to inject these only on the paint path).
+        if self.in_dashboard_overlay {
+            hints.insert(
+                0,
+                HintItem::new(
+                    registry
+                        .find(ActionId::DashboardOverlayStop)
+                        .map(|def| def.default_key)
+                        .unwrap_or(key!('x', CONTROL)),
+                    "stop",
+                ),
+            );
+            hints.insert(
+                0,
+                HintItem {
+                    keys: vec![key!('[', CONTROL), key!(']', CONTROL)],
+                    label: "agents".into(),
+                    custom_display: Some("Ctrl+[/]"),
+                    description: None,
+                    pinned: false,
+                },
+            );
+            hints.insert(0, HintItem::new(key!('\\', CONTROL), "dashboard"));
         }
         hints
     }
@@ -863,7 +963,8 @@ impl AgentView {
             chrome: true,
             chrome_pad_left: layout_cfg.block_pad_left,
             chrome_pad_right: layout_cfg.block_pad_right,
-            bg_override: None,
+            bg: crate::views::prompt_widget::PromptBg::Default,
+            placeholder_when_focused: false,
             accent_color_override: if let Some(c) = self.prompt_input_mode.accent_color(&theme) {
                 Some(c)
             } else if effective_plan || casual_commenting {
@@ -911,7 +1012,7 @@ impl AgentView {
         let compact = appearance.prompt.compact;
         let inner_width = AgentViewLayout::inner_width(area, layout_cfg, compact);
         let banner_height = if banner_height > 0 {
-            if let Some(tip_text) = tip {
+            let mut h = if let Some(tip_text) = tip {
                 if self.session_banner_active {
                     banner_height
                 } else {
@@ -919,7 +1020,15 @@ impl AgentView {
                 }
             } else {
                 banner_height
+            };
+            // Privacy upsell needs at least MIN_HEIGHT rows; production and
+            // tests may pass a short slot (legacy 2) — grow to paint.
+            if privacy_banner {
+                h = h
+                    .max(crate::views::privacy_banner::MIN_HEIGHT)
+                    .max(crate::views::privacy_banner::height(inner_width));
             }
+            h
         } else {
             banner_height
         };
@@ -998,7 +1107,8 @@ impl AgentView {
             chrome: false,
             chrome_pad_left: 0,
             chrome_pad_right: 0,
-            bg_override: Some(theme.bg_visual),
+            bg: crate::views::prompt_widget::PromptBg::Panel(theme.bg_visual),
+            placeholder_when_focused: false,
             accent_color_override: None,
             border_color_override: None,
             prefix_override: None,
@@ -1033,7 +1143,8 @@ impl AgentView {
                 chrome: false,
                 chrome_pad_left: 0,
                 chrome_pad_right: 0,
-                bg_override: Some(theme.bg_visual),
+                bg: crate::views::prompt_widget::PromptBg::Panel(theme.bg_visual),
+                placeholder_when_focused: false,
                 accent_color_override: None,
                 border_color_override: None,
                 prefix_override: None,
@@ -2522,7 +2633,8 @@ impl AgentView {
             self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
         }
-        let privacy_banner_owns_slot = privacy_banner && layout.banner.height >= 2;
+        let privacy_banner_owns_slot =
+            privacy_banner && layout.banner.height >= crate::views::privacy_banner::MIN_HEIGHT;
         if !privacy_banner_owns_slot {
             self.privacy_banner.clear_hits();
         }
@@ -2531,14 +2643,17 @@ impl AgentView {
             self.hit_announcement_cta.clear();
             let rects = crate::views::privacy_banner::render(layout.banner, buf, &theme, mouse_pos);
             self.privacy_banner
-                .hit_accept
-                .set_unless_dropdown(Some(rects.accept), dropdown_open);
+                .hit_opt_in
+                .set_unless_dropdown(Some(rects.opt_in), dropdown_open);
             self.privacy_banner
-                .hit_customize
-                .set_unless_dropdown(Some(rects.customize), dropdown_open);
+                .hit_opt_out
+                .set_unless_dropdown(Some(rects.opt_out), dropdown_open);
             self.privacy_banner
-                .hit_legal
-                .set_unless_dropdown(Some(rects.legal), dropdown_open);
+                .hit_terms
+                .set_unless_dropdown(Some(rects.terms), dropdown_open);
+            self.privacy_banner
+                .hit_policy
+                .set_unless_dropdown(Some(rects.policy), dropdown_open);
         } else if let Some((ref msg, remaining)) = self.mode_switch_banner {
             self.hit_announcement_hide.clear();
             self.hit_announcement_cta.clear();
@@ -2845,6 +2960,7 @@ impl AgentView {
                     perm_area,
                     perm,
                     followup_text,
+                    self.permission_pattern_edit.as_ref(),
                     self.hovered_permission_item,
                     &theme,
                     prompt_focused,
@@ -2859,7 +2975,8 @@ impl AgentView {
                         chrome: false,
                         chrome_pad_left: 0,
                         chrome_pad_right: 0,
-                        bg_override: Some(row_bg),
+                        bg: crate::views::prompt_widget::PromptBg::Panel(row_bg),
+                        placeholder_when_focused: false,
                         accent_color_override: None,
                         border_color_override: None,
                         prefix_override: None,
@@ -3658,189 +3775,53 @@ impl AgentView {
         if self.plan_approval_view.is_none() {
             self.hit_soft_park_ctas.clear();
         }
-        if let Some(ref viewer) = self.block_viewer {
-            let hints = viewer.shortcuts_hints();
-            ShortcutsBar::new(&hints)
-                .with_pending(pending_hint)
-                .render(layout.shortcuts, buf);
-        } else if !self.permission_queue.is_empty() {
-            use crate::views::permission_view::PermissionFocus;
-            use crate::views::shortcuts_bar::HintItem;
-            let hints = if let Some(perm) = self.permission_queue.front() {
-                match perm.focus {
-                    PermissionFocus::FollowupInput => {
-                        vec![
-                            HintItem::new(key!(Enter), "send"),
-                            HintItem::new(key!(Esc), "back"),
-                        ]
-                    }
-                    PermissionFocus::Options => {
-                        use crate::input::key::KeyShortcut;
-                        use crossterm::event::{KeyCode, KeyModifiers};
-                        let n = perm.options.len().min(9) as u8;
-                        let last_ch = char::from(b'0' + n.max(1));
-                        let last_key = KeyShortcut::new(KeyCode::Char(last_ch), KeyModifiers::NONE);
-                        let mut hints = vec![HintItem::paired(key!('1'), last_key, "select")];
-                        if perm.has_adjustable_scope() {
-                            hints.push(HintItem::paired(key!(Left), key!(Right), "scope"));
-                        }
-                        if !perm.description.is_empty() {
-                            let label = if perm.args_expanded {
-                                "collapse"
-                            } else {
-                                "expand"
-                            };
-                            hints.push(HintItem::new(key!('f', CONTROL), label));
-                        }
-                        hints.push(HintItem::new(key!('o', CONTROL), "always-approve"));
-                        hints.push(HintItem::new(key!('c', CONTROL), "cancel"));
-                        hints
-                    }
-                }
-            } else {
-                vec![]
+        // Soft-park (no side panel) with plan approval holding the keys: paint
+        // real clickable footer CTAs so a draft never strands the user without
+        // mouse Approve/Quit. Otherwise the bar follows key_owner.
+        let soft_park_plan_ctas =
+            self.line_viewer.is_none() && matches!(self.key_owner(), KeyOwner::PlanApproval);
+        if soft_park_plan_ctas {
+            self.commit_parked_plan_card();
+            use crate::views::plan_approval_view::{
+                SoftParkCtaHovers, paint_soft_park_cta_buttons,
             };
-            ShortcutsBar::new(&hints)
-                .with_pending(pending_hint)
-                .render(layout.shortcuts, buf);
-        } else if self.plan_approval_view.is_some() {
-            // Soft-park (no side panel): always paint real clickable footer CTAs
-            // so a draft or Prompt focus never strands the user without mouse
-            // Approve/Quit. Panel open (`line_viewer`) paints its own footer.
-            let soft_park_no_panel = self.line_viewer.is_none();
-            if soft_park_no_panel {
-                // FileBacked: refresh soft-park transcript card from live plan.md
-                // while parked so dogfood does not show park-time freeze.
-                self.commit_parked_plan_card();
-                use crate::views::plan_approval_view::{
-                    SoftParkCtaHovers, paint_soft_park_cta_buttons,
-                };
-                let hovers = SoftParkCtaHovers {
-                    approve: self.hit_soft_park_ctas.approve.hovered,
-                    notes: self.hit_soft_park_ctas.notes.hovered,
-                    clarify: self.hit_soft_park_ctas.clarify.hovered,
-                    revise: self.hit_soft_park_ctas.revise.hovered,
-                    quit: self.hit_soft_park_ctas.quit.hovered,
-                };
-                let areas = paint_soft_park_cta_buttons(buf, layout.shortcuts, &theme, hovers);
-                self.hit_soft_park_ctas.apply_areas(areas);
-            } else {
-                self.hit_soft_park_ctas.clear();
-                if let Some(ref pav) = self.plan_approval_view {
-                    let hints = self.plan_approval_shortcut_hints(pav);
-                    if !hints.is_empty() {
-                        ShortcutsBar::new(&hints)
-                            .with_pending(pending_hint)
-                            .render(layout.shortcuts, buf);
-                    }
-                }
-            }
-        } else if self.line_viewer.is_some() && self.is_plan_viewer() {
-            let suppress_shortcuts = self
-                .line_viewer
-                .as_ref()
-                .is_some_and(|v| v.fullscreen && v.list_state.input_mode().is_some());
-            if !suppress_shortcuts {
-                use crate::views::shortcuts_bar::HintItem;
-                let hints = if self.is_casual_commenting() {
-                    vec![
-                        HintItem::new(key!(Enter), "save comment"),
-                        HintItem::new(key!(Esc), "cancel"),
-                    ]
-                } else {
-                    let mut h = vec![
-                        HintItem::new(key!('c'), "comment"),
-                        HintItem::new(key!('f', CONTROL), "fullscreen"),
-                    ];
-                    if !self.plan_comments.is_empty() {
-                        h.push(HintItem::new(key!('s'), "send"));
-                    }
-                    h.push(HintItem::new(key!(Esc), "close"));
-                    h
-                };
-                ShortcutsBar::new(&hints)
-                    .with_pending(pending_hint)
-                    .render(layout.shortcuts, buf);
-            }
-        } else if let Some(ref qv) = self.question_view {
-            use crate::views::question_view::QuestionFocus;
-            use crate::views::shortcuts_bar::HintItem;
-            let hints = match qv.focus {
-                QuestionFocus::InputMode => {
-                    if self.prompt.file_search_visible() {
-                        vec![
-                            HintItem::paired(key!(Up), key!(Down), "nav"),
-                            HintItem::new(key!(Tab), "accept"),
-                            HintItem::new(key!(Right), "drill"),
-                            HintItem::new(key!(Esc), "dismiss"),
-                        ]
-                    } else {
-                        vec![
-                            HintItem::new(key!(Enter), "submit"),
-                            HintItem::new(key!(Esc), "back"),
-                        ]
-                    }
-                }
-                QuestionFocus::Navigation => {
-                    vec![
-                        HintItem::new(key!(Esc), "unselect"),
-                        HintItem::new(key!(Tab), "scrollback"),
-                        HintItem::new(key!('X'), "dismiss"),
-                    ]
-                }
+            let hovers = SoftParkCtaHovers {
+                approve: self.hit_soft_park_ctas.approve.hovered,
+                notes: self.hit_soft_park_ctas.notes.hovered,
+                clarify: self.hit_soft_park_ctas.clarify.hovered,
+                revise: self.hit_soft_park_ctas.revise.hovered,
+                quit: self.hit_soft_park_ctas.quit.hovered,
             };
-            ShortcutsBar::new(&hints).render(layout.shortcuts, buf);
-        } else if self.cancel_turn_view.is_some() {
-            use crate::views::shortcuts_bar::HintItem;
-            let hints = vec![
-                HintItem::paired(key!('1'), key!('4'), "select"),
-                HintItem::new(key!(Enter), "confirm"),
-                HintItem::new(key!(Esc), "keep running"),
-                HintItem::new(key!(Tab), "scrollback"),
-            ];
-            ShortcutsBar::new(&hints)
-                .with_pending(pending_hint)
-                .render(layout.shortcuts, buf);
+            let areas = paint_soft_park_cta_buttons(buf, layout.shortcuts, &theme, hovers);
+            self.hit_soft_park_ctas.apply_areas(areas);
         } else {
-            let mut hints = self.normal_pane_hints(registry, esc_owned_before_agent);
-            if in_dashboard_overlay {
-                use crate::views::shortcuts_bar::HintItem;
-                hints.insert(
-                    0,
-                    HintItem::new(
-                        registry
-                            .find(ActionId::DashboardOverlayStop)
-                            .map(|def| def.default_key)
-                            .unwrap_or(key!('x', CONTROL)),
-                        "stop",
-                    ),
-                );
-                hints.insert(
-                    0,
-                    HintItem {
-                        keys: vec![key!('[', CONTROL), key!(']', CONTROL)],
-                        label: "agents".into(),
-                        custom_display: Some("Ctrl+[/]"),
-                        description: None,
-                        pinned: false,
-                    },
-                );
-                hints.insert(0, HintItem::new(key!('\\', CONTROL), "dashboard"));
+            if self.plan_approval_view.is_some() {
+                self.hit_soft_park_ctas.clear();
             }
-            let help_hint = registry.find(ActionId::ShortcutsHelp).map(|def| {
-                let mut hint = def.hint();
-                if in_dashboard_overlay
-                    && def.default_key == key!('x', CONTROL)
-                    && let Some(alt) = def.alt_keys.first()
-                {
-                    hint.keys = vec![*alt];
+            match self.shortcuts_bar_content(registry, esc_owned_before_agent) {
+                ShortcutsBarContent::Hidden => {}
+                ShortcutsBarContent::Surface(hints) => {
+                    ShortcutsBar::new(&hints)
+                        .with_pending(pending_hint)
+                        .render(layout.shortcuts, buf);
                 }
-                hint
-            });
-            ShortcutsBar::new(&hints)
-                .compact(5, help_hint)
-                .with_pending(pending_hint)
-                .render(layout.shortcuts, buf);
+                ShortcutsBarContent::Pane(hints) => {
+                    let help_hint = registry.find(ActionId::ShortcutsHelp).map(|def| {
+                        let mut hint = def.hint();
+                        if in_dashboard_overlay
+                            && def.default_key == key!('x', CONTROL)
+                            && let Some(alt) = def.alt_keys.first()
+                        {
+                            hint.keys = vec![*alt];
+                        }
+                        hint
+                    });
+                    ShortcutsBar::new(&hints)
+                        .compact(5, help_hint)
+                        .with_pending(pending_hint)
+                        .render(layout.shortcuts, buf);
+                }
+            }
         }
         let is_plan_viewer = self.is_plan_viewer();
         let has_plan_comments = !self.plan_comments.is_empty();
@@ -5139,9 +5120,9 @@ mod clear_done_and_limits_chrome_tests {
             }
 
             let buf = draw_hits(&mut agent);
-            let clear = agent.hit_todo_clear_done.rect.expect(&format!(
-                "{label_case} open + finished must register clear-finished hit"
-            ));
+            let clear = agent.hit_todo_clear_done.rect.unwrap_or_else(|| {
+                panic!("{label_case} open + finished must register clear-finished hit")
+            });
 
             assert!(
                 !agent.tasks.view_button_rects.is_empty(),

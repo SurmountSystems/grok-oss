@@ -460,10 +460,8 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
         if current.join(".git").exists() {
             return Some(current);
         }
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => return None,
-        }
+        let parent = current.parent()?;
+        current = parent.to_path_buf();
     }
 }
 

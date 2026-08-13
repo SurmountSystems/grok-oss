@@ -860,10 +860,12 @@ mod tests {
         // Recovery command must carry GROK_SCREEN_MODE so following the
         // hint after a failed `/fullscreen` does not reopen minimal/inline. The
         // explicit flag keeps the resume in the right mode if the env is dropped.
-        let cli = cli_hint_name();
+        // Hint strings hardcode the public `grok` resume command (not the
+        // running binary name); cli_hint_name is for other recovery copy.
+        let _cli = cli_hint_name();
         let full = screen_mode_relaunch_resume_hint("abc-sid", false);
         assert_eq!(
-            screen_mode_relaunch_resume_hint("abc-sid", false),
+            full,
             "GROK_SCREEN_MODE=fullscreen grok --fullscreen --resume abc-sid"
         );
         assert_eq!(

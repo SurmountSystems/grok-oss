@@ -34,7 +34,7 @@ use crate::session::{ExtMethodResult, SessionCommand};
 use xai_grok_telemetry::id::agent_id;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
-pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/session/rename" => handle_session_rename(agent, args).await,
         "x.ai/session/delete" => handle_session_delete(agent, args).await,

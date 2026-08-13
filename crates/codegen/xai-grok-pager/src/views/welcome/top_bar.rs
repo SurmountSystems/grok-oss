@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn location_line_branch_chrome_is_primary_white_not_dim() {
         let cwd = Path::new("/tmp/grok-theme-branch-chrome-test-cwd");
-        git_info::update_from_notification(cwd, Some("fix/interject-no-cancel"), None);
+        git_info::update_from_notification(cwd, Some("fix/interject-no-cancel"), None, false);
         let theme = Theme::doge();
         let line = location_line_at(&theme, cwd);
         let git = line

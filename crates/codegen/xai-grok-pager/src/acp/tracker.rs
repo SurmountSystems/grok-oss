@@ -358,6 +358,9 @@ pub struct AcpUpdateTracker {
     last_stream_start_ms: Option<i64>,
     /// Monotonic count of live parent-agent updates that changed scrollback.
     agent_output_epoch: u64,
+    /// Snapshot of [`Self::agent_output_epoch`] at the last turn finish (or
+    /// explicit snapshot). Used by [`Self::output_since_last_finish`].
+    epoch_at_last_finish: u64,
     /// Session project cwd for display-only redundant-`cd` stripping.
     /// Set from [`AgentSession::cwd`]; not used for execution.
     session_cwd: Option<PathBuf>,
@@ -479,6 +482,15 @@ impl AcpUpdateTracker {
     /// Current boundary for visible live parent-agent output.
     pub(crate) fn agent_output_epoch(&self) -> u64 {
         self.agent_output_epoch
+    }
+    /// True when parent-agent output landed since the last finish/snapshot.
+    pub(crate) fn output_since_last_finish(&self) -> bool {
+        self.agent_output_epoch != self.epoch_at_last_finish
+    }
+    /// Mark all output so far as accounted for without finishing the turn.
+    #[allow(dead_code)] // reserved for mid-turn epoch baselines (e.g. cancel reconcile)
+    pub(crate) fn snapshot_output_epoch(&mut self) {
+        self.epoch_at_last_finish = self.agent_output_epoch;
     }
     fn bump_agent_output_epoch(&mut self) {
         self.agent_output_epoch = self.agent_output_epoch.wrapping_add(1);
@@ -1000,6 +1012,7 @@ impl AcpUpdateTracker {
     }
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
+        self.epoch_at_last_finish = self.agent_output_epoch;
         self.finish_thinking(scrollback);
         if let Some(agent_id) = self.current_agent_msg.take() {
             scrollback.finish_running(agent_id);

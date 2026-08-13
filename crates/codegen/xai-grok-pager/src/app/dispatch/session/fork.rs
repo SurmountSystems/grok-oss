@@ -1,5 +1,6 @@
 //! Fork and project-selection dispatchers and fork placeholder builders.
 use super::lifecycle::{dispatch_new_session_inner_with_id, refuse_chat_mode_build_agent};
+use super::load::session_opens_as_chat;
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
@@ -520,10 +521,14 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
     code_restored: bool,
     restore_summary: Option<String>,
     restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
+    resume_session_id: Option<String>,
 ) -> Vec<Effect> {
     let session_id_str = session_id.0.to_string();
     let pending_entry = std::mem::take(&mut app.deferred_startup.pending_chat);
-    let agent_entry = app.agents.get(&agent_id).is_some_and(|a| a.chat_kind);
+    let agent_entry = app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|a| a.conversation_entry);
     let conversation_entry = pending_entry || agent_entry;
     if crate::app::session_startup::chat_mode_refuses_local_build_load(
         app.chat_mode,
@@ -534,6 +539,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         refuse_chat_mode_build_agent(app, agent_id);
         return vec![];
     }
+    let rename_entry = session_opens_as_chat(app, conversation_entry);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "WorktreeForked");
         agent.session.finish_command();
@@ -544,6 +550,11 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         agent.session.restore_degree = restore_degree;
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
+        // Worktree cwd is not the main-repo branch snapshot; clear sticky
+        // main-repo git chrome so status bar / dashboard don't lie.
+        agent.current_branch = None;
+        agent.main_repo = None;
+        agent.is_worktree = true;
         app.restore_code = None;
         agent.prompt.file_search.retarget(&session_cwd);
         agent.scrollback.push_block(RenderBlock::system(format!(
@@ -565,29 +576,42 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         }
         let effective_chat = conversation_entry || app.chat_mode;
         agent.chat_kind = effective_chat;
+        agent.conversation_entry = rename_entry;
         agent.apply_credit_balance(
             app.credit_balance.clone(),
             app.auto_topup.clone(),
             app.openrouter_credit_balance,
         );
-        return vec![Effect::LoadSession {
-            agent_id,
-            session_id: session_id_str,
-            session_cwd: Some(session_cwd),
-            chat_kind: conversation_entry,
-        }];
+    } else {
+        return vec![];
     }
-    vec![]
+    if let Some(resume_id) = resume_session_id.as_deref() {
+        crate::app::event_loop::retarget_suppress_code_restore(
+            app,
+            resume_id,
+            session_id_str.clone(),
+        );
+    }
+    vec![Effect::LoadSession {
+        agent_id,
+        session_id: session_id_str,
+        session_cwd: Some(session_cwd),
+        chat_kind: conversation_entry,
+    }]
 }
 pub(in crate::app::dispatch) fn handle_fork_session_ready(
     app: &mut AppView,
     agent_id: AgentId,
     new_session_id: acp::SessionId,
     cwd: std::path::PathBuf,
+    parent_session_id: acp::SessionId,
 ) -> Vec<Effect> {
     let session_id_str = new_session_id.0.to_string();
     let pending_entry = std::mem::take(&mut app.deferred_startup.pending_chat);
-    let agent_entry = app.agents.get(&agent_id).is_some_and(|a| a.chat_kind);
+    let agent_entry = app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|a| a.conversation_entry);
     let conversation_entry = pending_entry || agent_entry;
     if crate::app::session_startup::chat_mode_refuses_local_build_load(
         app.chat_mode,
@@ -598,6 +622,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         refuse_chat_mode_build_agent(app, agent_id);
         return vec![];
     }
+    let rename_entry = session_opens_as_chat(app, conversation_entry);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "ForkSessionReady");
         agent.session.finish_command();
@@ -608,14 +633,21 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         agent.session.cwd = cwd.clone();
         let effective_chat = conversation_entry || app.chat_mode;
         agent.chat_kind = effective_chat;
-        return vec![Effect::LoadSession {
-            agent_id,
-            session_id: session_id_str,
-            session_cwd: Some(cwd),
-            chat_kind: conversation_entry,
-        }];
+        agent.conversation_entry = rename_entry;
+    } else {
+        return vec![];
     }
-    vec![]
+    crate::app::event_loop::retarget_suppress_code_restore(
+        app,
+        parent_session_id.0.as_ref(),
+        session_id_str.clone(),
+    );
+    vec![Effect::LoadSession {
+        agent_id,
+        session_id: session_id_str,
+        session_cwd: Some(cwd),
+        chat_kind: conversation_entry,
+    }]
 }
 pub(in crate::app::dispatch) fn handle_fork_session_failed(
     app: &mut AppView,

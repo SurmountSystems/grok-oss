@@ -187,12 +187,23 @@ fn write_tmux_buffer(text: &str) -> bool {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         xai_tty_utils::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
         let mut child = cmd.spawn()?;
+        let group = xai_tty_utils::ProcessGroup::new().and_then(|mut group| {
+            group.attach_std(&child)?;
+            Ok(std::sync::Arc::new(group))
+        })?;
+        if !xai_tty_utils::global_process_scope().register(&group) {
+            let _ = group.kill();
+            let _ = child.wait();
+            return Err("process scope closed; tmux load-buffer aborted".into());
+        }
         // Bounded wait: a wedged tmux server must not freeze the UI thread.
         let status = xai_grok_shared::clipboard::wait_with_deadline(
             &mut child,
             std::time::Duration::from_secs(2),
         )?;
+        drop(group); // drop strong handle after reap so Weak cannot killpg a reused PID
         if !status.success() {
             return Err(format!("tmux load-buffer exited with {status}").into());
         }

@@ -256,7 +256,7 @@ fn capture_dir_json_snapshot(dir: &Path) -> Result<DirJsonSnapshot, HookWriteDen
         validate_direct_hook_json_file(&f)?;
         files.push(capture_path_identity(&f)?);
     }
-    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files.sort_by_key(|f| f.path.clone());
     Ok(DirJsonSnapshot {
         dir: dir.to_path_buf(),
         files,

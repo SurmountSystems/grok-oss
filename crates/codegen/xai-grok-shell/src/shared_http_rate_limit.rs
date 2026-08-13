@@ -154,9 +154,8 @@ mod tests {
             unsafe { std::env::remove_var(DISABLE_ENV) };
         }
         let out = f();
-        match prev {
-            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
-            None => {}
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(DISABLE_ENV, v) }
         }
         out
     }
@@ -339,6 +338,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // ENV_LOCK serializes kill-switch env across await
     async fn wait_before_http_respects_shared_cooldown() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os(DISABLE_ENV);

@@ -379,9 +379,9 @@ async fn handle_new_file_creation(
     }
     let tool_output_for_prompt = format!(
         "The file {} has been created successfully.",
-        &input.file_path
+        input.file_path
     );
-    let tool_output_for_prompt_concise = format!("The file {} has been created.", &input.file_path);
+    let tool_output_for_prompt_concise = format!("The file {} has been created.", input.file_path);
     let edits = vec![SearchReplaceEditDetail {
         old_string: input.old_string.clone(),
         old_line: 1,
@@ -731,18 +731,18 @@ async fn handle_replacement(
     let (tool_output_for_prompt, tool_output_for_prompt_concise) = if new_positions.len() == 1 {
         let default_msg = format!(
             "The file {} has been updated successfully.",
-            &input.file_path
+            input.file_path
         );
-        let concise_msg = format!("The file {} has been updated.", &input.file_path);
+        let concise_msg = format!("The file {} has been updated.", input.file_path);
         (default_msg, concise_msg)
     } else {
         let default_msg = format!(
             "The file {} has been updated. All occurrences were successfully replaced.",
-            &input.file_path
+            input.file_path
         );
         let concise_msg = format!(
             "The file {} has been updated. All occurrences were replaced.",
-            &input.file_path,
+            input.file_path,
         );
         (default_msg, concise_msg)
     };

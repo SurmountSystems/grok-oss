@@ -17,6 +17,7 @@
 //! independent of leader mode.
 
 use crate::app::actions::Action;
+use crate::slash::AppCtx;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::{ModeSupport, Remedy};
 
@@ -54,6 +55,12 @@ impl SlashCommand for DashboardCommand {
         ModeSupport::FullscreenOnly(Remedy::SwitchMode {
             why: "minimal is single-session",
         })
+    }
+
+    /// Hide from the dropdown in minimal mode (mode_support also refuses typed
+    /// `/dashboard` there). Feature-flag gating is external via the registry.
+    fn visible(&self, ctx: &AppCtx) -> bool {
+        !ctx.screen_mode.is_minimal()
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -108,6 +115,8 @@ mod tests {
             billing_surface_visible: true,
             workflows_available: true,
             screen_mode,
+            usage_command_visible: true,
+            current_title: None,
         };
         assert!(cmd.visible(&ctx(crate::app::ScreenMode::Fullscreen)));
         assert!(cmd.visible(&ctx(crate::app::ScreenMode::Inline)));

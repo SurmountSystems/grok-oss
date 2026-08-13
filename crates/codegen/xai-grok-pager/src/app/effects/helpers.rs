@@ -174,11 +174,25 @@ pub(crate) fn parse_session_load_running_prompt_id(
         .and_then(|v| v.as_str())
         .map(String::from)
 }
+
+/// CANONICAL wire parser for session `_meta["x.ai/schedulerBackgroundLoops"]`
+/// on `session/new` and `session/load`. Shared spelling with
+/// [`xai_grok_shell::session::handle::SCHEDULER_BACKGROUND_LOOPS_META_KEY`].
+pub(super) fn parse_scheduler_background_loops_meta(
+    resp_meta: Option<&acp::Meta>,
+) -> Option<bool> {
+    resp_meta
+        .and_then(|m| {
+            m.get(xai_grok_shell::session::handle::SCHEDULER_BACKGROUND_LOOPS_META_KEY)
+        })
+        .and_then(|v| v.as_bool())
+}
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
-fn is_disk_full_error(raw: &str) -> bool {
+pub(crate) fn is_disk_full_error(raw: &str) -> bool {
     raw.contains(xai_fast_worktree::OUT_OF_DISK_CONTEXT)
         || raw.contains(xai_fast_worktree::ENOSPC_OS_MESSAGE)
-        || raw.contains("Disk quota exceeded") || raw.contains("Out of disk space")
+        || raw.contains("Disk quota exceeded")
+        || raw.contains("Out of disk space")
 }
 /// Sanitize an error string before showing it to the user.
 ///
@@ -615,6 +629,7 @@ pub(super) fn parse_session_picker_entries(
                 branch,
                 repo_name,
                 worktree_label,
+                last_turn_summary: None,
                 card_detail: None,
             })
         })
@@ -655,6 +670,7 @@ pub(super) fn session_picker_entry_to_roster(
         model_id: e.model_id.clone(),
         yolo: false,
         activity: RosterActivity::Dormant,
+        last_turn_summary: None,
         resident: false,
         last_change_unix_ms: last_change.timestamp_millis(),
         origin: RosterOrigin {
