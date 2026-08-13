@@ -682,6 +682,10 @@ pub fn current_value_for(
             crate::appearance::cache::load_show_thinking_blocks(),
         )),
         // Live cache (like `show_thinking_blocks`).
+        "always_expand_thinking" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_always_expand_thinking(),
+        )),
+        // Live cache (like `show_thinking_blocks`).
         "group_tool_verbs" => Some(SettingValue::Bool(
             crate::appearance::cache::load_group_tool_verbs(),
         )),
@@ -1193,6 +1197,14 @@ mod tests {
                         *default,
                         ui.show_thinking_blocks.unwrap_or(true),
                         "show_thinking_blocks default drifts from UiConfig::default()"
+                    );
+                }
+                // always_expand_thinking: Option<bool>; None → false (client default).
+                ("always_expand_thinking", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.always_expand_thinking.unwrap_or(false),
+                        "always_expand_thinking default drifts from UiConfig::default()"
                     );
                 }
                 // group_tool_verbs: Option<bool>; None → true (client default).

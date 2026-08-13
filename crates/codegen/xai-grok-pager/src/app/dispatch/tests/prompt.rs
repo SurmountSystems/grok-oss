@@ -1084,6 +1084,79 @@ fn send_prompt_while_running_queues_without_drain() {
     assert_eq!(q[0].text, "queued");
 }
 
+/// Contract: send while busy must produce immediate visible feedback so the
+/// composer clear never feels like a void swallow. Toast "Queued" always;
+/// held_queue_count must be non-zero mid-generation (not only on sendable wait).
+#[test]
+fn send_while_busy_acks_with_queued_toast_and_held_count() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+    // Composer draft as if the operator typed then pressed Enter.
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_text("follow up while busy");
+
+    let _ = dispatch(Action::SendPrompt("follow up while busy".into()), &mut app);
+
+    let agent = &app.agents[&id];
+    assert!(
+        agent.prompt.text().is_empty(),
+        "composer must clear on queue"
+    );
+    let toast = agent
+        .toast
+        .as_ref()
+        .map(|(msg, _)| msg.as_str())
+        .unwrap_or("");
+    assert!(
+        toast.contains("Queued"),
+        "busy queue must toast Queued immediately, got {toast:?}"
+    );
+    assert!(
+        agent.held_queue_count() > 0,
+        "mid-generation held count must be non-zero so status can show N queued"
+    );
+    assert!(
+        agent.has_held_user_queue(),
+        "optimistic server echo must occupy the held queue"
+    );
+}
+
+/// Local (non-immediate) mid-turn enqueue path also toasts — FIFO behind an
+/// older local row still must not feel swallowed.
+#[test]
+fn send_while_running_local_path_acks_queued_toast() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.enqueue_prompt("two".into());
+    }
+
+    let _ = dispatch(Action::SendPrompt("three".into()), &mut app);
+
+    let agent = &app.agents[&id];
+    assert_eq!(agent.session.pending_prompts.len(), 2);
+    let toast = agent
+        .toast
+        .as_ref()
+        .map(|(msg, _)| msg.as_str())
+        .unwrap_or("");
+    assert!(
+        toast.contains("Queued"),
+        "local mid-turn queue must toast Queued, got {toast:?}"
+    );
+    assert!(
+        agent.held_queue_count() >= 2,
+        "local mid-turn rows must feed held_queue_count, got {}",
+        agent.held_queue_count()
+    );
+}
+
 /// Regression (queue reorder race): a plain prompt typed while a turn is
 /// running must NOT jump onto the server queue when an older prompt is still
 /// waiting in the local drip-feed queue — e.g. prompts queued during

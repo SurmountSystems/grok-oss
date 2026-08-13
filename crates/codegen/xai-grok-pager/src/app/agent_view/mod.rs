@@ -518,7 +518,11 @@ const MODE_BANNER_TOTAL_TICKS: u8 = 69;
 const MODE_BANNER_FADE_TICKS: u8 = 9;
 /// Whether `Event::Paste(text)` should probe the clipboard for image
 /// bytes / a file reference. See [`crate::clipboard::paste_payload_needs_clipboard_attachment_probe`].
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+///
+/// Runs on every OS: terminals often deliver Ctrl+V as bracketed paste rather
+/// than a key event (especially Linux Wayland). Otty IME origin gating lives
+/// in the off-thread probe (`ProbeClipboardAttachment`), not here — so short
+/// IME commits still do not attach an unrelated clipboard image.
 pub(super) fn bracketed_paste_should_probe(text: &str) -> bool {
     crate::clipboard::paste_payload_needs_clipboard_attachment_probe(text)
 }
@@ -1049,9 +1053,19 @@ pub struct AgentView {
     /// error, rate_limit, end_turn, …). `cancelled` leaves the flag false so
     /// Esc cancel-resume markers still auto-start. Also gates dropping **stale**
     /// `canceled_turn_resume.json` after a finished primary (rebuild/reopen
-    /// must not re-fire a completed prompt). Cleared when a resumable user
-    /// prompt is applied during replay. Reset at every load window start.
+    /// must not re-fire a **successful** completed prompt). Cleared when a
+    /// resumable user prompt is applied during replay. Reset at every load
+    /// window start.
     pub(crate) last_primary_user_turn_completed_in_replay: bool,
+    /// During load replay, true when the most recent primary-user turn ended
+    /// with durable `stop_reason == "error"` (API failure, Internal error,
+    /// 403 mapped as turn failure, …). Distinct from clean success: session
+    /// load / rebuild relaunch **auto-resumes** the last user prompt for
+    /// error-class terminals (operator contract: do not leave the session
+    /// quiet with only the yellow error lines). Not set for `rate_limit`
+    /// (dedicated paywall UX) or user `cancelled`. Reset with the completed
+    /// flag at every load window start.
+    pub(crate) last_primary_user_turn_failed_in_replay: bool,
     pub active_pane: AgentPane,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
@@ -1534,6 +1548,19 @@ pub struct AgentView {
     /// The cycle logic uses `plan_mode_pending.unwrap_or(plan_mode_active)`
     /// so rapid Shift+Tab presses advance correctly without waiting for ACP.
     pub(crate) plan_mode_pending: Option<bool>,
+    /// After a decisive Approve / Quit, suppress idle / draw / `/view-plan`
+    /// re-park of decision CTAs for the same plan. Cleared only on a new
+    /// `exit_plan_mode` soft-park present. Stops dogfood where
+    /// `CurrentModeUpdate` clears `plan_mode_pending` while plan mode is still
+    /// active (or disk still has `plan.md` with "approved and implemented")
+    /// and turn-end re-arms Approve for a plan the operator already decided.
+    pub(crate) plan_decision_resolved: bool,
+    /// After decisive Revise / Clarify unparks, suppress idle "Plan written.
+    /// Click or /view-plan" status and local idle decision re-park until a new
+    /// `exit_plan_mode` present re-arms CTAs. Status paints "Revising plan..."
+    /// or "Waiting for updated plan..." instead (P2 continuous revise loop).
+    pub(crate) plan_feedback_in_flight:
+        Option<crate::views::plan_approval_view::PlanFeedbackInFlight>,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).

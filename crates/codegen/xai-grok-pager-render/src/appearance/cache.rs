@@ -39,6 +39,8 @@ const SIMPLE_MODE_DEFAULT: bool = true;
 /// Vim-mode scrollback default — matches the previous on-disk default.
 const VIM_MODE_DEFAULT: bool = false;
 const SHOW_THINKING_BLOCKS_DEFAULT: bool = true;
+/// Keep thinking fully expanded by default — off (collapsed on finish).
+const ALWAYS_EXPAND_THINKING_DEFAULT: bool = false;
 const GROUP_TOOL_VERBS_DEFAULT: bool = true;
 /// Collapsed-Edit-blocks rollout flag defaults OFF (legacy expanded diffs).
 const COLLAPSED_EDIT_BLOCKS_DEFAULT: bool = false;
@@ -320,6 +322,37 @@ pub fn load_show_thinking_blocks() -> bool {
 pub fn set_show_thinking_blocks(enabled: bool) {
     SHOW_THINKING_BLOCKS_CURRENT.with(|c| c.set(enabled));
     SHOW_THINKING_BLOCKS_LOADED.with(|l| l.set(true));
+}
+
+// -- Always expand thinking ---------------------------------------------------
+
+thread_local! {
+    static ALWAYS_EXPAND_THINKING_CURRENT: Cell<bool> =
+        const { Cell::new(ALWAYS_EXPAND_THINKING_DEFAULT) };
+    static ALWAYS_EXPAND_THINKING_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read cached `always_expand_thinking`, seeding from `[ui]` on first call.
+/// Default OFF when unset. Startup may override via resolve.
+pub fn load_always_expand_thinking() -> bool {
+    ALWAYS_EXPAND_THINKING_LOADED.with(|loaded| {
+        if !loaded.get() {
+            ALWAYS_EXPAND_THINKING_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "always_expand_thinking",
+                    ALWAYS_EXPAND_THINKING_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    ALWAYS_EXPAND_THINKING_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `always_expand_thinking`.
+pub fn set_always_expand_thinking(enabled: bool) {
+    ALWAYS_EXPAND_THINKING_CURRENT.with(|c| c.set(enabled));
+    ALWAYS_EXPAND_THINKING_LOADED.with(|l| l.set(true));
 }
 
 // -- Group tool verbs ---------------------------------------------------------
@@ -716,6 +749,7 @@ pub fn prime(ui: &UiConfig) {
     let _ = load_scroll_lines();
     let _ = load_render_mermaid();
     let _ = load_show_thinking_blocks();
+    let _ = load_always_expand_thinking();
     let _ = load_group_tool_verbs();
     let _ = load_collapsed_edit_blocks();
     let _ = load_prompt_suggestions();
@@ -831,6 +865,11 @@ mod tests {
             SHOW_THINKING_BLOCKS_DEFAULT,
             ui.show_thinking_blocks
                 .unwrap_or(SHOW_THINKING_BLOCKS_DEFAULT)
+        );
+        assert_eq!(
+            ALWAYS_EXPAND_THINKING_DEFAULT,
+            ui.always_expand_thinking
+                .unwrap_or(ALWAYS_EXPAND_THINKING_DEFAULT)
         );
         assert_eq!(
             GROUP_TOOL_VERBS_DEFAULT,
@@ -958,6 +997,18 @@ mod tests {
             assert!(!load_show_thinking_blocks());
             set_show_thinking_blocks(true);
             assert!(load_show_thinking_blocks());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn set_then_load_round_trips_always_expand_thinking() {
+        std::thread::spawn(|| {
+            set_always_expand_thinking(true);
+            assert!(load_always_expand_thinking());
+            set_always_expand_thinking(false);
+            assert!(!load_always_expand_thinking());
         })
         .join()
         .unwrap();

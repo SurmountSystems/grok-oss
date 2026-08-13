@@ -279,17 +279,31 @@ impl AgentView {
     /// paths get inserted as decoded absolute path text.
     ///
     /// Route a popup pane's `Event::Paste(text)` through the drop
-    /// classifier and fall back to a plain text paste into the shared
-    /// prompt buffer. Used by the plan-feedback, permission-followup,
-    /// plan-approval, and question-view paste arms — all of which share
-    /// the same prompt widget as the main Prompt pane and need identical
-    /// classifier semantics.
+    /// classifier, then the same clipboard-attachment probe as the main
+    /// Prompt pane, then plain text. Used by the plan-feedback,
+    /// permission-followup, plan-approval, and question-view paste arms —
+    /// all share the prompt widget and must accept screenshot pastes the
+    /// same way as the main composer.
     pub(super) fn route_popup_paste(&mut self, text: &str) -> InputOutcome {
         if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
             return outcome;
         }
-        let _ = self.prompt.handle_paste(text);
-        InputOutcome::Changed
+        let attachment_change_count = if super::bracketed_paste_should_probe(text) {
+            crate::clipboard::attachment_probe_gate(Some(text))
+        } else {
+            None
+        };
+        let (outcome, synchronous_text_insertion) = self.insert_bracketed_prompt_text(text);
+        if let Some(change_count) = attachment_change_count {
+            self.enqueue_clipboard_attachment_probe(
+                crate::app::actions::ClipboardPasteSource::BracketedInserted {
+                    text: text.to_owned(),
+                    insertion: synchronous_text_insertion,
+                },
+                change_count,
+            );
+        }
+        outcome
     }
     /// Returns redraw and completion outcomes only when at least one path resolves.
     ///
@@ -2265,8 +2279,10 @@ pub(super) mod paste_key_tests {
         );
     }
     /// Regression: an IME commit delivered as bracketed paste (Otty)
-    /// must not attach the unrelated clipboard image.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    /// must stamp a bracketed source so the off-thread probe can verify
+    /// payload origin and drop an unrelated clipboard image. Runs on every
+    /// OS — agent `Event::Paste` must enqueue the probe on Linux too
+    /// (terminals often deliver Ctrl+V as bracketed paste, not a key event).
     #[test]
     fn agent_bracketed_paste_stamps_ctx_bracketed() {
         let mut agent = make_agent();
@@ -2290,6 +2306,89 @@ pub(super) mod paste_key_tests {
         );
         assert_eq!(agent.prompt.text(), "中");
     }
+
+    /// Pure clipboard image (screenshot "Copy to Clipboard"): terminal
+    /// delivers empty bracketed paste. Agent must still defer an attachment
+    /// probe so completion can insert `[Image #N]` with real bytes.
+    #[test]
+    fn agent_empty_bracketed_paste_defers_probe_for_clipboard_image() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let registry = ActionRegistry::defaults();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let outcome = agent.handle_input(&Event::Paste(String::new()), &registry);
+        let calls = crate::clipboard::clipboard_probe_call_count();
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Unchanged),
+            "empty paste must not error; got {outcome:?}"
+        );
+        assert_eq!(calls, 0, "probe must NOT run inline on the event loop");
+        let ctx = ctx.expect(
+            "empty Event::Paste with a raster on the pasteboard must enqueue \
+             ProbeClipboardAttachment on every OS (screenshot path)",
+        );
+        assert!(
+            ctx.source.is_bracketed(),
+            "empty bracketed paste must stamp bracketed source for Otty origin gate"
+        );
+        assert_eq!(ctx.source.text(), Some(""));
+        assert!(
+            agent.prompt.images.is_empty(),
+            "chip attaches on completion, not inline"
+        );
+    }
+
+    /// Path paste of a real PNG must put loadable image bytes on the prompt
+    /// so send builds a `ContentBlock::Image` (not a path-only card).
+    #[test]
+    fn agent_path_paste_png_attaches_bytes_for_send() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Spaces in the name match GNOME Screenshots default filenames.
+        let png_path = dir.path().join("Screenshot From 2026-08-09.png");
+        // Minimal valid 8×8 grayscale PNG (same fixture shape as e2e).
+        const PNG_8X8_GRAY: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x08, 0x00, 0x00, 0x00,
+            0x00, 0xe1, 0x64, 0xe1, 0x57, 0x00, 0x00, 0x00, 0x0e, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0x68, 0x80, 0x02, 0x06, 0xca, 0x18, 0x00, 0x80, 0x84, 0x20, 0x01, 0x0d,
+            0x80, 0x24, 0x61, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60,
+            0x82,
+        ];
+        std::fs::write(&png_path, PNG_8X8_GRAY).expect("write png");
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let registry = ActionRegistry::defaults();
+        let paste = png_path.display().to_string();
+        let outcome = agent.handle_input(&Event::Paste(paste), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "path paste must attach; got {outcome:?}"
+        );
+        assert_eq!(
+            agent.prompt.images.len(),
+            1,
+            "PNG path paste must create one image chip"
+        );
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "chip placeholder must be in the prompt text: {:?}",
+            agent.prompt.text()
+        );
+        let images = agent.prompt.drain_images();
+        let text = agent.prompt.text().to_string();
+        let blocks = crate::prompt_images::build_content_blocks_with_workspace(text, images, None);
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, agent_client_protocol::ContentBlock::Image(ic) if !ic.data.is_empty())),
+            "path-pasted PNG must produce non-empty Image content for the model; blocks={blocks:?}"
+        );
+    }
+
     #[test]
     fn agent_empty_paste_key_defers_probe() {
         let mut agent = make_agent();

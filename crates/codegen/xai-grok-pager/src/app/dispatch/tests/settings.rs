@@ -1876,6 +1876,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "show_thinking_blocks" => {
             let _ = dispatch(Action::SetShowThinkingBlocks(true), app);
         }
+        "always_expand_thinking" => {
+            let _ = dispatch(Action::SetAlwaysExpandThinking(true), app);
+        }
         "group_tool_verbs" => {
             let _ = dispatch(Action::SetGroupToolVerbs(false), app);
         }
@@ -2550,6 +2553,55 @@ fn set_show_thinking_blocks_applies_persists_and_rolls_back() {
         crate::appearance::cache::load_show_thinking_blocks(),
         "rollback must restore cache",
     );
+}
+#[test]
+fn set_always_expand_thinking_applies_persists_and_rolls_back() {
+    crate::appearance::cache::set_always_expand_thinking(false);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PersistSetting {
+                key: "always_expand_thinking",
+                value: crate::settings::SettingValue::Bool(true),
+                rollback_value: crate::settings::SettingValue::Bool(false),
+            }]
+        ),
+        "expected exactly one PersistSetting effect, got {effects:?}",
+    );
+    assert!(crate::appearance::cache::load_always_expand_thinking());
+    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
+    assert!(effects.is_empty(), "redundant set must be a no-op");
+    let _ = apply_setting_rollback(
+        &mut app,
+        "always_expand_thinking",
+        &crate::settings::SettingValue::Bool(false),
+    );
+    assert!(
+        !crate::appearance::cache::load_always_expand_thinking(),
+        "rollback must restore cache",
+    );
+}
+#[test]
+fn set_always_expand_thinking_expands_existing_thinking() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::types::DisplayMode;
+    crate::appearance::cache::set_always_expand_thinking(false);
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::thinking("collapsed-until-setting"));
+    agent.scrollback.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
+    let _ = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
+    assert_eq!(
+        agent.scrollback.get_by_id(id).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "turning always_expand_thinking on must expand existing thinking"
+    );
+    crate::appearance::cache::set_always_expand_thinking(false);
 }
 #[test]
 fn set_group_tool_verbs_applies_persists_and_rolls_back() {

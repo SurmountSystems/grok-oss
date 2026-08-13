@@ -68,24 +68,52 @@ fn cursor_filter_in_plan_mode_keeps_writes_and_shows_create_plan() {
     assert!(kept.contains(&"Grep"));
     assert!(kept.contains(&"CreatePlan"));
     assert!(kept.contains(&"SwitchMode"));
+    // Cursor AskQuestion is a different surface; only the grok questionnaire
+    // names are stripped (see is_plan_mode_blocked_ask_user_tool_name).
     assert!(kept.contains(&"AskQuestion"));
     assert!(kept.contains(&"Write"));
     assert!(kept.contains(&"StrReplace"));
 }
+/// Plan mode must hard-strip `ask_user_question` from the advertised tool list.
+/// Soft prompt bans alone left the tool available and models still opened
+/// multi-choice plan questionnaires.
 #[test]
-fn cursor_filter_is_noop_for_non_cursor_tools() {
+fn plan_mode_tool_list_omits_ask_user_question() {
     let defs = vec![
         fn_def("read_file"),
         fn_def("search_replace"),
         fn_def("write"),
         fn_def("ask_user_question"),
+        fn_def("AskUserQuestion"),
+        fn_def("AskUser"),
         fn_def("enter_plan_mode"),
         fn_def("exit_plan_mode"),
     ];
     let in_plan = filter_cursor_tools_by_plan_mode(defs.clone(), true);
     let out_of_plan = filter_cursor_tools_by_plan_mode(defs.clone(), false);
-    assert_eq!(names(&in_plan).len(), defs.len());
-    assert_eq!(names(&out_of_plan).len(), defs.len());
+    let in_names = names(&in_plan);
+    assert!(
+        !in_names.contains(&"ask_user_question"),
+        "plan mode must not advertise ask_user_question: {in_names:?}"
+    );
+    assert!(!in_names.contains(&"AskUserQuestion"));
+    assert!(!in_names.contains(&"AskUser"));
+    assert!(in_names.contains(&"read_file"));
+    assert!(in_names.contains(&"exit_plan_mode"));
+    assert!(in_names.contains(&"search_replace"));
+    // Outside plan mode the questionnaire stays available (non-plan use).
+    let out_names = names(&out_of_plan);
+    assert_eq!(out_names.len(), defs.len());
+    assert!(out_names.contains(&"ask_user_question"));
+}
+#[test]
+fn plan_mode_blocked_ask_user_name_matcher() {
+    assert!(is_plan_mode_blocked_ask_user_tool_name("ask_user_question"));
+    assert!(is_plan_mode_blocked_ask_user_tool_name("AskUserQuestion"));
+    assert!(is_plan_mode_blocked_ask_user_tool_name("AskUser"));
+    assert!(!is_plan_mode_blocked_ask_user_tool_name("exit_plan_mode"));
+    assert!(!is_plan_mode_blocked_ask_user_tool_name("AskQuestion"));
+    assert!(!is_plan_mode_blocked_ask_user_tool_name("read_file"));
 }
 /// Pins the `reconcile_plan_mode_with_prompt` transitions:
 /// Plan → Pending, idempotent, non-plan modes exit cleanly.

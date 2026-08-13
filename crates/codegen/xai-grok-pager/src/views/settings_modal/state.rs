@@ -870,6 +870,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
         }
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
+        "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),

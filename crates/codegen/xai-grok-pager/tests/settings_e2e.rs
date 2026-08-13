@@ -62,6 +62,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "auto_update",
     "fork_secondary_model",
     "show_thinking_blocks",
+    "always_expand_thinking",
     "prompt_suggestions",
     "auto_run_implement",
     "economic_mode",
@@ -325,6 +326,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetShowThinkingBlocks value differs from expected"
+            )
+        }
+        ("always_expand_thinking", Action::SetAlwaysExpandThinking(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetAlwaysExpandThinking value differs from expected"
             )
         }
         ("prompt_suggestions", Action::SetPromptSuggestions(b)) => {
@@ -1933,6 +1940,7 @@ fn registry_kind_membership_through_pr_14() {
             "respect_manual_folds",
             "bubble_copy_buttons",
             "show_thinking_blocks",
+            "always_expand_thinking",
             "show_timeline",
             "show_timestamps",
             "page_flip_on_send",
@@ -2143,6 +2151,7 @@ fn defaults_round_trip_through_registry() {
             "auto_update" => SettingValue::Bool(true),
             "fork_secondary_model" => SettingValue::String(String::new()),
             "show_thinking_blocks" => SettingValue::Bool(true),
+            "always_expand_thinking" => SettingValue::Bool(false),
             "prompt_suggestions" => SettingValue::Bool(true),
             "auto_run_implement" => SettingValue::Bool(true),
             "economic_mode" => SettingValue::Bool(true),
@@ -2243,6 +2252,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetAutoUpdate(_))
             | SettingsKeyOutcome::Action(Action::SetRespectManualFolds(_))
             | SettingsKeyOutcome::Action(Action::SetShowThinkingBlocks(_))
+            | SettingsKeyOutcome::Action(Action::SetAlwaysExpandThinking(_))
             | SettingsKeyOutcome::Action(Action::SetPromptSuggestions(_))
             | SettingsKeyOutcome::Action(Action::SetAutoRunImplement(_))
             | SettingsKeyOutcome::Action(Action::SetEconomicMode(_))
@@ -7600,7 +7610,8 @@ fn show_thinking_blocks_renders_under_appearance_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for show_thinking_blocks, got {other:?}"),
     }
-    // Must sit immediately above respect_manual_folds in the registry order.
+    // always_expand_thinking sits between show_thinking_blocks and
+    // respect_manual_folds in Appearance order.
     let keys: Vec<&str> = reg
         .all()
         .iter()
@@ -7611,16 +7622,45 @@ fn show_thinking_blocks_renders_under_appearance_category_shell_owned() {
         .iter()
         .position(|k| *k == "show_thinking_blocks")
         .expect("show_thinking_blocks in Appearance");
+    let always_idx = keys
+        .iter()
+        .position(|k| *k == "always_expand_thinking")
+        .expect("always_expand_thinking in Appearance");
     let respect_idx = keys
         .iter()
         .position(|k| *k == "respect_manual_folds")
         .expect("respect_manual_folds in Appearance");
     assert_eq!(
         show_idx + 1,
-        respect_idx,
-        "show_thinking_blocks must be immediately above respect_manual_folds; \
+        always_idx,
+        "always_expand_thinking must follow show_thinking_blocks; \
          Appearance order: {keys:?}"
     );
+    assert_eq!(
+        always_idx + 1,
+        respect_idx,
+        "always_expand_thinking must sit immediately above respect_manual_folds; \
+         Appearance order: {keys:?}"
+    );
+    let always_meta = reg
+        .find("always_expand_thinking")
+        .expect("always_expand_thinking must be registered");
+    assert_eq!(always_meta.category, SettingCategory::Appearance);
+    assert_eq!(always_meta.owner, SettingOwner::Shell);
+    match &always_meta.kind {
+        SettingKind::Bool { default } => assert!(!*default, "always expand default must be false"),
+        other => panic!("expected Bool kind for always_expand_thinking, got {other:?}"),
+    }
+}
+
+#[test]
+fn always_expand_thinking_space_dispatches_typed_setter() {
+    xai_grok_pager::appearance::cache::set_always_expand_thinking(false);
+    let mut s = make_state();
+    navigate_to(&mut s, "always_expand_thinking");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "always_expand_thinking", true);
+    xai_grok_pager::appearance::cache::set_always_expand_thinking(false);
 }
 
 // ---------------------------------------------------------------------------

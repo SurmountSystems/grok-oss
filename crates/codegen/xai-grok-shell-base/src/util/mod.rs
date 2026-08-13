@@ -196,14 +196,26 @@ pub enum KillSignal {
     Term,
     /// Forceful `SIGKILL` (Unix) — unblockable escalation.
     Kill,
+    /// Cooperative rebuild relaunch (`SIGUSR1` on Unix). Peers that installed
+    /// the product signal handler re-exec onto the newly installed binary;
+    /// processes without a handler get the default terminate disposition.
+    /// On Windows this maps to the same forceful terminate as `Term`/`Kill`.
+    User1,
 }
 /// Terminate a process by PID with `SIGTERM`. Idempotent: already-dead is `Ok`.
 pub fn kill_process_by_pid(pid: u32) -> std::io::Result<()> {
     kill_process_with_signal(pid, KillSignal::Term)
 }
+/// Ask a live product process to pick up a rebuild (Unix `SIGUSR1`).
+///
+/// Idempotent: already-dead is `Ok`. Pairs with
+/// [`is_grok_process`] so callers only nudge product PIDs.
+pub fn signal_process_rebuild_relaunch(pid: u32) -> std::io::Result<()> {
+    kill_process_with_signal(pid, KillSignal::User1)
+}
 /// Terminate a process by PID with a chosen signal. Idempotent: already-dead is `Ok`.
 ///
-/// - Unix: `SIGTERM`/`SIGKILL` via `nix::sys::signal::kill`; ESRCH maps to `Ok`.
+/// - Unix: `SIGTERM`/`SIGKILL`/`SIGUSR1` via `nix::sys::signal::kill`; ESRCH maps to `Ok`.
 /// - Windows: `OpenProcess(PROCESS_TERMINATE)` + `TerminateProcess` (already
 ///   forceful, so `signal` is ignored); ERROR_INVALID_PARAMETER maps to `Ok`.
 pub fn kill_process_with_signal(pid: u32, signal: KillSignal) -> std::io::Result<()> {
@@ -215,6 +227,7 @@ pub fn kill_process_with_signal(pid: u32, signal: KillSignal) -> std::io::Result
         let sig = match signal {
             KillSignal::Term => Signal::SIGTERM,
             KillSignal::Kill => Signal::SIGKILL,
+            KillSignal::User1 => Signal::SIGUSR1,
         };
         match kill(Pid::from_raw(pid as i32), sig) {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),

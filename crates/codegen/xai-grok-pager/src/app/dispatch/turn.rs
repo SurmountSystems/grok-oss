@@ -378,7 +378,9 @@ pub(super) fn write_cancel_resume_marker_for_session(session: &crate::app::agent
     }
 }
 
-/// Clear durable cancel-resume for this session (error terminal / last child).
+/// Clear durable cancel-resume for this session (rate-limit terminal, clean
+/// success, explicit idle clear). **Not** error terminals: error keeps the
+/// marker so reopen auto-resumes failed work.
 pub(super) fn clear_cancel_resume_marker_for_session(session: &crate::app::agent::AgentSession) {
     let Some(sid) = session.session_id.as_ref().map(|s| s.0.to_string()) else {
         return;
@@ -387,7 +389,7 @@ pub(super) fn clear_cancel_resume_marker_for_session(session: &crate::app::agent
     let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd, &sid);
     tracing::info!(
         session = %sid,
-        "canceled_turn_resume: cleared (error terminal or explicit idle clear)"
+        "canceled_turn_resume: cleared (rate-limit, clean success, or explicit idle clear)"
     );
 }
 
@@ -408,7 +410,7 @@ pub(super) fn finalize_cancel_resume_after_successful_turn(
         return;
     };
     let cwd = agent.session.cwd.to_string_lossy().into_owned();
-    if agent.holds_queue_for_background() {
+    if agent.has_live_background_subagents() {
         let Some(text) = kept_prompt_text.map(str::trim).filter(|t| !t.is_empty()) else {
             tracing::info!(
                 session = %sid,
@@ -889,6 +891,12 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         agent.activity_started_at = None;
         agent.last_activity = None;
         drain_permission_queue(agent);
+        // Mirror PromptResponse turn-end: keep live soft-park; surface local
+        // idle decision CTAs when plan mode is still on without a reverse-request.
+        // Without this, lost-RPC reconcile left dogfood on "Plan written" +
+        // view-only `c comment` with no Approve/Revise.
+        agent.dismiss_plan_approval_after_turn_if_stale();
+        agent.surface_idle_plan_review_if_needed();
         agent.cancel_turn_view = None;
         agent.cancel_turn_buttons.clear();
         if agent.bash_turn {
@@ -924,15 +932,53 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
                 cancel_resume_keep_pid.as_deref(),
             );
         } else if !was_cancelling
-            && matches!(pending.stop_reason.as_deref(), Some("error" | "rate_limit"))
+            && matches!(pending.stop_reason.as_deref(), Some("rate_limit"))
             && agent.session.current_prompt_id.is_none()
-            && !agent.holds_queue_for_background()
+            && !agent.has_live_background_subagents()
         {
-            // Error / rate-limit terminal: drop the eager turn-start marker so
-            // reopen/`/rebuild` does not re-fire a failed prompt (dogfood:
-            // flat-poll block re-sent "??? [Image #1]" on every rebuild).
-            // User cancel leaves the marker on purpose (`was_cancelling`).
+            // Rate-limit terminal: drop the eager turn-start marker (dedicated
+            // paywall / retry UX owns the next step). User cancel leaves the
+            // marker (`was_cancelling`). Error terminals re-arm below.
             clear_cancel_resume_marker_for_session(&agent.session);
+        } else if !was_cancelling
+            && matches!(pending.stop_reason.as_deref(), Some("error"))
+            && agent.session.current_prompt_id.is_none()
+        {
+            // Error terminal: ensure marker on disk (reopen / rebuild auto-
+            // resume). Prefer kept whole-turn text; history recovery still
+            // covers no-marker sessions via durable stop_reason error.
+            if let Some(text) = cancel_resume_keep_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Some(marker) =
+                    xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+                        text,
+                        cancel_resume_keep_pid.as_deref(),
+                        now,
+                    )
+                {
+                    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+                    if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.as_ref()) {
+                        match xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+                            &cwd, sid, &marker,
+                        ) {
+                            Ok(()) => tracing::info!(
+                                session = %sid,
+                                prompt_len = text.len(),
+                                "canceled_turn_resume: marker written (error terminal reconcile)"
+                            ),
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                session = %sid,
+                                "canceled_turn_resume: error-terminal reconcile write failed"
+                            ),
+                        }
+                    }
+                }
+            }
         }
         let soft_stop_toast = app.soft_stop.on_top_level_turn_finished();
         let block_drain = app.soft_stop.blocks_drain() || app.global_work_pause.is_active();

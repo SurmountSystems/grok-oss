@@ -48,10 +48,14 @@ pub(crate) fn set_quit_notify(notify: std::sync::Arc<tokio::sync::Notify>) {
     *QUIT_NOTIFY.lock() = Some(notify);
 }
 
-/// Deregister the quit notify once the event loop has exited; a later first
-/// signal force-exits instead of notifying nobody.
-pub(crate) fn clear_quit_notify() {
-    *QUIT_NOTIFY.lock() = None;
+/// Set when `SIGUSR1` asks this TUI to re-exec onto a newly installed binary
+/// (peer of a `/rebuild` / `grok-oss rebuild` on another process). The event
+/// loop reads the rebuild request file and arms `rebuild_relaunch` before quit.
+static PEER_REBUILD_RELAUNCH: AtomicBool = AtomicBool::new(false);
+
+/// Consume the peer-rebuild flag (true once after `SIGUSR1` until taken).
+pub(crate) fn take_peer_rebuild_relaunch() -> bool {
+    PEER_REBUILD_RELAUNCH.swap(false, Ordering::AcqRel)
 }
 
 /// Whether the TUI currently owns the terminal. Set by [`install`], cleared
@@ -87,6 +91,19 @@ pub(crate) fn mark_restored() {
 }
 
 fn spawn_async_signal_task() {
+    // Cooperative rebuild peer path: SIGUSR1 does not count as the first
+    // terminate signal (so a later SIGTERM can still force-exit). It arms
+    // peer re-exec and notifies the same graceful quit as SIGTERM.
+    #[cfg(unix)]
+    tokio::spawn(async {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigusr1 = signal(SignalKind::user_defined1()).ok();
+        loop {
+            recv_optional_unix_signal(&mut sigusr1).await;
+            request_peer_rebuild_relaunch();
+        }
+    });
+
     tokio::spawn(async {
         #[cfg(unix)]
         {
@@ -132,6 +149,25 @@ fn spawn_async_signal_task() {
             }
         }
     });
+}
+
+/// `SIGUSR1` from `/rebuild` on another process: arm peer re-exec and quit
+/// gracefully so this TTY keeps the same session on the new binary.
+fn request_peer_rebuild_relaunch() {
+    PEER_REBUILD_RELAUNCH.store(true, Ordering::Release);
+    // Mid-turn: leave cancel-resume on disk so reopen re-queues once if re-exec
+    // fails and the operator opens the session cold.
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::write_armed_process_shutdown_cancel_resume();
+    let notify = QUIT_NOTIFY.lock().clone();
+    if TERMINAL_OWNED.load(Ordering::Acquire)
+        && let Some(n) = notify
+    {
+        n.notify_one();
+    }
+    // If the event loop is not registered (or terminal already restored), do
+    // not hard-exit: a bare SIGUSR1 without a live TUI is a no-op for process
+    // lifetime. Leaders and headless use RelaunchForUpdate / their own paths.
 }
 
 /// Wait for the next SIGINT/SIGTERM/SIGHUP and map it to its exit code.
@@ -209,17 +245,10 @@ fn request_graceful_or_exit(code: i32) {
     if TERMINAL_OWNED.load(Ordering::Acquire)
         && let Some(n) = notify
     {
-        // An orphan never gets the second, forcing signal; bound the quit.
-        super::exit_timeout::arm(code);
         n.notify_one();
     } else {
         shutdown_with_terminal_restore(code);
     }
-}
-
-/// The second-signal teardown, exposed for the exit-timeout path.
-pub(crate) fn force_exit(exit_code: i32) -> ! {
-    shutdown_with_terminal_restore(exit_code)
 }
 
 /// Restore the terminal first, then flush observability, then exit.

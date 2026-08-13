@@ -409,12 +409,17 @@ pub(super) fn dispatch_dashboard_attach(
                 })
                 .unwrap_or((None, false));
 
-            // Already local (e.g. double-click after the row converted): focus only.
+            // Already local (e.g. double-click after the row converted): focus,
+            // and auto-resume when idle after an error-class turn (picker /
+            // multi-session reopen without cold SessionLoaded).
             if let Some(existing_id) =
                 focus_if_session_already_open(app, session_id.as_str(), conversation_entry)
             {
                 log_dashboard_attached(&DashboardRowId::TopLevel(existing_id));
-                return vec![];
+                return super::session::load::try_auto_resume_error_idle_on_reopen(
+                    app,
+                    existing_id,
+                );
             }
 
             // Mirror the picker resume path: allocate a new local agent and

@@ -1,16 +1,25 @@
-//! Rebuild Grok OSS from a local source tree and soft-relaunch live leaders.
+//! Rebuild Grok OSS from a local source tree and soft-relaunch live processes.
 //!
 //! This is the product path for `/rebuild` and `grok-oss rebuild`. It does
 //! **not** use the SpaceXAI auto-updater channel. Install default is
 //! `just install` → `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss`.
+//!
+//! After install it:
+//! 1. Soft-signals reachable leaders (`RelaunchForUpdate`).
+//! 2. Writes a cooperative rebuild-relaunch request under `$GROK_HOME`.
+//! 3. Nudges **all** other live product TUI PIDs in `active_sessions` with
+//!    `SIGUSR1` so they re-exec onto the new binary (same session), not only
+//!    the window that typed `/rebuild`.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::format_build_id;
 use xai_grok_shell::active_sessions::{self, ActiveSession};
@@ -23,6 +32,12 @@ const PAGER_BIN_PACKAGE: &str = "xai-grok-pager-bin";
 const JUSTFILE_NAME: &str = "justfile";
 const PAGER_BIN_MANIFEST: &str = "crates/codegen/xai-grok-pager-bin/Cargo.toml";
 
+/// Disk file under `$GROK_HOME` that tells peer TUIs to re-exec after rebuild.
+const REBUILD_RELAUNCH_REQUEST_FILENAME: &str = "rebuild_relaunch_request.json";
+
+/// Ignore requests older than this so a stale file cannot thrash forever.
+const REBUILD_RELAUNCH_REQUEST_MAX_AGE_SECS: u64 = 15 * 60;
+
 /// Summary of one rebuild + relaunch attempt (for CLI, slash scrollback, tests).
 #[derive(Debug, Clone)]
 pub struct RebuildReport {
@@ -32,10 +47,37 @@ pub struct RebuildReport {
     pub installed_identity: String,
     pub install_backend: InstallBackend,
     pub leader_outcomes: Vec<LeaderRelaunchOutcome>,
+    /// Outcomes of cooperative peer TUI relaunch signals (`SIGUSR1`).
+    pub peer_outcomes: Vec<PeerRelaunchOutcome>,
     /// Alive active_sessions rows after optional crash hygiene.
     pub live_sessions: Vec<ActiveSession>,
     /// Lines suitable for operator scrollback / stdout.
     pub summary_lines: Vec<String>,
+}
+
+/// Outcome of asking one live active-session process to re-exec for rebuild.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerRelaunchOutcome {
+    /// `SIGUSR1` (or platform equivalent) delivered.
+    Signaled { pid: u32, session_id: String },
+    /// Skipped (self, not grok, dead, or signal error).
+    Skipped {
+        pid: u32,
+        session_id: String,
+        reason: String,
+    },
+}
+
+/// Cooperative request so peer TUIs re-exec onto the newly installed binary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebuildRelaunchRequest {
+    /// Absolute path of the installed `grok-oss` binary.
+    pub installed_exe: PathBuf,
+    /// Full identity, e.g. `0.1.100 (abc123)`.
+    pub installed_identity: String,
+    /// Unix epoch seconds when the request was written.
+    pub requested_at_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -893,7 +935,222 @@ pub fn orchestrate_order_on_install_result(
     Ok(())
 }
 
-/// Full rebuild + leader signal + live session inventory.
+// ---------------------------------------------------------------------------
+// Cooperative peer relaunch (all active TUIs, not only the invoker)
+// ---------------------------------------------------------------------------
+
+/// Path of the rebuild-relaunch request under a Grok home root.
+pub fn rebuild_relaunch_request_path(grok_home: &Path) -> PathBuf {
+    grok_home.join(REBUILD_RELAUNCH_REQUEST_FILENAME)
+}
+
+/// Unix epoch seconds (best-effort; 0 if the clock is broken).
+pub fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Build a fresh request for peers to re-exec onto `installed_exe`.
+pub fn make_rebuild_relaunch_request(
+    installed_exe: PathBuf,
+    installed_identity: impl Into<String>,
+    now_secs: u64,
+) -> RebuildRelaunchRequest {
+    RebuildRelaunchRequest {
+        installed_exe,
+        installed_identity: installed_identity.into(),
+        requested_at_unix_secs: now_secs,
+    }
+}
+
+/// Whether a peer running `self_identity` should re-exec for `request`.
+///
+/// Accepts when the request is fresh and **either**:
+/// - the running identity is older than the installed one (same rules as
+///   leader relaunch: same package + different git SHA counts as older), or
+/// - the process is still on a replaced/deleted binary image (common after
+///   `just install` overwrites `~/.cargo/bin/grok-oss` while the TUI runs).
+///
+/// Does **not** check that `installed_exe` exists; callers that will `exec`
+/// must verify the path first.
+pub fn should_peer_relaunch_for_request(
+    self_identity: &str,
+    request: &RebuildRelaunchRequest,
+    now_secs: u64,
+) -> bool {
+    should_peer_relaunch_for_request_with_current_exe(
+        self_identity,
+        request,
+        now_secs,
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
+/// Whether a cooperative request is fresh enough to act on (identity/path
+/// gates not applied). Used when this process received rebuild `SIGUSR1`.
+pub fn peer_rebuild_request_is_actionable(request: &RebuildRelaunchRequest, now_secs: u64) -> bool {
+    if request.installed_identity.trim().is_empty() {
+        return false;
+    }
+    let age = now_secs.saturating_sub(request.requested_at_unix_secs);
+    age <= REBUILD_RELAUNCH_REQUEST_MAX_AGE_SECS
+}
+
+/// Injectable form of [`should_peer_relaunch_for_request`] for tests.
+pub fn should_peer_relaunch_for_request_with_current_exe(
+    self_identity: &str,
+    request: &RebuildRelaunchRequest,
+    now_secs: u64,
+    current_exe: Option<&Path>,
+) -> bool {
+    if !peer_rebuild_request_is_actionable(request, now_secs) {
+        return false;
+    }
+    if leader::leader_is_older_than(self_identity, &request.installed_identity) {
+        return true;
+    }
+    // Same compile-time identity (or unknown SHA) but still on a replaced
+    // binary: Linux `/proc/self/exe` keeps the deleted inode after install.
+    running_exe_needs_relaunch_onto(current_exe, &request.installed_exe)
+}
+
+/// True when this process should re-exec onto `installed_exe` because the
+/// running image is gone/replaced (deleted inode) or is a different path.
+pub fn running_exe_needs_relaunch_onto(current_exe: Option<&Path>, installed_exe: &Path) -> bool {
+    let Some(current) = current_exe else {
+        return false;
+    };
+    let current_s = current.to_string_lossy();
+    // Linux marks replaced binaries: `…/grok-oss (deleted)`.
+    if current_s.contains("(deleted)") {
+        return true;
+    }
+    // Different path (dev binary vs cargo-bin install) while a fresh request
+    // is outstanding: still pick up the installed product binary.
+    let cur = dunce::canonicalize(current).unwrap_or_else(|_| current.to_path_buf());
+    let inst = dunce::canonicalize(installed_exe).unwrap_or_else(|_| installed_exe.to_path_buf());
+    cur != inst
+}
+
+/// Pure: which active-session PIDs should receive the cooperative relaunch
+/// signal. Excludes `except_pid` (the invoker, which re-execs itself), dead
+/// PIDs, and non-product processes (recycled PID safety).
+pub fn peer_pids_to_signal_for_relaunch(
+    sessions: &[(u32, String, bool /* alive */, bool /* is_grok */)],
+    except_pid: Option<u32>,
+) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    for (pid, session_id, alive, is_grok) in sessions {
+        if except_pid == Some(*pid) {
+            continue;
+        }
+        if !*alive || !*is_grok {
+            continue;
+        }
+        out.push((*pid, session_id.clone()));
+    }
+    out
+}
+
+/// Write the cooperative request under the default Grok home.
+pub fn write_rebuild_relaunch_request(request: &RebuildRelaunchRequest) -> std::io::Result<()> {
+    write_rebuild_relaunch_request_in(&xai_grok_shell::util::grok_home::grok_home(), request)
+}
+
+/// Write the cooperative request under an injectable root (tests).
+pub fn write_rebuild_relaunch_request_in(
+    grok_home: &Path,
+    request: &RebuildRelaunchRequest,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(grok_home)?;
+    let path = rebuild_relaunch_request_path(grok_home);
+    let tmp = grok_home.join(format!("{REBUILD_RELAUNCH_REQUEST_FILENAME}.tmp"));
+    let json = serde_json::to_string_pretty(request)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&tmp, json.as_bytes())?;
+    std::fs::rename(&tmp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Read the cooperative request from the default Grok home.
+pub fn read_rebuild_relaunch_request() -> Option<RebuildRelaunchRequest> {
+    read_rebuild_relaunch_request_in(&xai_grok_shell::util::grok_home::grok_home())
+}
+
+/// Read the cooperative request from an injectable root (tests).
+pub fn read_rebuild_relaunch_request_in(grok_home: &Path) -> Option<RebuildRelaunchRequest> {
+    let path = rebuild_relaunch_request_path(grok_home);
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Soft-signal every other live product TUI in `active_sessions` to re-exec.
+///
+/// Writes the request first, then delivers `SIGUSR1` (best-effort). The
+/// invoker (`except_pid`) re-execs via `/rebuild` itself and is not signaled.
+pub fn signal_active_sessions_to_relaunch(
+    installed_exe: &Path,
+    installed_identity: &str,
+    except_pid: Option<u32>,
+) -> Vec<PeerRelaunchOutcome> {
+    let request = make_rebuild_relaunch_request(
+        installed_exe.to_path_buf(),
+        installed_identity,
+        now_unix_secs(),
+    );
+    if let Err(e) = write_rebuild_relaunch_request(&request) {
+        tracing::warn!(error = %e, "failed to write rebuild relaunch request");
+    }
+
+    let sessions = active_sessions::list().unwrap_or_default();
+    let mut outcomes = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for s in sessions {
+        let pid = s.pid;
+        let session_id = s.session_id.0.to_string();
+        if !seen.insert(pid) {
+            continue;
+        }
+        if except_pid == Some(pid) {
+            outcomes.push(PeerRelaunchOutcome::Skipped {
+                pid,
+                session_id,
+                reason: "invoking process (self re-exec)".into(),
+            });
+            continue;
+        }
+        if !active_sessions::is_pid_alive(pid) {
+            outcomes.push(PeerRelaunchOutcome::Skipped {
+                pid,
+                session_id,
+                reason: "pid not alive".into(),
+            });
+            continue;
+        }
+        if !xai_grok_shell::util::is_grok_process(pid) {
+            outcomes.push(PeerRelaunchOutcome::Skipped {
+                pid,
+                session_id,
+                reason: "not a grok product process".into(),
+            });
+            continue;
+        }
+        match xai_grok_shell::util::signal_process_rebuild_relaunch(pid) {
+            Ok(()) => outcomes.push(PeerRelaunchOutcome::Signaled { pid, session_id }),
+            Err(e) => outcomes.push(PeerRelaunchOutcome::Skipped {
+                pid,
+                session_id,
+                reason: format!("signal failed: {e}"),
+            }),
+        }
+    }
+    outcomes
+}
+
+/// Full rebuild + leader signal + peer TUI signal + live session inventory.
 ///
 /// On build/install failure, returns `Err` **before** any leader signal.
 /// Mid-build progress is discarded; use [`rebuild_and_relaunch_with_progress`]
@@ -958,6 +1215,14 @@ where
 
     let leader_outcomes = leader::signal_leaders_to_relaunch(&installed_identity).await;
 
+    // Cooperative peer TUI relaunch: every other live product window, not only
+    // the invoker. Writes request + SIGUSR1; peers re-exec with the same session.
+    let peer_outcomes = signal_active_sessions_to_relaunch(
+        &installed_path,
+        &installed_identity,
+        Some(std::process::id()),
+    );
+
     let live_sessions = active_sessions::list()
         .unwrap_or_default()
         .into_iter()
@@ -976,6 +1241,7 @@ where
         &installed_identity,
         backend,
         &leader_outcomes,
+        &peer_outcomes,
         &live_sessions,
     );
 
@@ -985,6 +1251,7 @@ where
         installed_identity,
         install_backend: backend,
         leader_outcomes,
+        peer_outcomes,
         live_sessions,
         summary_lines,
     })
@@ -997,6 +1264,7 @@ pub fn format_rebuild_summary(
     installed_identity: &str,
     backend: InstallBackend,
     leader_outcomes: &[LeaderRelaunchOutcome],
+    peer_outcomes: &[PeerRelaunchOutcome],
     live_sessions: &[ActiveSession],
 ) -> Vec<String> {
     let mut lines = Vec::new();
@@ -1042,11 +1310,37 @@ pub fn format_rebuild_summary(
         }
     }
 
+    let peers_signaled = peer_outcomes
+        .iter()
+        .filter(|o| matches!(o, PeerRelaunchOutcome::Signaled { .. }))
+        .count();
+    let peers_skipped = peer_outcomes
+        .iter()
+        .filter(|o| matches!(o, PeerRelaunchOutcome::Skipped { .. }))
+        .count();
+    lines.push(format!(
+        "  Peer TUIs: {peers_signaled} signaled to re-exec, {peers_skipped} skipped"
+    ));
+    for o in peer_outcomes {
+        match o {
+            PeerRelaunchOutcome::Signaled { pid, session_id } => lines.push(format!(
+                "    ↻ pid {pid} session {session_id} (cooperative re-exec)"
+            )),
+            PeerRelaunchOutcome::Skipped {
+                pid,
+                session_id,
+                reason,
+            } => lines.push(format!(
+                "    · skipped pid {pid} session {session_id}: {reason}"
+            )),
+        }
+    }
+
     if live_sessions.is_empty() {
         lines.push("  Live sessions: none registered (or all dead PIDs cleaned).".into());
     } else {
         lines.push(format!(
-            "  Live sessions ({}): standalone TUIs may still need reattach if they were not leaders and did not self-exec:",
+            "  Live sessions at report time ({}): peers were asked to re-exec onto the new binary; this process re-execs when invoked via /rebuild.",
             live_sessions.len()
         ));
         for s in live_sessions {
@@ -1054,14 +1348,10 @@ pub fn format_rebuild_summary(
                 "    · pid {} session {} cwd {}",
                 s.pid, s.session_id.0, s.cwd
             ));
-            lines.push(format!(
-                "      reattach: grok-oss --resume {}",
-                s.session_id.0
-            ));
         }
     }
     lines.push(
-        "This process (when invoked via /rebuild) re-execs onto the new binary with the same session when possible."
+        "All active product windows on this host should pick up the new binary (leaders drain; peer TUIs re-exec; /rebuild invoker re-execs)."
             .into(),
     );
     lines
@@ -1334,5 +1624,163 @@ mod tests {
         assert!(a > 0.0 && a < 1.0);
         assert!(b > a);
         assert!(b < 1.0);
+    }
+
+    /// Contract: rebuild must schedule restart of **all** other live product
+    /// sessions, not only the invoker. Pure PID filter excludes self / dead /
+    /// non-grok.
+    #[test]
+    fn peer_pids_to_signal_excludes_self_dead_and_non_grok() {
+        let sessions = vec![
+            (100, "sess-self".into(), true, true),
+            (200, "sess-peer".into(), true, true),
+            (300, "sess-dead".into(), false, true),
+            (400, "sess-other".into(), true, false),
+            (500, "sess-peer-2".into(), true, true),
+        ];
+        let targets = peer_pids_to_signal_for_relaunch(&sessions, Some(100));
+        assert_eq!(
+            targets,
+            vec![(200, "sess-peer".into()), (500, "sess-peer-2".into()),]
+        );
+    }
+
+    /// Contract: same package + different git SHA is a rebuild peers must accept.
+    #[test]
+    fn peer_relaunch_accepts_same_semver_different_sha() {
+        let req = make_rebuild_relaunch_request(
+            PathBuf::from("/tmp/grok-oss-new"),
+            "0.2.120 (abc999)",
+            1_000,
+        );
+        assert!(should_peer_relaunch_for_request_with_current_exe(
+            "0.2.120 (oldsha1)",
+            &req,
+            1_000,
+            Some(Path::new("/tmp/grok-oss-new")),
+        ));
+    }
+
+    /// Contract: equal identity + same live path must not thrash re-exec loops.
+    #[test]
+    fn peer_relaunch_declines_equal_identity_on_same_path() {
+        let tmp = TempDir::new().unwrap();
+        let exe = tmp.path().join("grok-oss");
+        fs::write(&exe, b"stub").unwrap();
+        let req = make_rebuild_relaunch_request(exe.clone(), "0.2.120 (abc999)", 1_000);
+        assert!(!should_peer_relaunch_for_request_with_current_exe(
+            "0.2.120 (abc999)",
+            &req,
+            1_000,
+            Some(exe.as_path()),
+        ));
+    }
+
+    /// Contract: after install replaces the binary, Linux shows `(deleted)` on
+    /// `/proc/self/exe` — peers must re-exec even when compile-time SHA is equal
+    /// or unknown (pager crate often has no `GROK_GIT_SHA`).
+    #[test]
+    fn peer_relaunch_accepts_deleted_inode_even_when_identity_equal() {
+        let req = make_rebuild_relaunch_request(
+            PathBuf::from("/home/me/.cargo/bin/grok-oss"),
+            "0.2.120 (abc999)",
+            1_000,
+        );
+        let deleted = PathBuf::from("/home/me/.cargo/bin/grok-oss (deleted)");
+        assert!(should_peer_relaunch_for_request_with_current_exe(
+            "0.2.120 (abc999)",
+            &req,
+            1_000,
+            Some(deleted.as_path()),
+        ));
+        assert!(running_exe_needs_relaunch_onto(
+            Some(deleted.as_path()),
+            Path::new("/home/me/.cargo/bin/grok-oss")
+        ));
+    }
+
+    /// Contract: stale request (older than 15 minutes) is ignored.
+    #[test]
+    fn peer_relaunch_declines_stale_request() {
+        let req = make_rebuild_relaunch_request(
+            PathBuf::from("/tmp/grok-oss-new"),
+            "0.2.120 (abc999)",
+            1_000,
+        );
+        let now = 1_000 + REBUILD_RELAUNCH_REQUEST_MAX_AGE_SECS + 1;
+        assert!(!should_peer_relaunch_for_request_with_current_exe(
+            "0.2.120 (oldsha1)",
+            &req,
+            now,
+            Some(Path::new("/tmp/grok-oss-old")),
+        ));
+        assert!(!peer_rebuild_request_is_actionable(&req, now));
+    }
+
+    #[test]
+    fn peer_rebuild_request_is_actionable_when_fresh() {
+        let req = make_rebuild_relaunch_request(
+            PathBuf::from("/tmp/grok-oss-new"),
+            "0.2.120 (abc999)",
+            1_000,
+        );
+        assert!(peer_rebuild_request_is_actionable(&req, 1_000));
+        assert!(peer_rebuild_request_is_actionable(
+            &req,
+            1_000 + REBUILD_RELAUNCH_REQUEST_MAX_AGE_SECS
+        ));
+        assert!(!peer_rebuild_request_is_actionable(
+            &make_rebuild_relaunch_request(PathBuf::from("/x"), "", 1_000),
+            1_000
+        ));
+    }
+
+    #[test]
+    fn rebuild_relaunch_request_round_trips_on_disk() {
+        let tmp = TempDir::new().unwrap();
+        let req = make_rebuild_relaunch_request(
+            PathBuf::from("/home/me/.cargo/bin/grok-oss"),
+            "0.2.120 (deadbeef)",
+            42,
+        );
+        write_rebuild_relaunch_request_in(tmp.path(), &req).unwrap();
+        let loaded = read_rebuild_relaunch_request_in(tmp.path()).expect("request");
+        assert_eq!(loaded, req);
+    }
+
+    /// Contract: summary reports peer TUI signal outcomes (not only leaders).
+    #[test]
+    fn format_rebuild_summary_includes_peer_signals() {
+        let peers = vec![
+            PeerRelaunchOutcome::Signaled {
+                pid: 222,
+                session_id: "s-peer".into(),
+            },
+            PeerRelaunchOutcome::Skipped {
+                pid: 111,
+                session_id: "s-self".into(),
+                reason: "invoking process (self re-exec)".into(),
+            },
+        ];
+        let lines = format_rebuild_summary(
+            Path::new("/src"),
+            Path::new("/bin/grok-oss"),
+            "0.2.120 (abc)",
+            InstallBackend::JustInstall,
+            &[],
+            &peers,
+            &[],
+        );
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("Peer TUIs: 1 signaled to re-exec"),
+            "{joined}"
+        );
+        assert!(joined.contains("pid 222"), "{joined}");
+        assert!(joined.contains("All active product windows"), "{joined}");
+        assert!(
+            !joined.contains("may still need reattach"),
+            "old single-process wording must not remain: {joined}"
+        );
     }
 }

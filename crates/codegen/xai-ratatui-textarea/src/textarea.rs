@@ -2073,20 +2073,35 @@ impl TextArea {
             } => {
                 self.move_cursor_down();
             }
-            // Home/End → logical line (full left/right even when soft-wrapped).
-            // Super+Left/Right stay on the visual wrap row; Ctrl+A/E chain
-            // across logical lines when already at BOL/EOL.
+            // Document-level: Ctrl+Home / Ctrl+PageUp → buffer start;
+            // Ctrl+End / Ctrl+PageDown → buffer end. Bare Home/End stay
+            // visual-row (soft wrap). Ctrl+A/E remain logical-line (emacs).
+            KeyEvent {
+                code: KeyCode::Home | KeyCode::PageUp,
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.set_cursor(0);
+            }
+            KeyEvent {
+                code: KeyCode::End | KeyCode::PageDown,
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.set_cursor(self.text.len());
+            }
+            // Home/End → visual row; Ctrl+A/E → logical line (emacs).
             KeyEvent {
                 code: KeyCode::Home,
                 ..
             } => {
-                self.set_cursor(self.beginning_of_current_line());
+                self.move_cursor_to_beginning_of_line(false);
             }
 
             KeyEvent {
                 code: KeyCode::End, ..
             } => {
-                self.set_cursor(self.end_of_current_line());
+                self.move_cursor_to_end_of_line(false);
             }
             _o => {
                 #[cfg(feature = "debug-logs")]
@@ -3535,6 +3550,5 @@ fn truncate_line_display(line: &Line<'static>, max_width: usize) -> Line<'static
     Line::from(new_spans)
 }
 
-#[cfg(test)]
 #[path = "textarea_tests.rs"]
 mod tests;

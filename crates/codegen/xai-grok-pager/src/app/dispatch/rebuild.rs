@@ -1,4 +1,12 @@
 //! `/rebuild` TaskResult handling: report, cancel mid-turn, arm self re-exec.
+//!
+//! Peer TUIs (other live product windows) receive `SIGUSR1` after a rebuild
+//! and arm re-exec via [`try_arm_peer_rebuild_relaunch_from_request`].
+//!
+//! **Exit-path contract:** every event-loop exit that can race with peer
+//! rebuild (SIGUSR1 quit notify, leader IPC disconnect) must call
+//! [`arm_peer_rebuild_before_exit`] so the window re-execs onto the new binary
+//! instead of only quitting.
 
 use super::router::dispatch;
 use super::turn::do_cancel_turn_for;
@@ -8,6 +16,165 @@ use crate::app::app_view::{AppView, RebuildRelaunch};
 use crate::scrollback::block::RenderBlock;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+
+/// Running-process identity used to decide whether a peer rebuild request is
+/// newer than this binary (package version + optional git SHA).
+fn running_binary_identity() -> String {
+    xai_grok_update::format_build_id(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("GROK_GIT_SHA").unwrap_or("unknown"),
+    )
+}
+
+/// Pure decision + path check for peer re-exec (unit-tested).
+///
+/// Returns the `RebuildRelaunch` to arm when the request is fresh, the installed
+/// exe exists, and a session id is available.
+///
+/// - `signaled == false` (opportunistic): also requires older identity and/or
+///   deleted/different running path (anti-thrash after a successful re-exec).
+/// - `signaled == true` (`SIGUSR1` received): identity/path gates are skipped.
+///   The signal is the operator intent; peers must re-exec, not only quit.
+pub(crate) fn peer_rebuild_relaunch_if_applicable(
+    self_identity: &str,
+    request: &xai_grok_update::RebuildRelaunchRequest,
+    now_secs: u64,
+    session_id: Option<&str>,
+    minimal: bool,
+    current_exe: Option<&std::path::Path>,
+    signaled: bool,
+) -> Option<RebuildRelaunch> {
+    if signaled {
+        if !xai_grok_update::peer_rebuild_request_is_actionable(request, now_secs) {
+            return None;
+        }
+    } else if !xai_grok_update::should_peer_relaunch_for_request_with_current_exe(
+        self_identity,
+        request,
+        now_secs,
+        current_exe,
+    ) {
+        return None;
+    }
+    if !request.installed_exe.is_file() {
+        return None;
+    }
+    let session_id = session_id?.to_string();
+    if session_id.is_empty() {
+        return None;
+    }
+    Some(RebuildRelaunch {
+        session_id,
+        installed_exe: request.installed_exe.clone(),
+        minimal,
+    })
+}
+
+/// Resolve session id for peer re-exec (active agent first, then any agent).
+fn peer_rebuild_session_id(app: &AppView) -> Option<String> {
+    app.active_session_id()
+        .map(|s| s.to_string())
+        .or_else(|| {
+            app.agents
+                .values()
+                .find_map(|a| a.session.session_id.as_ref().map(|s| s.0.to_string()))
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// After `SIGUSR1` (or opportunistic leader-disconnect recovery), arm re-exec
+/// onto the newly installed binary for the active session when the request
+/// applies.
+///
+/// `signaled`: true when this process received cooperative rebuild `SIGUSR1`
+/// (force path: fresh request + exe + session is enough). Mid-turn
+/// cancel-resume is still handled by the graceful quit path that follows.
+/// Returns `true` when `app.rebuild_relaunch` was set.
+pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
+    app: &mut AppView,
+    signaled: bool,
+) -> bool {
+    if app.rebuild_relaunch.is_some() {
+        return true;
+    }
+    let Some(request) = xai_grok_update::read_rebuild_relaunch_request() else {
+        if signaled {
+            tracing::warn!(
+                "peer rebuild SIGUSR1 received but no rebuild_relaunch_request.json under grok home"
+            );
+        }
+        return false;
+    };
+    let self_identity = running_binary_identity();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let session_id = peer_rebuild_session_id(app);
+    let current_exe = std::env::current_exe().ok();
+    let Some(relaunch) = peer_rebuild_relaunch_if_applicable(
+        &self_identity,
+        &request,
+        now,
+        session_id.as_deref(),
+        app.screen_mode.is_minimal(),
+        current_exe.as_deref(),
+        signaled,
+    ) else {
+        if signaled {
+            tracing::warn!(
+                self_identity = %self_identity,
+                installed = %request.installed_exe.display(),
+                has_session = session_id.is_some(),
+                "peer rebuild SIGUSR1: request present but re-exec not armed"
+            );
+        }
+        return false;
+    };
+    if let crate::app::app_view::ActiveView::Agent(agent_id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        agent.show_toast("Rebuild on another window: relaunching on the new binary…");
+    }
+    app.rebuild_relaunch = Some(relaunch);
+    true
+}
+
+/// Why the event loop is arming peer rebuild on the way out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerRebuildExitReason {
+    /// `SIGUSR1` quit-notify path, or final drain of a leftover flag.
+    /// Only re-execs when the peer-rebuild flag was set (or already armed).
+    SignalOrFlag,
+    /// Leader IPC cancelled. Also tries identity/path gates without the flag
+    /// so a leader `RelaunchForUpdate` race still picks up the request.
+    LeaderDisconnect,
+}
+
+/// Call on event-loop exits that can race with peer rebuild.
+///
+/// Named contract: a peer that received rebuild `SIGUSR1` must arm re-exec,
+/// not only exit. Leader IPC cancel is higher priority in the biased select
+/// than quit-notify; without arming there, peers quit and never come back.
+///
+/// Does **not** re-exec on ordinary SIGTERM/`/exit` when no rebuild flag is
+/// set (avoids fighting a deliberate kill while a request file is still fresh).
+pub(crate) fn arm_peer_rebuild_before_exit(
+    app: &mut AppView,
+    reason: PeerRebuildExitReason,
+) -> bool {
+    let signaled = crate::app::signal_handler::take_peer_rebuild_relaunch();
+    if try_arm_peer_rebuild_relaunch_from_request(app, signaled) {
+        return true;
+    }
+    // Leader may have drained for RelaunchForUpdate before SIGUSR1 was
+    // observed, or cancel won the race with the flag already cleared. Still
+    // pick up a fresh request under identity/path gates.
+    if matches!(reason, PeerRebuildExitReason::LeaderDisconnect) && !signaled {
+        return try_arm_peer_rebuild_relaunch_from_request(app, false);
+    }
+    false
+}
 
 /// Handle [`crate::app::actions::TaskResult::RebuildDone`].
 pub(super) fn handle_rebuild_done(
@@ -231,7 +398,8 @@ pub(crate) fn print_rebuild_exec_failure_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
 
     fn sample_relaunch(minimal: bool) -> RebuildRelaunch {
         RebuildRelaunch {
@@ -247,6 +415,156 @@ mod tests {
         assert_eq!(r.session_id, "sess-1");
         assert!(!r.minimal);
         assert_eq!(r.installed_exe, PathBuf::from("/tmp/grok-oss-new"));
+    }
+
+    /// Contract: peer of a rebuild arms re-exec when identity is older and the
+    /// installed binary path exists (all live product windows, not only invoker).
+    #[test]
+    fn peer_rebuild_relaunch_if_applicable_arms_when_older_and_exe_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("grok-oss");
+        std::fs::File::create(&exe)
+            .unwrap()
+            .write_all(b"stub")
+            .unwrap();
+        let req =
+            xai_grok_update::make_rebuild_relaunch_request(exe.clone(), "0.2.120 (newsha)", 1_000);
+        let armed = peer_rebuild_relaunch_if_applicable(
+            "0.2.120 (oldsha)",
+            &req,
+            1_000,
+            Some("sess-peer"),
+            false,
+            Some(exe.as_path()),
+            false,
+        )
+        .expect("must arm peer re-exec");
+        assert_eq!(armed.session_id, "sess-peer");
+        assert_eq!(armed.installed_exe, exe);
+        assert!(!armed.minimal);
+    }
+
+    #[test]
+    fn peer_rebuild_relaunch_if_applicable_skips_equal_identity_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("grok-oss");
+        std::fs::write(&exe, b"stub").unwrap();
+        let req =
+            xai_grok_update::make_rebuild_relaunch_request(exe.clone(), "0.2.120 (samesha)", 1_000);
+        assert!(
+            peer_rebuild_relaunch_if_applicable(
+                "0.2.120 (samesha)",
+                &req,
+                1_000,
+                Some("sess"),
+                false,
+                Some(exe.as_path()),
+                false,
+            )
+            .is_none()
+        );
+    }
+
+    /// Contract (operator failure): peer received SIGUSR1 and must re-exec even
+    /// when compile-time identity matches the install (same-commit rebuild) and
+    /// the path looks equal. Without this, peers quit and never come back.
+    #[test]
+    fn peer_rebuild_signaled_arms_even_when_identity_and_path_equal() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("grok-oss");
+        std::fs::write(&exe, b"stub").unwrap();
+        let req =
+            xai_grok_update::make_rebuild_relaunch_request(exe.clone(), "0.2.120 (samesha)", 1_000);
+        let armed = peer_rebuild_relaunch_if_applicable(
+            "0.2.120 (samesha)",
+            &req,
+            1_000,
+            Some("sess-peer"),
+            false,
+            Some(exe.as_path()),
+            true, // SIGUSR1 received
+        )
+        .expect("signaled peer must re-exec, not only quit");
+        assert_eq!(armed.session_id, "sess-peer");
+        assert_eq!(armed.installed_exe, exe);
+    }
+
+    #[test]
+    fn peer_rebuild_signaled_skips_stale_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("grok-oss");
+        std::fs::write(&exe, b"stub").unwrap();
+        let req =
+            xai_grok_update::make_rebuild_relaunch_request(exe.clone(), "0.2.120 (samesha)", 1_000);
+        let now = 1_000 + 15 * 60 + 1;
+        assert!(
+            peer_rebuild_relaunch_if_applicable(
+                "0.2.120 (samesha)",
+                &req,
+                now,
+                Some("sess"),
+                false,
+                Some(exe.as_path()),
+                true,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn peer_rebuild_relaunch_if_applicable_arms_deleted_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("grok-oss");
+        std::fs::write(&exe, b"stub").unwrap();
+        let req =
+            xai_grok_update::make_rebuild_relaunch_request(exe.clone(), "0.2.120 (samesha)", 1_000);
+        let deleted = PathBuf::from(format!("{} (deleted)", exe.display()));
+        let armed = peer_rebuild_relaunch_if_applicable(
+            "0.2.120 (samesha)",
+            &req,
+            1_000,
+            Some("sess-peer"),
+            true,
+            Some(deleted.as_path()),
+            false,
+        )
+        .expect("deleted inode must arm re-exec");
+        assert!(armed.minimal);
+        assert_eq!(armed.session_id, "sess-peer");
+    }
+
+    #[test]
+    fn peer_rebuild_relaunch_if_applicable_skips_missing_exe() {
+        let req = xai_grok_update::make_rebuild_relaunch_request(
+            PathBuf::from("/no/such/grok-oss-binary-for-test"),
+            "0.2.120 (newsha)",
+            1_000,
+        );
+        assert!(
+            peer_rebuild_relaunch_if_applicable(
+                "0.2.120 (oldsha)",
+                &req,
+                1_000,
+                Some("sess"),
+                false,
+                Some(Path::new("/no/such/old")),
+                false,
+            )
+            .is_none()
+        );
+        // Signaled path also requires the installed exe to exist.
+        assert!(
+            peer_rebuild_relaunch_if_applicable(
+                "0.2.120 (oldsha)",
+                &req,
+                1_000,
+                Some("sess"),
+                false,
+                Some(Path::new("/no/such/old")),
+                true,
+            )
+            .is_none()
+        );
     }
 
     /// Contract: failed restore must not re-exec (half-restored TUI glitch).

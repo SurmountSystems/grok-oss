@@ -1106,6 +1106,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "always_expand_thinking" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("always_expand_thinking", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_always_expand_thinking(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "group_tool_verbs" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("group_tool_verbs", "Bool", &value));

@@ -34,20 +34,67 @@ plan. Clarify answers without rewriting. Quit abandons.
 pub const PLAN_PARKED_TOAST: &str =
     "Plan ready. Review the side panel, or click Approve/Quit below";
 
-/// Toast when plan mode is still active after a turn ends **without** live
-/// approval chrome (agent finished freeform without `exit_plan_mode`, or
-/// stale approval was cleared). Auto-opens the side panel for review.
+/// Toast when plan mode is still active after a turn ends **without** a live
+/// reverse-request (agent finished freeform without `exit_plan_mode`, or stale
+/// approval was cleared). Auto-opens the side panel with real decision CTAs.
 ///
-/// Real Approve / Revise / Quit only appear after the agent presents the plan
-/// via `exit_plan_mode`. Until then the operator can review, leave plan mode
-/// with Shift+Tab, or ask the agent to present for approval.
+/// Local idle decision park: Approve / Revise / Quit work without waiting for
+/// another `exit_plan_mode` reverse-request (leave plan mode + implement, or
+/// revise Interject, or abandon). Shift+Tab still leaves plan mode.
 pub const PLAN_IDLE_REVIEW_TOAST: &str = "\
-Plan ready to review. Side panel open. Approve/Revise appear when the agent \
-presents the plan. Until then: /view-plan anytime, or Shift+Tab to leave plan mode.";
+Plan ready. Side panel open — Approve builds, Revise rewrites, Quit abandons. \
+Shift+Tab also leaves plan mode.";
 
 /// Status-line label while plan mode is active without a live reverse-request
-/// (idle / freeform dead end). Click opens the side panel; `/view-plan` too.
+/// (idle / freeform dead end). Prefer parking local decision chrome so CTAs
+/// paint; this string is fallback when no `plan_approval_view` is open yet.
+///
+/// Never paint this while Revise/Clarify rewrite is in flight (see
+/// [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]).
 pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
+
+/// Status while Revise unparked and the agent is rewriting `plan.md`
+/// (waiting for a new `exit_plan_mode` present). Not idle click ceremony.
+pub const PLAN_REVISING_STATUS: &str = "Revising plan...";
+
+/// Status while Clarify unparked and the agent is answering without a new
+/// present yet. Same no-idle-chrome contract as revise-in-flight.
+pub const PLAN_WAITING_UPDATED_STATUS: &str = "Waiting for updated plan...";
+
+/// Toast when freeform Enter cannot attach to a live plan-feedback channel
+/// (Revise/Clarify already unparked) and the message will queue as a normal
+/// follow-up instead. Never silent fail (P2/Q1).
+pub const PLAN_FEEDBACK_QUEUE_TOAST: &str =
+    "No live plan feedback channel — message will queue as a normal follow-up.";
+
+/// Human scrollback line when decisive Revise unparks with no freeform notes.
+/// Keeps the transcript from looking barren while the agent rewrites.
+pub const PLAN_REVISE_HUMAN_LINE: &str = "Revise the plan";
+
+/// Human scrollback line when decisive Clarify unparks with no freeform notes.
+pub const PLAN_CLARIFY_HUMAN_LINE: &str = "Clarify the plan";
+
+/// What decisive plan feedback is waiting on before decision chrome re-arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanFeedbackInFlight {
+    /// Revise (ACP cancelled / Interject rewrite).
+    Revising,
+    /// Clarify (ACP questions / Interject answer-only).
+    Clarifying,
+}
+
+impl PlanFeedbackInFlight {
+    /// Status-line label while this feedback is in flight (no live park).
+    pub fn status_label(self) -> &'static str {
+        match self {
+            Self::Revising => PLAN_REVISING_STATUS,
+            Self::Clarifying => PLAN_WAITING_UPDATED_STATUS,
+        }
+    }
+}
+
+/// Synthetic tool_call_id for local idle decision park (no shell reverse-request).
+pub const IDLE_PLAN_DECISION_TOOL_CALL_ID: &str = "local-idle-plan-decision";
 
 /// Header line for the inline transcript plan card (option C).
 pub const PLAN_CARD_HEADER: &str = "Plan ready for review";
@@ -399,6 +446,13 @@ pub struct PlanApprovalViewState {
     pub commenting_range: Option<std::ops::Range<usize>>,
 
     pub stashed_feedback_prompt: Option<StashedPrompt>,
+
+    /// Local idle decision surface (no shell reverse-request channel).
+    ///
+    /// Parked when plan mode is still on with a plan body but `exit_plan_mode`
+    /// is not awaiting. Approve / Revise / Quit drive SetPlanMode / Interject
+    /// instead of ACP `x.ai/exit_plan_mode` outcomes.
+    pub is_local_idle_decision: bool,
 }
 
 impl PlanApprovalViewState {
@@ -437,6 +491,31 @@ impl PlanApprovalViewState {
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            is_local_idle_decision: false,
+        }
+    }
+
+    /// Local decision park when plan mode is idle with a plan body but no
+    /// live `exit_plan_mode` reverse-request. Same side-panel CTAs; decisions
+    /// leave plan mode / Interject rather than ACP outcomes.
+    pub fn for_idle_decision(plan_content: Option<String>) -> Self {
+        let plan_content = plan_content.filter(|s| !s.trim().is_empty());
+        let has_plan = plan_content.is_some();
+        Self {
+            tool_call_id: IDLE_PLAN_DECISION_TOOL_CALL_ID.to_owned(),
+            has_plan,
+            plan_content,
+            source: PlanReviewSource::FileBacked,
+            stashed_prompt: StashedPrompt::default(),
+            response_tx: None,
+            focus: PlanApprovalFocus::Prompt,
+            prompt_intent: PlanPromptIntent::Revise,
+            comments: Vec::new(),
+            next_comment_id: 0,
+            editing_comment_id: None,
+            commenting_range: None,
+            stashed_feedback_prompt: None,
+            is_local_idle_decision: true,
         }
     }
 
@@ -788,14 +867,38 @@ mod tests {
         );
         assert!(
             PLAN_IDLE_REVIEW_TOAST.contains("Side panel open")
-                && PLAN_IDLE_REVIEW_TOAST.contains("/view-plan")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Approve")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Revise")
                 && PLAN_IDLE_REVIEW_TOAST.contains("Shift+Tab"),
-            "idle-review toast must name panel + discoverable exit; got {PLAN_IDLE_REVIEW_TOAST:?}"
+            "idle-review toast must name panel + decision CTAs + exit; got {PLAN_IDLE_REVIEW_TOAST:?}"
         );
         assert!(
             PLAN_IDLE_REVIEW_STATUS.contains("Click")
                 && PLAN_IDLE_REVIEW_STATUS.contains("/view-plan"),
             "idle-review status must be click-discoverable; got {PLAN_IDLE_REVIEW_STATUS:?}"
+        );
+        assert_eq!(
+            PlanFeedbackInFlight::Revising.status_label(),
+            PLAN_REVISING_STATUS
+        );
+        assert_eq!(
+            PlanFeedbackInFlight::Clarifying.status_label(),
+            PLAN_WAITING_UPDATED_STATUS
+        );
+        assert!(
+            PLAN_REVISING_STATUS.contains("Revising")
+                && !PLAN_REVISING_STATUS.contains("Click")
+                && !PLAN_REVISING_STATUS.contains("/view-plan"),
+            "revising status must not be idle click ceremony; got {PLAN_REVISING_STATUS:?}"
+        );
+        assert!(
+            PLAN_WAITING_UPDATED_STATUS.contains("Waiting")
+                && !PLAN_WAITING_UPDATED_STATUS.contains("Click"),
+            "waiting status must not be idle click ceremony; got {PLAN_WAITING_UPDATED_STATUS:?}"
+        );
+        assert!(
+            PLAN_FEEDBACK_QUEUE_TOAST.to_lowercase().contains("queue"),
+            "queue toast must mention queue; got {PLAN_FEEDBACK_QUEUE_TOAST:?}"
         );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());

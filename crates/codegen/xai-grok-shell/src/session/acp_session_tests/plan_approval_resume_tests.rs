@@ -256,9 +256,11 @@ async fn real_exit_plan_mode_disconnect_keeps_awaiting_persisted() {
         .await;
 }
 
-/// Headless / no UI client wired: the reverse-request can't be delivered, so
-/// `exit_plan_mode` falls through and executes (original behavior) — verified by
-/// `prepare_tool_call` returning a prepared call rather than Cancelled.
+/// Headless / no UI client wired: reverse-request enqueue fails ("unable to
+/// send"). Product leaves plan mode with an honest no-panel tool result — not
+/// a plan-panel Approve click, not always-approve plan auto-approve, and not
+/// a fall-through that runs the bare `exit_plan_mode` tool body (that body is
+/// present-only and must not claim approval).
 #[tokio::test(flavor = "current_thread")]
 async fn real_exit_plan_mode_no_client_executes_tool() {
     let local = tokio::task::LocalSet::new();
@@ -288,10 +290,55 @@ async fn real_exit_plan_mode_no_client_executes_tool() {
                 .prepare_tool_call(call, &mut deferred)
                 .await
                 .expect("prepare_tool_call should not error");
-            // Headless: the tool is prepared (it will execute and exit plan mode).
+            // Headless intercept completes in prepare (no tool body fall-through).
+            match outcome {
+                Err(ToolLoop::Continue) => {}
+                other => panic!(
+                    "headless exit_plan_mode must complete as ToolLoop::Continue \
+                     (honest no-client leave), got {other:?}"
+                ),
+            }
             assert!(
-                outcome.is_ok(),
-                "headless exit_plan_mode should fall through to execute the tool"
+                !actor.plan_mode.lock().is_active(),
+                "no-client path must leave plan mode"
+            );
+            assert!(
+                !actor.plan_mode.lock().is_awaiting_plan_approval(),
+                "no-client leave must clear awaiting_plan_approval"
+            );
+
+            let conv = actor.chat_state_handle.get_conversation().await;
+            let exit_text = conv
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    xai_grok_sampling_types::ConversationItem::ToolResult(tr)
+                        if tr.tool_call_id == "call-exit-headless" =>
+                    {
+                        Some(tr.content.to_string())
+                    }
+                    _ => None,
+                })
+                .expect("no-client path must push a tool_result");
+            assert!(
+                exit_text.contains("No interactive plan panel"),
+                "message must name the no-panel path: {exit_text:?}"
+            );
+            assert!(
+                exit_text.contains("NOT a plan-panel Approve"),
+                "message must deny plan-panel Approve: {exit_text:?}"
+            );
+            assert!(
+                !exit_text.to_lowercase().contains("has been approved"),
+                "must not claim operator approval: {exit_text:?}"
+            );
+            assert!(
+                !exit_text.to_lowercase().contains("start coding"),
+                "must not tell the model to start coding from present alone: {exit_text:?}"
+            );
+            assert!(
+                exit_text.contains("# Plan") || exit_text.contains("step 1"),
+                "no-client message should embed plan body when present: {exit_text:?}"
             );
         })
         .await;

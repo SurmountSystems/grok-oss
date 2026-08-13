@@ -316,25 +316,30 @@ impl AgentView {
         }
     }
 
-    /// Whether the local drip-feed queue should hold while background
-    /// subagents are still live — even when the parent looks idle (not blocked
-    /// on a wait). Matches the still-running watcher cue's subagent count
-    /// (standalone children only; workflow-owned children roll into workflows).
+    /// Whether any standalone background subagent is still running.
     ///
-    /// Commands/monitors are intentionally **not** part of this hold: they
-    /// often run indefinitely (dev servers, log tails), and holding the queue
-    /// forever would strand follow-ups. Subagents finish.
-    pub(crate) fn holds_queue_for_background(&self) -> bool {
+    /// Same set as the still-running status cue (workflow-owned children roll
+    /// into workflows, not this count). Commands/monitors are not included.
+    ///
+    /// Used for pause/stop chrome and cancel-resume keep while children work.
+    /// Does **not** hold the main prompt queue or force Enter:queue — primary
+    /// idle means plain Enter sends a normal main turn even with live children
+    /// (operator 2026-08-09).
+    pub(crate) fn has_live_background_subagents(&self) -> bool {
         self.watchers().subagents > 0
     }
 
-    /// Visible held rows for the "N queued" hint. Non-zero only while a
-    /// sendable wait is active **or** background subagents are holding the
-    /// drain (parent may look idle). Goal-gated via
-    /// [`Self::is_parked_on_sendable_wait`] for the wait path (0 during a goal
-    /// — shell exempts goal turns).
+    /// Visible held rows for the status "N queued" hint. Non-zero while:
+    /// - a **sendable wait** is active (goal-gated via
+    ///   [`Self::is_parked_on_sendable_wait`]; 0 during a goal — shell exempts
+    ///   goal turns), or
+    /// - a **primary turn is running** (thinking / tools / streaming) so a
+    ///   mid-turn follow-up is not invisible until the next wait.
+    ///
+    /// Clean idle (including idle with live background subagents) returns 0:
+    /// the queue drains immediately and Enter sends a normal main turn.
     pub(crate) fn held_queue_count(&self) -> usize {
-        if !self.is_parked_on_sendable_wait() && !self.holds_queue_for_background() {
+        if !self.is_parked_on_sendable_wait() && !self.session.state.is_turn_running() {
             return 0;
         }
         self.visible_held_queue_len()
@@ -511,21 +516,11 @@ impl AgentView {
     /// Soft-interject one merged-queue row into the running turn (by selection
     /// id). Never cancels — the shell merges the text at the next safe point.
     ///
-    /// When the parent is **idle** but background subagents hold the queue,
-    /// promotes a local row (if needed) and returns [`Action::ForceDrainQueue`]
-    /// so the row can start despite live children — same force path as the
-    /// empty-composer interject chord.
-    ///
-    /// Always surfaces a toast on reject/defer — never a silent no-op when the
-    /// user clicked `[Interject]` or pressed the interject chord on a row.
+    /// When the parent is **idle**, there is nothing to soft-interject into
+    /// (background subagents alone do not hold the main queue; plain Enter
+    /// starts a normal turn). Toast only — never a silent no-op.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
         if !self.session.state.is_turn_running() {
-            // Idle + background hold: force-start this local row as the next
-            // turn (nothing to soft-interject into). Server rows still drain
-            // shell-side; force-drain cannot bypass server ownership.
-            if self.holds_queue_for_background() {
-                return self.force_drain_held_queue_row(id);
-            }
             self.show_toast("No turn running — prompt will send when ready");
             return InputOutcome::Changed;
         }
@@ -588,36 +583,6 @@ impl AgentView {
         }
         self.show_toast("Queued prompt is gone");
         InputOutcome::Changed
-    }
-
-    /// Idle + background-subagent hold: force-drain a local queue row past the
-    /// hold (promote to front when not already first). Server rows are not
-    /// client-drained — force only bypasses the subagent hold, not server FIFO.
-    fn force_drain_held_queue_row(&mut self, id: u64) -> InputOutcome {
-        let row = self.queue.row_ref(id);
-        let is_server = matches!(
-            row.as_ref().map(|r| r.origin),
-            Some(crate::views::queue_pane::QueueRowOrigin::Server)
-        );
-        if is_server {
-            self.show_toast("No turn running — prompt will send when ready");
-            return InputOutcome::Changed;
-        }
-        let Some(pos) = self.session.queue_position(id) else {
-            self.show_toast("Queued prompt is gone");
-            return InputOutcome::Changed;
-        };
-        // Selected row becomes the next drain target (same intent as mid-turn
-        // row Interject picking a non-top local row).
-        if pos > 0 {
-            let prompt = self
-                .session
-                .pending_prompts
-                .remove(pos)
-                .expect("position from queue_position");
-            self.session.pending_prompts.push_front(prompt);
-        }
-        InputOutcome::Action(Action::ForceDrainQueue)
     }
 
     /// Reconcile this client's optimistic queue echoes against a raw
@@ -1510,17 +1475,17 @@ mod queue_edit_routing_tests {
         assert_eq!(agent.session.pending_prompts.len(), 1);
     }
 
-    /// Idle parent + live background subagent: queue-row Interject force-drains
-    /// the selected local row (not soft mid-turn interject, not toast refuse).
+    /// Idle parent + live background subagent: queue-row Interject does not
+    /// force-drain (children no longer hold the main queue). Toast only.
     #[test]
-    fn force_interject_local_row_while_idle_held_by_subagents() {
+    fn force_interject_idle_with_live_subagents_is_noop_toast() {
         let mut agent = running_agent_local_only();
         agent.session.state = AgentState::Idle;
         agent.subagent_sessions.insert(
             "bg-child".into(),
             test_fixtures::running_subagent_info("bg-child"),
         );
-        assert!(agent.holds_queue_for_background());
+        assert!(agent.has_live_background_subagents());
         assert!(!agent.session.state.is_turn_running());
 
         let registry = non_vscode_registry();
@@ -1528,17 +1493,21 @@ mod queue_edit_routing_tests {
         assert_eq!(ids.len(), 1);
         agent.queue.list_state.select_by_id(ids[0]);
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        match outcome {
-            InputOutcome::Action(Action::ForceDrainQueue) => {}
-            other => panic!("expected ForceDrainQueue while held idle, got {other:?}"),
-        }
-        // Row stays until dispatch drains it.
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "idle Interject with live children must toast, not ForceDrain, got {outcome:?}"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(m, _)| m.as_str()),
+            Some("No turn running — prompt will send when ready"),
+        );
         assert_eq!(agent.session.pending_prompts.len(), 1);
     }
 
-    /// Idle + hold: Interject on a non-front local row promotes it, then force-drains.
+    /// Idle + live children: Interject on a non-front row is also toast-only
+    /// (no promote / force-drain; Enter starts a normal main turn).
     #[test]
-    fn force_interject_promotes_non_front_local_row_while_held() {
+    fn force_interject_idle_with_live_subagents_does_not_promote() {
         let mut agent = running_agent_local_only();
         agent.session.state = AgentState::Idle;
         agent.session.enqueue_prompt("second follow-up".into());
@@ -1557,25 +1526,18 @@ mod queue_edit_routing_tests {
         let registry = non_vscode_registry();
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 2);
+        let front_id = ids[0];
         let back_id = ids[1];
         agent.queue.list_state.select_by_id(back_id);
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::ForceDrainQueue)),
-            "expected ForceDrainQueue, got {outcome:?}"
+            matches!(outcome, InputOutcome::Changed),
+            "expected toast-only, got {outcome:?}"
         );
         assert_eq!(
             agent.session.pending_prompts.front().map(|p| p.id),
-            Some(back_id),
-            "selected row must be promoted to front before force drain"
-        );
-        assert_eq!(
-            agent
-                .session
-                .pending_prompts
-                .front()
-                .map(|p| p.text.as_str()),
-            Some("second follow-up")
+            Some(front_id),
+            "idle Interject must not promote the selected row"
         );
     }
 

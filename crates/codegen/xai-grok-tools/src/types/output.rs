@@ -945,16 +945,20 @@ impl ToolOutput {
                         format!("Write your plan to {plan_file_path}. {detail}")
                     }
                 };
+                // Default ban: no multi-choice questionnaire for plan clarifications.
+                // Open questions go in the plan file / freeform chat; present via exit_plan.
+                // `ask` is named only so the model knows which tool not to use for that.
                 format!(
                     "{message}\n\n\
                      {plan_status}\n\n\
                      In plan mode, you should:\n\
                      1. Thoroughly explore the codebase to understand existing patterns{task_hint}\n\
                      2. Identify similar features, codebase architecture, and understand trade-offs\n\
-                     3. Use {ask} if you need to clarify the approach\n\
-                     4. Design a concrete implementation strategy\n\
-                     5. Write your plan to the plan file above\n\
-                     6. When ready, use {exit} to present your plan to the user."
+                     3. Design a concrete implementation strategy\n\
+                     4. Write your plan to the plan file above. Put open questions as plain \
+                     bullets in the plan file or freeform chat; do not use {ask} multi-choice \
+                     questionnaires for plan clarifications\n\
+                     5. When ready, use {exit} to present your plan to the user."
                 )
             }
             ToolOutput::ExitPlanMode(exit) => match exit {
@@ -1122,6 +1126,8 @@ pub enum EnterPlanModeOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnterPlanModeToolHints {
     /// Client-facing name for `ask_user_question` (ToolKind::AskUser).
+    /// Used in enter-plan prompt text to **ban** multi-choice questionnaires for
+    /// plan clarifications (open questions go in the plan file / freeform chat).
     #[serde(default = "EnterPlanModeToolHints::default_ask_user")]
     pub ask_user: String,
     /// Client-facing name for `exit_plan_mode` (ToolKind::ExitPlan).
@@ -2280,9 +2286,13 @@ mod tests {
         assert!(prompt.contains("Entered plan mode."));
         assert!(prompt.contains("Write your plan to /tmp/plan.md. The file exists and is empty."));
         assert!(prompt.contains("/tmp/plan.md"));
-        assert!(prompt.contains("ask_user_question"));
+        assert!(
+            prompt.contains("do not use ask_user_question multi-choice questionnaires"),
+            "plan mode must ban questionnaire clarifications: {prompt}"
+        );
+        assert!(!prompt.contains("Use ask_user_question if you need"));
         assert!(prompt.contains("exit_plan_mode"));
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
+        assert!(prompt.contains("4. Write your plan to the plan file above"));
         assert!(prompt.contains("present your plan to the user"));
         assert!(
             !prompt.contains("subagent_type"),
@@ -2321,13 +2331,17 @@ mod tests {
             plan_file_seed: PlanFileSeedStatus::Empty,
         });
         let prompt = output.to_prompt_format();
-        assert!(prompt.contains("Use AskUser if you need"));
+        assert!(
+            prompt.contains("do not use AskUser multi-choice questionnaires"),
+            "custom ask tool name must appear in the ban: {prompt}"
+        );
+        assert!(!prompt.contains("Use AskUser if you need"));
         assert!(prompt.contains("use FinishPlan to present"));
         assert!(!prompt.contains("ask_user_question"));
         assert!(!prompt.contains("exit_plan_mode"));
     }
     #[test]
-    fn enter_plan_mode_prompt_format_contains_six_steps() {
+    fn enter_plan_mode_prompt_format_contains_five_steps_bans_questionnaire() {
         let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
             message: "Entered plan mode.".into(),
             plan_file_path: "/tmp/plan.md".into(),
@@ -2337,10 +2351,14 @@ mod tests {
         let prompt = output.to_prompt_format();
         assert!(prompt.contains("1. Thoroughly explore"));
         assert!(prompt.contains("2. Identify similar"));
-        assert!(prompt.contains("3. Use ask_user_question"));
-        assert!(prompt.contains("4. Design a concrete"));
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
-        assert!(prompt.contains("6. When ready, use exit_plan_mode"));
+        assert!(prompt.contains("3. Design a concrete"));
+        assert!(prompt.contains("4. Write your plan to the plan file above"));
+        assert!(prompt.contains("do not use ask_user_question multi-choice questionnaires"));
+        assert!(prompt.contains("5. When ready, use exit_plan_mode"));
+        assert!(
+            !prompt.contains("6. When ready"),
+            "step count should be five after questionnaire ban: {prompt}"
+        );
     }
     #[test]
     fn enter_plan_mode_output_serde_with_tool_hints() {
@@ -2411,7 +2429,8 @@ mod tests {
             prompt.contains("Write your plan to /tmp/plan.md. The file exists but is not empty.")
         );
         assert!(!prompt.contains("and is empty"));
-        assert!(prompt.contains("5. Write your plan to the plan file above\n"));
+        assert!(prompt.contains("4. Write your plan to the plan file above"));
+        assert!(prompt.contains("do not use ask_user_question multi-choice questionnaires"));
     }
     #[test]
     fn enter_plan_mode_prompt_format_missing_seed() {
@@ -2425,7 +2444,8 @@ mod tests {
         assert!(
             prompt.contains("Write your plan to /tmp/plan.md. The file has not yet been created.")
         );
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
+        assert!(prompt.contains("4. Write your plan to the plan file above"));
+        assert!(prompt.contains("do not use ask_user_question multi-choice questionnaires"));
     }
     #[test]
     fn enter_plan_mode_absent_seed_field_prompt_is_missing() {

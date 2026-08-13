@@ -97,8 +97,9 @@ less than product code and tests. Do not invent long essays or git nags.
    actually does. No invented metaphors that name things not in the product
    (e.g. "media player pause" when there is no media player), no clever
    analogies the reader must decode, no vague handwaves when two paths differ.
-   Real control, path, or outcome first. Host dual-pin: `~/.grok/AGENTS.md` §
-   Prose + tone.
+   Real control, path, or outcome first. **No void/gap/jargon padding** —
+   short concrete sentences only (host pin: *Speak like a normal precise
+   person*). Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
    **Self-improving feedback loop (pinned 2026-08-03):** trigger phrases such as
    "always remember", "please remember", "I hate repeating myself" (and close
    variants) mean same-turn standing pin (project `AGENTS.md` / residual when
@@ -115,6 +116,14 @@ less than product code and tests. Do not invent long essays or git nags.
    session `plan.md` and re-present; do not invent `ask:*` queues as a
    substitute. **Clarify** is answer-only. Host:
    `~/.grok/AGENTS.md` § *Plan approval* item 8.
+   **Plan present ≠ Approve (pinned 2026-08-10):** `exit_plan_mode` tool
+   success and “Plan ready” soft-park are **present for review**, not operator
+   approval. Always-approve is tool permissions only. Empty freeform Enter
+   never approves (mouse Approve / empty-prompt `a`). After one decisive
+   Approve or Quit, do not re-arm CTAs until a new present. After Revise or
+   Clarify, wait for re-present (no idle “Plan written / Click or /view-plan”
+   CTA re-arm mid-rewrite). User-guide `19-plan-mode`; FORK plan-approval
+   bullets P1–P2.
    **Dual-auth language (pinned 2026-07-27; vocabulary 2026-08-08):** ban bare
    jargon **proactive hop**, **sticky exhaust** / **sticky hop**, and
    **dual-host** without plain explanation. Prefer: *mark SuperGrok used up from
@@ -138,9 +147,23 @@ less than product code and tests. Do not invent long essays or git nags.
    **explicitly** defers that slice. Surmount does complete work. True
    *Ambiguity → park* stays for unclear intent only, not for optional-feeling
    follow-ons on a locked plan. Host dual-pin: `~/.grok/AGENTS.md` same rule.
-6. **Prefer Rust tools over inventing Python/bash** when a product or host
-   tool/bin already covers the job (token + security). Do not paste inventories
-   into this file. Migration plan:
+6. **Prefer Rust tools; do not invent and run new Python/shell scripts**
+   (pinned 2026-08-09; supply-chain). Prefer product/host **Rust tools and
+   bins** for agent work. Agents must **not write and execute new Python
+   scripts**, and must **not invent and execute ad-hoc shell scripts that
+   download or run untrusted code**, for agent tasks. Active **supply chain
+   attacks on the Python ecosystem** make agent-authored `python3` / `pip` /
+   one-off `.py` payloads a real risk. **Shell tool for named product
+   commands** (`cargo`, `just`, `cargo test`/nextest, `rg`, read-only git,
+   existing in-tree scripts) is fine. **Writing** a new `.py`/throwaway `.sh`
+   (or equivalent heredoc payload) and executing it for agent glue is not.
+   **Narrow exceptions:** pre-reviewed office/docx/pptx/xlsx/pdf skill
+   scripts under `~/.agents/skills`; allowlisted host helpers
+   (`memory.py` / plan-validate / session_reader CLI forms; product may
+   intercept to Rust); user-project Python when **their** product is Python;
+   existing repo `just`/scripts. Do not invent alternate helpers. Do not
+   paste inventories here. Host dual-pin: `~/.grok/AGENTS.md` § *Prefer Rust
+   tools; do not invent…*; skill-rules rule 17; D2:
    [`doc/dev/research/python-to-rust-tools-2026-07-26.md`](doc/dev/research/python-to-rust-tools-2026-07-26.md).
 7. **Friction → suggest plan** — process pushback / “plan first” → stop
    implementing and suggest or enter plan mode; explicit “just fix it” is fine.
@@ -273,17 +296,28 @@ intent, or recon survival from prose alone.
   (`cargo test` contracts), not host shell D-Bus/keyring probes. Do **not** fan
   out explore + implementer on the same store bug. One implementer owns TDD.
   Pin: `~/.grok/AGENTS.md` § *Product auth / store diagnosis*.
-- **Plan approval:** product CTAs only (`exit_plan_mode` → soft-park →
-  `a`/`A`/`?`/`s`/`q`). **Never** freeform chat “reply approve/revise/abandon.”
-  Pin: `~/.grok/AGENTS.md` § *Plan approval — product CTAs only*.
+- **Plan approval:** product CTAs only (`exit_plan_mode` soft-park / side panel
+  → Approve / Notes / Clarify / Revise / Quit; keys `a`/`A`/`?`/`s`/`q` when
+  panel has empty prompt focus). **`exit_plan_mode` tool success = present for
+  review, not operator Approve.** Always-approve permission mode skips tool
+  permission prompts only; it does not auto-click plan CTAs. **Empty freeform
+  Enter never approves** (mouse Approve or empty-prompt `a`). After one
+  decisive Approve or Quit, do not re-arm Approve for the same present until a
+  new `exit_plan_mode`. After Revise/Clarify, status is rewriting wait (not
+  idle “Plan written / Click or /view-plan”) until re-present. **Never**
+  freeform chat “reply approve/revise/abandon.” Pin: `~/.grok/AGENTS.md` §
+  *Plan approval — product CTAs only*; user-guide `19-plan-mode`; FORK plan
+  bullets P1–P2.
 - **DOGE colour roles (do not invent from screenshots):** Human chrome is
   **green** (`accent_user`: composer caret, human rails, OSC 12, success).
-  Agent activity is **magenta** (`accent_running`: active agent rails, tool
-  spinner, lower-left still-running throbber, model accent). **Do not** flip
-  the caret to magenta “because agent,” invent a “little guy” colour without a
-  plain operator name, or conflate caret residue with the lower-left throbber
-  or **Clear finished** (quiet secondary idle; not neon green, not magenta).
-  Lasting product pin: [`FORK.md`](FORK.md); user-guide `06-theming`.
+  Mid-draft letter under caret: empty blink half is normal text
+  (`text_primary`), not neon green ink on the letter. Agent activity is
+  **magenta** (`accent_running`: active agent rails, tool spinner, lower-left
+  still-running throbber, model accent). **Do not** flip the caret to magenta
+  “because agent,” invent a “little guy” colour without a plain operator name,
+  or conflate caret residue with the lower-left throbber or **Clear finished**
+  (quiet secondary idle; not neon green, not magenta). Lasting product pin:
+  [`FORK.md`](FORK.md); user-guide `06-theming`.
 
 ## Skills (multi-source)
 

@@ -12,17 +12,20 @@
 //!   loaded session still looks mid-work (unfinished subagents / running
 //!   scrollback) and a last user prompt is available.
 //!
-//! Cleared on clean successful turn finish. Not written for network blips,
-//! fearless global pause, soft stop, or **SIGKILL** (`kill -9` — no userspace
-//! handler can run; eager write is the only defense against total hard death).
+//! Cleared on clean successful turn finish (and rate-limit terminals). Kept
+//! on **error** terminals so reopen continues failed work. Not written for
+//! network blips alone, fearless global pause, soft stop, or **SIGKILL**
+//! (`kill -9` — no userspace handler can run; eager write is the only defense
+//! against total hard death).
 //!
 //! Resume on session open is gated by `[ui] resume_canceled_turn_on_restart`
 //! (default **on**). Order on load: (A) apply marker if present **and** the
-//! load is not a stale-marker case (primary user turn already finished
-//! successfully/errored in replay with no mid-work evidence — drop the
-//! file, do not re-fire), else (B) recover from interruption evidence + last
-//! user prompt. Finished clean turns must never invent a resume. `/rebuild`
-//! relaunch uses the same session load path.
+//! load is not a stale-marker case (primary user turn finished **successfully**
+//! in replay with no mid-work and no error terminal — drop the file, do not
+//! re-fire), else (B) recover from mid-work interruption **or** last-turn
+//! **error** + last user prompt. Clean successful turns must never invent a
+//! resume; error-class failures must auto-resume. `/rebuild` relaunch uses
+//! the same session load path.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
