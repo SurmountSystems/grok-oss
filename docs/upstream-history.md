@@ -230,33 +230,28 @@ buckets — never tree-wide bulk checkout, never 18 parallel one-file agents.
 Detail also in project [`AGENTS.md`](../AGENTS.md) § *Onto / put-history*.
 ### Live stack (update when tip moves)
 
-**Snapshot: 2026-08-10 — put-history + join complete on force-export `b13fa526`.**
+**Snapshot: 2026-08-12 — restack onto public Grok Build 1.0.3 (`e5fd4816`).**
 
 | Field | Value |
 |-------|--------|
-| Branch | `onto-xai/b13fa526f511` |
-| xAI tip | `b13fa526f5112c0b20dad5f1f2300d3d3b127895` (tree `0f26f4082a3b9602ec712b218e177626b2bf72e5`) |
-| Onto tip | `9060f502978900ef1293faa97dc84d39650c2599` |
-| Onto tree | `168086434791ce1c16e5b951da03b3cffda3a8e3` |
-| Join | Done (`ea7a9ad5`, `-s ours`); `origin/main` (`a1515fe1`) is ancestor |
-| Post-join mop | Cargo feature dedupe + shell `local-workspace` / `test-support` flags |
+| Branch | `onto-xai/b13fa526f511` (same PR #36 name; old joined tip on `backup/onto-xai-b13fa526f511-0f61ff44-joined-20260812`) |
+| xAI tip | `e5fd4816d43260c15ba785f103990c1ed6cea230` (tree `25eefa9bdb3a4748cc065be3fa8200d04bc54493`) |
+| Onto first-parent tip | `ee8a80d28cf5df2841b3762396b5921837e15813` (24 first-parent picks from `b13fa526f511..09c407e2`) |
+| Onto tip (after join) | `e08e596167538f9e72da0760865340adfa34868f` |
+| Onto tree | `ae3568e6fa7dcff47a63ca6f87c6c3e8fec18d28` |
+| Join | Done (`e08e5961`, `-s ours` via commit-tree); `origin/main` (`f17e84d8`) is ancestor |
 | Cherry-picks | **Done** — no active pick |
-| Assert | `./scripts/assert-process-pins.sh HEAD` **green** |
-| Filters | `grok-rate-limit` lib **15/15 green**; full pager/shell filters not finished this resume (compile heavy) |
+| Toolchain | `rust-toolchain.toml` / fenix **1.97.1** |
+| Nucleo | `FuzzySearchManager` reuse-per-root; `Nucleo::new(..., Some(2), 1)` |
 
-**Finished on tip:** OpenRouter → Branding (#2) → Rate limits (#3) → Merge 2 (#4) → impl (#7) → merge xai 2 (#12) → compaction (#13) → merge xai 3 (#16) → soft interject (#18) → 6× `main..fixes-2` → join → mop.
+**Finished on tip:** OpenRouter through `09c407e2 merge upstream` replayed onto 1.0.3, then join current `origin/main`. Report: `.agents/reports/recon-restack-1.0.3-2026-08-12.md`.
 
-**Human next (hand only; no agent push):**
+**Human next:**
 
 ```bash
-# optional: re-sign tip commits if required before land
-just check
-git push -u origin onto-xai/b13fa526f511
-gh pr create --base main --head onto-xai/b13fa526f511 \
-  --title "onto-xai: product stack on xAI tip b13fa526f511" \
-  --body "Put-history + join for force-export b13fa526. See docs/upstream-onto-log.md."
-# restore Work B WIP if still needed:
-#   git checkout fixes-2 && git stash apply stash^{/recon-temp-work-b-wip-2026-08-10}
+# already authorized: force-with-lease this PR branch only
+git push --force-with-lease origin onto-xai/b13fa526f511
+# do not create a new PR; SurmountSystems/grok-oss#36 updates
 ```
 
 **Historical notes:** Resume from mid-stack at `75a84a52` after 3/9 picks. Recon-unsigned intermediates via `ALLOW_UNSIGNED` + `commit-tree` (PreToolUse blocks `--no-gpg-sign` string). Mega-picks #4/#12 used intentional ours/theirs groups, not bulk tree checkout.

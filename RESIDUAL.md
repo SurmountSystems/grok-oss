@@ -6,7 +6,9 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
-- **Workspace fuzzy search reuses one matcher per root (2026-08-12, shipped).** Opening many workspace fuzzy searches without `close` no longer grows a new nucleo worker pair per `open`; `FuzzySearchManager` keeps one live search per cwd/root, and poll-only `get_results` does not reset the stale timer.
+- **Workspace fuzzy search reuses one matcher per root (2026-08-12, shipped).** Opening many workspace fuzzy searches without `close` no longer grows a new nucleo worker pair per `open`; `FuzzySearchManager` keeps one live search per cwd/root, and poll-only `get_results` does not reset the stale timer. Restack onto Grok Build 1.0.3 (2026-08-12) kept this contract in `xai-grok-workspace` plus `xai-fuzzy-file-search` `Nucleo::new(..., Some(2), 1)`.
+
+- **Onto restack onto public Grok Build 1.0.3 (2026-08-12).** Product stack replayed onto `e5fd4816`. PR branch `onto-xai/b13fa526f511` now joins `origin/main` `f17e84d8`. Compile mop after restack may still be red on shell/pager half-merged files. Do not treat dogfood as done until install + this PR is pushed.
 
 - **Rust 1.97.1 + CI unit mop (2026-08-12, shipped, not open).**
   Project pin is `rust-toolchain.toml` / fenix **1.97.1**. Surmount keeps that
