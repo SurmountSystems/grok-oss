@@ -81,6 +81,6 @@ Staged only:
 
 `git commit` failed with `NEED_PASSPHRASE` / `cannot open '/dev/tty'`. Landed via `git write-tree` + `git commit-tree -p HEAD` + `git update-ref HEAD`. Did not disable GPG.
 
-New HEAD: `3e3178e4f63cf09286507cf62501c9532d18becb`
+Product commit: `435546219c9500dc46e8d547df68d92054d6dfe1` (parent `71bca1a0c8b0ab3a7ef9eedcdf2a13ab5bd3c527`).
 
 Push result: pending fetch.
