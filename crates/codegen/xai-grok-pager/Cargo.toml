@@ -288,19 +288,14 @@ path = "src/bin/todo_pane_playground.rs"
 # Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
 # `cargo clippy --workspace -- -D warnings` on this package is stricter than
 # the workspace-default clippy allows used in CI.
-[lints]
-workspace = true
-
 [features]
-# Cross-crate test seams (minimal_api helpers, pager-render probes).
-test-support = ["xai-grok-pager-render/test-support"]
 default = ["jemalloc", "sandbox-enforce"]
 default-bazel = [
     "jemalloc",
     "sandbox-enforce",
     "test-support",
     "local-workspace",
-    ]
+]
 local-workspace = ["xai-grok-shell/local-workspace"]
 # No-op on this crate: the actual `#[global_allocator]` (and the
 # `tikv-jemallocator` dep) live on the composition-root binary
@@ -310,9 +305,9 @@ local-workspace = ["xai-grok-shell/local-workspace"]
 jemalloc = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 release-dist = []
-# Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
-# `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
-# by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
+# Cross-crate test seams (minimal_api helpers, pager-render probes) and
+# test-only view-model constructors for sibling crates' test builds.
+# Never enabled in production builds.
 test-support = ["xai-grok-pager-render/test-support"]
 
 [lints]
