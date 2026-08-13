@@ -238,13 +238,14 @@ Detail also in project [`AGENTS.md`](../AGENTS.md) § *Onto / put-history*.
 | xAI tip | `e5fd4816d43260c15ba785f103990c1ed6cea230` (tree `25eefa9bdb3a4748cc065be3fa8200d04bc54493`) |
 | Onto first-parent tip | `ee8a80d28cf5df2841b3762396b5921837e15813` (24 first-parent picks from `b13fa526f511..09c407e2`) |
 | Onto tip (after join) | `e08e596167538f9e72da0760865340adfa34868f` |
-| Onto tree | `ae3568e6fa7dcff47a63ca6f87c6c3e8fec18d28` |
+| Compile mop | `4651593a1da1bbaf2831f316791cfb6d69c663e6` (shell + pager + update; tree `42dfccb62b5258ec7d8505f71e7318d89e88746a`) |
+| Onto tree | `42dfccb62b5258ec7d8505f71e7318d89e88746a` (after compile mop; join tree was `ae3568e6fa7dcff47a63ca6f87c6c3e8fec18d28`) |
 | Join | Done (`e08e5961`, `-s ours` via commit-tree); `origin/main` (`f17e84d8`) is ancestor |
 | Cherry-picks | **Done** — no active pick |
 | Toolchain | `rust-toolchain.toml` / fenix **1.97.1** |
 | Nucleo | `FuzzySearchManager` reuse-per-root; `Nucleo::new(..., Some(2), 1)` |
 
-**Finished on tip:** OpenRouter through `09c407e2 merge upstream` replayed onto 1.0.3, then join current `origin/main`. Report: `.agents/reports/recon-restack-1.0.3-2026-08-12.md`.
+**Finished on tip:** OpenRouter through `09c407e2 merge upstream` replayed onto 1.0.3, then join current `origin/main`, then compile mop `4651593a`. Report: `.agents/reports/recon-restack-1.0.3-2026-08-12.md`.
 
 **Human next:**
 
