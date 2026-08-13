@@ -12,6 +12,9 @@
 //!   fields were absent on the poll series).
 //! - C6: when SuperGrok session is live and team postpaid OAuth class dominates,
 //!   plain English that session can still move team Usage dollars.
+//! - Active / `activeDriver` is client spend-order **intent chrome**, not proof
+//!   of which wallet settles (team prepaid remaining and team OAuth / Grok Build
+//!   class can still move under SuperGrok session).
 //! - When console team prepaid dollars are shown, name the ≤Ns process-cache
 //!   lag and that `grok limits` / TUI `/limits` force a fresh Management fetch.
 
@@ -46,6 +49,34 @@ pub const NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS: &str = "Note: free S
 can stay flat across recent polls while team Grok Build / OAuth settlement dollars rise under \
 SuperGrok session; product does not invent free-period debit and does not treat team settlement \
 as SuperGrok dollar extras.";
+
+/// Active / `activeDriver` is intent chrome, not settlement proof.
+///
+/// Shown when SuperGrok session is live and the product also has team prepaid
+/// remaining and/or team postpaid OAuth class dominating. Closes the gap where
+/// chrome says free SuperGrok period is active while dogfood burn still settles
+/// on team Billing Credits (prepaid remaining) and/or team OAuth / Grok Build
+/// class without free SuperGrok period used % moving and without console key live.
+pub const NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT: &str = "Note: Active free SuperGrok period \
+(activeDriver) is the client spend-order driver and intent chrome, not proof of which wallet \
+settles the bill. SuperGrok session traffic can still settle on team postpaid OAuth / Grok Build \
+class and can change console team prepaid remaining (team Billing Credits) without free SuperGrok \
+period used % moving and without the console API key being live. Product tracks team prepaid \
+remaining and team OAuth class when a management key is set; it does not invent free SuperGrok \
+period debit.";
+
+/// Opt-in hard block: sampler turns blocked under unproven free SuperGrok period debit.
+///
+/// Shown when SuperGrok session is live, free SuperGrok period still has room,
+/// flat-poll unproven debit is true, and the operator set
+/// `[auth] allow_spend_when_free_period_debit_unproven = false` (hard block;
+/// default is allow). Matches the shell gate when that opt-in is on.
+pub const NOTE_TURNS_BLOCKED_FREE_PERIOD_DEBIT_UNPROVEN: &str = "Note: new agent turns are \
+blocked (opt-in hard block) while free SuperGrok period limits stay flat (unproven debit) and \
+still have room. SuperGrok session traffic can still move team Grok Build / OAuth settlement \
+and SuperGrok dollar credits. Set [auth] allow_spend_when_free_period_debit_unproven = true \
+(default) to allow turns under unproven free SuperGrok period debit, or wait until free \
+SuperGrok period used % steps.";
 
 /// Console team prepaid lag honesty (when dollars are shown).
 ///
@@ -94,9 +125,13 @@ management key is set.";
 /// only (no secrets). Always ends with a trailing newline for doctor append.
 pub fn dogfood_burn_proof_doctor_block() -> String {
     "Dogfood burn proof (meters stay distinct)\n\
-  Proof: grok-oss limits / TUI /limits team postpaid OAuth (Grok Build class) \
-and usage series when a management key is set; browser team Usage \
-(console.x.ai team .../usage spend charts).\n\
+  Proof: grok-oss limits / TUI /limits team postpaid OAuth (Grok Build class), \
+console team prepaid remaining, and usage series when a management key is set; \
+browser team Usage (console.x.ai team .../usage spend charts) and team Billing \
+Credits.\n\
+  Active free SuperGrok period (activeDriver) is client spend-order intent chrome, \
+not settlement proof when team prepaid remaining or team OAuth / Grok Build class \
+moves under SuperGrok session with console not live.\n\
   Not proof: Platforms → Grok Business → licenses Usage (messages / \
 conversations / active users). CLI SuperGrok does not drive those seat \
 counters; zeros there are expected.\n"
@@ -199,6 +234,9 @@ pub struct LimitsHonestyInput {
     pub has_console_team_prepaid_reading: bool,
     /// True when team default credits (dashboard allotment) are shown.
     pub has_team_default_credits_reading: bool,
+    /// True when the product will block sampler turns under unproven free
+    /// SuperGrok period debit (operator has not opted into allow-spend).
+    pub turns_blocked_free_period_debit_unproven: bool,
 }
 
 /// Build honesty notes for limits modal / human `grok limits` (ordered).
@@ -211,6 +249,8 @@ pub struct LimitsHonestyInput {
 /// - Flat-poll note only when SuperGrok session is live **and**
 ///   [`LimitsHonestyInput::flat_poll_unproven_debit`]. Meter names come from
 ///   observed flags (no invent Build/extras flat claim).
+/// - Active-is-intent-not-settlement when SuperGrok session is live **and**
+///   team prepaid remaining is shown and/or OAuth postpaid dominates.
 /// - C6 team Usage note when SuperGrok session is live **and**
 ///   [`LimitsHonestyInput::oauth_postpaid_dominates`].
 /// - Console-live: no SuperGrok burn / flat-poll / C6 honesty notes (prepaid
@@ -231,6 +271,10 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     if input.has_included_reading {
         notes.push(NOTE_INCLUDED_PCT_IS_BILLING_POLL.to_string());
     }
+    // Intent chrome vs settlement: when team meters are in view under SuperGrok.
+    if input.has_console_team_prepaid_reading || input.oauth_postpaid_dominates {
+        notes.push(NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT.to_string());
+    }
     if input.flat_poll_unproven_debit {
         notes.push(flat_poll_unproven_debit_note(
             input.flat_poll_observed_build,
@@ -244,6 +288,9 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     // not read team Grok Build $ climb as SuperGrok extras or free-period move.
     if input.flat_poll_unproven_debit && input.oauth_postpaid_dominates {
         notes.push(NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS.to_string());
+    }
+    if input.turns_blocked_free_period_debit_unproven {
+        notes.push(NOTE_TURNS_BLOCKED_FREE_PERIOD_DEBIT_UNPROVEN.to_string());
     }
     notes
 }
@@ -271,6 +318,7 @@ mod tests {
             oauth_postpaid_dominates: false,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
+            turns_blocked_free_period_debit_unproven: false,
         }
     }
 
@@ -459,6 +507,14 @@ mod tests {
             "must name Grok Build class: {block}"
         );
         assert!(
+            lower.contains("team prepaid") || lower.contains("billing credits"),
+            "must name console team prepaid remaining / Billing Credits: {block}"
+        );
+        assert!(
+            lower.contains("intent chrome") || lower.contains("spend-order"),
+            "must name activeDriver as intent chrome not settlement: {block}"
+        );
+        assert!(
             lower.contains("/limits") || lower.contains("limits"),
             "must name product limits path: {block}"
         );
@@ -469,6 +525,98 @@ mod tests {
         assert!(
             !block.contains('\u{2014}') && !block.contains('—') && !block.contains('\u{2026}'),
             "no em dash / unicode ellipsis: {block}"
+        );
+    }
+
+    /// Named contract (2026-08-09): Active / activeDriver is intent chrome, not
+    /// proof of who settles when team prepaid remaining or team OAuth class is
+    /// in view under SuperGrok session.
+    #[test]
+    fn active_driver_intent_not_settlement_note_when_team_meters_under_supergrok() {
+        let note = NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT;
+        let lower = note.to_ascii_lowercase();
+        assert!(
+            lower.contains("intent chrome") || lower.contains("spend-order"),
+            "must name intent chrome / spend-order: {note}"
+        );
+        assert!(
+            lower.contains("activedriver") || lower.contains("active free supergrok"),
+            "must name Active / activeDriver: {note}"
+        );
+        assert!(
+            lower.contains("team prepaid") && lower.contains("billing credits"),
+            "must name team prepaid remaining / Billing Credits: {note}"
+        );
+        assert!(
+            lower.contains("oauth") || lower.contains("grok build"),
+            "must name team OAuth / Grok Build settlement: {note}"
+        );
+        assert!(
+            lower.contains("does not invent") && lower.contains("free supergrok period"),
+            "must ban invent free SuperGrok period debit: {note}"
+        );
+        assert!(
+            !note.contains('\u{2014}') && !note.contains('—') && !note.contains('\u{2026}'),
+            "no em dash / unicode ellipsis: {note}"
+        );
+
+        // Emits when SuperGrok live + team prepaid remaining shown.
+        let prepaid = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::SuperGrokSession,
+            has_included_reading: true,
+            has_console_team_prepaid_reading: true,
+            ..Default::default()
+        });
+        assert!(
+            prepaid
+                .iter()
+                .any(|n| n.as_str() == NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT),
+            "must emit intent-not-settlement with team prepaid under SuperGrok: {prepaid:?}"
+        );
+
+        // Emits when SuperGrok live + OAuth postpaid dominates (even without prepaid $).
+        let oauth = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::SuperGrokSession,
+            has_included_reading: true,
+            oauth_postpaid_dominates: true,
+            has_console_team_prepaid_reading: false,
+            ..Default::default()
+        });
+        assert!(
+            oauth
+                .iter()
+                .any(|n| n.as_str() == NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT),
+            "must emit intent-not-settlement with OAuth dominate: {oauth:?}"
+        );
+
+        // Console live: do not claim SuperGrok Active intent vs settlement split.
+        let console = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::ConsoleKey,
+            has_included_reading: true,
+            has_console_team_prepaid_reading: true,
+            oauth_postpaid_dominates: true,
+            ..Default::default()
+        });
+        assert!(
+            !console
+                .iter()
+                .any(|n| n.as_str() == NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT),
+            "console live skips intent-not-settlement note: {console:?}"
+        );
+
+        // SuperGrok live with neither team prepaid nor OAuth dominate: no note.
+        let bare = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::SuperGrokSession,
+            has_included_reading: true,
+            has_console_team_prepaid_reading: false,
+            oauth_postpaid_dominates: false,
+            ..Default::default()
+        });
+        assert!(
+            !bare
+                .iter()
+                .any(|n| n.as_str() == NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT),
+            "no team meters → no intent-not-settlement note: {bare:?}"
         );
     }
 
@@ -570,13 +718,15 @@ mod tests {
             oauth_postpaid_dominates: true,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
+            turns_blocked_free_period_debit_unproven: true,
         });
         assert!(
             !notes
                 .iter()
                 .any(|n| n.as_str() == NOTE_INCLUDED_PCT_IS_BILLING_POLL
                     || n.contains("included debit is unproven")
-                    || n.as_str() == NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS),
+                    || n.as_str() == NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS
+                    || n.as_str() == NOTE_TURNS_BLOCKED_FREE_PERIOD_DEBIT_UNPROVEN),
             "console live + flat flag must not emit SuperGrok honesty: {notes:?}"
         );
         assert!(
@@ -661,6 +811,7 @@ mod tests {
             oauth_postpaid_dominates: false,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
+            turns_blocked_free_period_debit_unproven: false,
         });
         let expected_flat = flat_poll_unproven_debit_note(false, false);
         assert!(
@@ -672,6 +823,87 @@ mod tests {
                 .iter()
                 .any(|n| n.as_str() == NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER),
             "license note still present: {notes:?}"
+        );
+    }
+
+    /// Named contract (2026-08-08): turns-blocked note when opt-in hard block is on.
+    #[test]
+    fn turns_blocked_note_when_opt_in_hard_block_active() {
+        let notes = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::SuperGrokSession,
+            has_included_reading: true,
+            flat_poll_unproven_debit: true,
+            flat_poll_observed_build: false,
+            flat_poll_observed_extras: true,
+            oauth_postpaid_dominates: true,
+            has_console_team_prepaid_reading: false,
+            has_team_default_credits_reading: false,
+            turns_blocked_free_period_debit_unproven: true,
+        });
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_TURNS_BLOCKED_FREE_PERIOD_DEBIT_UNPROVEN),
+            "must emit turns-blocked note: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("allow_spend_when_free_period_debit_unproven")),
+            "must name config: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("opt-in hard block")),
+            "must name opt-in hard block (not default block): {notes:?}"
+        );
+    }
+
+    /// Default allow path: flat unproven honesty still surfaces; turns-blocked note absent.
+    #[test]
+    fn flat_unproven_honesty_without_turns_blocked_when_default_allow() {
+        let notes = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::SuperGrokSession,
+            has_included_reading: true,
+            flat_poll_unproven_debit: true,
+            flat_poll_observed_build: false,
+            flat_poll_observed_extras: true,
+            oauth_postpaid_dominates: true,
+            has_console_team_prepaid_reading: false,
+            has_team_default_credits_reading: false,
+            turns_blocked_free_period_debit_unproven: false,
+        });
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_TURNS_BLOCKED_FREE_PERIOD_DEBIT_UNPROVEN),
+            "default allow must not claim turns blocked: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("unproven") || n.contains("flat")),
+            "flat unproven honesty must still surface: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn turns_blocked_note_absent_when_flag_false() {
+        let notes = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::SuperGrokSession,
+            has_included_reading: true,
+            flat_poll_unproven_debit: true,
+            flat_poll_observed_build: false,
+            flat_poll_observed_extras: false,
+            oauth_postpaid_dominates: false,
+            has_console_team_prepaid_reading: false,
+            has_team_default_credits_reading: false,
+            turns_blocked_free_period_debit_unproven: false,
+        });
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_TURNS_BLOCKED_FREE_PERIOD_DEBIT_UNPROVEN),
+            "must not emit turns-blocked when guard off: {notes:?}"
         );
     }
 
@@ -812,6 +1044,7 @@ mod tests {
             vec![
                 NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER.to_string(),
                 NOTE_INCLUDED_PCT_IS_BILLING_POLL.to_string(),
+                NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT.to_string(),
                 flat_poll_unproven_debit_note(true, true),
                 NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS.to_string(),
                 NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS.to_string(),

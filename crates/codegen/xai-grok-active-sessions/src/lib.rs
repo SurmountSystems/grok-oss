@@ -41,6 +41,14 @@ pub fn collect_crashed() -> io::Result<Vec<ActiveSession>> {
     collect_crashed_in(&xai_grok_config::grok_home())
 }
 
+/// List registered active sessions for the default Grok home.
+///
+/// Includes stale rows with dead PIDs until [`collect_crashed`] runs. Callers
+/// that need only live processes should filter with PID liveness themselves.
+pub fn list() -> io::Result<Vec<ActiveSession>> {
+    list_in(&crate::util::grok_home::grok_home())
+}
+
 // -- Injectable-root variants (`_in`) for testing ---------------------------
 
 pub fn register_in(root: &Path, session: ActiveSession) -> io::Result<()> {
@@ -170,7 +178,8 @@ fn write_data_file_atomic(
     })
 }
 
-fn is_pid_alive(pid: u32) -> bool {
+/// Whether `pid` appears alive on this host (for inventory / crash hygiene).
+pub fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         let pid_i = match i32::try_from(pid) {

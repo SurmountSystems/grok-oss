@@ -117,6 +117,7 @@ use super::transcript::{
 use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
     dispatch_demote_to_background, dispatch_kill_bg_task, dispatch_kill_subagent,
+    persist_cancel_resume_on_graceful_quit,
 };
 use super::voice::{dispatch_enable_voice_mode, dispatch_voice_stop, dispatch_voice_toggle};
 use crate::app::actions::{Action, Effect};
@@ -156,6 +157,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => {
+            // SIGTERM / first signal / /exit all land here. Mid-turn: write the
+            // same cancel-resume marker as Esc so reopen can re-queue once.
+            persist_cancel_resume_on_graceful_quit(app);
             if let Some(tx) = &app.voice_cmd_tx {
                 let _ = tx.try_send(xai_grok_voice::VoiceCommand::Shutdown);
             }
@@ -164,10 +168,35 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects
         }
         Action::QuitForUpdate => {
+            persist_cancel_resume_on_graceful_quit(app);
             let mut effects = unregister_all_active_sessions(app);
             app.quit_for_update = true;
             effects.push(Effect::Quit);
             effects
+        }
+        Action::RebuildAndRelaunch => {
+            let ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
+                    fraction: 0.0,
+                    detail: "Starting rebuild".into(),
+                });
+                agent.show_toast_ticks("Rebuild 0%  Starting rebuild", 255);
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Starting /rebuild: resolve source tree, just install, \
+                     soft-relaunch leaders, then re-exec this session on the new binary.",
+                    ));
+            }
+            let start_dir =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            vec![Effect::RunRebuild {
+                start_dir,
+                agent_id,
+            }]
         }
         Action::ResumeForeignSession => {
             let Some(hint) = app.take_foreign_resume_hint() else {

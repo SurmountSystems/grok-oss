@@ -154,6 +154,18 @@ impl DualAuthStatus {
                 "  Prefer free SuperGrok period allowance: no ([auth] auto_use_included_limits = false; classic dual-auth order; omit that line or set true to prefer free SuperGrok period allowance first)\n",
             );
         }
+        // Live guard: default allows turns under unproven free SuperGrok period
+        // debit; opt-in hard block when allow_spend… = false.
+        let guard = super::evaluate_free_period_unproven_spend_guard();
+        if guard.block {
+            out.push_str(
+                "  Free SuperGrok period debit unproven: turns blocked (opt-in hard block). Set [auth] allow_spend_when_free_period_debit_unproven = true (default) or unset GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN to allow SuperGrok session traffic under unproven free SuperGrok period debit.\n",
+            );
+        } else if guard.flat_poll_unproven && guard.free_period_has_headroom {
+            out.push_str(
+                "  Free SuperGrok period debit unproven: turns allowed (default). Free SuperGrok period limits are not debiting (flat poll); team Grok Build / OAuth settlement and SuperGrok dollar credits can still move. Set [auth] allow_spend_when_free_period_debit_unproven = false (or env GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN=0) to hard-block turns.\n",
+            );
+        }
 
         if self.dual_auth_ready() {
             out.push_str("  Failover: ready (session + console key path)\n");

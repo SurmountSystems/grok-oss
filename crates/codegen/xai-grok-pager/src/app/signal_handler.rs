@@ -199,6 +199,12 @@ define_recv_optional_windows_signal!(
 /// still owns the terminal; otherwise hard-exit (agent mode, or a signal after
 /// teardown already started).
 fn request_graceful_or_exit(code: i32) {
+    // Write cancel-resume **before** notify / hard-exit. Mid-turn killall is
+    // one SIGTERM; if the event loop is wedged or a second signal force-exits
+    // before Action::Quit, the armed prompt text must already be on disk.
+    // Best-effort; idle / unarmed turns leave no marker.
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::write_armed_process_shutdown_cancel_resume();
     let notify = QUIT_NOTIFY.lock().clone();
     if TERMINAL_OWNED.load(Ordering::Acquire)
         && let Some(n) = notify
@@ -224,6 +230,10 @@ pub(crate) fn force_exit(exit_code: i32) -> ! {
 /// before the signal can still land after our teardown writes -- the writer
 /// thread is not reachable from here without a deadlock risk.
 fn shutdown_with_terminal_restore(exit_code: i32) -> ! {
+    // Second signal / hard path: still attempt cancel-resume write (no-op if
+    // first signal already wrote, or no arm). SIGKILL cannot reach here.
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::write_armed_process_shutdown_cancel_resume();
     // The graceful quit (or a prior teardown) already restored the terminal;
     // skip teardown and just flush telemetry before exiting.
     if !TERMINAL_OWNED.load(Ordering::Acquire) {

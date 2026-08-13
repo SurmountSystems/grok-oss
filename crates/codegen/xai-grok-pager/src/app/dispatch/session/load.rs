@@ -15,7 +15,9 @@ use crate::app::dispatch::ctx::{
 };
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{defer_to_open_reload_window, supersede_open_reload_window};
-use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
+use crate::app::dispatch::queue::{
+    force_drain_queue_past_background, maybe_drain_queue, note_peek_page_flip,
+};
 use crate::app::dispatch::router::dispatch;
 use crate::app::dispatch::status::notify_session_ready;
 use crate::app::dispatch::transcript::extensions_modal_tab_fetches;
@@ -174,6 +176,7 @@ fn dispatch_load_session_ungated(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -832,6 +835,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -880,6 +884,144 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
     }]
 }
 #[allow(clippy::too_many_arguments)]
+/// Snapshot mid-work death evidence **before** `finish_turn` / zombie finalize
+/// clear running tools, blocking waits, and unfinished subagent rows.
+///
+/// Counts as interrupted when:
+/// - unfinished subagent records (even if the primary already completed —
+///   parent success with live children / killall mid-child), **or**
+/// - primary did **not** complete in this load's replay **and** any of:
+///   - parent/child scrollback still running
+///   - tracker mid-turn activity (suppressed wait tools never hit scrollback)
+///   - open turn: agent work after last user prompt with no turn-terminal event
+///
+/// **Replay residue after a completed primary:** during `session/load`, durable
+/// `TurnCompleted` sets [`AgentView::last_primary_user_turn_completed_in_replay`]
+/// but does **not** call `finish_turn`. Running scrollback entries and tracker
+/// `current_agent_msg` / thinking / pending tools therefore often remain until
+/// `handle_session_loaded` calls `finish_turn` **after** this snapshot. That
+/// residue is **not** mid-work. Treating it as interrupted made every clean
+/// completed session look mid-work, so the stale-marker gate never dropped and
+/// reopen / `/rebuild` re-fired leftover `canceled_turn_resume.json` (dogfood
+/// 2026-08-08 session `019faf9d…`: immediate `prompt.drain` len 14 for
+/// `??? [Image #1]` on grok-oss after a completed primary).
+///
+/// Iso dogfood shape still interrupts: parent parked on suppressed
+/// `get_command_or_subagent_output`, all children finished, **no** durable
+/// primary terminal (`last_primary_user_turn_completed_in_replay == false`).
+pub(crate) fn session_looks_interrupted_mid_work(agent: &AgentView) -> bool {
+    // Live children always win — parent may already have a completed terminal.
+    if agent.subagent_sessions.values().any(|s| !s.finished) {
+        return true;
+    }
+    // Completed primary in this load: ignore parent stream residue until
+    // finish_turn. Only unfinished children (above) keep resume alive.
+    if agent.last_primary_user_turn_completed_in_replay {
+        return false;
+    }
+    agent.scrollback.has_running_entries()
+        || agent
+            .subagent_views
+            .values()
+            .any(|child| child.scrollback.has_running_entries())
+        || agent.session.tracker.has_in_flight_mid_turn_activity()
+        || scrollback_has_open_turn_without_terminal(agent)
+}
+
+/// After the last resumable user prompt, agent work started but no
+/// `TurnCompleted` / `TurnCancelled` / `TurnFailed` was recorded — typical
+/// killall / process death mid-turn (PromptResponse never landed).
+///
+/// **Replay caveat:** during `session/load`, durable primary-user
+/// `TurnCompleted` updates are recorded on
+/// [`AgentView::last_primary_user_turn_completed_in_replay`] and are **not**
+/// pushed as scrollback `SessionEvent` terminals. Without that flag, every
+/// clean completed session looks "open" and false-fires auto-resume of the
+/// last user prompt (dogfood: re-sent "Still nothing!!! [Image #1]" on reopen).
+fn scrollback_has_open_turn_without_terminal(agent: &AgentView) -> bool {
+    // Durable terminal for the last primary user turn arrived in this load's
+    // replay — not an open/interrupted turn.
+    if agent.last_primary_user_turn_completed_in_replay {
+        return false;
+    }
+    let len = agent.scrollback.len();
+    let mut last_user_idx: Option<usize> = None;
+    for idx in 0..len {
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::UserPrompt(b) = &entry.block {
+            if b.is_bash || b.is_cron || b.is_interjection {
+                continue;
+            }
+            if b.text.trim().is_empty() {
+                continue;
+            }
+            last_user_idx = Some(idx);
+        }
+    }
+    let Some(user_idx) = last_user_idx else {
+        return false;
+    };
+    let mut saw_agent_work = false;
+    let mut saw_terminal = false;
+    for idx in (user_idx + 1)..len {
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            continue;
+        };
+        match &entry.block {
+            RenderBlock::SessionEvent(b) if b.event.is_turn_terminal() => {
+                saw_terminal = true;
+            }
+            RenderBlock::AgentMessage(_)
+            | RenderBlock::Thinking(_)
+            | RenderBlock::ToolCall(_)
+            | RenderBlock::Subagent(_)
+            | RenderBlock::BgTask(_) => {
+                saw_agent_work = true;
+            }
+            _ => {}
+        }
+    }
+    saw_agent_work && !saw_terminal
+}
+
+/// Last non-empty user prompt text suitable for cancel-resume re-queue.
+///
+/// Skips bash, cron, and mid-turn interjections. Full block text (not first
+/// line only) so `/implement …` skill lines re-enter the same send path.
+pub(crate) fn last_resumable_user_prompt_text(agent: &AgentView) -> Option<String> {
+    let len = agent.scrollback.len();
+    for idx in (0..len).rev() {
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::UserPrompt(b) = &entry.block {
+            if b.is_bash || b.is_cron || b.is_interjection {
+                continue;
+            }
+            let text = b.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
+/// When there is **no** `canceled_turn_resume.json` but the loaded session
+/// looks interrupted mid-work, recover a one-shot resume from history.
+///
+/// Returns prompt text to re-queue when evidence + last user prompt both
+/// exist. Does **not** invent work for clean completed turns.
+pub(crate) fn recover_interrupted_turn_from_session(agent: &AgentView) -> Option<String> {
+    if !session_looks_interrupted_mid_work(agent) {
+        return None;
+    }
+    last_resumable_user_prompt_text(agent)
+}
+
 pub(in crate::app::dispatch) fn handle_session_loaded(
     app: &mut AppView,
     agent_id: AgentId,
@@ -904,6 +1046,11 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
         agent.session.restore_degree = restore_degree;
+        // Capture interruption evidence **before** finish_turn clears running
+        // tools/agent messages and before zombie finalize marks subagents done.
+        // Marker path does not need this; history recovery does.
+        let history_resume_prompt = recover_interrupted_turn_from_session(agent);
+        let interrupted_for_log = session_looks_interrupted_mid_work(agent);
         agent.session.finish_turn(&mut agent.scrollback);
         agent.mark_turn_finished();
         if let Some(placeholder_id) = agent.loading_placeholder_id.take() {
@@ -957,42 +1104,240 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             for child in agent.subagent_views.values_mut() {
                 child.scrollback.finish_all_running();
             }
+            // Cold load after killall / process death: subagent rows may still
+            // show unfinished=false from replay (SubagentFinished never landed).
+            // Those children are dead with this process. Finalize so the local
+            // queue is not held forever and cancel-resume can auto-start.
+            for info in agent.subagent_sessions.values_mut() {
+                if !info.finished {
+                    info.finished = true;
+                    info.pending_kill = false;
+                    info.kill_requested_at = None;
+                    info.activity_label = None;
+                }
+            }
         }
         let mut effects = Vec::new();
         if let Some(directive) = agent.pending_first_prompt.take() {
             agent.session.enqueue_prompt_front(directive);
         }
-        // Auto-resume an explicitly canceled turn on session open (default on).
-        // Only when not already adopting a live running prompt from the leader.
+        // Auto-resume an interrupted/canceled turn on session open (default on).
+        // Covers Esc cancel, SIGTERM/killall (eager or signal-path marker), and
+        // graceful Quit. Only when not already adopting a live running prompt
+        // from the leader. Path must match write side: cwd + session id string
+        // (same as `session_id.0`), not a Display that could drift.
+        //
+        // Product contract: toast + **automatically start** the interrupted
+        // prompt as a live turn (SendPrompt path), not composer-only. Clear
+        // the one-shot marker when we enqueue, then force-drain so the turn
+        // actually runs. Successful drain re-eager-writes for the new active
+        // turn (second killall still works). If drain fails, re-persist the
+        // marker so a later reopen can retry instead of leaving the session idle.
         let mut resume_toast: Option<String> = None;
+        let mut resume_applied = false;
+        let mut resume_rewarm: Option<(String, String, String, Option<String>)> = None;
         if !adopting {
             let resume_enabled = app.current_ui.resume_canceled_turn_on_restart_enabled();
             let cwd = agent.session.cwd.to_string_lossy().into_owned();
-            let sid = hydrate_sid.to_string();
-            if let Ok(Some(marker)) =
-                xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd, &sid)
-            {
-                if xai_grok_shell::session::canceled_turn_resume::should_auto_resume_on_restart(
-                    resume_enabled,
-                    Some(&marker),
-                ) {
-                    agent
-                        .session
-                        .enqueue_prompt_front(marker.prompt_text.clone());
-                    let _ =
-                        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            // Prefer bound session id; hydrate_sid is the load request id and
+            // matches after `bind_session_id` above.
+            let sid = agent
+                .session
+                .session_id
+                .as_ref()
+                .map(|s| s.0.to_string())
+                .unwrap_or_else(|| hydrate_sid.0.to_string());
+            let marker = xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(
+                &cwd, &sid,
+            )
+            .ok()
+            .flatten();
+            match marker.as_ref() {
+                // A) Marker path when present (Esc / SIGTERM / eager turn /
+                // mid-`/rebuild` cancel). Refuse **stale** markers after a
+                // primary user turn already finished cleanly in this load's
+                // replay (no mid-work evidence): eager write + missed clear
+                // (parent success with live children, error terminal, …)
+                // left `canceled_turn_resume.json` that re-fired the last
+                // prompt on every reopen/`/rebuild` relaunch (dogfood:
+                // "??? [Image #1]" and "Still nothing!!!" loops).
+                Some(marker)
+                    if xai_grok_shell::session::canceled_turn_resume::should_auto_resume_on_restart(
+                        resume_enabled,
+                        Some(marker),
+                    ) =>
+                {
+                    let stale_after_completed = agent
+                        .last_primary_user_turn_completed_in_replay
+                        && !interrupted_for_log;
+                    if stale_after_completed {
+                        tracing::info!(
+                            session = %sid,
+                            prompt_len = marker.prompt_text.len(),
+                            "canceled_turn_resume: dropping stale marker after completed primary turn (no mid-work)"
+                        );
+                        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
                             &cwd, &sid,
                         );
-                    resume_toast = Some(
-                        xai_grok_shell::session::canceled_turn_resume::auto_resume_toast()
-                            .to_string(),
+                    } else {
+                        let prompt_text = marker.prompt_text.clone();
+                        let prompt_id = marker.prompt_id.clone();
+                        tracing::info!(
+                            session = %sid,
+                            prompt_len = prompt_text.len(),
+                            "canceled_turn_resume: applying marker on session load (auto-start)"
+                        );
+                        agent.session.enqueue_prompt_front(prompt_text.clone());
+                        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+                            &cwd, &sid,
+                        );
+                        resume_toast = Some(
+                            xai_grok_shell::session::canceled_turn_resume::auto_resume_toast()
+                                .to_string(),
+                        );
+                        resume_applied = true;
+                        resume_rewarm = Some((cwd, sid, prompt_text, prompt_id));
+                    }
+                }
+                Some(_) if !resume_enabled => {
+                    tracing::info!(
+                        session = %sid,
+                        "canceled_turn_resume: marker present but resume_canceled_turn_on_restart is off"
                     );
                 }
+                Some(marker) => {
+                    tracing::info!(
+                        session = %sid,
+                        prompt_len = marker.prompt_text.len(),
+                        "canceled_turn_resume: marker present but not auto-resume eligible"
+                    );
+                }
+                // B) No marker: recover from unfinished children / running
+                // scrollback / suppressed wait tools / open turn + last user
+                // prompt (killall without marker file).
+                None if resume_enabled => {
+                    if let Some(prompt_text) = history_resume_prompt {
+                        tracing::info!(
+                            session = %sid,
+                            prompt_len = prompt_text.len(),
+                            interrupted = interrupted_for_log,
+                            "canceled_turn_resume: recovering interrupted turn from session history (no marker)"
+                        );
+                        // Write a marker as we re-queue so a second SIGTERM mid-drain
+                        // still has durable resume text (same shape as Esc/killall).
+                        if let Some(built) =
+                            xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+                                &prompt_text,
+                                None,
+                                chrono::Utc::now().to_rfc3339(),
+                            )
+                        {
+                            let _ = xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+                                &cwd, &sid, &built,
+                            );
+                        }
+                        agent.session.enqueue_prompt_front(prompt_text.clone());
+                        let _ =
+                            xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+                                &cwd, &sid,
+                            );
+                        resume_toast = Some(
+                            xai_grok_shell::session::canceled_turn_resume::auto_resume_interrupted_toast(
+                            )
+                            .to_string(),
+                        );
+                        resume_applied = true;
+                        resume_rewarm = Some((cwd, sid, prompt_text, None));
+                    } else if interrupted_for_log {
+                        tracing::info!(
+                            session = %sid,
+                            "canceled_turn_resume: interrupted evidence on load but no user prompt to re-queue"
+                        );
+                        resume_toast = Some(
+                            xai_grok_shell::session::canceled_turn_resume::interrupted_resume_failed_toast(
+                                "no user prompt to re-queue",
+                            ),
+                        );
+                    }
+                }
+                None if interrupted_for_log => {
+                    tracing::info!(
+                        session = %sid,
+                        "canceled_turn_resume: interrupted evidence on load but resume_canceled_turn_on_restart is off"
+                    );
+                    resume_toast = Some(
+                        xai_grok_shell::session::canceled_turn_resume::interrupted_resume_failed_toast(
+                            "resume on restart is off in settings",
+                        ),
+                    );
+                }
+                None => {}
             }
         }
-        let drain = maybe_drain_queue(agent);
+        // Cancel-resume must start a turn even if residual background holds
+        // remain (defense in depth after zombie finalize above). Normal load
+        // keeps the standard drain so live-children hold still applies when
+        // we did not just re-queue a killall interrupt.
+        let drain = if resume_applied {
+            force_drain_queue_past_background(agent)
+        } else {
+            maybe_drain_queue(agent)
+        };
         let page_flip_entry = drain.page_flip_entry;
+        let turn_started = drain.effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::SendPrompt { .. }
+                    | Effect::SendPromptBlocks { .. }
+                    | Effect::SetModeThenPrompt { .. }
+            )
+        });
+        if resume_applied {
+            let resume_sid = agent
+                .session
+                .session_id
+                .as_ref()
+                .map(|s| s.0.to_string())
+                .unwrap_or_else(|| hydrate_sid.0.to_string());
+            if turn_started {
+                tracing::info!(
+                    session = %resume_sid,
+                    "canceled_turn_resume: session load drain started SendPrompt (marker or history)"
+                );
+            } else {
+                tracing::info!(
+                    session = %resume_sid,
+                    "canceled_turn_resume: session load drain blocked (will re-warm marker)"
+                );
+                // Loud dogfood: enqueue happened but turn did not start.
+                resume_toast = Some(
+                    xai_grok_shell::session::canceled_turn_resume::interrupted_resume_failed_toast(
+                        "queue drain did not start a turn",
+                    ),
+                );
+            }
+        }
         effects.extend(drain.effects);
+        if let Some((cwd, sid, prompt_text, prompt_id)) = resume_rewarm
+            && !turn_started
+        {
+            tracing::warn!(
+                session = %sid,
+                "cancel-resume enqueued on session load but drain did not start a turn; \
+                 re-writing canceled_turn_resume.json for a later reopen"
+            );
+            if let Some(marker) =
+                xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+                    &prompt_text,
+                    prompt_id.as_deref(),
+                    chrono::Utc::now().to_rfc3339(),
+                )
+            {
+                let _ = xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+                    &cwd, &sid, &marker,
+                );
+            }
+        }
         if let Some(toast) = resume_toast {
             agent.show_toast(&toast);
         }

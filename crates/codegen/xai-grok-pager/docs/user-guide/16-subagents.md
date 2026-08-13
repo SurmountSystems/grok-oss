@@ -303,7 +303,9 @@ Subagents appear at the top of the tasks pane in their own collapsible "Subagent
 
 Queued follow-ups **hold** not only when the parent is blocked waiting on a subagent, but also whenever **any background subagent is still live** — even if the parent already looks idle. That keeps typed follow-ups from starting a conflicting main turn while children work.
 
-- Status cue: e.g. `N subagent(s) still running · M queued — Interject to force`.
+- **Before you type:** the footer shows `Enter: queue` (not `Enter: send`) while a background subagent hold is active, so you can see that plain Enter will queue rather than start a turn.
+- **Status cue with an empty queue:** e.g. `N subagent(s) still running · Enter queues` (advertises the hold before the first follow-up is queued).
+- **Status cue after items are held:** e.g. `N subagent(s) still running · M queued — Interject to force`.
 - **Interject** (chord or queue row `[Interject]`) force-starts the next parent turn despite live children.
 - When the last holding subagent finishes, the queue drains on its own (no extra keystroke).
 - **Monitors** and long-running background commands alone do **not** hold the queue (they can run indefinitely).

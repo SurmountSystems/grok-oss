@@ -1657,13 +1657,13 @@ fn show_limits_opens_modal_with_cached_snapshot() {
     assert!(text.contains("Next reset: Jul 30, 12:00"), "{text}");
     // Honest gap family (host may or may not have management config).
     assert!(
-        text.contains("Balance: no management key")
-            || text.contains("Balance: no management team id")
-            || text.contains("Balance: loading team prepaid...")
-            || text.contains("Balance: team prepaid unavailable")
+        text.contains("Team prepaid remaining: no management key")
+            || text.contains("Team prepaid remaining: no management team id")
+            || text.contains("Team prepaid remaining: loading team prepaid...")
+            || text.contains("Team prepaid remaining: team prepaid unavailable")
             || text
                 .lines()
-                .any(|l| l.trim_start().starts_with("Balance: $")),
+                .any(|l| l.trim_start().starts_with("Team prepaid remaining: $")),
         "honest console prepaid gap: {text}"
     );
     assert!(
@@ -1714,13 +1714,13 @@ fn show_limits_console_live_keeps_meters_distinct() {
     );
     assert!(!text.contains("Path:"), "Path: wording retired: {text}");
     assert!(
-        text.contains("Balance: no management key")
-            || text.contains("Balance: no management team id")
-            || text.contains("Balance: loading team prepaid...")
-            || text.contains("Balance: team prepaid unavailable")
+        text.contains("Team prepaid remaining: no management key")
+            || text.contains("Team prepaid remaining: no management team id")
+            || text.contains("Team prepaid remaining: loading team prepaid...")
+            || text.contains("Team prepaid remaining: team prepaid unavailable")
             || text
                 .lines()
-                .any(|l| l.trim_start().starts_with("Balance: $")),
+                .any(|l| l.trim_start().starts_with("Team prepaid remaining: $")),
         "honest console prepaid gap: {text}"
     );
     assert!(
@@ -1881,7 +1881,7 @@ fn show_limits_console_live_with_management_fixture_shows_prepaid_balance() {
     let text = state.content_lines(chrono::Utc::now()).join("\n");
     assert!(text.contains("Live sampling: console key"), "{text}");
     assert!(
-        text.contains("Balance: $125"),
+        text.contains("Team prepaid remaining: $125"),
         "management prepaid on /limits (short Balance): {text}"
     );
     assert!(

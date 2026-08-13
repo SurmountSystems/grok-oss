@@ -16,11 +16,17 @@ pub fn how_to_update_message() -> String {
     format!(
         "Rebuild from source or reinstall a package that tracks main:\n\
          \n\
-         git clone https://github.com/{OSS_GITHUB_REPO}.git\n\
-         cd grok-oss && git pull\n\
-         just install          # or: just install-nix / AUR package\n\
+         From a Grok OSS checkout (preferred):\n\
+           /rebuild                 # TUI: build, install, soft-relaunch live instances\n\
+           grok-oss rebuild         # same core from the CLI (agents / scripts)\n\
          \n\
-         See FORK.md — Grok OSS has no separate release train."
+         Or by hand:\n\
+           git clone https://github.com/{OSS_GITHUB_REPO}.git\n\
+           cd grok-oss && git pull\n\
+           just install             # or: just install-nix / AUR package\n\
+         \n\
+         See FORK.md — Grok OSS has no separate release train. \
+         `/rebuild` does not use the SpaceXAI auto-updater channel."
     )
 }
 

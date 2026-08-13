@@ -72,25 +72,53 @@ static POLL_HISTORY_BY_IDENTITY: Mutex<BTreeMap<String, VecDeque<IncludedPollSam
 /// Any step in included %, Build product %, or extras cents clears flat
 /// (returns `false`). Not enough polls or too-short window → `false`
 /// (no invented evidence).
+/// Select the most recent poll suffix that spans at least `min_window` and has
+/// at least `min_polls` samples. Returns `None` when evidence is too thin.
+///
+/// High-frequency multipoll (many samples a few seconds apart) must still fire
+/// once the series covers `min_window`. Looking only at the last `min_polls`
+/// points fails when those two points are 2s apart under load, even if free
+/// SuperGrok period % has been flat for minutes. Named C4 measurement contract:
+/// flat free-period series under load is ticket evidence, not invent debit.
+pub fn recent_flat_candidate_window(
+    samples: &[IncludedPollSample],
+    min_polls: usize,
+    min_window: Duration,
+) -> Option<&[IncludedPollSample]> {
+    if min_polls < 2 || samples.len() < min_polls {
+        return None;
+    }
+    let last_idx = samples.len() - 1;
+    let last = &samples[last_idx];
+    // Walk newest→oldest until the span from that sample to the last covers
+    // min_window. That is the tightest recent window with enough wall time.
+    let mut start_idx = None;
+    for i in (0..last_idx).rev() {
+        let span = (last.ts - samples[i].ts).to_std().unwrap_or(Duration::ZERO);
+        if span >= min_window {
+            start_idx = Some(i);
+            break;
+        }
+    }
+    let start_idx = start_idx?;
+    let window = &samples[start_idx..=last_idx];
+    if window.len() < min_polls {
+        return None;
+    }
+    Some(window)
+}
+
+/// True when SuperGrok included % (and any observed Build / extras) stayed flat
+/// across a recent multi-poll window of at least `min_window`.
 pub fn included_debit_unproven(
     samples: &[IncludedPollSample],
     min_polls: usize,
     min_window: Duration,
 ) -> bool {
-    if min_polls < 2 {
-        // Need at least two points to compare.
+    let Some(window) = recent_flat_candidate_window(samples, min_polls, min_window) else {
         return false;
-    }
-    if samples.len() < min_polls {
-        return false;
-    }
-    let window = &samples[samples.len() - min_polls..];
+    };
     let first = &window[0];
-    let last = &window[window.len() - 1];
-    let span = (last.ts - first.ts).to_std().unwrap_or(Duration::ZERO);
-    if span < min_window {
-        return false;
-    }
     for s in &window[1..] {
         if !float_same(s.credit_usage_percent, first.credit_usage_percent) {
             return false;
@@ -550,7 +578,9 @@ pub fn flat_poll_evidence_for_samples(
     if !included_debit_unproven(samples, min_polls, min_window) {
         return FlatPollEvidence::default();
     }
-    let window = &samples[samples.len() - min_polls..];
+    // Same recent window as [`included_debit_unproven`] (not only last N points).
+    let window = recent_flat_candidate_window(samples, min_polls, min_window)
+        .expect("included_debit_unproven true implies a candidate window");
     let observed_build = window.iter().all(|s| s.build_usage_percent.is_some());
     let observed_extras = window.iter().all(|s| s.prepaid_balance_cents.is_some());
     FlatPollEvidence {
@@ -744,6 +774,42 @@ mod tests {
         assert!(
             !included_debit_unproven(&samples, 2, Duration::from_secs(30)),
             "10s span must not satisfy 30s min_window"
+        );
+    }
+
+    /// Named contract (C4 multipoll under load): many dense samples a few
+    /// seconds apart with free SuperGrok period % flat for ≥30s wall must mark
+    /// unproven debit. Looking only at the last two points (often ~2s apart)
+    /// used to miss this and hide ticket evidence.
+    #[test]
+    fn dense_high_frequency_flat_series_marks_unproven_when_wall_spans_min_window() {
+        // 20 samples, 2s apart → 38s wall, all free period 6.0%.
+        let samples: Vec<_> = (0..20)
+            .map(|i| sample(1_000 + i * 2, 6.0, None, Some(10029)))
+            .collect();
+        assert!(
+            included_debit_unproven(&samples, 2, Duration::from_secs(30)),
+            "dense multipoll flat free-period series spanning ≥30s must mark unproven"
+        );
+        let ev = flat_poll_evidence_for_samples(&samples, 2, Duration::from_secs(30));
+        assert!(ev.unproven);
+        assert!(!ev.observed_build, "Build never on wire in this series");
+        assert!(ev.observed_extras, "extras present on every dense sample");
+    }
+
+    /// Named contract: dense series that only recently stepped must clear.
+    #[test]
+    fn dense_flat_then_step_in_recent_window_clears_unproven() {
+        let mut samples: Vec<_> = (0..15)
+            .map(|i| sample(1_000 + i * 2, 6.0, None, Some(10029)))
+            .collect();
+        // Last two seconds: free period steps to 7% (still dense).
+        samples.push(sample(1_000 + 15 * 2, 7.0, None, Some(10029)));
+        samples.push(sample(1_000 + 16 * 2, 7.0, None, Some(10029)));
+        // Recent 30s window still includes the 6→7 step.
+        assert!(
+            !included_debit_unproven(&samples, 2, Duration::from_secs(30)),
+            "step inside the recent min_window must clear flat-poll unproven"
         );
     }
 

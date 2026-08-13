@@ -140,6 +140,21 @@ pub struct GrokComConfig {
         skip_serializing_if = "auto_use_included_limits_is_default_true"
     )]
     pub auto_use_included_limits: bool,
+    /// When free SuperGrok period limits still have room (used % below 100) but
+    /// multipoll / poll history marks free SuperGrok period debit **unproven**
+    /// (`flatPollUnprovenDebit`), the product still **allows** sampler turns by
+    /// default so dogfood is not hard-stopped by unproven server debit (C4).
+    /// Honesty notes on `/limits`, doctor dual-auth status, and multipoll still
+    /// name the flat free SuperGrok period and that team settlement can move.
+    /// Set **false** only to **opt into a hard block** of new turns under that
+    /// state. Config.toml: `[auth] allow_spend_when_free_period_debit_unproven`.
+    /// Env: `GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN` (truthy = allow,
+    /// falsy when set = block; unset uses config / default **true**).
+    #[serde(
+        default = "default_allow_spend_when_free_period_debit_unproven",
+        skip_serializing_if = "allow_spend_when_free_period_debit_unproven_is_default_true"
+    )]
+    pub allow_spend_when_free_period_debit_unproven: bool,
 }
 
 /// Default for [`GrokComConfig::auto_use_included_limits`]: prefer free SuperGrok
@@ -149,6 +164,17 @@ pub const fn default_auto_use_included_limits() -> bool {
 }
 
 fn auto_use_included_limits_is_default_true(value: &bool) -> bool {
+    *value
+}
+
+/// Default for [`GrokComConfig::allow_spend_when_free_period_debit_unproven`]:
+/// allow sampler turns under unproven free SuperGrok period debit (dogfood;
+/// hard block is opt-in via `false`).
+pub const fn default_allow_spend_when_free_period_debit_unproven() -> bool {
+    true
+}
+
+fn allow_spend_when_free_period_debit_unproven_is_default_true(value: &bool) -> bool {
     *value
 }
 /// Team login restriction. TOML string or array; an empty array fails closed.
@@ -361,6 +387,8 @@ impl Default for GrokComConfig {
             force_login_team_uuid: None,
             preferred_method: None,
             auto_use_included_limits: default_auto_use_included_limits(),
+            allow_spend_when_free_period_debit_unproven:
+                default_allow_spend_when_free_period_debit_unproven(),
         }
     }
 }
@@ -545,6 +573,10 @@ mod tests {
             cfg.auto_use_included_limits,
             "empty/new config defaults auto_use_included_limits to true"
         );
+        assert!(
+            cfg.allow_spend_when_free_period_debit_unproven,
+            "empty config defaults allow_spend_when_free_period_debit_unproven to true (allow; hard block is opt-in)"
+        );
         let cfg: GrokComConfig =
             toml::from_str("auto_use_included_limits = true").expect("flag only");
         assert!(cfg.auto_use_included_limits);
@@ -555,6 +587,39 @@ mod tests {
         assert!(
             !cfg.auto_use_included_limits,
             "explicit false must be preserved"
+        );
+    }
+
+    #[test]
+    fn allow_spend_when_free_period_debit_unproven_default_true_opt_in_block_false() {
+        assert!(default_allow_spend_when_free_period_debit_unproven());
+        let empty: GrokComConfig = toml::from_str("").expect("empty");
+        assert!(empty.allow_spend_when_free_period_debit_unproven);
+        let on: GrokComConfig =
+            toml::from_str("allow_spend_when_free_period_debit_unproven = true").expect("true");
+        assert!(on.allow_spend_when_free_period_debit_unproven);
+        let off: GrokComConfig =
+            toml::from_str("allow_spend_when_free_period_debit_unproven = false").expect("false");
+        assert!(!off.allow_spend_when_free_period_debit_unproven);
+        // Default true omits the key on serialize; explicit false is written.
+        let on_ser = GrokComConfig {
+            allow_spend_when_free_period_debit_unproven: true,
+            ..GrokComConfig::default()
+        };
+        let on_toml = toml::to_string(&on_ser).expect("ser on");
+        assert!(
+            !on_toml.contains("allow_spend_when_free_period_debit_unproven"),
+            "default true should omit key: {on_toml}"
+        );
+        let off_ser = GrokComConfig {
+            allow_spend_when_free_period_debit_unproven: false,
+            ..GrokComConfig::default()
+        };
+        let off_toml = toml::to_string(&off_ser).expect("ser off");
+        assert!(
+            off_toml.contains("allow_spend_when_free_period_debit_unproven = false")
+                || off_toml.contains("allow_spend_when_free_period_debit_unproven=false"),
+            "explicit false (opt-in hard block) must round-trip: {off_toml}"
         );
     }
 

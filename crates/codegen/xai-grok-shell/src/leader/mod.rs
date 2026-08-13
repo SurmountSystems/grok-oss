@@ -92,15 +92,87 @@ const EVICT_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the SAME live grok flock-holder may stay unconnectable before
 /// `connect_or_spawn` treats it as a "zombie leader" and evicts it.
 const ZOMBIE_EVICT_DEADLINE: Duration = Duration::from_secs(30);
-/// Whether `leader_version` is a strictly-older parseable semver than `baseline`.
-/// Unparseable versions (e.g. dev `"unknown"`) return `false` — leave them alone.
+/// Package version and optional git SHA from a binary identity string.
+///
+/// Accepted forms (optional trailing channel label ` [stable]` is stripped):
+/// - pure package version: `0.1.100`
+/// - package + short SHA: `0.1.100 (abc123def456)` (see `format_build_id` /
+///   `--version` output for Grok OSS)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryIdentity {
+    pub version: semver::Version,
+    /// Lowercase git short SHA when present; `None` for bare package versions.
+    pub git_sha: Option<String>,
+}
+
+/// Parse a leader/client binary identity for relaunch comparisons.
+///
+/// Returns `None` when the package version is not parseable semver (e.g.
+/// `"unknown"`). A missing or `"unknown"` SHA is treated as no SHA.
+pub fn parse_binary_identity(raw: &str) -> Option<BinaryIdentity> {
+    let mut s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Strip optional channel label: "0.1.100 (abc) [stable]" or "0.1.100 [stable]".
+    if let Some(idx) = s.find(" [") {
+        s = s[..idx].trim_end();
+    }
+    let (version_part, git_sha) = if let Some((ver, rest)) = s.rsplit_once(" (") {
+        if let Some(sha) = rest.strip_suffix(')') {
+            let sha = sha.trim().to_ascii_lowercase();
+            let git_sha = if sha.is_empty() || sha == "unknown" {
+                None
+            } else {
+                Some(sha)
+            };
+            (ver.trim(), git_sha)
+        } else {
+            (s, None)
+        }
+    } else {
+        (s, None)
+    };
+    let version = semver::Version::parse(version_part).ok()?;
+    Some(BinaryIdentity { version, git_sha })
+}
+
+/// Whether `leader_version` is strictly older than `baseline` for relaunch.
+///
+/// Package versions compare with semver. When package versions are equal,
+/// git SHA identity is used so a local rebuild (same crate version, new SHA)
+/// can relaunch leaders that still run the previous binary:
+///
+/// | Leader | Baseline | Result |
+/// |--------|----------|--------|
+/// | lower semver | higher | older (accept) |
+/// | higher / equal pure semver | lower / equal pure | not older |
+/// | same semver, different SHAs | both present | older (accept) |
+/// | same semver, same SHA | | not older |
+/// | bare package | package + SHA | older (accept; upgrade path) |
+/// | package + SHA | bare package | not older (do not thrash to less specific) |
+/// | unparseable either side | | not older (leave alone) |
+///
+/// Unparseable versions (e.g. dev `"unknown"`) return `false`.
 pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {
-    match (
-        semver::Version::parse(leader_version),
-        semver::Version::parse(baseline),
-    ) {
-        (Ok(leader), Ok(baseline)) => leader < baseline,
-        _ => false,
+    let Some(leader) = parse_binary_identity(leader_version) else {
+        return false;
+    };
+    let Some(baseline) = parse_binary_identity(baseline) else {
+        return false;
+    };
+    if leader.version < baseline.version {
+        return true;
+    }
+    if leader.version > baseline.version {
+        return false;
+    }
+    // Same package version: local-rebuild / identity-aware rules.
+    match (leader.git_sha.as_deref(), baseline.git_sha.as_deref()) {
+        (None, None) => false,
+        (Some(l), Some(b)) => l != b,
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
     }
 }
 /// Evict a discovered leader only if it runs a strictly-older parseable version
@@ -517,6 +589,114 @@ async fn discover_leaders_in(root: &Path) -> Vec<LeaderDescriptor> {
 pub async fn discover_leaders() -> Vec<LeaderDescriptor> {
     discover_leaders_in(&crate::util::grok_home::grok_home()).await
 }
+
+/// Outcome of asking one reachable leader to relaunch onto a new binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaderRelaunchOutcome {
+    /// Leader accepted and is draining for upgrade.
+    Relaunching {
+        from_version: String,
+        to_version: String,
+        pid: Option<u32>,
+    },
+    /// Leader declined (not older, already relaunching, no cap, etc.).
+    Declined { reason: String, pid: Option<u32> },
+    /// Connect or control path failed (best-effort skip).
+    Skipped { reason: String, pid: Option<u32> },
+}
+
+/// After a successful install, ask reachable leaders older than
+/// `installed_version` to relaunch (bounded grace; clients reconnect via
+/// `session/load`). Best-effort: discovery/connect/control failures are
+/// recorded as skips, not hard errors.
+///
+/// `installed_version` should be a full binary identity when available
+/// (`0.1.100 (abc123)`), so same-package local rebuilds are accepted by
+/// [`leader_is_older_than`].
+pub async fn signal_leaders_to_relaunch(installed_version: &str) -> Vec<LeaderRelaunchOutcome> {
+    let mut outcomes = Vec::new();
+    for d in discover_leaders().await {
+        if d.classification != LeaderDiscoveryState::Reachable {
+            continue;
+        }
+        let Some(socket_path) = d.socket_path.clone() else {
+            continue;
+        };
+        let pid = d.live_info.as_ref().map(|li| li.pid).or(d.pid_from_lock);
+        if let Some(ref live) = d.live_info
+            && !leader_is_older_than(&live.leader_binary_version, installed_version)
+        {
+            outcomes.push(LeaderRelaunchOutcome::Declined {
+                reason: format!(
+                    "leader {} is not older than {installed_version}",
+                    live.leader_binary_version
+                ),
+                pid,
+            });
+            continue;
+        }
+        let client = match LeaderClient::connect(
+            socket_path,
+            "grok-rebuild-relaunch",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                outcomes.push(LeaderRelaunchOutcome::Skipped {
+                    reason: format!("could not connect: {e}"),
+                    pid,
+                });
+                continue;
+            }
+        };
+        if !client.registration().supports_relaunch() {
+            client.cancel();
+            outcomes.push(LeaderRelaunchOutcome::Skipped {
+                reason: "leader does not support relaunch_v1".into(),
+                pid,
+            });
+            continue;
+        }
+        let outcome = match client
+            .send_control(ControlCommand::RelaunchForUpdate {
+                to_version: installed_version.to_string(),
+            })
+            .await
+        {
+            Ok(Ok(ControlPayload::Relaunching {
+                from_version,
+                to_version,
+                ..
+            })) => LeaderRelaunchOutcome::Relaunching {
+                from_version,
+                to_version,
+                pid,
+            },
+            Ok(Ok(ControlPayload::RelaunchDeclined { reason })) => {
+                LeaderRelaunchOutcome::Declined { reason, pid }
+            }
+            Ok(Ok(_)) => LeaderRelaunchOutcome::Skipped {
+                reason: "unexpected control payload".into(),
+                pid,
+            },
+            Ok(Err(e)) => LeaderRelaunchOutcome::Skipped {
+                reason: format!("control error: {}", e.message),
+                pid,
+            },
+            Err(e) => LeaderRelaunchOutcome::Skipped {
+                reason: format!("ack not received (leader may be exiting): {e}"),
+                pid,
+            },
+        };
+        client.cancel();
+        outcomes.push(outcome);
+    }
+    outcomes
+}
+
 /// (pid, leader_binary_version) of socket-verified (Reachable) leaders; a
 /// stale-lock-only descriptor is skipped (its `pid_from_lock` may be recycled).
 fn reachable_leader_pids(leaders: &[LeaderDescriptor]) -> Vec<(u32, String)> {
@@ -2005,6 +2185,59 @@ mod tests {
         assert!(!leader_is_older_than("0.2.0", "0.2.0"));
         assert!(!leader_is_older_than("unknown", "0.2.0"));
         assert!(!leader_is_older_than("0.1.0", "not-a-version"));
+    }
+
+    #[test]
+    fn parse_binary_identity_package_and_sha() {
+        let bare = parse_binary_identity("0.1.100").unwrap();
+        assert_eq!(bare.version.to_string(), "0.1.100");
+        assert!(bare.git_sha.is_none());
+
+        let with_sha = parse_binary_identity("0.1.100 (abc123def456)").unwrap();
+        assert_eq!(with_sha.version.to_string(), "0.1.100");
+        assert_eq!(with_sha.git_sha.as_deref(), Some("abc123def456"));
+
+        let channel = parse_binary_identity("0.1.100 (abc123) [stable]").unwrap();
+        assert_eq!(channel.git_sha.as_deref(), Some("abc123"));
+
+        assert!(parse_binary_identity("unknown").is_none());
+        assert!(
+            parse_binary_identity("0.1.100 (unknown)")
+                .unwrap()
+                .git_sha
+                .is_none()
+        );
+    }
+
+    /// Local rebuild: same package semver + newer (different) git SHA must
+    /// accept relaunch; equal SHA and older package must decline.
+    #[test]
+    fn leader_is_older_than_same_semver_git_sha_identity() {
+        // Same package version, leader on older SHA, baseline is just-installed.
+        assert!(leader_is_older_than(
+            "0.1.100 (aaaaaaaaaaaa)",
+            "0.1.100 (bbbbbbbbbbbb)"
+        ));
+        // Equal identity: do not thrash.
+        assert!(!leader_is_older_than(
+            "0.1.100 (aaaaaaaaaaaa)",
+            "0.1.100 (aaaaaaaaaaaa)"
+        ));
+        // Bare leader + SHA baseline (pre-identity leaders after local rebuild).
+        assert!(leader_is_older_than("0.1.100", "0.1.100 (bbbbbbbbbbbb)"));
+        // SHA leader + bare baseline (xAI-style package-only): do not thrash down.
+        assert!(!leader_is_older_than("0.1.100 (aaaaaaaaaaaa)", "0.1.100"));
+        // Higher package version still wins over SHA presence.
+        assert!(leader_is_older_than(
+            "0.1.100 (bbbbbbbbbbbb)",
+            "0.1.101 (aaaaaaaaaaaa)"
+        ));
+        assert!(!leader_is_older_than(
+            "0.1.101 (aaaaaaaaaaaa)",
+            "0.1.100 (bbbbbbbbbbbb)"
+        ));
+        // Pure equal package versions still decline (xAI channel path).
+        assert!(!leader_is_older_than("0.1.100", "0.1.100"));
     }
     /// Evicted only when strictly older than the client (anti-thrash).
     #[test]

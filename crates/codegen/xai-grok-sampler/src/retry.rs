@@ -624,6 +624,34 @@ mod tests {
     }
 
     #[test]
+    fn classify_forbidden_bad_credentials_emits_to_session() {
+        let err = api_err(
+            StatusCode::FORBIDDEN,
+            "unauthenticated:bad-credentials: The OAuth2 access token could not be validated.",
+        );
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::EmitToSession(SamplingError::Api {
+                status, message, ..
+            }) => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(message.contains("bad-credentials"));
+            }
+            other => panic!("expected EmitToSession(Api 403 bad-credentials), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_forbidden_policy_is_fatal_not_auth() {
+        let err = api_err(StatusCode::FORBIDDEN, "Content violates usage guidelines.");
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+            }
+            other => panic!("expected Fatal policy 403, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn classify_encrypted_content_emits_to_session() {
         let err = api_err(
             StatusCode::BAD_REQUEST,

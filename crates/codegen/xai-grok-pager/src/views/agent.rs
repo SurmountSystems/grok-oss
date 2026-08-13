@@ -995,9 +995,8 @@ pub fn render_todo_badge_spans(
     ));
     Some(spans)
 }
-/// The scrollback's default focus hint: `Space` leaves for the prompt. A
-/// parked blocking card replaces it with its own (pinned) route back.
-pub fn prompt_focus_hint() -> HintItem {
+/// Space:prompt hint — shared across multiple scrollback hint branches.
+fn space_prompt_hint() -> HintItem {
     use crate::input::key::KeyShortcut;
     use crossterm::event::{KeyCode, KeyModifiers};
     HintItem {
@@ -1008,6 +1007,67 @@ pub fn prompt_focus_hint() -> HintItem {
         pinned: false,
     }
 }
+
+/// What plain Enter does for the agent composer (footer label truth).
+///
+/// Callers pass the same predicates dispatch uses: turn running (with parked
+/// empty wait already collapsed to "not running" for the footer when Enter
+/// cancel-and-sends), background-subagent queue hold, and whether a follow-up
+/// is already queued for empty-Enter soft-interject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterPromptMode {
+    /// Clean idle: enqueue and drain immediately.
+    Send,
+    /// Mid-turn follow-up, or idle while background subagents hold drain.
+    Queue,
+    /// Empty composer + mid-turn + visible queue: soft-interject top row.
+    Interject,
+    /// Composer cannot submit (empty draft and no empty-Enter interject path).
+    Blocked,
+}
+
+impl EnterPromptMode {
+    /// Footer / shortcuts-bar label for the Enter key, if any.
+    pub fn footer_label(self) -> Option<&'static str> {
+        match self {
+            Self::Send => Some("send"),
+            Self::Queue => Some("queue"),
+            Self::Interject => Some("interject"),
+            Self::Blocked => None,
+        }
+    }
+}
+
+/// Resolve what bare Enter does for the agent composer.
+///
+/// Mirrors dispatch:
+/// - sendable text + (turn running **or** background subagent hold) → queue
+/// - sendable text + clean idle → send
+/// - empty composer + mid-turn + queued follow-up → soft-interject
+/// - otherwise → blocked (no Enter submit hint)
+///
+/// `turn_running_for_footer` should be `session.is_turn_running() &&
+/// !renders_parked()` so a parked empty sendable wait still labels Enter as
+/// send (cancel-and-send), matching live drain behavior.
+pub fn enter_prompt_mode(
+    composer_can_send: bool,
+    turn_running_for_footer: bool,
+    holds_queue_for_background: bool,
+    has_queued_follow_up: bool,
+) -> EnterPromptMode {
+    if composer_can_send {
+        if turn_running_for_footer || holds_queue_for_background {
+            EnterPromptMode::Queue
+        } else {
+            EnterPromptMode::Send
+        }
+    } else if turn_running_for_footer && has_queued_follow_up {
+        EnterPromptMode::Interject
+    } else {
+        EnterPromptMode::Blocked
+    }
+}
+
 /// Build the hints list for the shortcuts bar based on current state.
 ///
 /// Each pane contributes its own hints dynamically. The registry provides
@@ -1019,14 +1079,12 @@ pub fn prompt_focus_hint() -> HintItem {
 /// `group_header_label` ("expand"/"collapse") marks a selected group header;
 /// it replaces the fold and Enter:open hints with a single Enter toggle hint.
 ///
-/// `focus_hint` is how the scrollback says the keyboard can leave it —
-/// [`prompt_focus_hint`], or a caller-supplied replacement. A pinned one
-/// leads the bar and is offered once; an unpinned one is offered only in the
-/// selection states where moving on is the useful next step.
+/// `holds_queue_for_background` is true when standalone background subagents
+/// are still live (same predicate as [`crate::app::agent_view::AgentView::holds_queue_for_background`]).
+/// It drives Enter:queue while the parent looks idle, matching drain hold.
 #[allow(clippy::too_many_arguments)]
 pub fn build_hints(
     active_pane: ActivePane,
-    focus_hint: HintItem,
     prompt: &PromptWidget,
     registry: &ActionRegistry,
     is_editing_queued: bool,
@@ -1043,6 +1101,7 @@ pub fn build_hints(
     vim_mode: bool,
     is_subagent_view: bool,
     is_turn_running: bool,
+    holds_queue_for_background: bool,
     esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     selected_is_user_prompt: bool,
@@ -1072,7 +1131,10 @@ pub fn build_hints(
                 HintItem::paired(crate::key!('J'), crate::key!('K'), "reorder"),
                 HintItem::new(crate::key!('y'), "copy"),
             ];
-            if is_turn_running && let Some(def) = registry.find(ActionId::InterjectPrompt) {
+            // Soft-interject mid-turn, or force-drain while background subagents hold.
+            if (is_turn_running || holds_queue_for_background)
+                && let Some(def) = registry.find(ActionId::InterjectPrompt)
+            {
                 hints.push(def.hint());
             }
             hints
@@ -1110,17 +1172,28 @@ pub fn build_hints(
             } else {
                 crate::key!(Enter, SHIFT)
             };
-            let submit_label = if is_turn_running { "queue" } else { "send" };
+            // Enter label matches dispatch (send / queue / soft-interject).
+            let enter_mode = enter_prompt_mode(
+                prompt.can_send(),
+                is_turn_running,
+                holds_queue_for_background,
+                has_queued_follow_up,
+            );
             if let Some(key) = registry.key_for(ActionId::SendPrompt) {
                 if prompt.paste_element_at_cursor().is_some() {
                     hints.push(HintItem::new(key, "expand"));
-                } else if multiline_mode && prompt.can_send() {
-                    hints.push(HintItem::new(newline_key, submit_label));
-                } else if prompt.can_send() {
-                    hints.push(HintItem::new(key, submit_label));
-                } else if is_turn_running && has_queued_follow_up {
-                    // Empty Enter mid-turn soft-interjects the top queued row.
-                    hints.push(HintItem::new(key, "interject"));
+                } else if let Some(submit_label) = enter_mode.footer_label() {
+                    if multiline_mode && prompt.can_send() {
+                        // Multiline: modified Enter submits; bare Enter is newline
+                        // (except empty mid-turn queue soft-interject, still bare Enter).
+                        if matches!(enter_mode, EnterPromptMode::Interject) {
+                            hints.push(HintItem::new(key, submit_label));
+                        } else {
+                            hints.push(HintItem::new(newline_key, submit_label));
+                        }
+                    } else {
+                        hints.push(HintItem::new(key, submit_label));
+                    }
                 }
             }
             if shift_enter_unavailable && !multiline_mode && prompt.can_send() {
@@ -1202,14 +1275,6 @@ pub fn build_hints(
         }
         ActivePane::Scrollback => {
             let mut hints = Vec::new();
-            if focus_hint.pinned {
-                hints.push(focus_hint.clone());
-            }
-            let offer_focus_hint = |hints: &mut Vec<HintItem>| {
-                if !focus_hint.pinned {
-                    hints.push(focus_hint.clone());
-                }
-            };
             let nothing_special = !selected_is_agent_message
                 && !selected_is_user_prompt
                 && !selected_is_credit_limit
@@ -1217,13 +1282,13 @@ pub fn build_hints(
                 && group_header_label.is_none()
                 && !selected_supports_fullscreen;
             if nothing_special {
-                offer_focus_hint(&mut hints);
+                hints.push(space_prompt_hint());
             }
             if selected_is_credit_limit {
                 if let Some(key) = registry.key_for(ActionId::OpenBlockViewer) {
                     hints.push(HintItem::new(key, "open"));
                 }
-                offer_focus_hint(&mut hints);
+                hints.push(space_prompt_hint());
             }
             if selected_is_agent_message {
                 if vim_mode
@@ -1232,7 +1297,7 @@ pub fn build_hints(
                 {
                     hints.push(HintItem::new(key, "copy"));
                 }
-                offer_focus_hint(&mut hints);
+                hints.push(space_prompt_hint());
             }
             if selected_is_user_prompt {
                 let user_collapsed = fold_label == Some("expand");
@@ -1248,7 +1313,7 @@ pub fn build_hints(
                     hints.push(HintItem::new(key, thinking_label));
                 }
                 if !user_collapsed {
-                    offer_focus_hint(&mut hints);
+                    hints.push(space_prompt_hint());
                 }
             }
             let user_collapsed_already_pushed =
@@ -1290,7 +1355,9 @@ pub fn build_hints(
                     registry.key_for(ActionId::NextTurn),
                 )
             {
-                hints.push(HintItem::paired(l, h, "turn").pinned());
+                let mut hint = HintItem::paired(l, h, "turn").pinned();
+                hint.custom_display = Some("Shift+l/h");
+                hints.push(hint);
             }
             if !selected_is_user_prompt
                 && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
@@ -1334,9 +1401,25 @@ pub fn build_hints(
         }
         hints.push(hint);
     }
+    // Work B: advertise global pause while a turn runs or background subagents
+    // hold the queue (same live-work surface as status-row pause chrome). Soft
+    // stop stays chord-only (no footer button).
+    if (is_turn_running || holds_queue_for_background)
+        && let Some(def) = registry.find(ActionId::ToggleGlobalPause)
+    {
+        let mut hint = def.hint();
+        // Short footer label; long_help still names fearless global pause.
+        hint.label = std::borrow::Cow::Borrowed("pause");
+        hints.push(hint);
+    }
     let has_composer_payload = !prompt.text().trim().is_empty() || is_editing_queued;
+    // Mid-turn soft-interject, or idle force-drain while background subagents hold
+    // (non-empty text enqueues front + force; empty + held queue force-drains top).
+    let interject_available =
+        ActionRegistry::interjection_possible(is_turn_running, has_composer_payload)
+            || (holds_queue_for_background && (has_composer_payload || has_queued_follow_up));
     if matches!(active_pane, ActivePane::Prompt)
-        && ActionRegistry::interjection_possible(is_turn_running, has_composer_payload)
+        && interject_available
         && let Some(def) = registry.find(ActionId::InterjectPrompt)
     {
         hints.push(def.hint());
@@ -1385,7 +1468,6 @@ mod tests {
     ) -> Vec<HintItem> {
         build_hints(
             ActivePane::Scrollback,
-            prompt_focus_hint(),
             &PromptWidget::default(),
             registry,
             false,
@@ -1400,6 +1482,7 @@ mod tests {
             false,
             false,
             vim_mode,
+            false,
             false,
             false,
             false,
@@ -1526,7 +1609,6 @@ mod tests {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Scrollback,
-            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1541,6 +1623,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -1562,7 +1645,6 @@ mod tests {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Scrollback,
-            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1577,6 +1659,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -1728,7 +1811,6 @@ mod tests {
         }
         build_hints(
             ActivePane::Scrollback,
-            prompt_focus_hint(),
             &PromptWidget::default(),
             registry,
             false,
@@ -1743,6 +1825,7 @@ mod tests {
             false,
             false,
             vim_mode,
+            false,
             false,
             false,
             false,
@@ -1833,7 +1916,6 @@ mod tests {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Prompt,
-            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1848,6 +1930,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -1888,6 +1971,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -1944,6 +2028,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 None,
             );
             let thinking = hints
@@ -1965,12 +2050,25 @@ mod tests {
         shift_enter_unavailable: bool,
         is_turn_running: bool,
     ) -> Vec<HintItem> {
+        prompt_hints_with_text_turn_and_hold(
+            multiline_mode,
+            shift_enter_unavailable,
+            is_turn_running,
+            false,
+        )
+    }
+
+    fn prompt_hints_with_text_turn_and_hold(
+        multiline_mode: bool,
+        shift_enter_unavailable: bool,
+        is_turn_running: bool,
+        holds_queue_for_background: bool,
+    ) -> Vec<HintItem> {
         let mut prompt = PromptWidget::default();
         prompt.textarea.insert_str("hello");
         let registry = ActionRegistry::defaults();
         build_hints(
             ActivePane::Prompt,
-            prompt_focus_hint(),
             &prompt,
             &registry,
             false,
@@ -1987,6 +2085,7 @@ mod tests {
             true,
             false,
             is_turn_running,
+            holds_queue_for_background,
             false,
             false,
             false,
@@ -2022,6 +2121,63 @@ mod tests {
             "mid-turn with composer text must advertise the soft-interject chord; got {labels:?}"
         );
     }
+
+    /// Named contract: plain Enter outcome matches dispatch predicates.
+    ///
+    /// | composer | turn running | bg hold | queued | mode |
+    /// |----------|--------------|---------|--------|------|
+    /// | text     | no           | no      | *      | Send |
+    /// | text     | yes          | *       | *      | Queue |
+    /// | text     | no           | yes     | *      | Queue |
+    /// | empty    | yes          | *       | yes    | Interject |
+    /// | empty    | no           | *       | *      | Blocked |
+    /// | empty    | yes          | *       | no     | Blocked |
+    #[test]
+    fn enter_prompt_mode_matrix_matches_dispatch_predicates() {
+        use EnterPromptMode::*;
+        // (can_send, turn_running, holds_bg, has_queued, expected)
+        let cases = [
+            (true, false, false, false, Send),
+            (true, false, false, true, Send),
+            (true, true, false, false, Queue),
+            (true, true, true, true, Queue),
+            (true, false, true, false, Queue),
+            (true, false, true, true, Queue),
+            (false, true, false, true, Interject),
+            (false, true, true, true, Interject),
+            (false, false, true, true, Blocked), // idle hold: empty Enter does not soft-interject
+            (false, false, false, false, Blocked),
+            (false, true, false, false, Blocked),
+            (false, false, true, false, Blocked),
+        ];
+        for (can_send, turn, hold, queued, expected) in cases {
+            let got = enter_prompt_mode(can_send, turn, hold, queued);
+            assert_eq!(
+                got, expected,
+                "enter_prompt_mode(can_send={can_send}, turn={turn}, hold={hold}, queued={queued})"
+            );
+        }
+    }
+
+    /// Primary dogfood gap: parent idle + live background subagent must not
+    /// advertise Enter:send — Enter queues and holds until children finish.
+    #[test]
+    fn prompt_idle_with_background_hold_submit_hint_is_queue() {
+        let hints = prompt_hints_with_text_turn_and_hold(false, false, false, true);
+        let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
+        assert!(
+            labels.contains(&"queue"),
+            "idle + background subagent hold must advertise Enter:queue; got {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"send"),
+            "idle + background hold must not mislabel Enter as send; got {labels:?}"
+        );
+        assert!(
+            labels.contains(&"interject"),
+            "idle + hold with composer text must advertise force Interject; got {labels:?}"
+        );
+    }
     /// Empty composer + mid-turn queue: bare Enter soft-interjects in both normal
     /// and multiline modes (multiline only inserts newline when there is text).
     #[test]
@@ -2031,7 +2187,6 @@ mod tests {
             let registry = ActionRegistry::defaults();
             let hints = build_hints(
                 ActivePane::Prompt,
-                prompt_focus_hint(),
                 &prompt,
                 &registry,
                 false,
@@ -2048,6 +2203,7 @@ mod tests {
                 true,
                 false,
                 true,
+                false,
                 false,
                 true,
                 false,
@@ -2079,7 +2235,6 @@ mod tests {
         {
             let hints = build_hints(
                 ActivePane::Prompt,
-                prompt_focus_hint(),
                 &prompt,
                 &registry,
                 false,
@@ -2096,6 +2251,7 @@ mod tests {
                 true,
                 false,
                 true,
+                false,
                 esc_would_cancel_turn,
                 false,
                 false,
@@ -2125,7 +2281,6 @@ mod tests {
         let search = ScrollbackSearchState::open();
         let hints = build_hints(
             ActivePane::Scrollback,
-            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -2142,6 +2297,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -2177,7 +2333,6 @@ mod tests {
         prompt.textarea.insert_str("edited row");
         let hints = build_hints(
             ActivePane::Prompt,
-            prompt_focus_hint(),
             &prompt,
             &registry,
             true,
@@ -2194,6 +2349,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,

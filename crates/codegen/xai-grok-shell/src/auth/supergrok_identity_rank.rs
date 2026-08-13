@@ -378,6 +378,39 @@ pub struct AutoCredentialOrder {
     pub session_identity_key: Option<String>,
 }
 
+/// Ranked free SuperGrok period primary access token, when any candidate still
+/// has free SuperGrok period headroom.
+///
+/// SessionToken sampling must use this JWT (via AuthManager align), not a sticky
+/// base-scope Team principal that free SuperGrok period rank did not pick.
+pub fn ranked_free_period_primary_token(
+    candidates: &[SupergrokSessionCandidate],
+) -> Option<String> {
+    order_live_supergrok_for_auto(candidates)
+        .live_tokens
+        .into_iter()
+        .next()
+}
+
+/// Whether the live SessionToken bearer should switch to free SuperGrok period
+/// ranked primary (different non-empty JWT).
+///
+/// Named contract for the sticky AuthManager base vs dual SuperGrok free-period
+/// rank bug: when rank picks personal (or any other SuperGrok principal) but
+/// AuthManager still holds Team base, SessionToken reconstruct must not keep
+/// sampling the Team JWT.
+pub fn session_bearer_should_align_to_ranked_free_period_primary(
+    current_bearer: Option<&str>,
+    ranked_primary: Option<&str>,
+) -> bool {
+    let cur = current_bearer.map(str::trim).filter(|s| !s.is_empty());
+    let ranked = ranked_primary.map(str::trim).filter(|s| !s.is_empty());
+    match (cur, ranked) {
+        (Some(c), Some(r)) => c != r,
+        _ => false,
+    }
+}
+
 /// Rank SuperGrok candidates with included headroom (sooner reset first).
 ///
 /// Bounded dual SuperGrok poll hygiene: identities whose last billing poll was
@@ -946,7 +979,59 @@ mod tests {
         assert!(!order.exhausted_all_supergrok_included);
     }
 
+    /// Named contract: free SuperGrok period rank primary is personal when both
+    /// principals share headroom and the same reset (lex identity_id), not the
+    /// sticky Team/business base scope that SessionToken AuthManager may hold.
     #[test]
+    fn ranked_free_period_primary_personal_when_equal_headroom_not_sticky_business() {
+        let personal = cand(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457",
+            SupergrokAccountRole::Personal,
+            94,
+            Some(1_000),
+            "tok-personal-free-period",
+        );
+        let business = cand(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+            SupergrokAccountRole::Business,
+            94,
+            Some(1_000),
+            "tok-business-team-base",
+        );
+        // Sticky AuthManager base is often business (last Team login); rank must
+        // still pick personal when headroom + reset are equal (lex id).
+        let ranked = ranked_free_period_primary_token(&[business.clone(), personal.clone()]);
+        assert_eq!(
+            ranked.as_deref(),
+            Some("tok-personal-free-period"),
+            "equal free SuperGrok period headroom must not sticky-prefer Team base"
+        );
+        assert!(session_bearer_should_align_to_ranked_free_period_primary(
+            Some("tok-business-team-base"),
+            ranked.as_deref(),
+        ));
+        assert!(!session_bearer_should_align_to_ranked_free_period_primary(
+            Some("tok-personal-free-period"),
+            ranked.as_deref(),
+        ));
+    }
+
+    #[test]
+    fn session_bearer_align_false_when_ranked_missing_or_empty() {
+        assert!(!session_bearer_should_align_to_ranked_free_period_primary(
+            Some("tok"),
+            None
+        ));
+        assert!(!session_bearer_should_align_to_ranked_free_period_primary(
+            Some("tok"),
+            Some("")
+        ));
+        assert!(!session_bearer_should_align_to_ranked_free_period_primary(
+            None,
+            Some("tok")
+        ));
+    }
+
     fn auto_order_not_business_first_when_personal_resets_sooner() {
         let personal = cand(
             "personal-1",

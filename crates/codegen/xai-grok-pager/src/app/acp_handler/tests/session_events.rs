@@ -595,6 +595,16 @@
             "Unauthorized (401) from https://proxy/v1/responses"
         ));
         assert!(is_reauthable_failure(None, "Unauthorized (401)"));
+        // Gateway may return invalid OAuth as HTTP 403 bad-credentials.
+        assert!(is_reauthable_failure(
+            Some("api"),
+            "API error (status 403 Forbidden): unauthenticated:bad-credentials: \
+             The OAuth2 access token could not be validated."
+        ));
+        assert!(is_reauthable_failure(
+            None,
+            "unauthenticated:bad-credentials: The OAuth2 access token could not be validated."
+        ));
         // legacy_auth carries its own migration guidance — excluded.
         assert!(!is_reauthable_failure(
             Some("legacy_auth"),
@@ -606,6 +616,11 @@
             "internal server error"
         ));
         assert!(!is_reauthable_failure(Some("api"), "model not found"));
+        // Bare policy 403 is not re-authable.
+        assert!(!is_reauthable_failure(
+            Some("api"),
+            "Content violates usage guidelines."
+        ));
     }
 
     /// A 401 with `error_type == "auth"` surfaces the actionable re-auth
@@ -678,6 +693,32 @@
             last_session_event(&scrollback),
             Some(SessionEvent::ReAuthRequired)
         ));
+    }
+
+    /// Dogfood: 403 bad-credentials with error_type "api" must still push
+    /// ReAuthRequired (not raw Retry failed / Internal error JSON).
+    #[test]
+    fn apply_retry_state_403_bad_credentials_prompts_reauth() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: "API error (status 403 Forbidden): unauthenticated:bad-credentials: \
+                          The OAuth2 access token could not be validated."
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert!(
+            matches!(
+                last_session_event(&scrollback),
+                Some(SessionEvent::ReAuthRequired)
+            ),
+            "403 bad-credentials must surface re-auth, not Retry failed dump"
+        );
     }
 
     /// Legacy WebLogin auth keeps its verbose message (with `grok logout` /

@@ -494,6 +494,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        // Mid-rebuild: progress bar + sticky stage text. Never scrollback-spam
+        // every Compiling line; raw cargo already captured off the TTY.
+        TaskResult::RebuildProgress {
+            agent_id,
+            message,
+            fraction,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                let fraction = xai_grok_update::clamp_rebuild_fraction(fraction);
+                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
+                    fraction,
+                    detail: message.clone(),
+                });
+                // Keep a long-lived toast so status chrome still shows the stage
+                // if the bar row is tight; ticks high enough for multi-minute builds.
+                agent.show_toast_ticks(
+                    &format!("Rebuild {:3.0}%  {message}", fraction * 100.0),
+                    255,
+                );
+            }
+            vec![]
+        }
         TaskResult::PromptResponse {
             agent_id,
             result,
@@ -708,6 +730,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             };
             deliver_doctor_message(app, target.agent_id, message);
             vec![]
+        }
+        TaskResult::RebuildDone { agent_id, result } => {
+            super::rebuild::handle_rebuild_done(app, agent_id, result)
         }
         TaskResult::AnnouncementsHiddenPersisted { result } => {
             if let Err(e) = result {

@@ -93,6 +93,69 @@ pub fn todo_parent_id(item: &TodoItem) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// Bound subagent / task id from `meta.taskId` (camelCase) when present.
+///
+/// Used by the multi-track also-guard: demoting `in_progress` → `pending` is
+/// rejected while this id is still running. Completing or cancelling is always
+/// allowed. Unbound items (no `taskId`) may still demote in the first cut.
+pub fn todo_bound_task_id(item: &TodoItem) -> Option<&str> {
+    item.meta
+        .as_ref()
+        .and_then(|m| m.get("taskId"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Reject demoting `in_progress` → `pending` when the item is bound to a
+/// still-running subagent (`meta.taskId` + `is_running` true).
+///
+/// Completing and cancelling always pass. Unbound items pass. `is_running` is
+/// supplied by the caller (coordinator query, or a test stub).
+pub fn check_live_demote_guard(
+    state: &TodoState,
+    updates: &[TodoUpdate],
+    is_running: &dyn Fn(&str) -> bool,
+) -> Result<(), String> {
+    for u in updates {
+        let Some(new_status) = u.status else {
+            continue;
+        };
+        if new_status != TodoStatus::Pending {
+            continue;
+        }
+        let Some(existing) = state.todos.get(&u.id) else {
+            continue;
+        };
+        if existing.status != TodoStatus::InProgress {
+            continue;
+        }
+        // Prefer taskId from the update meta when the merge carries a new bind;
+        // otherwise use the item's existing bind.
+        let bound = u
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("taskId"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| todo_bound_task_id(existing));
+        let Some(task_id) = bound else {
+            continue;
+        };
+        if is_running(task_id) {
+            return Err(format!(
+                "Cannot demote '{id}' from in_progress to pending while subagent \
+                 {task_id} is still running. Leave it in_progress, mark completed \
+                 when the subagent finishes, or mark cancelled if you are dropping \
+                 the track (do not park a live track).",
+                id = u.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// True when any active item (or update in `updates`) lists `id` as `parentId`.
 pub fn todo_id_has_children(state: &TodoState, id: &str, updates: &[TodoUpdate]) -> bool {
     if state
@@ -851,9 +914,12 @@ pub struct TodoUpdate {
     /// - `parentId`: id of a parent todo when nesting levels
     /// - `namespace`: owning skill/session prefix (e.g. `plan`, `impl`)
     /// - `size`: Fibonacci leaf size 1|2 (fallback when top-level `size` omitted)
+    /// - `taskId`: subagent id returned by Task (`subagent_id`) — binds this
+    ///   board row to a live worker; demoting `in_progress`→`pending` is
+    ///   rejected while that worker is still Running
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "Optional metadata JSON object. Documented keys: kind (residual|phase|work|child), parentId, namespace."
+        description = "Optional metadata JSON object. Documented keys: kind (residual|phase|work|child), parentId, namespace, taskId (bind live subagent; demote to pending rejected while Running)."
     )]
     pub meta: Option<serde_json::Value>,
 
@@ -923,7 +989,7 @@ impl crate::types::tool_metadata::ToolMetadata for TodoWriteTool {
 
 Use for any task with 3+ steps. Skip for trivial single-step work.
 
-Prefer merge: true upsert only (never casually wipe with merge: false). Fibonacci work leaves size 1 or 2 only — anything larger must split into children; parents/containers omit size. Progress totals only leaf sizes. Prefer namespaced ids (plan:, impl:, feat:, bug:, …) and meta.kind + parentId for structure."#
+Prefer merge: true upsert only (never casually wipe with merge: false). Fibonacci work leaves size 1 or 2 only — anything larger must split into children; parents/containers omit size. Progress totals only leaf sizes. Prefer namespaced ids (plan:, impl:, feat:, bug:, …) and meta.kind + parentId for structure. After spawning a subagent, set meta.taskId to that subagent_id so the board owns the live track. Do not demote a bound in_progress item to pending while that subagent is still running (complete or cancel instead; a second user ask is additive, not a pivot)."#
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -1009,6 +1075,56 @@ impl xai_tool_runtime::Tool for TodoWriteTool {
             {
                 return Ok(TodoWriteOutput::InvalidArgument(msg));
             }
+
+            // Multi-track also-guard: collect bound demote candidates, then
+            // query the subagent backend without holding Resources.
+            let bound_task_ids: Vec<String> = input
+                .todos
+                .iter()
+                .filter_map(|u| {
+                    if u.status != Some(TodoStatus::Pending) {
+                        return None;
+                    }
+                    let existing = todo_state.0.todos.get(&u.id)?;
+                    if existing.status != TodoStatus::InProgress {
+                        return None;
+                    }
+                    u.meta
+                        .as_ref()
+                        .and_then(|m| m.get("taskId"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| todo_bound_task_id(existing).map(str::to_owned))
+                })
+                .collect();
+            let state_for_guard = todo_state.0.clone();
+            let backend = res
+                .get::<crate::implementations::grok_build::task::backend::SubagentBackendResource>()
+                .cloned();
+            drop(res);
+
+            if !bound_task_ids.is_empty() {
+                let mut running: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                if let Some(backend) = backend {
+                    for task_id in &bound_task_ids {
+                        let snap = backend.backend().query(task_id, false, None).await;
+                        if snap.as_ref().is_some_and(|s| s.is_running()) {
+                            running.insert(task_id.clone());
+                        }
+                    }
+                }
+                if let Err(msg) = check_live_demote_guard(&state_for_guard, &input.todos, &|id| {
+                    running.contains(id)
+                }) {
+                    return Ok(TodoWriteOutput::InvalidArgument(msg));
+                }
+            }
+
+            let mut res = resources.lock().await;
+            let todo_state = res.get_or_default::<State<TodoState>>();
 
             let mut archived = 0usize;
             if effective_merge {
@@ -1444,6 +1560,82 @@ mod tests {
         let item = get_item(&state, "1");
         assert_eq!(item.status, TodoStatus::Completed);
         assert_eq!(item.content, "Build the project"); // unchanged
+    }
+
+    /// Multi-track also-guard: bound in_progress + still-running taskId must
+    /// reject demote to pending. Completing / cancelling / unbound stay free.
+    #[test]
+    fn live_demote_guard_rejects_bound_running_to_pending() {
+        let mut state = seed_state(&[("impl:limits", "Ship limits", TodoStatus::InProgress)]);
+        // Bind meta.taskId after seed.
+        let item = state.todos.get_mut("impl:limits").unwrap();
+        item.meta = Some(serde_json::json!({ "taskId": "sub-abc-1" }));
+
+        let updates = vec![make_update("impl:limits", None, Some(TodoStatus::Pending))];
+        let err = check_live_demote_guard(&state, &updates, &|id| id == "sub-abc-1")
+            .expect_err("must reject live demote");
+        assert!(
+            err.contains("Cannot demote") && err.contains("sub-abc-1") && err.contains("running"),
+            "plain English reject; got {err}"
+        );
+        // State unchanged (guard is pre-merge).
+        assert_eq!(
+            get_item(&state, "impl:limits").status,
+            TodoStatus::InProgress
+        );
+    }
+
+    #[test]
+    fn live_demote_guard_allows_complete_and_cancel_while_bound() {
+        let mut state = seed_state(&[("impl:a", "Work A", TodoStatus::InProgress)]);
+        state.todos.get_mut("impl:a").unwrap().meta =
+            Some(serde_json::json!({ "taskId": "sub-run" }));
+
+        let complete = vec![make_update("impl:a", None, Some(TodoStatus::Completed))];
+        check_live_demote_guard(&state, &complete, &|_| true).expect("complete ok while running");
+
+        let cancel = vec![make_update("impl:a", None, Some(TodoStatus::Cancelled))];
+        check_live_demote_guard(&state, &cancel, &|_| true).expect("cancel ok while running");
+    }
+
+    #[test]
+    fn live_demote_guard_allows_unbound_demote() {
+        let state = seed_state(&[("impl:free", "No bind", TodoStatus::InProgress)]);
+        let updates = vec![make_update("impl:free", None, Some(TodoStatus::Pending))];
+        check_live_demote_guard(&state, &updates, &|_| true)
+            .expect("unbound demote still allowed in first cut");
+    }
+
+    #[test]
+    fn live_demote_guard_allows_bound_when_subagent_finished() {
+        let mut state = seed_state(&[("impl:done", "Done track", TodoStatus::InProgress)]);
+        state.todos.get_mut("impl:done").unwrap().meta =
+            Some(serde_json::json!({ "taskId": "sub-finished" }));
+        let updates = vec![make_update("impl:done", None, Some(TodoStatus::Pending))];
+        check_live_demote_guard(&state, &updates, &|_| false)
+            .expect("finished subagent: demote to pending ok");
+    }
+
+    #[test]
+    fn todo_bound_task_id_reads_camel_case_task_id() {
+        let item = TodoItem {
+            content: "x".into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::InProgress,
+            meta: Some(serde_json::json!({ "taskId": "  sid-9  " })),
+            size: None,
+        };
+        assert_eq!(todo_bound_task_id(&item), Some("sid-9"));
+        assert!(
+            todo_bound_task_id(&TodoItem {
+                content: "y".into(),
+                priority: TodoPriority::default(),
+                status: TodoStatus::Pending,
+                meta: Some(serde_json::json!({ "kind": "work" })),
+                size: None,
+            })
+            .is_none()
+        );
     }
 
     #[test]

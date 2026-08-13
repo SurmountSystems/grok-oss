@@ -34,6 +34,21 @@ plan. Clarify answers without rewriting. Quit abandons.
 pub const PLAN_PARKED_TOAST: &str =
     "Plan ready. Review the side panel, or click Approve/Quit below";
 
+/// Toast when plan mode is still active after a turn ends **without** live
+/// approval chrome (agent finished freeform without `exit_plan_mode`, or
+/// stale approval was cleared). Auto-opens the side panel for review.
+///
+/// Real Approve / Revise / Quit only appear after the agent presents the plan
+/// via `exit_plan_mode`. Until then the operator can review, leave plan mode
+/// with Shift+Tab, or ask the agent to present for approval.
+pub const PLAN_IDLE_REVIEW_TOAST: &str = "\
+Plan ready to review. Side panel open. Approve/Revise appear when the agent \
+presents the plan. Until then: /view-plan anytime, or Shift+Tab to leave plan mode.";
+
+/// Status-line label while plan mode is active without a live reverse-request
+/// (idle / freeform dead end). Click opens the side panel; `/view-plan` too.
+pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
+
 /// Header line for the inline transcript plan card (option C).
 pub const PLAN_CARD_HEADER: &str = "Plan ready for review";
 
@@ -770,6 +785,17 @@ mod tests {
         assert!(
             !PLAN_PARKED_TOAST.contains("/view-plan"),
             "toast must not nudge /view-plan when the panel auto-opens"
+        );
+        assert!(
+            PLAN_IDLE_REVIEW_TOAST.contains("Side panel open")
+                && PLAN_IDLE_REVIEW_TOAST.contains("/view-plan")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Shift+Tab"),
+            "idle-review toast must name panel + discoverable exit; got {PLAN_IDLE_REVIEW_TOAST:?}"
+        );
+        assert!(
+            PLAN_IDLE_REVIEW_STATUS.contains("Click")
+                && PLAN_IDLE_REVIEW_STATUS.contains("/view-plan"),
+            "idle-review status must be click-discoverable; got {PLAN_IDLE_REVIEW_STATUS:?}"
         );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());

@@ -35,23 +35,48 @@ Grok stores each session in its own directory, grouped by working directory. It 
   compaction_checkpoints/ # saved state from compaction (manual or auto)
   subagents/              # per-subagent metadata (meta.json); the child sessions live in the normal sessions tree
   unsent_prompt_draft     # durable unsent composer text (not submitted history)
-  canceled_turn_resume.json  # optional: last explicit user cancel (prompt text + id) for auto-resume
+  canceled_turn_resume.json  # optional: mid-turn cancel/quit marker (prompt text + id) for auto-continue
 ```
 
-### Resume canceled turn on restart
+### Continue interrupted turn on restart
 
-When you **explicitly cancel** a running turn (Esc / stop), Grok may write
+This is **not** the `/resume` session picker. `/resume` (and `-c` / `--resume`)
+picks which saved conversation to open. **Continue interrupted turn** is what
+happens **inside** a reopened session when the last top-level turn was cut
+short mid-work.
+
+When a mid-turn is interrupted in a cancel-resumable way, Grok may write
 `canceled_turn_resume.json` with the in-flight prompt identity (not secrets).
 On the next open of that same session, if **`[ui] resume_canceled_turn_on_restart`**
-is on (default **true**, Settings → Session), Grok re-queues that prompt **once**,
-shows **“Resuming canceled turn...”**, and clears the marker.
+is on (default **true**, Settings → Session → **Continue interrupted turn on
+restart**), Grok re-queues that prompt **once**, shows **“Continuing
+interrupted turn...”**, and clears the marker.
 
-- **Does not** invent work that finished successfully or was never canceled.
+**Writes the marker:**
+
+- **When a turn starts** (eager active-turn sidecar): the user/display prompt is
+  written to disk as soon as the turn drains, so a hard `killall grok-oss` race
+  that never reaches the signal handler still leaves a resumeable file
+- Explicit user cancel (Esc / stop), including after the model has already
+  started tools or subagents (not only pristine pre-activity cancel)
+- Graceful process quit while a turn is running: SIGTERM (including default
+  `killall grok-oss`), SIGHUP, first signal → Quit, `/exit`, and similar
+  controlled shutdown paths. Whole-turn prompt text survives first server
+  activity; the first signal also flushes the in-process arm
+- `/rebuild` mid-turn cancel before self re-exec
+
+**Does not keep / invent the marker:**
+
+- Clean success or turns that finished without cancel (successful finish
+  **clears** any leftover marker)
+- Fearless global pause (`Ctrl+Shift+Space` or status-row `[pause]` / `[resume]`) — in-process stash only (not a durable cancel-resume marker)
+- Soft stop (`Ctrl+Shift+S` only; no status-row button) — holds the queue after the current turn
+- **SIGKILL** (`kill -9` / `killall -9`) before any turn-start write — no
+  userspace code runs; if the turn already started, the eager marker still
+  continues that interrupted turn on next open
+
+- **Does not** invent work that finished successfully or was never interrupted.
 - A later **successful** turn clears any leftover marker.
-- **Fearless global pause** (`Ctrl+Shift+Space`) uses its own in-process resume
-  stash and does **not** write this restart marker.
-- **Soft stop** (`Ctrl+Shift+S`) holds the queue after the current turn; it is
-  not cancel and does not write this marker.
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
 

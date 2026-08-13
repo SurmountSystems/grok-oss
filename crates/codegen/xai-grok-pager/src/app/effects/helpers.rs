@@ -11,11 +11,17 @@ use xai_grok_shell::sampling::error::{
 };
 use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::unified_list::ListScope;
-/// Typed progress message for session restore.
+/// Typed progress message for long-running effects (session restore, `/rebuild`).
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
 pub(crate) struct RestoreProgressMsg {
     pub agent_id: AgentId,
     pub message: String,
+    /// When true, update the agent toast / rebuild progress bar (`/rebuild`).
+    /// When false, push a system scrollback block (session restore).
+    pub toast: bool,
+    /// Overall rebuild fraction `0.0..=1.0` when this is a rebuild progress
+    /// sample. `None` for session-restore lines.
+    pub fraction: Option<f32>,
 }
 pub(super) fn log_prompt_result(
     session_id: &acp::SessionId,

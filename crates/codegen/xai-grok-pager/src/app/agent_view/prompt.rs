@@ -116,13 +116,6 @@ impl AgentView {
         // dropdown state derived from that text would otherwise steal the
         // arrows mid-browse.
         if self.prompt.history_search.is_active() {
-            // Tear down the history overlay before opening the cheatsheet: it
-            // renders unconditionally and would bleed around the popup, and Esc
-            // would otherwise silently resume the browse instead of closing help.
-            if registry.matches_id(ActionId::ShortcutsHelp, key) {
-                self.close_history_restoring_saved();
-                return self.handle_agent_action_with_registry(ActionId::ShortcutsHelp, registry);
-            }
             return self.handle_history_search_key(key);
         }
 
@@ -220,11 +213,22 @@ impl AgentView {
                 // stay open (row's insert_text ends with space => chains).
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     let snap = self.prompt.slash_snapshot();
-                    let exact_command = crate::slash::is_typed_slash_selected(
-                        &snap,
-                        self.prompt.text(),
-                        self.prompt.slash_controller.registry(),
-                    );
+                    let exact_command = snap.cursor_in_command
+                        && crate::slash::parse_invocation(self.prompt.text()).is_some_and(
+                            |invocation| {
+                                invocation.args.is_empty()
+                                    && self
+                                        .prompt
+                                        .slash_controller
+                                        .registry()
+                                        .get_for_dispatch(invocation.token)
+                                        .is_some()
+                                    && crate::slash::is_command_complete(
+                                        self.prompt.text(),
+                                        self.prompt.slash_controller.registry(),
+                                    )
+                            },
+                        );
                     if exact_command {
                         self.prompt.slash_commit_preview();
                         self.prompt.slash_close();
@@ -488,8 +492,11 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // 0e. Exit special input mode on empty prompt using per-mode exit keys (Bash/Remember: Backspace/Esc/Ctrl+W/U/C).
-        //     With non-empty text, Esc falls through to Esc policy (cancel / mid-turn swallow / clear / rewind). Mode is preserved for re-focus.
+        // 0e. Exit special input mode on empty prompt using per-mode exit keys
+        //     (Bash/Remember: Backspace/Esc/Ctrl+W/U/C; Feedback: Backspace/Esc only).
+        //     With non-empty text, Esc falls through to Esc policy
+        //     (cancel / mid-turn swallow / clear / rewind). Mode is preserved
+        //     for re-focus.
         if self.prompt_input_mode.is_exit_key(key) && self.prompt.text().is_empty() {
             self.prompt_input_mode = PromptInputMode::Normal;
             return InputOutcome::Changed;
@@ -561,9 +568,9 @@ impl AgentView {
                     //  - slash_accepted_send: slash dropdown Enter accepted a no-arg
                     //    command and fell through — must send, not insert newline.
                     //  - bash mode: Enter should always send.
-                    //  - empty composer + mid-turn queue: force-send the top row
-                    //    (send-now discoverability). Inserting a blank line on an
-                    //    empty prompt is never useful here; same path as normal mode.
+                    //  - empty composer + mid-turn queue: soft-interject the top
+                    //    queued follow-up (never cancels). Inserting a blank line
+                    //    on an empty prompt is never useful here; same as normal.
                     if self.multiline_mode
                         && self.prompt_input_mode != PromptInputMode::Bash
                         && !slash_accepted_send
@@ -593,8 +600,9 @@ impl AgentView {
                         return InputOutcome::Action(action);
                     }
                     // Empty (or backslash continuation). Mid-turn + a queued
-                    // follow-up: bare Enter force-sends the top queue row so
-                    // users discover send-now without learning a chord.
+                    // follow-up: bare Enter soft-interjects the top queue row
+                    // (never cancels) so users discover Interject without a
+                    // chord. Historical helper name: try_send_now_queued_from_prompt.
                     // Skip while editing a queued row (edit-mode Enter is
                     // handled earlier for non-empty; empty must stay a no-op).
                     // Guard on an actually-empty composer: try_send() also
@@ -613,26 +621,54 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ActionId::InterjectPrompt => {
-                    crate::actions::log_shortcut_used(
-                        key,
-                        ActionId::InterjectPrompt,
-                        When::PromptFocused.telemetry_name(),
-                    );
                     // Editing-queued intercept lives in `queue_edit.rs`.
                     if let Some(outcome) = self.interject_editing_queued_intercept() {
                         return outcome;
                     }
-                    // Mid-turn send-now (cancel-and-send):
-                    // 1) Non-empty composer → cancel the running turn and send
-                    //    that text as the next prompt.
+                    // Soft interject (never cancels the running turn):
+                    // 1) Non-empty composer mid-turn → soft Interject into the
+                    //    running turn (buffers shell-side at the next safe point).
                     // 2) Empty composer + a visible follow-up in the queue →
-                    //    same as bare Enter: send the top row now.
-                    // 3) Idle / nothing to send → toast (never silent no-op).
+                    //    soft-interject the top row (same as bare empty Enter).
+                    // 3) Idle + background subagents holding the queue → force
+                    //    drain (or enqueue + force drain for non-empty text).
+                    // 4) Idle / nothing to interject → toast (never silent no-op).
                     let text = self.prompt.text().trim().to_string();
                     let turn_running = self.session.state.is_turn_running();
                     if !text.is_empty() {
                         if !turn_running {
-                            self.show_toast("Nothing running to interrupt — press Enter to send");
+                            // Parent idle with live background subagents: Enter
+                            // would only queue/hold. Interject chord force-starts
+                            // the turn with this text (no cancel — nothing runs).
+                            if self.holds_queue_for_background() {
+                                if self.paste_probe_in_flight > 0 {
+                                    self.deferred_send = Some(AgentDeferredSend::Interject);
+                                    self.show_toast("Attaching image — interject when ready");
+                                    return InputOutcome::Changed;
+                                }
+                                let images = self.prompt.drain_images();
+                                self.prompt.set_text("");
+                                self.clear_unsent_prompt_draft();
+                                let queue_id = self.session.next_queue_id;
+                                self.session.next_queue_id += 1;
+                                self.session.pending_prompts.push_front(
+                                    crate::app::agent::QueuedPrompt {
+                                        images,
+                                        ..crate::app::agent::QueuedPrompt::plain(
+                                            queue_id,
+                                            text,
+                                            crate::app::agent::QueueEntryKind::Prompt,
+                                        )
+                                    },
+                                );
+                                // Toast only after force-drain succeeds (or reports
+                                // a hard gate like plan approval) — see
+                                // `dispatch_force_drain_queue`.
+                                return InputOutcome::Action(Action::ForceDrainQueue);
+                            }
+                            self.show_toast(
+                                "Nothing running to interject into — press Enter to send",
+                            );
                             return InputOutcome::Changed;
                         }
                         // Paste-then-immediate-send: an image probe is still
@@ -640,22 +676,30 @@ impl AgentView {
                         // completion so the not-yet-attached chip isn't dropped.
                         if self.paste_probe_in_flight > 0 {
                             self.deferred_send = Some(AgentDeferredSend::Interject);
-                            self.show_toast("Attaching image — send now when ready");
+                            self.show_toast("Attaching image — interject when ready");
                             return InputOutcome::Changed;
                         }
                         // Drain images BEFORE set_text("") wipes the chip elements.
                         let images = self.prompt.drain_images();
                         self.prompt.set_text("");
-                        return InputOutcome::Action(Action::SendPromptNow { text, images });
+                        self.clear_unsent_prompt_draft();
+                        return InputOutcome::Action(Action::Interject { text, images });
                     }
                     if turn_running {
                         if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                             return outcome;
                         }
-                        self.show_toast("Nothing queued to send now");
+                        self.show_toast("Nothing queued to interject");
                         return InputOutcome::Changed;
                     }
-                    self.show_toast("Nothing running to interrupt — press Enter to send");
+                    // Idle + held for background subagents: force-drain the top
+                    // local row so the chord still works without a running turn.
+                    // Toast is chosen in `dispatch_force_drain_queue` after the
+                    // drain result (success vs plan-approval / other hard gate).
+                    if self.holds_queue_for_background() && self.has_held_user_queue() {
+                        return InputOutcome::Action(Action::ForceDrainQueue);
+                    }
+                    self.show_toast("Nothing running to interject into — press Enter to send");
                     return InputOutcome::Changed;
                 }
                 ActionId::ToggleMultiline => {
@@ -753,6 +797,7 @@ impl AgentView {
                         self.open_line_viewer(&req.path, req.initial_range);
                     }
                     self.prompt.refresh_slash(&self.session.models);
+                    self.persist_unsent_prompt_draft();
                     if let Some(eff) = self.notify_suggestion_text_changed() {
                         self.pending_effects.push(eff);
                     }
@@ -812,40 +857,37 @@ impl AgentView {
         // dump.
         self.esc_pressed_at = None;
 
-        // A blocking card is still pending, parked behind the scrollback — the
-        // only way its Esc reaches this policy. Swallow it like the idle arms
-        // below: cancelling here would kill the turn the card is blocking on,
-        // and `esc_would_cancel_turn`, which the bar reads, already promises
-        // it will not.
-        if !self.no_input_overlay_pending() {
-            return Some(InputOutcome::Changed);
-        }
-
         // Mid-turn running, fullscreen vim mode: swallow Esc (do not cancel or
         // arm clear/rewind — Ctrl+C stays the cancel gesture there).
         // `is_minimal_mode` is the per-agent injected screen mode, not the
-        // process global, so tests stay race-free. A streaming wake turn
-        // follows the same policy as a running turn (the pane state is Idle
-        // only because wake turns are not adopted); once its cancel was sent
-        // it follows the cancelling retry below instead, in every mode.
-        if (self.session.state.is_turn_running()
-            || (self.wake_turn_active() && !self.wake_turn_cancelling()))
+        // process global, so tests stay race-free.
+        if self.session.state.is_turn_running()
             && !crate::app::esc_cancels_turn(self.is_minimal_mode(), self.vim_mode)
         {
             return Some(InputOutcome::Changed);
         }
-        // Mid-turn (minimal / non-vim): cancel immediately from prompt or
-        // scrollback, even with a draft. Also — in every mode — while already
-        // cancelling, so a lost cancel notification is re-sent (Ctrl+C
-        // escalates to Quit instead). Push the grace deadline out so an Esc
-        // mash past the cancel cannot silently arm the rewind picker below.
-        if self.session.state.is_turn_running()
-            || self.wake_turn_active()
-            || self.any_cancel_pending()
-        {
+        // While already cancelling: re-send cancel in every mode (lost ack).
+        // Ctrl+C escalates to Quit instead. Push the post-cancel grace so an
+        // Esc mash cannot silently arm the rewind picker after the turn goes
+        // idle. Does not use double-Esc arming — the user already committed.
+        if self.session.state.is_cancelling() {
             self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Action(Action::CancelTurn));
+        }
+        // Mid-turn (minimal / non-vim): arm double-Esc cancel confirm from
+        // prompt or scrollback, even with a draft (the draft is preserved,
+        // unlike Ctrl+C's clear-first gesture). First press is harmless so
+        // Esc that only closed a modal/dropdown cannot also cancel. Second
+        // Esc within the confirm window fires CancelTurn (AppView installs
+        // the pending and sets cancel_trigger_hint + rewind grace on fire).
+        if self.session.state.is_turn_running() {
+            return Some(InputOutcome::ArmPending {
+                action: Action::CancelTurn,
+                shortcut: crate::input::key::KeyShortcut::from(*key),
+                label: Some("cancel"),
+                ttl: crate::app::app_view::esc_double_press_ttl(),
+            });
         }
 
         // The two idle arms split on pane ownership. CLEAR mutates the composer
@@ -876,10 +918,10 @@ impl AgentView {
         // undoable prompts". The last three guards restate shields that the
         // PROMPT pane gets upstream but that the SCROLLBACK pane bypasses (so
         // they are vacuously true on the prompt pane): step 0e exits a latent
-        // Bash/Remember mode on an empty-composer Esc before the policy runs
-        // (without the mode guard a rewind restore would drop conversation
-        // text into a still-armed `!` composer); the needs-input overlay
-        // intercepts exempt the scrollback pane while the open
+        // Bash/Remember/Feedback mode on an empty-composer Esc before the
+        // policy runs — without the mode guard a rewind restore would drop
+        // conversation text into a still-armed `!` composer; the needs-input
+        // overlay intercepts exempt the scrollback pane while the open
         // picker's own intercept does not, so arming under a pending
         // permission/plan/cancel-turn/question overlay would let the picker
         // key-starve it (and a rewind mutate the session out from under it);
@@ -1006,8 +1048,11 @@ impl AgentView {
                 .map(str::to_owned)
             {
                 self.prompt.history_search.deactivate();
-                // Restore bash mode from a `! ` history entry unless Remember is active.
-                if self.prompt_input_mode != PromptInputMode::Remember
+                // Detect `! ` prefix to restore bash mode. Refined: only reset to Normal
+                // if currently in Bash (preserve Feedback/Remember if active). The ! prefix
+                // restore only applies when not in Feedback/Remember.
+                if self.prompt_input_mode != PromptInputMode::Feedback
+                    && self.prompt_input_mode != PromptInputMode::Remember
                     && let Some(cmd) = text.strip_prefix("! ")
                 {
                     self.prompt_input_mode = PromptInputMode::Bash;
@@ -1161,7 +1206,6 @@ mod shift_tab_cycle_mode_tests {
         let mut agent = super::test_fixtures::make_agent();
         agent.multiline_mode = true;
         agent.prompt.set_text("/doctor");
-        agent.prompt.set_cursor(agent.prompt.text().len());
         agent.prompt.refresh_slash(&agent.session.models);
         assert!(agent.prompt.slash_open());
 
@@ -1194,71 +1238,6 @@ mod shift_tab_cycle_mode_tests {
         );
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(agent.active_pane, super::AgentPane::Prompt);
-    }
-}
-
-#[cfg(test)]
-mod slash_menu_enter_tests {
-    use super::*;
-    use crate::app::app_view::InputOutcome;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    fn enter() -> KeyEvent {
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
-    }
-
-    fn agent_with_slash(text: &str) -> crate::app::agent_view::AgentView {
-        let mut agent = super::test_fixtures::make_agent();
-        agent.prompt.set_text(text);
-        agent.prompt.set_cursor(text.len());
-        agent.prompt.refresh_slash(&agent.session.models);
-        assert!(agent.prompt.slash_open());
-        agent
-    }
-
-    fn select_display(agent: &mut crate::app::agent_view::AgentView, display: &str) {
-        let idx = agent
-            .prompt
-            .slash_snapshot()
-            .matches
-            .iter()
-            .position(|row| row.display == display)
-            .unwrap_or_else(|| panic!("{display} in slash menu"));
-        for _ in 0..idx {
-            agent.prompt.slash_move_selection(1);
-        }
-    }
-
-    #[test]
-    fn enter_sends_highlighted_command_not_typed_prefix() {
-        let mut agent = agent_with_slash("/log");
-        select_display(&mut agent, "/login");
-        let outcome = agent.handle_prompt_key_for_test(&enter());
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/login"),
-            "got {outcome:?}; prompt={:?}",
-            agent.prompt.text()
-        );
-    }
-
-    #[test]
-    fn enter_keeps_typed_alias_when_that_command_is_highlighted() {
-        let mut agent = agent_with_slash("/log");
-        let display = agent
-            .prompt
-            .slash_snapshot()
-            .matches
-            .iter()
-            .find(|row| row.display == "/log" || row.display == "/transcript")
-            .map(|row| row.display.clone())
-            .expect("/log or /transcript in slash menu");
-        select_display(&mut agent, &display);
-        let outcome = agent.handle_prompt_key_for_test(&enter());
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/log"),
-            "got {outcome:?}; prompt={:?}",
-            agent.prompt.text()
-        );
     }
 }
 
@@ -1658,6 +1637,47 @@ mod history_browse_panel_tests {
     }
 }
 
+/// Ctrl+E expand-thinking must work while the prompt is focused (not only
+/// scrollback). Otherwise the chord falls through to the textarea as EOL and
+/// looks like a silent no-op.
+#[cfg(test)]
+mod expand_thinking_key_tests {
+    use super::*;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::types::DisplayMode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn ctrl_e() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_e_from_prompt_emits_expand_all_thinking() {
+        let mut agent = make_agent();
+        assert_eq!(agent.active_pane, crate::app::agent_view::AgentPane::Prompt);
+        // Seed a live truncated thought so expand has work to do.
+        let id = agent
+            .scrollback
+            .push_block(RenderBlock::thinking_streaming());
+        agent.scrollback.set_last_running(true);
+        agent
+            .scrollback
+            .push_chunk_to_thinking(id, "reason step by step\nmore lines\nhere");
+        assert_eq!(
+            agent.scrollback.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Truncated
+        );
+
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_e());
+        match outcome {
+            InputOutcome::Action(Action::ExpandAllThinking) => {}
+            other => panic!("expected ExpandAllThinking from prompt Ctrl+E, got {other:?}"),
+        }
+    }
+}
+
 /// Send-now (InterjectPrompt) must never silent-no-op: toast or action.
 #[cfg(test)]
 mod send_now_key_tests {
@@ -1672,7 +1692,7 @@ mod send_now_key_tests {
     }
 
     #[test]
-    fn send_now_with_text_while_idle_toasts() {
+    fn interject_contract_with_text_while_idle_toasts() {
         let mut agent = make_agent();
         agent.session.state = AgentState::Idle;
         agent.prompt.set_text("please fix this");
@@ -1680,15 +1700,15 @@ mod send_now_key_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Nothing running to interrupt — press Enter to send")
+            Some("Nothing running to interject into — press Enter to send")
         );
         assert_eq!(agent.prompt.text(), "please fix this", "draft preserved");
     }
 
     #[test]
-    fn send_now_empty_while_running_with_empty_queue_toasts() {
+    fn interject_contract_empty_while_running_with_empty_queue_toasts() {
         let mut agent = make_running_agent();
-        // Drop local + shared queue so nothing is force-sendable.
+        // Drop local + shared queue so nothing is interjectable.
         agent.session.pending_prompts.clear();
         agent.shared_queue.clear();
         agent.queue.sync_from_merged(
@@ -1703,20 +1723,20 @@ mod send_now_key_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Nothing queued to send now")
+            Some("Nothing queued to interject")
         );
     }
 
     #[test]
-    fn send_now_with_text_while_running_emits_send_prompt_now() {
+    fn interject_contract_with_text_while_running_emits_interject() {
         let mut agent = make_running_agent();
         agent.prompt.set_text("steer left");
         let outcome = agent.handle_prompt_key_for_test(&ctrl_enter());
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "steer left");
             }
-            other => panic!("expected SendPromptNow, got {other:?}"),
+            other => panic!("expected Interject, got {other:?}"),
         }
         assert!(agent.prompt.text().is_empty());
     }

@@ -39,7 +39,7 @@ use xai_grok_shell::agent::app::{run_headless, run_leader, run_stdio_agent};
 use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::leader::{
     ClientCapabilities, ClientMode, ControlCommand, LeaderCapabilities, LeaderDescriptor,
-    LeaderRegistration, LeaderTarget, leader_is_older_than,
+    LeaderRegistration, LeaderTarget,
 };
 use xai_grok_shell::leader::{
     ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
@@ -1867,6 +1867,11 @@ async fn async_main() -> Result<()> {
             Command::Memory(memory_args) => {
                 return xai_grok_pager::memory_cmd::run(memory_args);
             }
+            Command::Rebuild { source } => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return run_rebuild_command(source).await;
+            }
             Command::Update {
                 check,
                 json,
@@ -2383,6 +2388,30 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
         }
         client.cancel();
     }
+}
+
+/// CLI entry for `grok-oss rebuild`: same core as `/rebuild` without self re-exec.
+async fn run_rebuild_command(source: Option<std::path::PathBuf>) -> Result<()> {
+    let start = source.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+    println!("Rebuilding grok-oss from source (this may take several minutes)...");
+    println!("  start dir: {}", start.display());
+    // Capture install stdio (never inherit): weighted progress bar on stderr.
+    let report = xai_grok_update::rebuild_and_relaunch_with_progress(&start, |ev| {
+        use std::io::Write;
+        let line = xai_grok_update::format_rebuild_cli_progress(ev.fraction, &ev.detail, 24);
+        // Carriage return rewrite keeps a single progress row on terminals.
+        let mut err = std::io::stderr();
+        let _ = write!(err, "\r\x1b[2K{line}");
+        let _ = err.flush();
+    })
+    .await?;
+    eprintln!();
+    for line in &report.summary_lines {
+        println!("{line}");
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {

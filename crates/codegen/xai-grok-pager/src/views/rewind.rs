@@ -218,6 +218,17 @@ pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
     if key.kind == crossterm::event::KeyEventKind::Release {
         return RewindInput::Consumed;
     }
+    // Ctrl+C dismisses the same way Esc does (except while executing).
+    // The overlay owns exclusive key focus while open; swallowing Ctrl+C left
+    // L1 trapped with no way out except Esc. Align with plan-approval empty
+    // Ctrl+C abandon and Esc-dismiss for exclusive pickers.
+    if crate::key!('c', CONTROL).matches(key) {
+        return match &state.phase {
+            RewindPhase::Error { .. } => RewindInput::DismissError,
+            RewindPhase::Executing { .. } => RewindInput::Consumed,
+            _ => RewindInput::Dismissed,
+        };
+    }
     match &state.phase {
         RewindPhase::Picker { points, selected } => match key.code {
             KeyCode::Char('j') | KeyCode::Down => RewindInput::MoveDown,
@@ -252,6 +263,7 @@ pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
                 KeyCode::Char('a') => RewindInput::SelectMode(RewindMode::All, idx),
                 // Two-row inline variant letters its rows a/b; 'c' stays as
                 // an alias so classic-flow muscle memory keeps working.
+                // Bare `c` only (Ctrl+C is handled above as dismiss).
                 KeyCode::Char('b') if !*offer_files_only => {
                     RewindInput::SelectMode(RewindMode::ConversationOnly, idx)
                 }
@@ -1142,6 +1154,22 @@ mod tests {
         }
     }
 
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    fn picker_state() -> RewindState {
+        RewindState {
+            phase: RewindPhase::Picker {
+                points: vec![point(0), point(1)],
+                selected: 0,
+            },
+            anchor_entry_idx: 0,
+            stashed_draft: None,
+            selected_prompt_index: None,
+        }
+    }
+
     fn confirm_state() -> RewindState {
         RewindState {
             phase: RewindPhase::Confirm {
@@ -1530,6 +1558,105 @@ mod tests {
         assert!(matches!(
             handle_rewind_key(&s, &key(KeyCode::Esc)),
             RewindInput::Dismissed
+        ));
+    }
+
+    /// Named contract: Ctrl+C dismisses the rewind turn picker the same way
+    /// Esc does, so exclusive overlay capture cannot trap L1. Does not quit
+    /// the app; returns control to the prompt (caller maps Dismissed →
+    /// RewindDismiss and clears rewind_state).
+    #[test]
+    fn ctrl_c_dismisses_rewind_picker_like_esc() {
+        let s = picker_state();
+        assert!(
+            matches!(handle_rewind_key(&s, &ctrl_c()), RewindInput::Dismissed),
+            "Ctrl+C on the rewind picker must dismiss (not Consumed)"
+        );
+        // Bare `c` is not a dismiss key on the picker.
+        assert!(
+            matches!(
+                handle_rewind_key(&s, &key(KeyCode::Char('c'))),
+                RewindInput::Consumed
+            ),
+            "bare c on picker stays Consumed"
+        );
+    }
+
+    /// Ctrl+C must dismiss every Esc-dismissible phase, and must not be
+    /// mistaken for ModeSelect bare-`c` (conversation only).
+    #[test]
+    fn ctrl_c_dismisses_all_esc_dismissible_rewind_phases() {
+        let phases: Vec<RewindState> = vec![
+            picker_state(),
+            RewindState::new_mode_select(0, 1, true, true, None),
+            RewindState::new_cancel_offer(0, None, None),
+            confirm_state(),
+            conv_only_state(),
+            RewindState {
+                phase: RewindPhase::Loading,
+                anchor_entry_idx: 0,
+                stashed_draft: None,
+                selected_prompt_index: None,
+            },
+            RewindState {
+                phase: RewindPhase::Previewing {
+                    target_prompt_index: 0,
+                    mode: RewindMode::All,
+                },
+                anchor_entry_idx: 0,
+                stashed_draft: None,
+                selected_prompt_index: None,
+            },
+        ];
+        for s in &phases {
+            assert!(
+                matches!(handle_rewind_key(s, &ctrl_c()), RewindInput::Dismissed),
+                "Ctrl+C must dismiss phase {:?}",
+                s.phase
+            );
+        }
+
+        // ModeSelect: bare `c` still picks conversation-only; Ctrl+C does not.
+        let mode = RewindState::new_mode_select(0, 3, true, true, None);
+        assert!(
+            matches!(
+                handle_rewind_key(&mode, &key(KeyCode::Char('c'))),
+                RewindInput::SelectMode(RewindMode::ConversationOnly, 3)
+            ),
+            "bare c still selects conversation only"
+        );
+        assert!(
+            matches!(handle_rewind_key(&mode, &ctrl_c()), RewindInput::Dismissed),
+            "Ctrl+C must not select conversation only"
+        );
+
+        // Error phase: Ctrl+C matches Esc/Enter → DismissError.
+        let err = RewindState {
+            phase: RewindPhase::Error {
+                message: "boom".into(),
+            },
+            anchor_entry_idx: 0,
+            stashed_draft: None,
+            selected_prompt_index: None,
+        };
+        assert!(matches!(
+            handle_rewind_key(&err, &ctrl_c()),
+            RewindInput::DismissError
+        ));
+
+        // Executing: Esc is also swallowed; Ctrl+C stays Consumed.
+        let exec = RewindState {
+            phase: RewindPhase::Executing {
+                target_prompt_index: 0,
+                mode: RewindMode::All,
+            },
+            anchor_entry_idx: 0,
+            stashed_draft: None,
+            selected_prompt_index: None,
+        };
+        assert!(matches!(
+            handle_rewind_key(&exec, &ctrl_c()),
+            RewindInput::Consumed
         ));
     }
 

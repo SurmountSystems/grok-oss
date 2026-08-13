@@ -517,7 +517,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Interrupts the agent's current turn and stops generation, keeping the session open.\nEsc cancels immediately while a turn is running in minimal mode or when vim scrollback mode is off (prompt or scrollback focused, even with a draft).\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nIt stops the turn, not the app; use the quit shortcut to exit.",
+                "Hard cancel: interrupts the focused session's current turn and stops generation, keeping the session open. On a mouse host the turn-status `[stop]` control (red on hover) does the same. When the primary is idle but background subagents are still running, cancel opens the subagents panel or stops them per your cancel preference.\nEsc arms cancel while a turn is running in minimal mode or when vim scrollback mode is off (prompt or scrollback focused, even with a draft); press Esc again within about 800ms to confirm. The first press is harmless if you only meant to close a dialog.\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nThis is not global pause (Ctrl+Shift+Space / `[pause]`) and not soft stop (Ctrl+Shift+S). It stops the turn (or subagents), not the app; use the quit shortcut to exit.",
             ),
         },
         ActionDef {
@@ -534,7 +534,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("Ctrl+Shift+Space"),
             requires_confirmation: false,
             long_help: Some(
-                "Fearless global pause: stops work and in-flight requests across every open session in this process (not only the focused one).\nWhile paused, the status toast tracks how long you have been paused and how many sessions had incomplete work.\nPress again to resume: only interrupted mid-turn prompts and already-queued work continue; finished agents are not re-spawned and nothing pending is invented.\nDefault chord is Ctrl+Shift+Space so bare Space still focuses the prompt and types spaces, and so it does not collide with voice Ctrl+Space.",
+                "Fearless global pause: stops work and in-flight requests across every open session in this process (not only the focused one).\nOn a mouse host the turn-status row paints a quiet `[pause]` control while a turn or subagents are live; while paused the same control becomes `[resume]`. Hover uses quiet white chrome, never the red used for hard stop.\nWhile paused, the status toast tracks how long you have been paused and how many sessions had incomplete work.\nPress again (or click resume) to continue: only interrupted mid-turn prompts and already-queued work resume; finished agents are not re-spawned and nothing pending is invented.\nDefault chord is Ctrl+Shift+Space so bare Space still focuses the prompt and types spaces, and so it does not collide with voice Ctrl+Space. Distinct from hard cancel (`[stop]` / Esc Esc) and from soft stop (Ctrl+Shift+S).",
             ),
         },
         ActionDef {

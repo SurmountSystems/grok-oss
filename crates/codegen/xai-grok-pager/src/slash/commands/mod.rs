@@ -50,6 +50,7 @@ pub mod plan;
 pub mod plugin;
 pub mod privacy;
 pub mod queue;
+pub mod rebuild;
 pub mod recap;
 pub mod release_notes;
 pub mod remember;
@@ -131,6 +132,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
+        Arc::new(rebuild::RebuildCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(imagine::ImagineCommand),
@@ -331,6 +333,7 @@ mod tests {
             "queue",
             "quit",
             "recap",
+            "rebuild",
             "release-notes",
             "remember",
             "rename",

@@ -2175,6 +2175,11 @@ impl SessionActor {
     /// Persist a compaction checkpoint: writes the compacted history to a separate file
     /// and records a `CompactionCheckpoint` marker in `updates.jsonl`.
     ///
+    /// The checkpoint **file is written synchronously first**. The
+    /// `updates.jsonl` marker is only recorded after that write succeeds, so a
+    /// later cross-compaction rewind never sees a marker pointing at a missing
+    /// file from a failed or still-queued async write.
+    ///
     /// `auto_continue` should be `Some` when this compaction was triggered by auto-compact
     /// and an auto-continue prompt will follow.
     fn persist_compaction_checkpoint(
@@ -2199,13 +2204,45 @@ impl SessionActor {
             original_user_info,
             reread_file_paths: vec![],
         };
+
+        // Durability: write the file before the marker. Fire-and-forget through
+        // the persistence channel alone can leave a marker in updates.jsonl
+        // when the file write fails (or is still queued when rewind runs).
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let dir = session_dir.join("compaction_checkpoints");
+        let path = dir.join(format!("{checkpoint_id}.json"));
+        match (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            let bytes = serde_json::to_vec_pretty(&file_data)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            std::fs::write(&path, bytes)?;
+            Ok(())
+        })() {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!(
+                    ?e,
+                    path = %path.display(),
+                    prompt_index_at_compaction,
+                    "Failed to write compaction checkpoint file; not recording \
+                     updates.jsonl marker (rewind past this compact will be unavailable)"
+                );
+                return;
+            }
+        }
+
+        // Best-effort async copy for any storage backends that also track the
+        // file via the persistence actor (mirrors prior channel path).
         if self
             .notifications
             .persistence_tx
             .send(PersistenceMsg::CompactionCheckpoint(file_data))
             .is_err()
         {
-            tracing::warn!("Failed to send compaction checkpoint file to persistence channel");
+            tracing::warn!(
+                "Failed to send compaction checkpoint file to persistence channel \
+                 (file already written on disk)"
+            );
         }
         let info = CompactionCheckpointInfo {
             checkpoint_id,
@@ -2218,6 +2255,7 @@ impl SessionActor {
         self.persist_xai_update_only(XaiSessionUpdate::CompactionCheckpoint(Box::new(info)));
         tracing::info!(
             prompt_index_at_compaction,
+            path = %path.display(),
             "Persisted compaction checkpoint"
         );
     }

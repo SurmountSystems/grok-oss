@@ -103,6 +103,23 @@ impl SupergrokBillingPollOutcome {
 static POLL_OUTCOME_BY_IDENTITY: Mutex<BTreeMap<String, SupergrokBillingPollOutcome>> =
     Mutex::new(BTreeMap::new());
 
+/// Consecutive auth-class billing poll fails per SuperGrok identity_id.
+///
+/// Used to demote a sibling from automatic re-poll after
+/// [`SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD`] failures without deleting
+/// `auth.json` secrets. Cleared with [`clear_included_billing_cache`].
+/// Reset to zero on a successful poll for that identity.
+static AUTH_FAIL_STREAK_BY_IDENTITY: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
+
+/// After this many consecutive auth-class SuperGrok billing poll fails for one
+/// identity, automatic sibling polls skip that principal until a successful
+/// poll resets the streak (or the process cache is cleared).
+///
+/// Does **not** delete stored OIDC secrets. Active billing path still polls so
+/// `/limits` and doctor can surface re-login; only the non-active sibling list
+/// is filtered.
+pub const SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD: u32 = 3;
+
 /// Classify a billing poll error string into auth vs other (no secrets).
 ///
 /// Auth class: expired / no auth context / unauthorized / 401-style messages
@@ -130,23 +147,29 @@ pub fn classify_supergrok_billing_poll_error(err: &str) -> SupergrokBillingPollO
 ///
 /// Call only after a real Ok response for that principal's JWT. Does not
 /// invent meters; pair with [`remember_supergrok_included_billing`] when %.
+/// Resets the consecutive auth-fail streak so sibling polling may resume.
 pub fn remember_supergrok_billing_poll_ok(identity_id: &str) {
     let id = identity_id.trim();
     if id.is_empty() {
         return;
     }
-    let mut map = POLL_OUTCOME_BY_IDENTITY
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    map.insert(id.to_owned(), SupergrokBillingPollOutcome::ok());
+    {
+        let mut map = POLL_OUTCOME_BY_IDENTITY
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        map.insert(id.to_owned(), SupergrokBillingPollOutcome::ok());
+    }
+    reset_auth_fail_streak(id);
 }
 
 /// Remember a failed SuperGrok credits poll and demote stale included cache on
 /// auth-class fails.
 ///
 /// Auth fail: clear that identity's process-cache free-period `usage_pct` so
-/// rank does not treat it as **fresh** headroom. Does **not** delete
-/// `auth.json` secrets. Other fail: record outcome only (keep prior cache).
+/// rank does not treat it as **fresh** headroom; increment the consecutive
+/// auth-fail streak (sibling re-poll skips after threshold). Does **not**
+/// delete `auth.json` secrets. Other fail: record outcome only (keep prior
+/// cache and do not change the auth-fail streak).
 pub fn remember_supergrok_billing_poll_failed(identity_id: &str, err: &str) {
     let id = identity_id.trim();
     if id.is_empty() {
@@ -182,7 +205,54 @@ pub fn remember_supergrok_billing_poll_failed(identity_id: &str, err: &str) {
     }
     if kind == SupergrokBillingPollOutcomeKind::AuthFailed {
         demote_included_billing_on_auth_fail(id);
+        bump_auth_fail_streak(id);
     }
+}
+
+/// How many consecutive auth-class billing poll fails this process has recorded
+/// for `identity_id` (0 when unknown / never / after Ok).
+pub fn consecutive_auth_fail_streak(identity_id: &str) -> u32 {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return 0;
+    }
+    AUTH_FAIL_STREAK_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Whether automatic **sibling** SuperGrok billing polls should skip this
+/// identity after too many consecutive auth-class fails.
+///
+/// Process map only. Never deletes secrets. Successful poll resets the streak.
+pub fn should_skip_supergrok_billing_poll_for_auth_streak(identity_id: &str) -> bool {
+    consecutive_auth_fail_streak(identity_id) >= SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD
+}
+
+fn bump_auth_fail_streak(identity_id: &str) {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut map = AUTH_FAIL_STREAK_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let entry = map.entry(id.to_owned()).or_insert(0);
+    *entry = entry.saturating_add(1);
+}
+
+fn reset_auth_fail_streak(identity_id: &str) {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut map = AUTH_FAIL_STREAK_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    map.remove(id);
 }
 
 /// Clear free SuperGrok period `usage_pct` (and reset) for an identity after
@@ -483,6 +553,10 @@ pub fn load_supergrok_billing_poll_targets(grok_home: &Path) -> Vec<SupergrokBil
 /// When only one principal exists, returns empty (active path already polls).
 /// When two (or more) exist, returns the sibling(s) so billing refresh can
 /// remember their included % + reset without inventing scrape pipelines.
+///
+/// Skips siblings that have hit
+/// [`SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD`] consecutive auth-class poll
+/// fails this process (re-login needed; secrets stay on disk).
 pub fn load_non_active_supergrok_billing_poll_targets(
     grok_home: &Path,
 ) -> Vec<SupergrokBillingPollTarget> {
@@ -490,7 +564,159 @@ pub fn load_non_active_supergrok_billing_poll_targets(
     load_supergrok_billing_poll_targets(grok_home)
         .into_iter()
         .filter(|t| active.as_deref() != Some(t.identity_id.as_str()))
+        .filter(|t| !should_skip_supergrok_billing_poll_for_auth_streak(&t.identity_id))
         .collect()
+}
+
+/// Whether a stored SuperGrok session should OIDC-refresh before a billing poll.
+///
+/// True only when the access token is past the early-invalidation buffer **and**
+/// the entry still has refresh_token + issuer + client_id (OIDC-refreshable).
+/// Does not delete secrets. External-only or incomplete entries return false
+/// (caller may still poll with the stored access token).
+pub fn session_needs_oidc_refresh_before_billing_poll(auth: &super::model::GrokAuth) -> bool {
+    use super::model::{is_expired, is_supergrok_session_mode};
+
+    if !is_supergrok_session_mode(auth.auth_mode) {
+        return false;
+    }
+    if auth.auth_mode != AuthMode::Oidc {
+        // External binary path is not refreshed via OIDC token exchange here.
+        return false;
+    }
+    let has_rt = auth
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    let has_issuer = auth
+        .oidc_issuer
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    let has_client = auth
+        .oidc_client_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    has_rt && has_issuer && has_client && is_expired(auth)
+}
+
+/// Prefer multi-slot store entry for `identity_id` (same policy as poll targets).
+///
+/// Returns `(auth.json scope key, GrokAuth)`. Used so sibling OIDC refresh can
+/// write back the multi-slot without clobbering the active base of another
+/// principal.
+pub fn find_supergrok_auth_entry_for_billing(
+    grok_home: &Path,
+    identity_id: &str,
+) -> Option<(String, super::model::GrokAuth)> {
+    use super::model::{is_supergrok_session_mode, supergrok_identity_id_from_auth};
+
+    let want = identity_id.trim();
+    if want.is_empty() {
+        return None;
+    }
+    let path = grok_home.join("auth.json");
+    let map = read_auth_json(&path).ok()?;
+    let mut best: Option<(bool, String, super::model::GrokAuth)> = None;
+    for (scope, auth) in &map {
+        if scope == API_KEY_SCOPE {
+            continue;
+        }
+        if !is_supergrok_session_mode(auth.auth_mode) {
+            continue;
+        }
+        if auth.key.trim().is_empty() {
+            continue;
+        }
+        let id = supergrok_identity_id_from_auth(auth, scope);
+        if id != want {
+            continue;
+        }
+        let is_multi = scope.contains("::personal") || scope.contains("::team::");
+        match &best {
+            None => best = Some((is_multi, scope.clone(), auth.clone())),
+            Some((prev_multi, _, _)) => {
+                if is_multi && !*prev_multi {
+                    best = Some((is_multi, scope.clone(), auth.clone()));
+                }
+            }
+        }
+    }
+    best.map(|(_, scope, auth)| (scope, auth))
+}
+
+/// Persist a refreshed SuperGrok session into its existing `auth.json` scope.
+///
+/// Updates only `scope` (typically the multi-slot). Does **not** promote the
+/// sibling onto the active base when the base holds a different principal.
+/// Does **not** delete other principals or secrets.
+pub fn persist_refreshed_supergrok_billing_auth(
+    grok_home: &Path,
+    scope: &str,
+    new_auth: super::model::GrokAuth,
+) -> std::io::Result<()> {
+    use super::storage::write_auth_json;
+
+    let path = grok_home.join("auth.json");
+    let mut map = read_auth_json(&path)?;
+    map.insert(scope.to_owned(), new_auth);
+    write_auth_json(&path, &map)
+}
+
+/// Ensure the SuperGrok principal has a usable access token for a billing poll.
+///
+/// When the multi-slot (or base) JWT is past the early-invalidation buffer and
+/// still has OIDC refresh credentials, exchange the refresh token and write the
+/// new access token back to that `auth.json` scope **before** the credits HTTP
+/// call. On refresh failure, returns the existing token so the poll can record
+/// auth-fail honesty (and eventually N-fail demote). Never deletes secrets.
+///
+/// Returns `(access_token, user_id)`.
+pub async fn ensure_fresh_access_token_for_supergrok_billing_poll(
+    grok_home: &Path,
+    identity_id: &str,
+) -> Option<(String, String)> {
+    let (scope, auth) = find_supergrok_auth_entry_for_billing(grok_home, identity_id)?;
+    if !session_needs_oidc_refresh_before_billing_poll(&auth) {
+        return Some((auth.key.clone(), auth.user_id.clone()));
+    }
+    tracing::debug!(
+        identity_id = %identity_id,
+        scope = %scope,
+        "sibling SuperGrok billing: OIDC refresh before poll"
+    );
+    match super::oidc::oidc_token_exchange(&auth).await {
+        super::oidc::OidcRefreshResult::Success(new_auth) => {
+            let token = new_auth.key.clone();
+            let user_id = new_auth.user_id.clone();
+            if let Err(e) = persist_refreshed_supergrok_billing_auth(grok_home, &scope, *new_auth) {
+                tracing::warn!(
+                    identity_id = %identity_id,
+                    error = %e,
+                    "sibling SuperGrok billing: failed to persist refreshed multi-slot token"
+                );
+                // Still use the fresh token for this poll even if disk write failed.
+            }
+            Some((token, user_id))
+        }
+        super::oidc::OidcRefreshResult::TerminalError { reason } => {
+            tracing::debug!(
+                identity_id = %identity_id,
+                ?reason,
+                "sibling SuperGrok billing: OIDC refresh terminal; polling with stored token"
+            );
+            Some((auth.key.clone(), auth.user_id.clone()))
+        }
+        super::oidc::OidcRefreshResult::Failed => {
+            tracing::debug!(
+                identity_id = %identity_id,
+                "sibling SuperGrok billing: OIDC refresh failed; polling with stored token"
+            );
+            Some((auth.key.clone(), auth.user_id.clone()))
+        }
+    }
 }
 
 /// Snapshot of the process included-billing map (for tests / limits fill).
@@ -501,13 +727,18 @@ pub fn included_billing_fields_snapshot() -> BTreeMap<String, IncludedBillingFie
         .clone()
 }
 
-/// Clear process included-billing cache and poll outcomes (tests / reset).
+/// Clear process included-billing cache, poll outcomes, and auth-fail streaks
+/// (tests / reset). Does not touch `auth.json` secrets on disk.
 pub fn clear_included_billing_cache() {
     INCLUDED_BILLING_BY_IDENTITY
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clear();
     POLL_OUTCOME_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    AUTH_FAIL_STREAK_BY_IDENTITY
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clear();
@@ -600,11 +831,18 @@ fn prefer_supergrok_store_entry(
 /// Dedupes by `identity_id` so base active + multi-slot for the same principal
 /// count once. When both exist, prefer the **live / fresher** token (not a
 /// stale multi-slot that was left behind after base refresh).
+///
+/// Skips the legacy `https://accounts.x.ai/sign-in` scope: that key is only a
+/// storage fallback for pre-OIDC auth.json, not a second SuperGrok principal.
+/// Ranking it next to the current OAuth base scope (especially when both lack
+/// `user_id` / `team_id` and identity falls back to the store key) let free
+/// SuperGrok period align hot-swap the intentional new-scope primary onto the
+/// legacy entry.
 pub fn load_supergrok_session_candidates(
     grok_home: &Path,
 ) -> Vec<super::supergrok_identity_rank::SupergrokSessionCandidate> {
     use super::model::{
-        GrokAuth, is_expired_with_buffer, is_supergrok_session_mode,
+        GrokAuth, LEGACY_SCOPE, is_expired_with_buffer, is_supergrok_session_mode,
         supergrok_identity_id_from_auth,
     };
     use super::supergrok_identity_rank::{
@@ -620,6 +858,10 @@ pub fn load_supergrok_session_candidates(
     let mut by_id: BTreeMap<String, (bool, GrokAuth)> = BTreeMap::new();
     for (scope, auth) in &map {
         if scope == API_KEY_SCOPE {
+            continue;
+        }
+        // Legacy scope is lookup fallback only — never a dual-identity rank peer.
+        if scope == LEGACY_SCOPE {
             continue;
         }
         if !is_supergrok_session_mode(auth.auth_mode) {
@@ -887,7 +1129,7 @@ mod tests {
     use super::*;
     use crate::auth::credentials_store::{CredentialsStore, FORCE_FILE_ENV};
     use crate::auth::model::{AuthStore, GrokAuth};
-    use crate::auth::storage::write_auth_json;
+    use crate::auth::storage::{read_auth_json, write_auth_json};
     use crate::auth::xai_console::add_console_api_key;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -949,6 +1191,388 @@ mod tests {
             Some(500),
             "auth fail must not wipe SuperGrok $ extras memory"
         );
+        clear_included_billing_cache();
+    }
+
+    /// Named contract: OIDC multi-slot needs refresh only when expired and still
+    /// has refresh_token + issuer + client_id.
+    #[test]
+    fn session_needs_oidc_refresh_when_expired_with_refresh_credentials() {
+        use chrono::{Duration, Utc};
+
+        let fresh = GrokAuth {
+            key: "fresh-at".into(),
+            auth_mode: AuthMode::Oidc,
+            user_id: "u1".into(),
+            refresh_token: Some("rt".into()),
+            oidc_issuer: Some("https://auth.x.ai".into()),
+            oidc_client_id: Some("client".into()),
+            expires_at: Some(Utc::now() + Duration::hours(2)),
+            create_time: Utc::now(),
+            ..Default::default()
+        };
+        assert!(
+            !session_needs_oidc_refresh_before_billing_poll(&fresh),
+            "live JWT must not force refresh"
+        );
+
+        let expired = GrokAuth {
+            expires_at: Some(Utc::now() - Duration::hours(1)),
+            ..fresh.clone()
+        };
+        assert!(
+            session_needs_oidc_refresh_before_billing_poll(&expired),
+            "expired OIDC with RT must need refresh before sibling poll"
+        );
+
+        let no_rt = GrokAuth {
+            refresh_token: None,
+            expires_at: Some(Utc::now() - Duration::hours(1)),
+            ..fresh.clone()
+        };
+        assert!(
+            !session_needs_oidc_refresh_before_billing_poll(&no_rt),
+            "without refresh_token cannot OIDC-refresh"
+        );
+
+        let external = GrokAuth {
+            auth_mode: AuthMode::External,
+            expires_at: Some(Utc::now() - Duration::hours(1)),
+            refresh_token: Some("rt".into()),
+            oidc_issuer: Some("https://auth.x.ai".into()),
+            oidc_client_id: Some("client".into()),
+            ..fresh
+        };
+        assert!(
+            !session_needs_oidc_refresh_before_billing_poll(&external),
+            "External mode is not OIDC token-exchange refresh here"
+        );
+    }
+
+    /// Named contract: prefer multi-slot store entry for billing identity lookup;
+    /// persist refreshed auth only to that scope (sibling multi-slot stays
+    /// multi-slot; does not wipe active base of another principal).
+    #[test]
+    #[serial_test::serial]
+    fn find_and_persist_refreshed_multi_slot_for_billing_without_clobbering_base() {
+        use crate::auth::model::upsert_supergrok_session;
+        use chrono::{Duration, Utc};
+
+        clear_included_billing_cache();
+        let dir = TempDir::new().unwrap();
+        let base = "https://auth.x.ai::multi-slot-refresh";
+        let mut map = AuthStore::default();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-stale".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p-ms".into(),
+                refresh_token: Some("rt-p".into()),
+                oidc_issuer: Some("https://auth.x.ai".into()),
+                oidc_client_id: Some("cli".into()),
+                expires_at: Some(Utc::now() - Duration::hours(2)),
+                create_time: Utc::now() - Duration::hours(3),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-business-active".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b-ms".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-ms".into()),
+                refresh_token: Some("rt-b".into()),
+                oidc_issuer: Some("https://auth.x.ai".into()),
+                oidc_client_id: Some("cli".into()),
+                expires_at: Some(Utc::now() + Duration::hours(2)),
+                create_time: Utc::now(),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let personal_id = {
+            let non = load_non_active_supergrok_billing_poll_targets(dir.path());
+            assert_eq!(non.len(), 1, "personal sibling: {non:?}");
+            non[0].identity_id.clone()
+        };
+
+        let (scope, auth) =
+            find_supergrok_auth_entry_for_billing(dir.path(), &personal_id).expect("entry");
+        assert!(
+            scope.contains("::personal"),
+            "must prefer multi-slot scope, got {scope}"
+        );
+        assert!(
+            session_needs_oidc_refresh_before_billing_poll(&auth),
+            "stale multi-slot needs refresh"
+        );
+        assert_eq!(auth.key, "tok-personal-stale");
+
+        let refreshed = GrokAuth {
+            key: "tok-personal-fresh".into(),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            create_time: Utc::now(),
+            ..auth
+        };
+        persist_refreshed_supergrok_billing_auth(dir.path(), &scope, refreshed).unwrap();
+
+        let reread = read_auth_json(&dir.path().join("auth.json")).unwrap();
+        assert_eq!(
+            reread.get(&scope).map(|a| a.key.as_str()),
+            Some("tok-personal-fresh"),
+            "multi-slot updated"
+        );
+        // Active base is business (last upsert) — must still be business token.
+        assert_eq!(
+            reread.get(base).map(|a| a.key.as_str()),
+            Some("tok-business-active"),
+            "must not clobber active base of other principal"
+        );
+        let (_, after) =
+            find_supergrok_auth_entry_for_billing(dir.path(), &personal_id).expect("after");
+        assert_eq!(after.key, "tok-personal-fresh");
+        assert!(!session_needs_oidc_refresh_before_billing_poll(&after));
+        clear_included_billing_cache();
+    }
+
+    /// Named contract: ensure_fresh runs OIDC exchange for expired multi-slot
+    /// and returns the new access token (hermetic mock IdP).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ensure_fresh_refreshes_expired_multi_slot_via_oidc_before_billing() {
+        use crate::auth::model::upsert_supergrok_session;
+        use chrono::{Duration, Utc};
+
+        clear_included_billing_cache();
+        let (issuer, _handle) = start_mock_oidc_for_billing_refresh().await;
+
+        let dir = TempDir::new().unwrap();
+        let base = "https://auth.x.ai::ensure-fresh-billing";
+        let mut map = AuthStore::default();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "stale-sibling-at".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-sib-fresh".into(),
+                refresh_token: Some("rt-sib".into()),
+                oidc_issuer: Some(issuer.clone()),
+                oidc_client_id: Some("billing-refresh-client".into()),
+                expires_at: Some(Utc::now() - Duration::minutes(30)),
+                create_time: Utc::now() - Duration::hours(2),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "active-business-at".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-act-fresh".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-ef".into()),
+                refresh_token: Some("rt-act".into()),
+                oidc_issuer: Some(issuer),
+                oidc_client_id: Some("billing-refresh-client".into()),
+                expires_at: Some(Utc::now() + Duration::hours(2)),
+                create_time: Utc::now(),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let sibling_id = load_non_active_supergrok_billing_poll_targets(dir.path())
+            .into_iter()
+            .next()
+            .expect("sibling")
+            .identity_id;
+
+        let (token, user_id) =
+            ensure_fresh_access_token_for_supergrok_billing_poll(dir.path(), &sibling_id)
+                .await
+                .expect("token");
+        assert_eq!(user_id, "user-sib-fresh");
+        assert_eq!(
+            token, "mock-billing-access-token",
+            "must use OIDC-refreshed access token, not stale multi-slot JWT"
+        );
+        // Persisted multi-slot must hold the new key.
+        let (_, stored) =
+            find_supergrok_auth_entry_for_billing(dir.path(), &sibling_id).expect("stored");
+        assert_eq!(stored.key, "mock-billing-access-token");
+        assert!(!session_needs_oidc_refresh_before_billing_poll(&stored));
+        clear_included_billing_cache();
+    }
+
+    /// Minimal mock IdP: discovery + token endpoint returning a fixed access token.
+    async fn start_mock_oidc_for_billing_refresh() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let issuer_disc = issuer.clone();
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || {
+                    let iss = issuer_disc.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "authorization_endpoint": format!("{iss}/authorize"),
+                            "token_endpoint": format!("{iss}/token"),
+                            "jwks_uri": format!("{iss}/jwks"),
+                            "id_token_signing_alg_values_supported": ["RS256"],
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/token",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({
+                        "access_token": "mock-billing-access-token",
+                        "refresh_token": "mock-billing-refresh-token",
+                        "expires_in": 3600,
+                        "token_type": "Bearer",
+                    }))
+                }),
+            );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        // Tiny settle so bind is ready.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        (issuer, handle)
+    }
+
+    /// Named contract: after N consecutive auth-class billing poll fails, skip
+    /// automatic sibling re-poll for that SuperGrok identity. Do not delete
+    /// secrets. Ok resets the streak. Network fails do not bump the streak.
+    #[test]
+    #[serial_test::serial]
+    fn sibling_poll_skips_after_n_consecutive_auth_fails_without_secret_delete() {
+        use crate::auth::model::upsert_supergrok_session;
+
+        clear_included_billing_cache();
+        let dir = TempDir::new().unwrap();
+        let base = "https://auth.x.ai::auth-streak-skip";
+        let mut map = AuthStore::default();
+        // First = personal (sibling when business is last upsert / active).
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-streak".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p-streak".into(),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-business-streak".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b-streak".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-streak".into()),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let non_active_before = load_non_active_supergrok_billing_poll_targets(dir.path());
+        assert_eq!(
+            non_active_before.len(),
+            1,
+            "one sibling before auth streak: {non_active_before:?}"
+        );
+        let sibling_id = non_active_before[0].identity_id.clone();
+        assert!(
+            !should_skip_supergrok_billing_poll_for_auth_streak(&sibling_id),
+            "fresh sibling must not be skipped"
+        );
+
+        // Network fails do not count toward the auth streak.
+        remember_supergrok_billing_poll_failed(
+            &sibling_id,
+            "Failed to fetch billing data: timeout",
+        );
+        assert_eq!(consecutive_auth_fail_streak(&sibling_id), 0);
+        assert!(!should_skip_supergrok_billing_poll_for_auth_streak(
+            &sibling_id
+        ));
+
+        for i in 1..=SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD {
+            remember_supergrok_billing_poll_failed(
+                &sibling_id,
+                "Billing service error: no auth context",
+            );
+            assert_eq!(
+                consecutive_auth_fail_streak(&sibling_id),
+                i,
+                "auth fail streak after {i}"
+            );
+            if i < SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD {
+                assert!(
+                    !should_skip_supergrok_billing_poll_for_auth_streak(&sibling_id),
+                    "must still poll before threshold; i={i}"
+                );
+                let still = load_non_active_supergrok_billing_poll_targets(dir.path());
+                assert_eq!(
+                    still.len(),
+                    1,
+                    "sibling still on poll list before threshold"
+                );
+            }
+        }
+        assert!(
+            should_skip_supergrok_billing_poll_for_auth_streak(&sibling_id),
+            "at threshold must skip automatic sibling poll"
+        );
+        let skipped = load_non_active_supergrok_billing_poll_targets(dir.path());
+        assert!(
+            skipped.is_empty(),
+            "sibling demoted from poll list after N auth fails; got {skipped:?}"
+        );
+
+        // Secrets must still be on disk (no auto-delete).
+        let reread =
+            read_auth_json(&dir.path().join("auth.json")).expect("auth.json still present");
+        assert!(
+            reread
+                .values()
+                .any(|a| a.key.contains("tok-personal-streak"))
+                || reread
+                    .values()
+                    .any(|a| a.key.contains("tok-business-streak")),
+            "auth.json secrets must not be auto-deleted after N auth fails"
+        );
+        // Full target loader still lists both principals (skip is sibling list only).
+        let all = load_supergrok_billing_poll_targets(dir.path());
+        assert_eq!(all.len(), 2, "all targets still load secrets from disk");
+
+        // Successful poll resets streak and restores sibling to the poll list.
+        remember_supergrok_billing_poll_ok(&sibling_id);
+        assert_eq!(consecutive_auth_fail_streak(&sibling_id), 0);
+        assert!(!should_skip_supergrok_billing_poll_for_auth_streak(
+            &sibling_id
+        ));
+        let restored = load_non_active_supergrok_billing_poll_targets(dir.path());
+        assert_eq!(
+            restored.len(),
+            1,
+            "sibling back on poll list after Ok: {restored:?}"
+        );
+        assert_eq!(restored[0].identity_id, sibling_id);
+
         clear_included_billing_cache();
     }
 
@@ -1679,6 +2303,56 @@ mod tests {
         );
 
         clear_all_including_durable();
+        clear_included_billing_cache();
+    }
+
+    /// Named contract: legacy sign-in scope is storage fallback only. When both
+    /// OAuth base and legacy hold SuperGrok-session-mode tokens, free SuperGrok
+    /// period ranking must not treat them as two principals (align would
+    /// hot-swap the intentional new-scope primary onto legacy).
+    #[test]
+    #[serial_test::serial]
+    fn load_supergrok_candidates_skips_legacy_scope_when_oauth_base_present() {
+        use crate::auth::model::LEGACY_SCOPE;
+        use chrono::Utc;
+
+        clear_included_billing_cache();
+        let dir = TempDir::new().unwrap();
+        let base = "https://auth.x.ai::rank-client";
+        let mut map = AuthStore::default();
+        map.insert(
+            LEGACY_SCOPE.to_string(),
+            GrokAuth {
+                key: "legacy-key".into(),
+                auth_mode: AuthMode::External,
+                user_id: String::new(),
+                expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                ..Default::default()
+            },
+        );
+        map.insert(
+            base.to_string(),
+            GrokAuth {
+                key: "new-key".into(),
+                auth_mode: AuthMode::External,
+                user_id: String::new(),
+                expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let candidates = load_supergrok_session_candidates(dir.path());
+        assert_eq!(
+            candidates.len(),
+            1,
+            "legacy scope must not be a free SuperGrok period dual-identity peer; got {:?}",
+            candidates
+                .iter()
+                .map(|c| c.access_token.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(candidates[0].access_token.as_str(), "new-key");
         clear_included_billing_cache();
     }
 

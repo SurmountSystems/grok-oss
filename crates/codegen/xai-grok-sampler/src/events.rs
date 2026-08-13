@@ -274,7 +274,11 @@ impl From<&SamplingError> for SamplingErrorInfo {
                 retry_after_secs,
                 ..
             } => {
-                let kind = if err.is_rate_limited() {
+                // Auth before rate-limit: 403 bad-credentials is credentials
+                // rejection (refresh / re-auth), not a throttle or plain Api.
+                let kind = if err.is_auth_error() {
+                    SamplingErrorKind::Auth
+                } else if err.is_rate_limited() {
                     SamplingErrorKind::RateLimited
                 } else {
                     SamplingErrorKind::Api
@@ -471,6 +475,35 @@ mod tests {
         assert_eq!(info.status_code, Some(429));
         assert_eq!(info.retry_after_secs, Some(15));
         assert!(info.is_retryable, "429 should be retryable");
+    }
+
+    /// 403 + bad-credentials body is credentials rejection: kind Auth so
+    /// handle_sampling_failure can refresh / surface re-auth (not bare Api).
+    #[test]
+    fn api_403_bad_credentials_classified_as_auth() {
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "unauthenticated:bad-credentials: The OAuth2 access token \
+                      could not be validated."
+                .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        let info = SamplingErrorInfo::from(&err);
+        assert_eq!(info.kind, SamplingErrorKind::Auth);
+        assert_eq!(info.status_code, Some(403));
+        assert!(!info.is_retryable);
+
+        let policy = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        let policy_info = SamplingErrorInfo::from(&policy);
+        assert_eq!(policy_info.kind, SamplingErrorKind::Api);
     }
 
     #[test]

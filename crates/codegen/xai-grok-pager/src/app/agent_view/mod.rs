@@ -27,11 +27,11 @@
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
 //!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
+//!         `[ui].vim_mode` off) → ArmPending CancelTurn (2× within 800ms,
+//!         hint "press again to cancel"; draft preserved, unlike Ctrl+C)
 //!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
 //!       turn cancelling → CancelTurn in every mode (retry lost ack;
-//!         Ctrl+C escalates to Quit)
+//!         Ctrl+C escalates to Quit; no double-Esc arm)
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
@@ -68,6 +68,16 @@ use crate::actions::ActionId;
 use crate::key;
 use crate::render::SafeBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Live `/rebuild` progress shown as a full-width bar in the agent view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RebuildUiProgress {
+    /// Overall fraction `0.0..=1.0`.
+    pub fraction: f32,
+    /// Human stage text (e.g. "Compiling xai-grok-pager (12 packages)").
+    pub detail: String,
+}
+
 /// Hit areas for inline media buttons, rebuilt each frame.
 ///
 /// All hit areas are cleared at the start of inline media rendering and
@@ -1028,6 +1038,20 @@ pub struct AgentView {
     /// turn that already ended (otherwise the viewer re-strands on "Waiting…").
     /// Reset at the start of every load so it never leaks across loads.
     pub(crate) replayed_terminal_prompts: HashSet<String>,
+    /// During load replay, durable primary-user `TurnCompleted` is recorded in
+    /// [`Self::replayed_terminal_prompts`] and is **not** pushed as a
+    /// `SessionEvent` into scrollback. History recovery used to treat "agent
+    /// work after last user prompt with no SessionEvent terminal" as an open
+    /// turn, which false-fired auto-resume on every clean completed session.
+    /// This flag is true when the most recent primary-user turn (origin
+    /// [`xai_grok_shell::session::PromptOrigin::User`]) saw a durable terminal
+    /// with a **non-`cancelled`** stop reason in this load's replay (success,
+    /// error, rate_limit, end_turn, …). `cancelled` leaves the flag false so
+    /// Esc cancel-resume markers still auto-start. Also gates dropping **stale**
+    /// `canceled_turn_resume.json` after a finished primary (rebuild/reopen
+    /// must not re-fire a completed prompt). Cleared when a resumable user
+    /// prompt is applied during replay. Reset at every load window start.
+    pub(crate) last_primary_user_turn_completed_in_replay: bool,
     pub active_pane: AgentPane,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
@@ -1301,11 +1325,16 @@ pub struct AgentView {
     pub hit_follow_indicator: HitArea,
     /// CWD / worktree path in the status bar (click to copy).
     pub hit_cwd: HitArea,
-    /// Cancel button in turn status line (`[stop]`).
+    /// Cancel / hard-stop button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
+    /// Global pause / resume button in turn status line (`[pause]` / `[resume]`).
+    pub hit_pause_button: HitArea,
     /// Still-running watcher cue on the turn-status row (click opens the
     /// tasks pane, same as `Ctrl+G`).
     pub hit_watching_cue: HitArea,
+    /// Snapshot of process-level global work pause for this frame (set by
+    /// [`AgentView::draw`] from [`AppRenderParams::global_paused`]).
+    pub(crate) global_work_paused: bool,
     /// One-time Ctrl+G toast already fired for a watching-cue click.
     pub(crate) watching_cue_toast_shown: bool,
     /// `[hide]` button on the announcement banner (click == `/announcements hide`).
@@ -1421,6 +1450,11 @@ pub struct AgentView {
     /// Tuple of (message, remaining_ticks). Decremented each tick, removed at 0.
     /// Does **not** carry sticky status banners — see [`Self::sticky_toast`].
     pub(crate) toast: Option<(String, u8)>,
+    /// Live `/rebuild` progress strip (bar + percent + stage). Set by
+    /// [`crate::app::actions::TaskResult::RebuildProgress`]; cleared on
+    /// rebuild done/fail. When present, render paints a full-width bar at the
+    /// bottom of the scrollback instead of a short-lived toast only.
+    pub(crate) rebuild_progress: Option<RebuildUiProgress>,
     /// Single-slot ephemeral tip shown in the banner rect above the prompt.
     /// Unlike `toast`, survives typing; cleared by TTL, any prompt-box
     /// submit (prompt/interject/bash/feedback/remember), or explicit clear.
@@ -2791,6 +2825,7 @@ pub(crate) mod test_fixtures {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2855,6 +2890,7 @@ pub(crate) mod test_fixtures {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
+                cancel_resume_prompt_text: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
@@ -3677,6 +3713,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,

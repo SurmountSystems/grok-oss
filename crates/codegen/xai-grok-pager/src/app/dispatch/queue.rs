@@ -387,6 +387,9 @@ fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -
                 let id = agent.scrollback.push_block(block);
                 (agent.scrollback.len().saturating_sub(1), id, vec![id])
             };
+            // Whole-turn cancel-resume text (SIGTERM / killall / Esc after first
+            // activity). Skill display text counts; rewind stash below does not.
+            agent.session.note_cancel_resume_prompt_text(&queued.text);
             // Stash for cancel-with-restore. Only plain (non-skill) prompts
             // can be reversed back into the input box.
             if queued.wire_blocks.is_none() {
@@ -870,10 +873,11 @@ pub(crate) fn apply_turn_start_shim(
     let page_flip_entry = if let Some(segments) = multi_segments {
         let (prompt_idx, first_id, last_id, all_ids) =
             paint_or_reuse_combined_user_bubbles(agent, &segments);
+        let restore = text
+            .clone()
+            .unwrap_or_else(|| xai_prompt_queue::join_texts(segments.iter().map(String::as_str)));
+        agent.session.note_cancel_resume_prompt_text(&restore);
         if rewindable {
-            let restore = text.clone().unwrap_or_else(|| {
-                xai_prompt_queue::join_texts(segments.iter().map(String::as_str))
-            });
             let earlier = all_ids.into_iter().filter(|id| *id != last_id).collect();
             // An adopted turn arrives with text only, never the original
             // attachments, so a Ctrl+C rewind restores just the joined text.
@@ -941,20 +945,23 @@ pub(crate) fn apply_turn_start_shim(
             let id = agent.scrollback.push_block(block);
             (agent.scrollback.len().saturating_sub(1), id)
         };
-        if rewindable && let Some(text) = text {
+        if let Some(text) = text {
             // The rewind restore must match the on-screen (possibly edited)
             // block text, not the adoption's stale mirror text.
             let restore_text = match agent.scrollback.entry(prompt_idx).map(|e| &e.block) {
                 Some(RenderBlock::UserPrompt(ub)) if ub.text != text => ub.text.clone(),
                 _ => text,
             };
-            agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
-                text: restore_text,
-                images: Vec::new(),
-                scrollback_entry: prompt_entry_id,
-                combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
-            });
+            agent.session.note_cancel_resume_prompt_text(&restore_text);
+            if rewindable {
+                agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+                    text: restore_text,
+                    images: Vec::new(),
+                    scrollback_entry: prompt_entry_id,
+                    combined_scrollback_entries: Vec::new(),
+                    chip_elements: Vec::new(),
+                });
+            }
         }
         if skip_entry_top {
             // Send-now: follow at the tail; never entry-top jump.

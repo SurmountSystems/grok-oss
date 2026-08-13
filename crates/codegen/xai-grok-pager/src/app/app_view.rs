@@ -571,6 +571,17 @@ pub struct ScreenModeRelaunch {
     /// Active session to reopen via `--resume`.
     pub session_id: String,
 }
+
+/// Pending re-exec onto a freshly installed binary after `/rebuild`.
+#[derive(Debug, Clone)]
+pub struct RebuildRelaunch {
+    /// Active session to reopen via `--resume`.
+    pub session_id: String,
+    /// Newly installed `grok-oss` path.
+    pub installed_exe: std::path::PathBuf,
+    /// Preserve screen mode across re-exec.
+    pub minimal: bool,
+}
 /// Root view component — owns all application state.
 pub struct AppView {
     /// Which view is currently active.
@@ -1109,6 +1120,8 @@ pub struct AppView {
     /// When true, the event loop should exit so the user can relaunch
     /// to pick up the downloaded update.
     pub quit_for_update: bool,
+    /// After `/rebuild` success: re-exec installed binary into this session.
+    pub rebuild_relaunch: Option<RebuildRelaunch>,
     /// Generation and state for the one launch-scoped foreign resume detection.
     pub(crate) foreign_resume_launch_generation: u64,
     pub(crate) foreign_resume_launch: Option<crate::app::foreign_sessions::ForeignResumeLaunch>,
@@ -1451,6 +1464,7 @@ impl AppView {
             foreign_resume_launch_generation: 0,
             foreign_resume_launch: None,
             quit_for_update: false,
+            rebuild_relaunch: None,
             relaunch: None,
             has_claude_import: false,
             import_claude_modal: None,
@@ -2222,6 +2236,17 @@ impl AppView {
             );
             if !stale_idle_arm_while_busy && !pending.expired() && pending.shortcut.matches(key) {
                 let action = self.pending_action.take().unwrap().action;
+                // Second Esc that confirms cancel: set Esc trigger + post-cancel
+                // rewind grace here (first Esc only armed; policy never saw the
+                // confirm press). Other double-press arms (clear/rewind/quit)
+                // need no agent-side side effects.
+                if matches!(action, Action::CancelTurn)
+                    && let ActiveView::Agent(id) = self.active_view
+                    && let Some(agent) = self.agents.get_mut(&id)
+                {
+                    agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+                    agent.suppress_rewind_arm(std::time::Instant::now());
+                }
                 return InputOutcome::Action(action);
             }
             self.pending_action = None;
@@ -4281,9 +4306,13 @@ impl AppView {
                                 &self.bundle_state,
                                 overlay_active,
                                 link_spans,
-                                voice_available,
-                                voice_listening,
-                                voice_interim.as_deref(),
+                                AppRenderParams {
+                                    voice_available,
+                                    voice_listening,
+                                    voice_interim: voice_interim.as_deref(),
+                                    esc_owned_before_agent,
+                                    global_paused: self.global_work_pause.is_active(),
+                                },
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {
                                 let theme = crate::theme::Theme::current();

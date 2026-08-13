@@ -45,6 +45,7 @@ pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
         bg_tool_call_to_task: std::collections::HashMap::new(),
         scheduled_tasks: std::collections::HashMap::new(),
         in_flight_prompt: None,
+        cancel_resume_prompt_text: None,
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,

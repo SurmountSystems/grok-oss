@@ -146,6 +146,19 @@ pub(crate) fn minimal_mode_active() -> bool {
 pub(crate) fn set_minimal_mode_active_for_test(on: bool) {
     MINIMAL_MODE_ACTIVE.store(on, Ordering::Release);
 }
+/// Whether a bare Esc can cancel a running turn (via double-Esc confirm):
+/// minimal mode and non-vim fullscreen arm cancel on first Esc; fullscreen
+/// vim mode keeps the mid-turn swallow (Ctrl+C stays the cancel gesture there).
+///
+/// Pure over its inputs. Production callers pass the agent's injected
+/// effective screen mode (`AgentView::is_minimal_mode`, seeded by
+/// `apply_app_scoped_gates`; never the [`minimal_mode_active`] process
+/// global) and tests pass explicit booleans. `vim_mode` is the
+/// scrollback-nav setting (`[ui].vim_mode` / `/vim-mode`), not the prompt
+/// `simple_mode`.
+pub(crate) fn esc_cancels_turn(is_minimal: bool, vim_mode: bool) -> bool {
+    is_minimal || !vim_mode
+}
 /// Whether the opt-in mouse-reporting toggle feature is enabled
 /// (`[ui] mouse_reporting_toggle` / `GROK_MOUSE_REPORTING_TOGGLE`). Seeded once
 /// at startup; gates both the `Ctrl+R` shortcut registration and the
@@ -886,15 +899,81 @@ pub async fn run(
     )
     .await;
     crate::unified_log::flush_blocking().await;
-    let _ = restore_terminal(terminal, writer_thread, screen_mode);
+    let restore_result = restore_terminal(terminal, writer_thread, screen_mode);
     cancel.cancel();
     xai_tty_utils::global_process_scope().kill_all();
+    let restore_ok = restore_result.is_ok();
+    if let Err(cleanup_error) = restore_result.as_ref() {
+        match &result {
+            Ok(_) => {
+                tracing::warn!(
+                    error = %cleanup_error,
+                    "terminal cleanup failed after successful event loop"
+                )
+            }
+            Err(run_error) => {
+                tracing::warn!(
+                    error = %cleanup_error,
+                    run_error = %run_error,
+                    "terminal cleanup also failed"
+                )
+            }
+        }
+    }
     match result {
         Ok(run_result) => {
             if run_result.quit_for_update {
                 return Ok(true);
             }
+            // Rebuild and screen-mode re-exec share the restore gate: never
+            // exec onto a new process image when terminal restore failed.
+            if let Some(rebuild) = run_result.rebuild_relaunch.as_ref() {
+                if !dispatch::rebuild::may_exec_relaunch_after_restore(restore_ok) {
+                    let cleanup_error = restore_result
+                        .as_ref()
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unknown restore error".into());
+                    tracing::error!(
+                        error = %cleanup_error,
+                        "rebuild relaunch blocked: terminal restore failed"
+                    );
+                    dispatch::rebuild::print_rebuild_restore_blocked_hint(
+                        rebuild,
+                        &cleanup_error,
+                        &mut io::stderr(),
+                    );
+                    return Ok(false);
+                }
+                if let Err(e) = dispatch::rebuild::exec_rebuild_relaunch(rebuild) {
+                    tracing::error!(error = %e, "rebuild relaunch failed");
+                    dispatch::rebuild::print_rebuild_exec_failure_hint(
+                        rebuild,
+                        &e,
+                        &mut io::stderr(),
+                    );
+                }
+                return Ok(false);
+            }
             if let Some(relaunch) = run_result.relaunch.as_ref() {
+                if !dispatch::rebuild::may_exec_relaunch_after_restore(restore_ok) {
+                    let cleanup_error = restore_result
+                        .as_ref()
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unknown restore error".into());
+                    tracing::error!(
+                        error = %cleanup_error,
+                        "screen-mode relaunch blocked: terminal restore failed"
+                    );
+                    print_screen_mode_restore_blocked_hint(
+                        &relaunch.session_id,
+                        relaunch.minimal,
+                        &cleanup_error,
+                        &mut io::stderr(),
+                    );
+                    return Ok(false);
+                }
                 if let Err(e) = screen_mode_relaunch::exec_screen_mode_relaunch(
                     &relaunch.session_id,
                     relaunch.minimal,
@@ -957,6 +1036,26 @@ fn print_relaunch_failure_hint(
     w: &mut impl Write,
 ) {
     let _ = writeln!(w, "Failed to relaunch in requested mode: {error}");
+    let _ = writeln!(w, "Resume this session with:");
+    let _ = writeln!(
+        w,
+        "  {}",
+        screen_mode_relaunch::screen_mode_relaunch_resume_hint(session_id, want_minimal),
+    );
+}
+
+/// Fail-loud when restore failed and `/minimal` or `/fullscreen` re-exec is blocked.
+fn print_screen_mode_restore_blocked_hint(
+    session_id: &str,
+    want_minimal: bool,
+    cleanup_error: &impl std::fmt::Display,
+    w: &mut impl Write,
+) {
+    let _ = writeln!(
+        w,
+        "Terminal cleanup failed after screen-mode switch ({cleanup_error})."
+    );
+    let _ = writeln!(w, "Not relaunching with terminal modes possibly latched.");
     let _ = writeln!(w, "Resume this session with:");
     let _ = writeln!(
         w,
@@ -2172,6 +2271,27 @@ mod tests {
                  Resume this session with:\n  {hint}\n"
             )
         );
+    }
+
+    /// Restore-fail gate for screen-mode: fail loud, no silent re-exec.
+    #[test]
+    fn print_screen_mode_restore_blocked_hint_writes_expected_lines() {
+        let mut buf = Vec::new();
+        print_screen_mode_restore_blocked_hint("sess-xyz", true, &"drain failed", &mut buf);
+        let hint = screen_mode_relaunch::screen_mode_relaunch_resume_hint("sess-xyz", true);
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("Terminal cleanup failed after screen-mode switch (drain failed)."),
+            "{out}"
+        );
+        assert!(
+            out.contains("Not relaunching with terminal modes possibly latched."),
+            "{out}"
+        );
+        assert!(out.contains(&format!("  {hint}\n")), "{out}");
+        // Shared gate with rebuild: restore failure must block re-exec.
+        assert!(!dispatch::rebuild::may_exec_relaunch_after_restore(false));
+        assert!(dispatch::rebuild::may_exec_relaunch_after_restore(true));
     }
     /// [`ExitInfo`] with a full summary, for the failing-writer tests.
     fn full_exit_info(session_id: &str) -> ExitInfo {

@@ -1710,18 +1710,23 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // Resume canceled turn on session restart (default on).
+        // Continue interrupted turn on session restart (default on).
+        // Wire key stays resume_canceled_turn_on_restart for config stability.
         SettingMeta {
             key: "resume_canceled_turn_on_restart",
             category: SettingCategory::Session,
             owner: SettingOwner::Shell,
-            label: "Resume canceled turn on restart",
-            description: "When you reopen a session whose last top-level turn was explicitly \
-                          canceled (Esc/stop), automatically re-queue that work once with a toast \
-                          (\"Resuming canceled turn...\"). Default on. Finished or never-canceled \
-                          sessions are never invented. Soft stop and fearless pause are separate.",
+            label: "Continue interrupted turn on restart",
+            description: "When you reopen a session whose last top-level turn was interrupted \
+                          (Esc/stop, graceful quit, killall, /rebuild cancel), automatically \
+                          re-queue that work once with a toast (\"Continuing interrupted \
+                          turn...\"). Default on. Not the /resume session picker. Finished or \
+                          never-interrupted sessions are never invented. Soft stop and fearless \
+                          pause are separate.",
             keywords: &[
                 "resume",
+                "continue",
+                "interrupted",
                 "cancel",
                 "canceled",
                 "cancelled",

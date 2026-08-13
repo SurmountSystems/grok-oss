@@ -487,7 +487,7 @@ mod tests {
         assert!(!joined.contains("Path:"), "Path: wording retired: {joined}");
         // Short Balance gap only — no Management Key lecture wall.
         assert!(
-            joined.contains("Balance: no management key"),
+            joined.contains("Team prepaid remaining: no management key"),
             "short balance gap: {joined}"
         );
         assert!(

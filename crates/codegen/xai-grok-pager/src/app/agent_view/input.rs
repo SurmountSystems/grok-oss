@@ -111,6 +111,59 @@ impl AgentView {
             && self.btw_state.is_none()
             && self.jump_state.is_none()
     }
+    /// Effective screen mode of this process, as injected per agent at
+    /// session creation (`apply_app_scoped_gates` →
+    /// `PromptWidget::set_screen_mode`; the mode is fixed for the process
+    /// lifetime). The global-free minimal check for per-agent input policy —
+    /// unwired test agents default to Fullscreen, and tests opt in with
+    /// `prompt.set_screen_mode(ScreenMode::Minimal)` instead of mutating the
+    /// `MINIMAL_MODE_ACTIVE` process global.
+    pub(crate) fn is_minimal_mode(&self) -> bool {
+        self.prompt.slash_controller.screen_mode().is_minimal()
+    }
+    /// Whether a bare Esc pressed right now would reach
+    /// [`Self::try_handle_esc_policy`]'s mid-turn double-Esc cancel arm
+    /// (assuming a turn is running — callers gate on that): the hint-bar
+    /// predicate deciding when to advertise `Esc` instead of `Ctrl+C` for
+    /// CancelTurn. Composed from the same predicates input routing uses, so
+    /// the hint cannot claim Esc while a higher-priority consumer (dropdown,
+    /// search, viewer/modal, agents/persona modal, needs-input overlay,
+    /// queued-prompt or inline edit, subagent-view close, selection/link/
+    /// goal/rewind/btw/jump, latent composer mode) would steal the press.
+    /// Conservative on purpose: when false, the registry `Ctrl+C` is shown,
+    /// which always cancels.
+    /// `esc_owned_before_agent` is the app-level ownership snapshot
+    /// (`AppView::esc_owned_before_agent`: voice dictation listening or
+    /// pending cold-start, a focused dev tracing pane, the top-level cloud /
+    /// import-Claude modals, and the dashboard's attached-agent popup — all
+    /// consume Esc before any agent routing), passed down by the draw path.
+    pub(crate) fn esc_would_cancel_turn(&self, esc_owned_before_agent: bool) -> bool {
+        if esc_owned_before_agent
+            || !crate::app::esc_cancels_turn(self.is_minimal_mode(), self.vim_mode)
+        {
+            return false;
+        }
+        let pane_clear = match self.active_pane {
+            AgentPane::Prompt => {
+                !self.modal_owns_input()
+                    && self.block_viewer.is_none()
+                    && self.line_viewer.is_none()
+                    && !self.prompt.any_dropdown_open()
+                    && !self.prompt.prompt_suggestion_visible()
+                    && self.prompt_input_mode == PromptInputMode::Normal
+            }
+            AgentPane::Scrollback => self.is_bare_scrollback(),
+            _ => false,
+        };
+        pane_clear
+            && matches!(self.prompt_mode, crate::app::queue_edit::PromptMode::Normal)
+            && self.inline_edit.is_none()
+            && !self.is_subagent_view
+            && self.agents_modal.is_none()
+            && self.persona_detail.is_none()
+            && self.no_esc_consumer_pending()
+            && self.no_input_overlay_pending()
+    }
     /// Esc on the prompt pane in a dashboard overlay backs out to the dashboard
     /// list (the prompt-focus mirror of the Left-arrow back-out), but only for an
     /// empty, Normal-mode composer with no per-pane Esc consumer pending. Beyond
@@ -125,7 +178,8 @@ impl AgentView {
     ///
     /// Also gated to an idle agent (`!is_turn_running() && !is_cancelling()`):
     /// while a turn is running or cancelling, Esc must fall through to
-    /// [`Self::try_handle_esc_policy`] (running → swallow; cancelling → retry
+    /// [`Self::try_handle_esc_policy`] (running → arm double-Esc cancel in
+    /// minimal / non-vim mode, swallow in vim mode; cancelling → retry
     /// CancelTurn), not detach to the dashboard. Detach mid-turn stays on
     /// Ctrl+\ / Left.
     pub(crate) fn overlay_esc_backs_out_from_prompt(&self) -> bool {
@@ -1048,6 +1102,16 @@ impl AgentView {
                 }
                 if self.session.state.is_cancelling() {
                     return InputOutcome::Action(Action::Quit);
+                }
+                // Work B: idle primary with live standalone subagents still
+                // offers CancelTurn → stop-subagents panel / kill path.
+                let has_running_subagents = self
+                    .subagent_sessions
+                    .values()
+                    .any(|s| s.is_running() && s.workflow_run_id.is_none());
+                if has_running_subagents {
+                    self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
+                    return InputOutcome::Action(Action::CancelTurn);
                 }
                 if crate::app::minimal_mode_active()
                     && self.session.state.is_idle()

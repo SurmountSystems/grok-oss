@@ -71,11 +71,13 @@ economic_mode = true                   # soft-cap effective context at 200k (Gro
                                        # When on, also enables Token Economy implement-effort
                                        # caps unless [token_economy] turns them off (see below).
                                        # Override one conversation with /economic-mode
-resume_canceled_turn_on_restart = true # when reopening a session whose last top-level turn was
-                                       # explicitly canceled (Esc/stop), re-queue that work once
-                                       # with a toast ("Resuming canceled turn..."). Default on.
-                                       # Finished or never-canceled sessions are never invented.
-                                       # Settings → Session. Distinct from soft stop and pause.
+resume_canceled_turn_on_restart = true # continue interrupted turn: when reopening a session that has
+                                       # a cancel-resume marker (Esc/stop, graceful SIGTERM/Quit
+                                       # mid-turn, /rebuild mid-turn), re-queue that work once with a
+                                       # toast ("Continuing interrupted turn..."). Default on. Not the
+                                       # /resume session picker. Finished work is never invented.
+                                       # SIGKILL cannot write a marker. Settings → Session. Distinct
+                                       # from soft stop and pause.
 hide_header = false                    # hide in-app status / welcome / dashboard headers only
                                        # (default: false). Not the desktop/terminal window title.
                                        # Window titles: [ui.notifications.title] enabled (default true).
@@ -135,7 +137,7 @@ Token Economy is the Surmount product surface for **spend brakes and books**:
 | Knob | Default | Role |
 |------|---------|------|
 | `[ui] economic_mode` | true | Soft-cap effective context at 200k (price cliff). Also gates implement-effort **ceiling** and **desired inject** when the cap master below is true. Live in **Settings**. |
-| `[ui] resume_canceled_turn_on_restart` | true | Re-queue an explicitly canceled turn once when reopening the same session. Live in **Settings → Session**. |
+| `[ui] resume_canceled_turn_on_restart` | true | **Continue interrupted turn:** re-queue a mid-turn interrupted by Esc/stop, graceful process quit (SIGTERM/`killall`), or `/rebuild` cancel once when reopening the same session. Toast: “Continuing interrupted turn...”. Not the `/resume` session picker. SIGKILL cannot leave a marker. Live in **Settings → Session**. |
 | `cap_implement_effort_when_economic` | true | Master for economic ceiling + desired inject on implement-loop effort. Live in **Settings**. |
 | `max_implement_effort` | 3 | Hard ceiling (1–5) when economic caps are active. |
 | `min_implement_effort` | 1 | Floor (1–5). **Always** applied (not economic-only). Raise if the prompt is below this. Default 1 keeps current behavior; set **2** so every implement run has at least one reviewer. |

@@ -310,6 +310,10 @@ pub(super) fn finalize_turn_from_terminal(
     push_turn_terminal_marker(agent, event, ending_prompt_id.as_deref());
 
     agent.mark_turn_finished();
+    // Mirror the driver turn-end path: keep live soft-park, surface review
+    // chrome when plan mode is still active without a reverse-request.
+    agent.dismiss_plan_approval_after_turn_if_stale();
+    agent.surface_idle_plan_review_if_needed();
 
     TerminalApply::ViewerFinalized
 }

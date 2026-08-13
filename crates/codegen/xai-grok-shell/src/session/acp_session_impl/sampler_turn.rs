@@ -375,6 +375,36 @@ impl SessionActor {
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
+        if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
+            // Included SuperGrok period dual-identity rank must drive SessionToken
+            // bearer. Without this, sticky AuthManager Team base keeps sampling
+            // business JWT while rank preferred personal included SuperGrok period.
+            if am.grok_com_config().auto_use_included_limits {
+                let _ = am.align_to_ranked_free_period_primary();
+            }
+            let _ = am.auth().await;
+            // Path-trace every SessionToken reconstruct: principal_type + team_id
+            // prove which SuperGrok identity is wire-active (User/personal vs
+            // Team/business) without dumping the JWT.
+            if let Some(trace) = am.session_wire_bearer_trace() {
+                tracing::info!(
+                    ?trace,
+                    "auth: SessionToken wire bearer for included SuperGrok period path"
+                );
+                xai_grok_telemetry::unified_log::info(
+                    "auth: SessionToken wire bearer for included SuperGrok period path",
+                    None,
+                    Some(trace),
+                );
+            }
+        }
+        let api_key = if use_bearer_resolver {
+            self.auth_manager
+                .as_ref()
+                .and_then(|am| am.current_wire_valid().map(|a| a.key))
+        } else {
+            creds.api_key
+        };
         let auth_scheme = model_facts.auth_scheme;
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
@@ -1072,6 +1102,35 @@ impl SessionActor {
         self: &Arc<Self>,
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
+        // Free SuperGrok period debit unproven (flat poll): default **allows**
+        // turns (dogfood). Opt-in hard block via
+        // [auth] allow_spend_when_free_period_debit_unproven = false.
+        // Honesty: warn when unproven with headroom even when not blocking.
+        let unproven_guard = crate::auth::evaluate_free_period_unproven_spend_guard();
+        if unproven_guard.honesty_unproven_allowed() {
+            tracing::warn!(
+                target: "auth.free_period_unproven_guard",
+                allow = unproven_guard.allow_spend_when_unproven,
+                unproven = unproven_guard.flat_poll_unproven,
+                headroom = unproven_guard.free_period_has_headroom,
+                "free SuperGrok period limits not debiting (flat poll); turns allowed by default; team settlement can still move"
+            );
+        }
+        if let Some(msg) = unproven_guard.block_message() {
+            tracing::warn!(
+                target: "auth.free_period_unproven_guard",
+                allow = unproven_guard.allow_spend_when_unproven,
+                unproven = unproven_guard.flat_poll_unproven,
+                headroom = unproven_guard.free_period_has_headroom,
+                "blocking sampler turn (opt-in hard block): free SuperGrok period debit unproven"
+            );
+            // Product message as primary ACP message so the UI does not show
+            // "Internal error: …" for this intentional operator gate.
+            return Err(acp::Error::new(
+                i32::from(acp::Error::internal_error().code),
+                msg,
+            ));
+        }
         self.prepare_sampler_for_turn().await;
         let stream_drained_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();

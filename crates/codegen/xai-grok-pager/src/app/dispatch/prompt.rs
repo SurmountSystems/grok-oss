@@ -1354,6 +1354,14 @@ pub(super) fn handle_prompt_response(
             .current_prompt_id
             .clone()
             .or_else(|| response_pid.clone());
+        // Killall mid-child: keep cancel-resume text across finish_turn so a
+        // successful parent exit with live background subagents can re-arm the
+        // parent implement prompt on disk.
+        let cancel_resume_keep_text = agent
+            .session
+            .prompt_text_for_cancel_resume()
+            .map(str::to_string);
+        let cancel_resume_keep_pid = agent.session.current_prompt_id.clone();
 
         agent.session.finish_turn(&mut agent.scrollback);
 
@@ -1432,6 +1440,9 @@ pub(super) fn handle_prompt_response(
         // drop leftovers with no open response channel. Explicit cancel-turn
         // still hard-wipes (see turn.rs).
         agent.dismiss_plan_approval_after_turn_if_stale();
+        // Plan mode still on, no reverse-request chrome: auto-open review
+        // panel + toast so freeform "waiting on plan panel" is not a dead end.
+        agent.surface_idle_plan_review_if_needed();
 
         agent.cancel_turn_view = None;
         agent.cancel_turn_buttons.clear();
@@ -1629,16 +1640,21 @@ pub(super) fn handle_prompt_response(
             && agent.session.current_prompt_id.is_none()
         {
             crate::app::auto_implement::on_successful_turn_end(agent);
-            // Successful finish: drop any durable cancel-resume marker so
-            // restart does not invent canceled work that already completed.
-            if let (Some(sid), Some(cwd)) = (
-                agent.session.session_id.as_ref().map(|s| s.0.to_string()),
-                Some(agent.session.cwd.to_string_lossy().into_owned()),
-            ) {
-                let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
-                    &cwd, &sid,
-                );
-            }
+            // Successful finish: clear marker unless live background subagents
+            // still own incomplete work (implement killall dogfood).
+            super::turn::finalize_cancel_resume_after_successful_turn(
+                agent,
+                cancel_resume_keep_text.as_deref(),
+                cancel_resume_keep_pid.as_deref(),
+            );
+        } else if result.is_err()
+            && !was_cancelling
+            && agent.session.current_prompt_id.is_none()
+            && !agent.holds_queue_for_background()
+        {
+            // Failed PromptResponse: drop eager turn-start marker so rebuild /
+            // reopen does not re-queue the failed prompt.
+            super::turn::clear_cancel_resume_marker_for_session(&agent.session);
         }
 
         // Soft stop: take effect after this top-level turn finishes; hold drain.

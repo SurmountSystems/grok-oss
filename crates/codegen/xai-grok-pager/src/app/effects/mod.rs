@@ -956,6 +956,8 @@ pub(crate) fn execute(
                                         .send(RestoreProgressMsg {
                                             agent_id,
                                             message: text,
+                                            toast: false,
+                                            fraction: None,
                                         });
                                 }
                             }),
@@ -1805,6 +1807,92 @@ pub(crate) fn execute(
                     }
                     TaskResult::PromptImagePreviewPrepared
                 });
+        }
+        Effect::PlanDoctorFix { target, report, terminal, request } => {
+            tasks
+                .spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || match request {
+                            crate::slash::command::DoctorRequest::ListFixes => {
+                                Ok(
+                                    actions::DoctorPlanningOutcome::Listing(
+                                        crate::diagnostics::format_applicable_automatic_fixes(
+                                            &report,
+                                            &terminal,
+                                        ),
+                                    ),
+                                )
+                            }
+                            crate::slash::command::DoctorRequest::Fix(id) => {
+                                match crate::diagnostics::select_fix_plan(
+                                    id,
+                                    &report,
+                                    &terminal,
+                                ) {
+                                    Ok(Some(plan)) => {
+                                        Ok(actions::DoctorPlanningOutcome::Plan(Box::new(plan)))
+                                    }
+                                    Ok(None) => {
+                                        Ok(
+                                            actions::DoctorPlanningOutcome::RunLocally(
+                                                crate::diagnostics::human_fix_command(id)
+                                                    .unwrap_or_else(|| id.to_string()),
+                                            ),
+                                        )
+                                    }
+                                    Err(error) => Err(error.to_string()),
+                                }
+                            }
+                            crate::slash::command::DoctorRequest::Report => {
+                                unreachable!("report does not enter the planning effect")
+                            }
+                        })
+                        .await
+                        .map_err(|error| format!("Could not prepare the fix: {error}"))
+                        .and_then(|result| result);
+                    TaskResult::DoctorFixPlanned {
+                        target,
+                        result,
+                    }
+                });
+        }
+        Effect::ApplyDoctorFix { target, plan } => {
+            tasks
+                .spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || crate::diagnostics::apply_fix(
+                            *plan,
+                        ))
+                        .await
+                        .map_err(|error| format!("Could not apply the fix: {error}"))
+                        .and_then(|result| result.map_err(|error| error.to_string()));
+                    TaskResult::DoctorFixApplied {
+                        target,
+                        result,
+                    }
+                });
+        }
+        Effect::RunRebuild { start_dir, agent_id } => {
+            // Capture install stdio in xai-grok-update (never inherit TTY).
+            // Weighted progress events go through progress_tx → rebuild bar
+            // so cargo/just cannot paint the alt-screen mid-rebuild.
+            let ptx = progress_tx.clone();
+            tasks.spawn(async move {
+                let progress_agent = agent_id;
+                let result = xai_grok_update::rebuild_and_relaunch_with_progress(
+                    &start_dir,
+                    move |ev| {
+                        let _ = ptx.send(RestoreProgressMsg {
+                            agent_id: progress_agent,
+                            message: ev.detail,
+                            toast: true,
+                            fraction: Some(ev.fraction),
+                        });
+                    },
+                )
+                .await
+                .map(Box::new)
+                .map_err(|e| e.to_string());
+                TaskResult::RebuildDone { agent_id, result }
+            });
         }
         Effect::FetchChangelog => {
             tasks

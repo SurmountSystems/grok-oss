@@ -908,6 +908,39 @@ mod link_click_tests {
             "click where stop used to be must not cancel the turn under a dropdown"
         );
     }
+    /// Work B: status-row `[pause]` is ToggleGlobalPause, never CancelTurn.
+    #[test]
+    fn pause_button_click_dispatches_global_pause_not_cancel() {
+        let reg = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.last_terminal_size = (80, 30);
+        agent.session.state = AgentState::TurnRunning;
+        draw_banner_frame(&mut agent, &reg, &[], 0);
+        let pause = agent
+            .hit_pause_button
+            .rect
+            .expect("running turn must arm the pause rect");
+        let stop = agent
+            .hit_cancel_button
+            .rect
+            .expect("running turn must arm the stop rect");
+        assert_ne!(pause, stop, "pause and stop must be distinct hit targets");
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(pause.x, pause.y)), &reg);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::ToggleGlobalPause)),
+            "pause click must dispatch ToggleGlobalPause, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "pause must never dispatch CancelTurn"
+        );
+        let outcome = agent.handle_input(&Event::Mouse(mouse_down(stop.x, stop.y)), &reg);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "stop click must still dispatch CancelTurn, got {outcome:?}"
+        );
+    }
+
     /// Clicking the still-running watcher cue toggles the tasks pane like
     /// Ctrl+G; only the first click that reveals the pane shows the one-time
     /// shortcut toast.
