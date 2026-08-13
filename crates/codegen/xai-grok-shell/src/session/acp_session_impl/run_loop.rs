@@ -911,7 +911,8 @@ pub(super) async fn run_session(
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::InterjectQueuedPrompt { id, expected_version, owner, new_text } => {
-                            // Send-now: the handler promoted the row; cancel the running turn and start it.
+                            // Soft interject: buffer into the running turn. Never
+                            // cancels. Send-now is `queue_input(send_now: true)`.
                             let cancel_for_send_now = session.handle_interject_queued_prompt(&id, expected_version, owner.as_deref(), new_text.as_deref()).await;
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;

@@ -2592,6 +2592,10 @@ impl SessionActor {
                     cap.start_stream(timestamp_ms);
                 }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
+                self.send_xai_notification(XaiSessionUpdate::RetryState(
+                    crate::extensions::notification::RetryState::StreamResumed,
+                ))
+                .await;
             }
             SamplingEvent::FirstToken { .. } => {
                 self.emit_event(crate::session::events::Event::FirstToken);
@@ -2601,52 +2605,56 @@ impl SessionActor {
                 text,
                 chunk_index,
                 ..
-            } => match channel {
-                SamplingChannel::Text => {
-                    {
-                        let mut cap = self.streaming_turn_capture.lock();
-                        if cap.prompt_id.is_none() {
-                            let prompt_id = self
-                                .current_prompt_id
-                                .lock()
-                                .expect("current_prompt_id mutex poisoned")
-                                .clone();
-                            cap.begin_turn(prompt_id, self.current_turn_number.get());
-                            cap.attempt_count += 1;
+            } => {
+                let text =
+                    crate::session::helpers::assistant_ascii_scrub::scrub_assistant_text(text);
+                match channel {
+                    SamplingChannel::Text => {
+                        {
+                            let mut cap = self.streaming_turn_capture.lock();
+                            if cap.prompt_id.is_none() {
+                                let prompt_id = self
+                                    .current_prompt_id
+                                    .lock()
+                                    .expect("current_prompt_id mutex poisoned")
+                                    .clone();
+                                cap.begin_turn(prompt_id, self.current_turn_number.get());
+                                cap.attempt_count += 1;
+                            }
+                            cap.append(false, &text);
                         }
-                        cap.append(false, &text);
+                        self.emit_event(crate::session::events::Event::PhaseChanged {
+                            phase: crate::session::events::Phase::StreamingText,
+                        });
+                        self.send_update(
+                            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                acp::ContentBlock::Text(acp::TextContent::new(text)),
+                            )),
+                            Some(chunk_index),
+                        )
+                        .await;
                     }
-                    self.emit_event(crate::session::events::Event::PhaseChanged {
-                        phase: crate::session::events::Phase::StreamingText,
-                    });
-                    self.send_update(
-                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                            acp::ContentBlock::Text(acp::TextContent::new(text)),
-                        )),
-                        Some(chunk_index),
-                    )
-                    .await;
-                }
-                SamplingChannel::Reasoning => {
-                    {
-                        let mut cap = self.streaming_turn_capture.lock();
-                        if cap.prompt_id.is_none() {
-                            let prompt_id = self
-                                .current_prompt_id
-                                .lock()
-                                .expect("current_prompt_id mutex poisoned")
-                                .clone();
-                            cap.begin_turn(prompt_id, self.current_turn_number.get());
-                            cap.attempt_count += 1;
+                    SamplingChannel::Reasoning => {
+                        {
+                            let mut cap = self.streaming_turn_capture.lock();
+                            if cap.prompt_id.is_none() {
+                                let prompt_id = self
+                                    .current_prompt_id
+                                    .lock()
+                                    .expect("current_prompt_id mutex poisoned")
+                                    .clone();
+                                cap.begin_turn(prompt_id, self.current_turn_number.get());
+                                cap.attempt_count += 1;
+                            }
+                            cap.append(true, &text);
                         }
-                        cap.append(true, &text);
+                        self.emit_event(crate::session::events::Event::PhaseChanged {
+                            phase: crate::session::events::Phase::StreamingReasoning,
+                        });
+                        self.send_thought_chunk(text, chunk_index).await;
                     }
-                    self.emit_event(crate::session::events::Event::PhaseChanged {
-                        phase: crate::session::events::Phase::StreamingReasoning,
-                    });
-                    self.send_thought_chunk(text, chunk_index).await;
                 }
-            },
+            }
             SamplingEvent::ToolCallDelta {
                 tool_index,
                 id,

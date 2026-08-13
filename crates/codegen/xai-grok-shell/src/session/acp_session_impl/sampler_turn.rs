@@ -798,11 +798,14 @@ impl SessionActor {
     pub(crate) async fn fail_turn_auth_budget_exhausted(&self, message: String) -> acp::Error {
         const STATUS: Option<u16> = Some(401);
         let (error_type, message) = match self.auth_manager.as_ref() {
-            Some(auth_manager) => self.apply_auth_remedy(
-                &auth_manager.auth_remedy().after_retries_exhausted(),
-                message,
-                STATUS,
-            ),
+            Some(auth_manager) => {
+                auth_manager.note_terminal_inference_auth_rejection();
+                self.apply_auth_remedy(
+                    &auth_manager.auth_remedy().after_retries_exhausted(),
+                    message,
+                    STATUS,
+                )
+            }
             None => ("auth", message),
         };
         self.log_terminal_failure(error_type, STATUS, &message);
@@ -1130,11 +1133,14 @@ impl SessionActor {
             error.kind.as_str()
         };
         let (error_type, detailed_message) = match self.auth_manager.as_ref() {
-            Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
-                &auth_manager.auth_remedy(),
-                detailed_message,
-                error.status_code,
-            ),
+            Some(auth_manager) if error_type == "auth" => {
+                auth_manager.note_terminal_inference_auth_rejection();
+                self.apply_auth_remedy(
+                    &auth_manager.auth_remedy(),
+                    detailed_message,
+                    error.status_code,
+                )
+            }
             _ => (error_type, detailed_message),
         };
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
@@ -1411,6 +1417,25 @@ impl SessionActor {
             );
             self.signals_handle()
                 .record_token_usage(u.completion_tokens, u.reasoning_tokens);
+            let identity = if self.startup_hints.is_subagent {
+                crate::session::usage_log::UsageIdentity::agent_turn(
+                    self.startup_hints.subagent_type.clone().unwrap_or_default(),
+                    self.startup_hints.work_ulid.clone(),
+                )
+            } else {
+                crate::session::usage_log::UsageIdentity::main()
+            };
+            let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
+            crate::session::usage_log::record_model_call(
+                &crate::session::persistence::session_dir(&self.session_info),
+                identity,
+                self.session_info.id.0.as_ref(),
+                prompt_id,
+                response.assistant().and_then(|a| a.model_id.clone()),
+                u,
+                api_duration_ms,
+                response.cost_usd_ticks,
+            );
         } else if self.tool_context.task_output_token_budget.is_some() {
             self.tool_context.fail_task_output_usage_closed();
             let handle = self.chat_state_handle.clone();

@@ -116,6 +116,10 @@ fn matrix_is_subset_of_registry() {
 fn make_state() -> SettingsModalState {
     // Voice rows are hidden when the process gate is off (default until startup).
     xai_grok_pager::app::set_voice_mode_enabled_for_test(true);
+    // Product default is Auto. Do not inherit host `[ui].render_mermaid`.
+    xai_grok_pager::appearance::cache::set_render_mermaid(
+        xai_grok_pager::appearance::RenderMermaid::Auto,
+    );
     SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
         UiConfig::default(),
@@ -1973,6 +1977,11 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_invert_scroll(false);
     // 3 = the registry default shown while the profile is in charge.
     xai_grok_pager::appearance::cache::set_scroll_lines(3);
+    // Product default is Auto. Host `~/.grok/config.toml` must not seed the
+    // process cache during this registry-default round-trip.
+    xai_grok_pager::appearance::cache::set_render_mermaid(
+        xai_grok_pager::appearance::RenderMermaid::Auto,
+    );
 
     // Hard-coded per-key expectations (independent of registry).
     let expected = |key: &str| -> SettingValue {

@@ -770,10 +770,18 @@ fn render_question(
             width: xai_grok_pager::views::question_view::inline_text_width(area.width),
             height: input_h,
         };
-        return agent
+        let cursor_pos = agent
             .prompt
             .draw(buf, editor, None, &style, None, None)
             .cursor_pos;
+        // Software box caret: invert the cell, hide the hardware cursor so
+        // the two do not stack (question overlay InputMode).
+        if let Some((cx, cy)) = cursor_pos
+            && let Some(cell) = buf.cell_mut((cx, cy))
+        {
+            cell.modifier.insert(ratatui::style::Modifier::REVERSED);
+        }
+        return None;
     }
     None
 }

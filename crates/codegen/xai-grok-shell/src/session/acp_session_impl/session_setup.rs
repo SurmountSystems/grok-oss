@@ -509,23 +509,31 @@ impl SessionActor {
         let mut config_changed = false;
         let mut new_context_window = current_config.context_window;
         let mut new_max_completion_tokens = current_config.max_completion_tokens;
+        if let Some(header_cw) = metadata.context_window.filter(|&w| w > 0) {
+            self.compaction.model_context_window.set(header_cw);
+        }
         if let Some(new_cw) = metadata.context_window.and_then(std::num::NonZeroU64::new)
-            && current_config.context_window != new_cw
             && self.compaction.context_window_override.is_none()
         {
+            let effective = crate::util::config::apply_economic_context_cap(
+                new_cw.get(),
+                self.compaction.economic_mode.get(),
+            );
+            let effective_cw = std::num::NonZeroU64::new(effective).unwrap_or(new_cw);
             if new_cw < current_config.context_window {
                 tracing::warn!(
                     current_context_window = current_config.context_window.get(),
                     header_context_window = new_cw.get(),
                     "Ignoring context_window downgrade from response header"
                 );
-            } else {
+            } else if effective_cw != current_config.context_window {
                 tracing::info!(
                     old_context_window = current_config.context_window.get(),
-                    new_context_window = new_cw.get(),
+                    new_context_window = effective_cw.get(),
+                    header_context_window = new_cw.get(),
                     "Model context_window upgraded via response header"
                 );
-                new_context_window = new_cw;
+                new_context_window = effective_cw;
                 config_changed = true;
             }
         }

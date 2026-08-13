@@ -120,6 +120,25 @@ pub fn retry_backoff_with_jitter(retry_count: u32) -> Duration {
     Duration::from_millis(base_ms - jitter_range + jitter)
 }
 
+/// +/-20% jitter around a fixed wait (generic Retry-After clamp path).
+fn jitter_around(base: Duration) -> Duration {
+    use std::hash::{Hash, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static JITTER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let base_ms = base.as_millis() as u64;
+    if base_ms == 0 {
+        return base;
+    }
+    let jitter_range = base_ms / 5;
+    let mut hasher = std::hash::DefaultHasher::new();
+    JITTER_SEQ.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    let jitter = hasher.finish() % (jitter_range * 2 + 1);
+    Duration::from_millis(base_ms - jitter_range + jitter)
+}
+
 /// What the actor should do next given a sampling error and retry context.
 ///
 /// Pure data: callers (the actor's per-request task) are responsible for
@@ -254,10 +273,14 @@ pub fn classify_error(
         if !is_unlimited_retries(max_retries) && next_attempt >= max_retries {
             return RetryDecision::Fatal(clone_error(err));
         }
-        let backoff = err
-            .retry_after()
-            .map(Duration::from_secs)
-            .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
+        let backoff = match err.retry_after() {
+            // Cloudflare 52x often sends Retry-After: 60-120. Honor values
+            // at or under 30s exactly; clamp longer waits to 30s +/- 20%
+            // jitter so 14 retries do not stall the turn for tens of minutes.
+            Some(secs) if secs > 30 => jitter_around(Duration::from_secs(30)),
+            Some(secs) => Duration::from_secs(secs),
+            None => retry_backoff_with_jitter(next_attempt),
+        };
         if next_attempt == 1 {
             return RetryDecision::RetryWithClientRebuild { backoff };
         }

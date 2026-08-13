@@ -354,7 +354,7 @@ async fn build_skill_information_for_refs_loads_and_wraps() {
         .expect("skill body must load");
     assert!(info.starts_with("<skill_information>"), "got: {info}");
     assert!(
-        info.contains("<skill name=\"commit\" args=\"fix typo\">"),
+        info.contains("<skill name=\"commit\" args=\"fix typo\" run_id=\""),
         "got: {info}"
     );
     assert!(

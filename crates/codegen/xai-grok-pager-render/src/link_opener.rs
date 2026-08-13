@@ -71,10 +71,12 @@ pub fn browser_open_likely_available() -> bool {
     browser_open_likely_available_from_env(&env)
 }
 
-/// User-facing copy when the browser opener cannot run. Includes the full
-/// URL on its own line so it is easy to select/copy in the TUI.
+/// User-facing copy when the browser opener cannot run.
+///
+/// URL first, one line: welcome toast is a single row and truncates from the
+/// right, so the URL must stay the prefix. Scrollback uses the same string.
 pub fn browser_unavailable_message(url: &str) -> String {
-    format!("Could not open a browser. Open this URL manually:\n{url}")
+    format!("{url} Could not open a browser. Open this URL manually.")
 }
 
 /// Open a URL in the system's default browser/handler.
@@ -598,8 +600,9 @@ mod tests {
         let msg = browser_unavailable_message(url);
         assert!(msg.contains("Could not open a browser"));
         assert!(msg.contains(url));
-        // URL on its own line for easy select/copy in the TUI.
-        assert!(msg.lines().any(|l| l == url));
+        // URL first, one line: welcome toast truncates from the right.
+        assert!(msg.starts_with(url), "{msg}");
+        assert!(!msg.contains('\n'), "{msg}");
     }
 
     #[test]

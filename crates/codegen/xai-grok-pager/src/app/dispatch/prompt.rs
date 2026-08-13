@@ -442,6 +442,11 @@ pub(super) fn dispatch_send_prompt_inner(
     } else {
         text
     };
+    let implement_rewrite = crate::app::auto_implement::apply_implement_effort_for_product(
+        &text,
+        crate::appearance::cache::load_economic_mode(),
+    );
+    let text = implement_rewrite.command;
 
     if app.reconnect_pending {
         app.show_toast("Reconnecting, please wait...");
@@ -469,6 +474,9 @@ pub(super) fn dispatch_send_prompt_inner(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    if let Some(toast) = implement_rewrite.toast {
+        agent.show_toast(&toast);
+    }
 
     // Paste-then-immediate-send: an image probe from a just-pasted Cmd+V is
     // still off-thread. Stash this send and re-issue it once the probe completes

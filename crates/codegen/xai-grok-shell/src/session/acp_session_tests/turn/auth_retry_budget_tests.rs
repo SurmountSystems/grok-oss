@@ -236,11 +236,10 @@ async fn run_prompt(
 /// The wake sequence: the resolver has nothing wire-valid, the send goes
 /// out with no `Authorization` header, the server 401s it, recovery lands a
 /// fresh token. The turn must survive and resubmit with the fresh bearer.
-#[tokio::test(flavor = "current_thread")]
-async fn fail_closed_401_is_uncharged_and_turn_survives() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn fail_closed_401_is_uncharged_and_turn_survives() {
+    run_on_large_stack("fail-closed-401", || {
+        block_on_local(false, async {
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 FRESH_TOKEN,
@@ -288,19 +287,18 @@ async fn fail_closed_401_is_uncharged_and_turn_survives() {
                 calls.load(Ordering::SeqCst) >= 2,
                 "both the failing pre-flight and the recovery refresh must run"
             );
-        })
-        .await;
+        });
+    });
 }
 
 /// Real credential rejections must still terminate: when every request
 /// carries a bearer the server rejects, the escalating budget exhausts after
 /// `MAX_RETRIES` and the failure names authenticated rejections — not a
 /// generic budget message. `start_paused` auto-advances the backoff ladder.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn authenticated_401s_still_exhaust_after_three_retries() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn authenticated_401s_still_exhaust_after_three_retries() {
+    run_on_large_stack("auth-401-exhaust", || {
+        block_on_local(true, async {
             // The server only accepts a token the refresher never mints, so
             // every authenticated send is rejected.
             let server = MockInferenceServer::start_with_required_auth(
@@ -350,6 +348,6 @@ async fn authenticated_401s_still_exhaust_after_three_retries() {
                 message.contains("authenticated inference requests were still rejected"),
                 "the notification must carry the same story as the error: {message}"
             );
-        })
-        .await;
+        });
+    });
 }

@@ -3510,6 +3510,12 @@ pub(crate) fn resolve_model_list(
         for (key, entry) in prefetched.iter_mut() {
             let donor = resolved.get(key);
             if let Some(donor) = donor {
+                // Stock catalog with no baked special policy: drop a remote
+                // models_cache undercut (e.g. 80 on grok-4.5) so resolve
+                // falls through to the product default.
+                if donor.info.auto_compact_threshold_percent.is_none() {
+                    entry.info.auto_compact_threshold_percent = None;
+                }
                 if entry.info.context_window.get() == default_cw
                     && donor.info.context_window.get() != default_cw
                 {

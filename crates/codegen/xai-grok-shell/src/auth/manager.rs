@@ -51,9 +51,7 @@ use chrono::DateTime;
 #[cfg(test)]
 use enrichment::apply_user_info_enrichment;
 
-#[cfg(test)]
-use super::model::AuthStore;
-use super::model::LEGACY_SCOPE;
+use super::model::{AuthStore, LEGACY_SCOPE};
 
 /// Why a token refresh is being requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1021,9 +1019,8 @@ impl AuthManager {
             }
         };
         let mut map = map;
-        // One entry per scope (personal and team share the scope key).
         tracing::debug!(scope = %self.scope, "auth: storing token");
-        map.insert(self.scope.clone(), auth.clone());
+        self.persist_auth_into_store(&mut map, auth.clone());
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = update_started.elapsed().as_millis() as u64;
         match &write_result {
@@ -1084,7 +1081,7 @@ impl AuthManager {
         };
         let mut map = map;
         tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        map.insert(self.scope.clone(), auth.clone());
+        self.persist_auth_into_store(&mut map, auth.clone());
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
@@ -1338,7 +1335,7 @@ impl AuthManager {
                 return Some(auth);
             }
         };
-        map.insert(self.scope.clone(), auth.clone());
+        self.persist_auth_into_store(&mut map, auth.clone());
         if let Err(e) = write_auth_json(&self.path, &map) {
             tracing::warn!(error = %e, "auth: failed to persist refreshed token to disk");
         }
@@ -2586,6 +2583,34 @@ impl AuthManager {
     fn is_external_provider_refresh_authority(&self) -> bool {
         self.grok_com_config.auth_provider_command.is_some()
             && self.token_type() == TokenType::ExternalBinary
+    }
+
+    /// Persist `auth` to the store: SuperGrok session modes keep sibling
+    /// principals in multi-slots (`{base}::personal` / `{base}::team::{id}`)
+    /// plus the active base. Console API-key and other modes stay one key.
+    fn persist_auth_into_store(&self, map: &mut AuthStore, auth: GrokAuth) {
+        if is_supergrok_session_mode(auth.auth_mode) {
+            upsert_supergrok_session(map, &self.scope, auth);
+        } else {
+            map.insert(self.scope.clone(), auth);
+        }
+    }
+
+    /// A terminal inference 401 against a live External provider credential
+    /// is not a wake-window blip: only the operator's binary can mint a
+    /// replacement. Record that verdict so [`Self::auth_remedy`] names
+    /// [`AuthRemedy::ProviderLogin`] instead of "wait it out / no /login".
+    pub(crate) fn note_terminal_inference_auth_rejection(&self) {
+        if !self.is_external_provider_refresh_authority() {
+            return;
+        }
+        let Some(auth) = self.current_or_expired() else {
+            return;
+        };
+        self.record_permanent_failure(
+            auth.key,
+            crate::auth::error::RefreshTokenFailedReason::ProviderInteractiveRequired.into(),
+        );
     }
 
     /// `true` iff a [`TokenRefresher`] is wired in. `false` for static-key

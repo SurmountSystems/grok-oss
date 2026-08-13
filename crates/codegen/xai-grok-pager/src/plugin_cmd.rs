@@ -1276,6 +1276,10 @@ mod tests {
         run_git(path, &["init", "--initial-branch", "main"]);
         run_git(path, &["config", "user.email", "test@example.com"]);
         run_git(path, &["config", "user.name", "Test User"]);
+        // Fixture-only: isolate from the host signing + hooks policy so
+        // marketplace cache-sync can create dummy commits.
+        run_git(path, &["config", "commit.gpgsign", "false"]);
+        run_git(path, &["config", "core.hooksPath", "/dev/null"]);
         add_commit(path, "file.txt", "initial");
     }
 
@@ -1313,6 +1317,7 @@ mod tests {
             .env("GIT_ASKPASS", "")
             .env("GIT_LFS_SKIP_SMUDGE", "1")
             .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+            .env("ALLOW_UNSIGNED_COMMIT", "1")
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap();

@@ -525,7 +525,7 @@ fn render_search_bar_with_label_viewport(
 
         let cursor_display_w = (cursor_col as u16).min(cursor_limit as u16);
 
-        if active || always_active {
+        if active {
             let cursor_x = input_x + cursor_display_w;
             if cursor_x < x + width {
                 // Inverse-video the cell at the cursor position so the
@@ -3390,6 +3390,7 @@ mod tests {
 
         // A `show_search_hint: false` picker (command palette / arg-picker family):
         // the cursor must track focus (`search_active`), not render always-on.
+        let _pin = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let config = cfg(false, false);
         let area = Rect::new(0, 0, 60, 16);

@@ -7107,6 +7107,9 @@ fn max_thoughts_width_preview_content_is_italic() {
 /// now matches that contract.
 #[test]
 fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
+    // Pin GrokNight + TrueColor so this is not the process Doge default
+    // (all-black bg slots) or NO_COLOR Reset collapse.
+    let _pin = crate::theme::cache::pin_theme();
     let area = Rect {
         x: 0,
         y: 0,

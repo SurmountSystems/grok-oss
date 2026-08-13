@@ -1457,9 +1457,13 @@ impl SamplingClient {
         let mut http_request = grok_headers
             .apply(self.post(self.endpoint("responses")))
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        if doom_loop.is_some() {
-            // Presence opts in; the server ignores the value.
-            http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
+        if let Some(policy) = self.defaults.doom_loop_recovery {
+            // Wire value is the clamped detector window (default 1024), not
+            // a boolean. Presence still opts in; the server uses the number.
+            let window = xai_grok_sampling_types::DoomLoopRecoveryPolicy::clamp_window_tokens(
+                policy.window_tokens,
+            );
+            http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, window.to_string());
         }
         let http_request = http_request.json(&request_body);
 

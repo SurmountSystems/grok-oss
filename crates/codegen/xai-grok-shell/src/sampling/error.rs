@@ -75,10 +75,11 @@ pub fn format_rate_limited_user_message(
     server_detail: Option<&str>,
     is_api_key_auth: bool,
 ) -> String {
-    if server_detail.is_some_and(is_free_usage_exhausted_error) {
+    let stripped = server_detail.map(strip_api_error_status_prefix);
+    if stripped.is_some_and(is_free_usage_exhausted_error) {
         return FREE_USAGE_USER_MESSAGE.to_string();
     }
-    if let Some(detail) = server_detail.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(detail) = stripped.map(str::trim).filter(|s| !s.is_empty()) {
         if is_api_key_auth && pushes_consumer_subscription_upsell(detail) {
             return RATE_LIMITED_USER_MESSAGE_API_KEY.to_string();
         }
@@ -162,7 +163,8 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             StatusCode::TOO_MANY_REQUESTS => {
                 acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited".to_string()).data(message)
             }
-            _ => acp::Error::internal_error().data(message),
+            other => acp::Error::internal_error()
+                .data(error_data_with_status(message, Some(other.as_u16()))),
         },
         SamplingError::EventStreamError(message) => acp::Error::internal_error().data(message),
         SamplingError::StreamError {

@@ -695,6 +695,7 @@ mod tests {
 
     #[test]
     fn mid_text_multiple_tokens_each_teal() {
+        let _pin = crate::theme::cache::pin_theme();
         let text = "run /commit then /review please";
         let block = UserPromptBlock::with_skill_tokens(text, vec![4..11, 17..24]);
         let lines = block.wrap_prompt_lines(80, None, true, false);
@@ -713,6 +714,7 @@ mod tests {
 
     #[test]
     fn mid_text_token_on_second_logical_line() {
+        let _pin = crate::theme::cache::pin_theme();
         let text = "first line\nthen /model here";
         // "/model" starts after "first line\nthen " = 16 bytes.
         let block = UserPromptBlock::with_skill_tokens(text, vec![16..22]);
@@ -735,6 +737,7 @@ mod tests {
 
     #[test]
     fn invalid_token_ranges_are_dropped() {
+        let _pin = crate::theme::cache::pin_theme();
         let text = "héllo /model now"; // 'é' is 2 bytes: "/model" = 7..13
         let block = UserPromptBlock::with_skill_tokens(
             text,
@@ -782,6 +785,7 @@ mod tests {
 
     #[test]
     fn collapsed_truncation_keeps_teal_on_straddling_token() {
+        let _pin = crate::theme::cache::pin_theme();
         // "/pr-workflow" (bytes 8..20) is wider than the content width, so it
         // straddles the last visible row and the hidden continuation; the
         // truncating re-wrap must keep the visible head teal.
@@ -802,6 +806,7 @@ mod tests {
 
     #[test]
     fn collapsed_truncation_keeps_teal_on_token_within_last_line() {
+        let _pin = crate::theme::cache::pin_theme();
         // "/do-it" (bytes 8..14) fits fully on the truncated last line even at
         // the ellipsis-reduced width, so it must survive whole and teal.
         let text = "one\ntwo\n/do-it more words here";
@@ -824,6 +829,7 @@ mod tests {
 
     #[test]
     fn narrow_wrap_keeps_teal_on_both_rows_of_split_token() {
+        let _pin = crate::theme::cache::pin_theme();
         // Expanded (no max_lines): the 12-wide token cannot fit at width 8, so
         // the wrapper splits it mid-token; every piece must stay teal.
         let text = "aa /pr-workflow zz";

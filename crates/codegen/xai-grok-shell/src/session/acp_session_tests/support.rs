@@ -1,5 +1,29 @@
 #![allow(dead_code)]
 use super::*;
+/// `SessionActor` turn futures overflow the default test thread stack.
+/// Production session threads use 8 MiB; these tests use 16 MiB.
+pub(crate) fn run_on_large_stack(name: &str, body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(body)
+        .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+/// Current-thread tokio + `LocalSet`. `start_paused` keeps auto-advance
+/// for backoff-ladder tests (same as `#[tokio::test(start_paused = true)]`).
+pub(crate) fn block_on_local(start_paused: bool, fut: impl std::future::Future<Output = ()>) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(start_paused)
+        .build()
+        .expect("current-thread runtime");
+    rt.block_on(async {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(fut).await;
+    });
+}
 /// Wrap `id` in a shared auth-method handle for `SessionActor` test literals
 /// (the field is now a shared live handle, not an owned id).
 pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::SharedAuthMethodId {

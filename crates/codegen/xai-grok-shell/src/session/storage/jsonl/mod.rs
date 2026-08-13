@@ -673,19 +673,10 @@ impl JsonlStorageAdapter {
         };
         let mut entries: Vec<_> = std::fs::read_dir(&workflows_dir)?
             .filter_map(Result::ok)
-            .take(MAX_RESTORED_WORKFLOW_RUNS.saturating_add(1))
             .collect();
-        let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
-        entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
         entries.sort_by_key(|entry| entry.file_name());
-        if entries_truncated {
-            tracing::warn!(
-                path = %workflows_dir.display(),
-                limit = MAX_RESTORED_WORKFLOW_RUNS,
-                "workflow restore run-count cap reached; ignoring remaining entries"
-            );
-        }
         let mut restored = Vec::new();
+        let mut entries_truncated = false;
         for entry in entries {
             let run_dir = entry.path();
             let Ok(run_meta) = std::fs::symlink_metadata(&run_dir) else {
@@ -756,11 +747,22 @@ impl JsonlStorageAdapter {
                     continue;
                 }
             };
+            if restored.len() >= MAX_RESTORED_WORKFLOW_RUNS {
+                entries_truncated = true;
+                break;
+            }
             restored.push(crate::session::workflow::store::RestoredWorkflowRun {
                 manifest,
                 script,
                 args,
             });
+        }
+        if entries_truncated {
+            tracing::warn!(
+                path = %workflows_dir.display(),
+                limit = MAX_RESTORED_WORKFLOW_RUNS,
+                "workflow restore run-count cap reached; ignoring remaining entries"
+            );
         }
         Ok(restored)
     }

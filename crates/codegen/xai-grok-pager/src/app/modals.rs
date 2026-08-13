@@ -3163,6 +3163,7 @@ mod command_palette_vim_input_tests {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
+        let _pin = crate::theme::cache::pin_theme();
         let render_palette_search_row = |search_active: bool| -> (bool, String) {
             let mut agent = make_agent();
             open_command_palette(&mut agent);
