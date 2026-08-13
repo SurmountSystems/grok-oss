@@ -430,7 +430,7 @@ impl ToolUsageStats {
     /// Get categories sorted by count (descending).
     pub fn sorted_categories(&self) -> Vec<(ToolCategory, &CategoryStats)> {
         let mut items: Vec<_> = self.categories.iter().map(|(k, v)| (*k, v)).collect();
-        items.sort_by(|a, b| b.1.count.cmp(&a.1.count));
+        items.sort_by_key(|b| std::cmp::Reverse(b.1.count));
         items
     }
 }

@@ -163,9 +163,9 @@ impl WorkflowManager {
                 let mut journal = match existing
                     .journal_path
                     .as_ref()
-                    .and_then(|p| self.session_dir.as_ref().map(|d| (d, p)))
+                    .zip(self.session_dir.as_ref())
                 {
-                    Some((session_dir, relative)) => {
+                    Some((relative, session_dir)) => {
                         let expected = format!("workflows/{run_id}/journal.jsonl");
                         if relative != &expected {
                             return Err(LaunchError::Journal(

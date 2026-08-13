@@ -599,7 +599,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
     crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
     let response = crate::http::shared_client()
         .get(&url)
-        .header("Authorization", format!("Bearer {}", &auth.key))
+        .header("Authorization", format!("Bearer {}", auth.key))
         .header(
             "X-XAI-Token-Auth",
             crate::auth::GrokComConfig::default().token_header,

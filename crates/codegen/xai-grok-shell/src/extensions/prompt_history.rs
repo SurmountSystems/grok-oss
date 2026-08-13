@@ -119,7 +119,7 @@ async fn load_session_prompts(
 
     // Sort sessions by updated_at ascending (oldest first)
     // so that when we reverse the final list, most recent prompts are first
-    summaries.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+    summaries.sort_by_key(|a| a.updated_at);
 
     // Load only user prompts using the optimized method (avoids loading full session data)
     let root_dir = crate::util::grok_home::grok_home();

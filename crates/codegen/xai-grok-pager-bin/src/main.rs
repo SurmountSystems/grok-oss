@@ -39,12 +39,12 @@ use xai_grok_shell::agent::app::{run_headless, run_leader, run_stdio_agent};
 use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::leader::{
     ClientCapabilities, ClientMode, ControlCommand, LeaderCapabilities, LeaderDescriptor,
-    LeaderRegistration, LeaderTarget,
+    LeaderRegistration, LeaderTarget, leader_is_older_than,
 };
 use xai_grok_shell::leader::{
     ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
 };
-use xai_grok_update::{UpdateConfig, auto_update, enforce_minimum_version_or_exit};
+use xai_grok_update::{UpdateConfig, auto_update, enforce_version_policy_or_exit};
 /// Apply headless args to an existing config, only overriding values that are
 /// explicitly set. This allows environment defaults to be preserved when
 /// specific args are not provided.
@@ -524,6 +524,7 @@ async fn workspace_start(
         &raw_config,
         remote_settings.as_ref(),
         true,
+        None,
     );
     if !use_leader {
         anyhow::bail!(
@@ -1084,6 +1085,7 @@ async fn run_agent_command(
         &raw_config,
         remote_settings.as_ref(),
         leader_eligible,
+        None,
     );
     tracing::info!(use_leader, ?policy_disable_reason, "leader mode resolved");
     let managed_install = is_managed_install(
@@ -1669,7 +1671,7 @@ fn main() {
 }
 async fn async_main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut args = PagerArgs::parse_and_apply_cwd()?;
+    let mut args = PagerArgs::parse_cli().apply_cwd()?;
     if let Some(ref mode) = args.compaction_mode {
         unsafe { std::env::set_var("GROK_COMPACTION_MODE", mode) };
     }
@@ -1699,8 +1701,8 @@ async fn async_main() -> Result<()> {
         set_if_unset("GROK_DEBUG_LOG", "1");
         set_if_unset("GROK_HOOKS_LOG", "1");
     }
-    if let Some(Command::Completions { shell }) = &args.command {
-        xai_grok_pager::completions_cmd::run(*shell);
+    if let Some(Command::Completions { shell }) = args.command.clone() {
+        xai_grok_pager::completions_cmd::run(shell);
         return Ok(());
     }
     if let Some(Command::Wrap(ref wrap_args)) = args.command {
@@ -1766,7 +1768,7 @@ async fn async_main() -> Result<()> {
                          Use `grok-pager agent {flag}` instead."
                     );
                 }
-                enforce_minimum_version_or_exit(&update_config).await;
+                enforce_version_policy_or_exit();
                 return run_agent_command(
                     agent_args,
                     args.permission_mode_flag.clone(),
@@ -1780,10 +1782,9 @@ async fn async_main() -> Result<()> {
             Command::Doctor(_) => {
                 unreachable!("doctor was consumed before runtime startup")
             }
-            Command::Limits(limits_args) => {
+            Command::DiskUsage(du_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                return xai_grok_pager::limits_cmd::run(limits_args).await;
+                return xai_grok_pager::disk_usage_cmd::run(du_args);
             }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
@@ -1867,11 +1868,6 @@ async fn async_main() -> Result<()> {
             Command::Memory(memory_args) => {
                 return xai_grok_pager::memory_cmd::run(memory_args);
             }
-            Command::Rebuild { source } => {
-                init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                return run_rebuild_command(source).await;
-            }
             Command::Update {
                 check,
                 json,
@@ -1902,47 +1898,10 @@ async fn async_main() -> Result<()> {
                 legacy: _,
                 oauth,
                 device_auth,
-                openrouter,
-                api_key,
-                management_key,
-                list_api_keys,
                 devbox,
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                if list_api_keys {
-                    xai_grok_shell::auth::run_list_console_api_keys(&grok_home)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    xai_grok_shell::instrumentation::finalize_and_exit(0);
-                }
-                // Management API key (console team prepaid / Business Usage) —
-                // distinct store from inference XAI_API_KEY / SuperGrok OAuth.
-                if management_key.is_some() {
-                    let key =
-                        xai_grok_shell::auth::materialize_cli_api_key(management_key.as_deref())
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    xai_grok_shell::auth::run_management_key_login(&grok_home, key.as_deref())
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    println!();
-                    xai_grok_shell::instrumentation::finalize_and_exit(0);
-                }
-                // OpenRouter and console key paths: one materialize gate so
-                // argv secrets are always refused before any store write.
-                if openrouter || api_key.is_some() {
-                    let key = xai_grok_shell::auth::materialize_cli_api_key(api_key.as_deref())
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    if openrouter {
-                        xai_grok_shell::auth::run_openrouter_login(&grok_home, key.as_deref())
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    } else {
-                        // Bare `--api-key` → no-echo prompt; not OAuth fallthrough.
-                        xai_grok_shell::auth::run_xai_console_login(&grok_home, key.as_deref())
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    }
-                    println!();
-                    xai_grok_shell::instrumentation::finalize_and_exit(0);
-                }
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
@@ -1951,14 +1910,8 @@ async fn async_main() -> Result<()> {
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout { openrouter } => {
+            Command::Logout => {
                 init_tracing_simple("cli");
-                if openrouter {
-                    let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                    xai_grok_shell::auth::run_openrouter_logout(&grok_home)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    xai_grok_shell::instrumentation::finalize_and_exit(0);
-                }
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
@@ -1987,7 +1940,7 @@ async fn async_main() -> Result<()> {
     if let Some(prompt) = headless_prompt {
         init_tracing_simple(HEADLESS_ENTRYPOINT);
         let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-        enforce_minimum_version_or_exit(&update_config).await;
+        enforce_version_policy_or_exit();
         let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
             args.yolo,
             args.permission_mode_flag.as_deref(),
@@ -2005,12 +1958,6 @@ async fn async_main() -> Result<()> {
             if args.output_format == xai_grok_pager::headless::OutputFormat::Plain {
                 args.output_format = xai_grok_pager::headless::OutputFormat::Json;
             }
-            if args.self_verify {
-                anyhow::bail!(
-                    "--json-schema and --self-verify cannot be used together: \
-                     verification output would corrupt the structured response"
-                );
-            }
         }
         return xai_grok_pager::headless::run_single_turn(
             prompt,
@@ -2018,10 +1965,12 @@ async fn async_main() -> Result<()> {
             xai_grok_pager::headless::HeadlessOptions {
                 session_id: args.session_id.clone(),
                 resume: args.resume_session.or(args.load_session),
+                resume_title_pinned: false,
                 cwd: args.cwd,
                 yolo: launch_yolo.yolo,
                 trust: args.trust,
                 output_format: args.output_format,
+                include_partial_messages: args.include_partial_messages,
                 json_schema,
                 model: args.model,
                 rules: args.rules,
@@ -2048,7 +1997,7 @@ async fn async_main() -> Result<()> {
         )
         .await;
     }
-    enforce_minimum_version_or_exit(&update_config).await;
+    enforce_version_policy_or_exit();
     let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
     type UpdateWaitHandle = tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>;
     let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =

@@ -538,17 +538,12 @@ fn render_minimal_status(
     let watchers = minimal_api::watchers(agent);
     let drain_blocked = minimal_api::drain_blocked(agent);
     let parked = minimal_api::renders_parked(agent);
-    // Minimal is keyboard-only and does not own process-level global pause
-    // chrome; AgentView::global_work_paused is crate-private. Pass false so
-    // status visibility matches idle-without-pause semantics.
-    let global_paused = false;
     if !turn_status::should_show(
         &agent.session.state,
         drain_blocked,
         minimal_api::mcp_init_progress(agent),
         watchers,
         parked,
-        global_paused,
     ) {
         render_idle_hint(buf, area, theme);
         return;
@@ -581,7 +576,6 @@ fn render_minimal_status(
             flat_background: true,
             held_queue: minimal_api::held_queue_count(agent),
             held_queue_top_sendable: minimal_api::held_queue_top_sendable(agent),
-            global_paused,
         },
     );
 }

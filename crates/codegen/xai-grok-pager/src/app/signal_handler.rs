@@ -61,9 +61,11 @@ pub(crate) fn clear_quit_notify() {
 static TERMINAL_OWNED: AtomicBool = AtomicBool::new(false);
 
 /// Set when SIGUSR1 asks this TUI to re-exec onto a newly installed binary.
+#[allow(dead_code)] // setter/listener not wired on this restack tip
 static PEER_REBUILD_RELAUNCH: AtomicBool = AtomicBool::new(false);
 
 /// Consume the peer-rebuild flag (true once after SIGUSR1 until taken).
+#[allow(dead_code)] // consumed by rebuild.rs; SIGUSR1 setter not wired yet
 pub(crate) fn take_peer_rebuild_relaunch() -> bool {
     PEER_REBUILD_RELAUNCH.swap(false, Ordering::AcqRel)
 }

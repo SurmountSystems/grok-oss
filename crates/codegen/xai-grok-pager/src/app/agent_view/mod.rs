@@ -2227,14 +2227,12 @@ fn collect_citation_links(
                     });
                 }
             }
-            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) => {
-                if !wf.url.is_empty() {
-                    links.push(VisibleLink {
-                        rects: vec![block_geom.content_area],
-                        target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
-                        id: None,
-                    });
-                }
+            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) if !wf.url.is_empty() => {
+                links.push(VisibleLink {
+                    rects: vec![block_geom.content_area],
+                    target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
+                    id: None,
+                });
             }
             _ => {}
         }

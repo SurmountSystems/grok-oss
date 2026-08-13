@@ -881,13 +881,7 @@ impl PromptWidget {
 
     /// Set the hovered completion dropdown item. Returns `true` if changed.
     pub fn set_completion_hovered(&mut self, index: Option<usize>) -> bool {
-        let clamped = index.and_then(|i| {
-            if i < self.suggestions.dropdown.items.len() {
-                Some(i)
-            } else {
-                None
-            }
-        });
+        let clamped = index.filter(|&i| i < self.suggestions.dropdown.items.len());
         let changed = clamped != self.suggestions.dropdown.hovered;
         self.suggestions.dropdown.hovered = clamped;
         changed
@@ -1300,13 +1294,7 @@ impl PromptWidget {
     /// Set the hovered slash dropdown item index. Returns `true` if changed.
     pub fn set_slash_hovered(&mut self, index: Option<usize>) -> bool {
         let snap = self.slash_state.snapshot();
-        let clamped = index.and_then(|i| {
-            if i < snap.matches.len() {
-                Some(i)
-            } else {
-                None
-            }
-        });
+        let clamped = index.filter(|&i| i < snap.matches.len());
         let changed = clamped != self.slash_hovered;
         self.slash_hovered = clamped;
         changed

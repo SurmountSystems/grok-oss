@@ -584,7 +584,7 @@ pub(super) fn handle_rewind_points_loaded(
     }
 
     let mut sorted = points;
-    sorted.sort_by(|a, b| b.prompt_index.cmp(&a.prompt_index));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.prompt_index));
     let draft = stashed.or_else(|| stash_prompt(&mut agent.prompt));
     let initial_anchor = sorted
         .first()

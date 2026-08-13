@@ -186,49 +186,28 @@ pub fn render(
         area.width,
     );
 
-    // ── controls: real hit-tested CTAs (mouse primary; keys remain accelerators) ──
-    // Soft-park / full TUI use paint_soft_park_cta_buttons. Minimal used to paint
-    // a plain text legend here with no SoftParkCtaHits — dogfood saw non-clickable,
-    // non-hoverable "a approve · A … · q quit" chrome.
+    // Keyboard legend only. Five-CTA mouse buttons are residual (not on this
+    // restack tip). Keys still route through handle_line_viewer_key.
     let controls_rect = Rect {
         x: area.x,
         y: controls_y,
         width: area.width,
         height: 1,
     };
-    match foc {
-        PlanApprovalFocus::Commenting => {
-            agent.hit_soft_park_ctas.clear();
-            let hint = "enter save comment \u{00b7} esc cancel";
-            let hint_style = theme.dim().bg(Color::Reset);
-            buf.set_style(controls_rect, hint_style);
-            buf.set_span(
-                area.x,
-                controls_y,
-                &Span::styled(hint, hint_style),
-                area.width,
-            );
-        }
+    let hint = match foc {
+        PlanApprovalFocus::Commenting => "enter save comment \u{00b7} esc cancel",
         PlanApprovalFocus::Preview | PlanApprovalFocus::Prompt => {
-            use xai_grok_pager::views::plan_approval_view::{
-                SoftParkCtaHovers, paint_soft_park_cta_buttons,
-            };
-            // Clear the row so leftover dim text does not sit under buttons.
-            buf.set_style(
-                controls_rect,
-                Style::default().bg(theme.bg_base).fg(theme.gray_dim),
-            );
-            let hovers = SoftParkCtaHovers {
-                approve: agent.hit_soft_park_ctas.approve.hovered,
-                notes: agent.hit_soft_park_ctas.notes.hovered,
-                clarify: agent.hit_soft_park_ctas.clarify.hovered,
-                revise: agent.hit_soft_park_ctas.revise.hovered,
-                quit: agent.hit_soft_park_ctas.quit.hovered,
-            };
-            let areas = paint_soft_park_cta_buttons(buf, controls_rect, theme, hovers);
-            agent.hit_soft_park_ctas.apply_areas(areas);
+            "a approve \u{00b7} A notes \u{00b7} ? clarify \u{00b7} s revise \u{00b7} q quit"
         }
-    }
+    };
+    let hint_style = theme.dim().bg(Color::Reset);
+    buf.set_style(controls_rect, hint_style);
+    buf.set_span(
+        area.x,
+        controls_y,
+        &Span::styled(hint, hint_style),
+        area.width,
+    );
 
     // ── feedback input (revise mode) ──
     if input_h > 0 {
@@ -274,16 +253,7 @@ fn input_style(theme: &Theme) -> PromptStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use xai_grok_pager::actions::ActionRegistry;
-    use xai_grok_pager::app::app_view::InputOutcome;
-    use xai_grok_pager::minimal_api::{
-        line_viewer_is_some, plan_approval_view, set_plan_approval_view, test_agent_view,
-    };
-    use xai_grok_pager::views::plan_approval_view::{
-        ExitPlanModeExtRequest, PlanApprovalViewState,
-    };
-    use xai_grok_pager::views::prompt_widget::StashedPrompt;
+    use xai_grok_pager::minimal_api::test_agent_view;
 
     #[test]
     fn empty_plan_header_is_explicit() {
@@ -304,160 +274,31 @@ mod tests {
         assert_eq!(real, "# Plan\n- do it");
     }
 
-    fn agent_with_parked_plan() -> AgentView {
+    /// This restack tip paints a keyboard legend only. Five-CTA mouse hit
+    /// areas are residual and not wired here.
+    #[test]
+    fn minimal_plan_render_paints_keyboard_legend() {
         let mut agent = test_agent_view(Some("min-plan-cta"), std::path::PathBuf::from("/tmp"));
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let request = ExitPlanModeExtRequest {
-            session_id: "test-session".into(),
-            tool_call_id: "call-min-cta".into(),
-            plan_content: Some("# Soft park CTAs\n\nDo the thing".into()),
-        };
-        set_plan_approval_view(
-            &mut agent,
-            Some(PlanApprovalViewState::new(
-                request,
-                StashedPrompt::default(),
-                tx,
-            )),
-        );
-        assert!(
-            !line_viewer_is_some(&agent),
-            "soft-park fixture: no line viewer"
-        );
-        agent
-    }
-
-    /// Named contract (dogfood 2026-07-29): minimal plan strip must register
-    /// SoftParkCtaHits — plain text legend is not enough.
-    #[test]
-    fn minimal_plan_render_sets_soft_park_cta_hit_areas() {
-        let mut agent = agent_with_parked_plan();
         let theme = Theme::current();
         let area = Rect::new(0, 10, 80, 2);
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 14));
         let _ = render(&mut buf, area, &mut agent, &theme);
-        assert!(
-            agent.hit_soft_park_ctas.approve.rect.is_some(),
-            "minimal plan render must set Approve hit area"
-        );
-        assert!(
-            agent.hit_soft_park_ctas.quit.rect.is_some(),
-            "minimal plan render must set Quit hit area"
-        );
-        assert!(
-            agent.hit_soft_park_ctas.notes.rect.is_some()
-                && agent.hit_soft_park_ctas.clarify.rect.is_some()
-                && agent.hit_soft_park_ctas.revise.rect.is_some(),
-            "all five soft-park CTAs required on wide strip"
-        );
-        let approve = agent.hit_soft_park_ctas.approve.rect.unwrap();
-        let cell = buf.cell((approve.x, approve.y)).expect("approve cell");
-        assert_eq!(
-            cell.symbol(),
-            "a",
-            "Approve paint must start with key glyph `a`"
-        );
-    }
-
-    /// Hover paint uses bg_highlight so buttons are not inert legend text.
-    #[test]
-    fn minimal_plan_render_highlights_hovered_cta() {
-        // Hermetic: ambient terminal-native theme may use Color::Reset for both
-        // bg_base and bg_highlight. Pin a palette with distinct highlight.
-        let _theme_pin = xai_grok_pager::theme::cache::pin_theme();
-        let mut agent = agent_with_parked_plan();
-        let theme = Theme::current();
-        let area = Rect::new(0, 10, 80, 2);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 14));
-        let _ = render(&mut buf, area, &mut agent, &theme);
-        let approve = agent.hit_soft_park_ctas.approve.rect.expect("approve hit");
-        let unhovered_bg = buf.cell((approve.x, approve.y)).unwrap().bg;
-        assert!(
-            agent.hit_soft_park_ctas.update_hover(approve.x, approve.y),
-            "hover must flip"
-        );
-        assert!(
-            agent.hit_soft_park_ctas.approve.hovered,
-            "Approve hit must report hovered after mouse over"
-        );
-        let theme = Theme::current();
-        let mut buf2 = Buffer::empty(Rect::new(0, 0, 80, 14));
-        let _ = render(&mut buf2, area, &mut agent, &theme);
-        let hovered_bg = buf2.cell((approve.x, approve.y)).unwrap().bg;
-        assert_eq!(
-            hovered_bg, theme.bg_highlight,
-            "hover style must use theme.bg_highlight; got {hovered_bg:?}"
-        );
-        if theme.bg_base != theme.bg_highlight {
-            assert_ne!(
-                hovered_bg, unhovered_bg,
-                "hovered Approve must change background when theme tokens differ"
-            );
+        let mut text = String::new();
+        let a = buf.area();
+        for y in a.y..a.y.saturating_add(a.height) {
+            for x in a.x..a.x.saturating_add(a.width) {
+                if let Some(cell) = buf.cell((x, y)) {
+                    text.push_str(cell.symbol());
+                }
+            }
         }
-    }
-
-    /// Full input path: mouse down on painted Approve after minimal render.
-    #[test]
-    fn minimal_plan_mouse_approve_via_handle_input_after_render() {
-        let mut agent = agent_with_parked_plan();
-        let theme = Theme::current();
-        let area = Rect::new(0, 20, 80, 2);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        let _ = render(&mut buf, area, &mut agent, &theme);
-        let approve = agent.hit_soft_park_ctas.approve.rect.expect("approve hit");
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: approve.x,
-            row: approve.y,
-            modifiers: KeyModifiers::NONE,
-        };
-        let outcome = agent.handle_input(&Event::Mouse(click), &ActionRegistry::defaults());
         assert!(
-            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
-            "mouse Approve after minimal render must fire; got {outcome:?}"
+            text.contains("a approve"),
+            "preview strip must paint the approve key legend; got {text:?}"
         );
         assert!(
-            plan_approval_view(&agent).is_none(),
-            "Approve must clear plan approval"
+            text.contains("q quit"),
+            "preview strip must paint the quit key legend; got {text:?}"
         );
-    }
-
-    /// Prompt focus + draft: mouse Quit still hits after render (not text-only).
-    #[test]
-    fn minimal_plan_mouse_quit_with_prompt_draft_after_render() {
-        let mut agent = agent_with_parked_plan();
-        // Prompt focus is set via reinstall with focus mutation through API:
-        // take state, mutate, put back.
-        {
-            let (tx, _rx) = tokio::sync::oneshot::channel();
-            let request = ExitPlanModeExtRequest {
-                session_id: "test-session".into(),
-                tool_call_id: "call-min-cta-q".into(),
-                plan_content: Some("# Soft park quit\n".into()),
-            };
-            let mut pav = PlanApprovalViewState::new(request, StashedPrompt::default(), tx);
-            pav.focus = PlanApprovalFocus::Prompt;
-            set_plan_approval_view(&mut agent, Some(pav));
-        }
-        let draft = "notes while parked";
-        agent.prompt.set_text(draft);
-        let theme = Theme::current();
-        let area = Rect::new(0, 18, 80, 3);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        let _ = render(&mut buf, area, &mut agent, &theme);
-        let quit = agent.hit_soft_park_ctas.quit.rect.expect("quit hit");
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: quit.x,
-            row: quit.y,
-            modifiers: KeyModifiers::NONE,
-        };
-        let outcome = agent.handle_input(&Event::Mouse(click), &ActionRegistry::defaults());
-        assert!(
-            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
-            "Quit click must apply; got {outcome:?}"
-        );
-        assert!(plan_approval_view(&agent).is_none());
-        assert_eq!(agent.prompt.text(), draft);
     }
 }

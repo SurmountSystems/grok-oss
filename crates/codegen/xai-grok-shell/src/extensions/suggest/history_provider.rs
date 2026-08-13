@@ -151,7 +151,7 @@ fn scan_cross_cwd_prompts() -> Vec<String> {
         })
         .collect();
 
-    dirs.sort_by(|a, b| b.1.cmp(&a.1));
+    dirs.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let mut prompts = Vec::new();
     for (dir, _) in dirs.iter().take(MAX_CROSS_CWD_DIRS) {

@@ -290,22 +290,18 @@ fn extract_session_context(agent: &AgentView) -> String {
                     user_prompts.push(text);
                 }
             }
-            RenderBlock::ToolCall(tc) => {
-                if file_paths.len() < 20 {
-                    match tc {
-                        ToolCallBlock::Read(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        ToolCallBlock::Edit(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        ToolCallBlock::ListDir(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        _ => {}
-                    }
+            RenderBlock::ToolCall(tc) if file_paths.len() < 20 => match tc {
+                ToolCallBlock::Read(b) => {
+                    file_paths.push(b.path.clone());
                 }
-            }
+                ToolCallBlock::Edit(b) => {
+                    file_paths.push(b.path.clone());
+                }
+                ToolCallBlock::ListDir(b) => {
+                    file_paths.push(b.path.clone());
+                }
+                _ => {}
+            },
             _ => {}
         }
         // Stop early once we have enough context.

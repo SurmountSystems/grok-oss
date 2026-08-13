@@ -595,7 +595,7 @@ impl TaskEntry {
         };
         let label = format!(
             "{} {} \u{b7} {}{}",
-            tag_display, info.human_schedule, &prompt_preview, &suffix
+            tag_display, info.human_schedule, prompt_preview, suffix
         );
 
         // Only the tag (e.g. `Loop`) carries color — the blue system accent.

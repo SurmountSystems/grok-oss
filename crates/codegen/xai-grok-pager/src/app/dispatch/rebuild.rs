@@ -8,6 +8,11 @@
 //! [`arm_peer_rebuild_before_exit`] so the window re-execs onto the new binary
 //! instead of only quitting.
 
+// Peer-rebuild helpers are unit-tested. Event-loop SIGUSR1 / leader-disconnect
+// wire-up is not on this restack tip yet (clippy --lib --bins does not compile
+// tests, so those items look unused).
+#![allow(dead_code)]
+
 use super::router::dispatch;
 use super::turn::do_cancel_turn_for;
 use crate::app::actions::{Action, Effect};

@@ -849,10 +849,10 @@ impl SessionActor {
             match &tool_loop {
                 ToolLoop::PermissionReject { .. }
                 | ToolLoop::Cancelled
-                | ToolLoop::FollowupMessage(_) => {
-                    if final_result.is_none() {
-                        *final_result = Some(tool_loop);
-                    }
+                | ToolLoop::FollowupMessage(_)
+                    if final_result.is_none() =>
+                {
+                    *final_result = Some(tool_loop);
                 }
                 _ => {}
             }

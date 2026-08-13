@@ -333,12 +333,12 @@ pub fn lookup_auth(map: &AuthStore, scope: &str) -> Option<GrokAuth> {
 
 /// True for SuperGrok login sessions (OIDC or external provider), not console
 /// API keys or legacy WebLogin.
-pub fn is_supergrok_session_mode(mode: AuthMode) -> bool {
+pub(super) fn is_supergrok_session_mode(mode: AuthMode) -> bool {
     matches!(mode, AuthMode::Oidc | AuthMode::External)
 }
 
 /// Multi-slot key for a personal SuperGrok principal under a base OIDC scope.
-pub const SUPERGROK_PERSONAL_MULTI_SLOT: &str = "personal";
+pub(super) const SUPERGROK_PERSONAL_MULTI_SLOT: &str = "personal";
 
 /// auth.json multi-slot key for one SuperGrok principal (personal or Business).
 ///
@@ -394,7 +394,10 @@ pub fn upsert_supergrok_session(map: &mut AuthStore, base_scope: &str, auth: Gro
 ///
 /// Used when base was cleared (logout of current) but a sibling SuperGrok
 /// multi-slot remains, and for first load of multi-principal stores.
-pub fn lookup_supergrok_session_for_base(map: &AuthStore, base_scope: &str) -> Option<GrokAuth> {
+pub(super) fn lookup_supergrok_session_for_base(
+    map: &AuthStore,
+    base_scope: &str,
+) -> Option<GrokAuth> {
     if let Some(auth) = lookup_auth(map, base_scope) {
         if is_supergrok_session_mode(auth.auth_mode) {
             return Some(auth);

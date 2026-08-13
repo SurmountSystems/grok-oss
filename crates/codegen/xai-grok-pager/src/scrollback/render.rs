@@ -521,8 +521,6 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         } else {
             (first_visible_content_y, content_skip)
         };
-        let mut screen_y = first_visible_content_y;
-
         // Labeled group header (either fold family): one synthetic selectable
         // row so drag/copy on the header yields the aggregated label text.
         // Plain-count headers carry no label and stay non-selectable.
@@ -546,7 +544,9 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 joiner_to_previous: None,
             });
         }
-        for (block_line_idx, line) in mapped_lines.iter().enumerate().skip(content_skip) {
+        for (screen_y, (block_line_idx, line)) in
+            (first_visible_content_y..).zip(mapped_lines.iter().enumerate().skip(content_skip))
+        {
             if screen_y >= max_y {
                 break;
             }
@@ -595,7 +595,6 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 }
                 result.selection_model.push_line(resolved_line);
             }
-            screen_y += 1;
         }
 
         // Collect hyperlinks for the link overlay. Group headers render
