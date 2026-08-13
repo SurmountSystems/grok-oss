@@ -31,10 +31,10 @@ pub mod render;
 pub mod row;
 pub mod state;
 
+pub use render::render_dashboard;
 pub use render::{
-    DashboardOverlayChrome, HeaderUpgradeCta, popup_rect, render_dashboard,
-    render_dashboard_session_header, render_dashboard_session_overlay,
-    render_dashboard_with_hide_header, render_popup_overlay,
+    DashboardOverlayChrome, HeaderUpgradeCta, popup_rect, render_dashboard_session_header,
+    render_dashboard_session_overlay, render_popup_overlay,
 };
 pub use row::{
     DashboardRow, RowBadge, build_rows, build_rows_with_roster, classify_subagent,

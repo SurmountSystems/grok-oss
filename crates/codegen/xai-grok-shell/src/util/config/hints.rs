@@ -61,8 +61,6 @@ impl WorktreeHintMode {
 pub struct ResolvedHints {
     pub new_session_worktree_mode: WorktreeHintMode,
     pub fork_worktree_mode: WorktreeHintMode,
-    /// `[hints].project_picker_disabled` — skip project-root picker.
-    pub project_picker_disabled: bool,
 }
 
 impl Default for ResolvedHints {
@@ -70,7 +68,6 @@ impl Default for ResolvedHints {
         Self {
             new_session_worktree_mode: WorktreeHintMode::Never,
             fork_worktree_mode: WorktreeHintMode::Ask,
-            project_picker_disabled: false,
         }
     }
 }
@@ -78,14 +75,9 @@ impl Default for ResolvedHints {
 impl ResolvedHints {
     fn from_hints_table(hints: Option<&TomlValue>) -> Self {
         let (new_session, fork) = WorktreeHintMode::resolve_pair(hints);
-        let project_picker_disabled = hints
-            .and_then(|h| h.get("project_picker_disabled"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         Self {
             new_session_worktree_mode: new_session,
             fork_worktree_mode: fork,
-            project_picker_disabled,
         }
     }
 }

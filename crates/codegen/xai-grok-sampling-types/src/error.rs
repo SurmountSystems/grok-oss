@@ -742,17 +742,20 @@ fn structured_error_message(bytes: &[u8]) -> Option<String> {
 /// Parse an API error body into a short string.
 ///
 /// Only structured JSON error envelopes are surfaced. Non-JSON bodies
-/// (HTML edge pages, plain text dumps) return a fixed placeholder — never
+/// (HTML edge pages, plain text dumps) return a fixed placeholder, never
 /// the raw bytes. Prefer [`user_facing_api_error_message`] when a status
 /// code is available.
 pub fn parse_error_bytes(bytes: &[u8]) -> String {
-    if let Some((error_type, message)) = std::str::from_utf8(bytes).ok().and_then(try_parse_error) {
-        if error_type == "unknown" || error_type == "server_error" {
-            return message;
-        }
-        return format!("{error_type}: {message}");
-    }
-    String::from_utf8_lossy(bytes).trim().to_owned()
+    structured_error_message(bytes).unwrap_or_else(|| "upstream error".into())
+}
+
+/// User-facing message for a failed API call.
+///
+/// Structured JSON error envelopes keep their message. Everything else
+/// (including Cloudflare HTML) maps to a status-based string. No body
+/// content matching.
+pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String {
+    structured_error_message(bytes).unwrap_or_else(|| status_user_message(status))
 }
 
 pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {

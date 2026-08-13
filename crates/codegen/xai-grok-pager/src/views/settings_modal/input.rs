@@ -142,9 +142,6 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
             // `action_for_string` already knows how to resolve via
             // `snapshot.resolve_model_name` AND treats the empty
             // canonical as a `Clear*` sentinel.
-            //
-            // Deep-link open (`close_on_picker_exit`) dismisses the
-            // whole modal instead of returning to Browse.
             let close = std::mem::take(&mut state.close_on_picker_exit);
             if !close {
                 state.transition_to_browse();
@@ -169,8 +166,6 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
             }
         }
         KeyCode::Esc => {
-            // Revert preview and return to Browse (or close when deep-linked).
-            // Non-preview Enums skip the revert (no live visual was applied).
             let close = std::mem::take(&mut state.close_on_picker_exit);
             if !close {
                 state.transition_to_browse();
@@ -191,8 +186,12 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
             }
         }
         // `d` reset: close picker, revert preview if applicable,
-        // then open the reset-confirm overlay.
-        KeyCode::Char('d') if key.modifiers.is_empty() => {
+        // then open the reset-confirm overlay. Consent choosers opt out of
+        // this entirely (no footer hint, no hidden shortcut) — reset stays
+        // reachable from the browse row.
+        KeyCode::Char('d')
+            if key.modifiers.is_empty() && !crate::settings::is_consent_chooser(setting_key) =>
+        {
             state.transition_to_browse();
             if supports_preview
                 && let SettingValue::Enum(orig) = &original_value
@@ -746,6 +745,9 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
                 }
                 // A locked row isn't the user's to change, by `d` any more
                 // than by Enter (which `try_enter_picking_enum` refuses).
+                // The dispatch-time guard would catch it either way, but
+                // only after walking the user through a confirm dialog for
+                // a change that cannot happen.
                 Some((key, _meta)) if state.row_lock(key).is_some() => {
                     SettingsKeyOutcome::Unchanged
                 }
@@ -872,16 +874,6 @@ pub fn handle_settings_mouse(
     column: u16,
     row: u16,
 ) -> SettingsKeyOutcome {
-    // Clicking anywhere on the chrome
-    // breadcrumb (the full `Settings › <label>` title) in a
-    // sub-pane mode collapses back to Browse. Dispatched FIRST
-    // so it wins over the picker / editor mouse handlers (which
-    // would otherwise ignore the click as out-of-content). The
-    // synthetic Esc is routed through the active sub-pane handler
-    // so the same revert-preview / mode-transition logic runs as
-    // for keyboard Esc — `handle_picking_enum` reverts the
-    // preview action, and `handle_editing_value` just transitions
-    // back.
     // Breadcrumb is hierarchical "up": always return to Browse (never
     // dismiss via `close_on_picker_exit`). Reuse sub-pane Esc handlers for
     // preview revert after clearing the deep-link flag.

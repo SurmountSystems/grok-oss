@@ -233,7 +233,7 @@ pub(super) fn dispatch_rewind_cancel_offer(app: &mut AppView) -> Vec<Effect> {
         trigger: None,
         // The rewind picker owns history via `handle_rewind`; this pre-cancel
         // must not also pop the in-flight prompt.
-        rewind_if_pristine: false,
+        rewind_if_no_output: false,
     }];
     effects.push(Effect::FetchRewindPoints {
         agent_id: id,
@@ -242,104 +242,7 @@ pub(super) fn dispatch_rewind_cancel_offer(app: &mut AppView) -> Vec<Effect> {
     effects
 }
 
-pub(super) fn dispatch_rewind_select_mode(
-    app: &mut AppView,
-    mode: crate::views::rewind::RewindMode,
-    target: usize,
-) -> Vec<Effect> {
-    use crate::views::rewind::{RewindMode, RewindPhase, RewindState};
-
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    let Some(session_id) = agent.session.session_id.clone() else {
-        return vec![];
-    };
-
-    match mode {
-        RewindMode::ConversationOnly if target == 0 => {
-            let anchor = agent
-                .rewind_state
-                .as_ref()
-                .map(|s| s.anchor_entry_idx)
-                .unwrap_or(0);
-            let preview = agent
-                .rewind_points
-                .as_ref()
-                .and_then(|pts| pts.iter().find(|p| p.prompt_index == target))
-                .and_then(|p| p.prompt_preview.clone());
-            let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-            agent.rewind_state = Some(RewindState {
-                phase: RewindPhase::ConversationOnlyConfirm {
-                    target_prompt_index: target,
-                    active_idx: 0,
-                    prompt_preview: preview,
-                },
-                anchor_entry_idx: anchor,
-                stashed_draft: draft,
-                selected_prompt_index: None,
-            });
-            vec![]
-        }
-        RewindMode::ConversationOnly => {
-            let anchor = agent
-                .rewind_state
-                .as_ref()
-                .map(|s| s.anchor_entry_idx)
-                .unwrap_or(0);
-            let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-            enter_executing_with_mode(agent, id, target, anchor, draft, mode)
-        }
-        RewindMode::All | RewindMode::FilesOnly => {
-            let has_files = agent
-                .rewind_state
-                .as_ref()
-                .and_then(|s| match &s.phase {
-                    RewindPhase::ModeSelect {
-                        has_file_changes, ..
-                    } => Some(*has_file_changes),
-                    _ => None,
-                })
-                .unwrap_or(false);
-
-            let anchor = agent
-                .rewind_state
-                .as_ref()
-                .map(|s| s.anchor_entry_idx)
-                .unwrap_or(0);
-            let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-
-            if !has_files {
-                enter_executing_with_mode(agent, id, target, anchor, draft, mode)
-            } else {
-                agent.rewind_state = Some(RewindState {
-                    phase: RewindPhase::Previewing {
-                        target_prompt_index: target,
-                        mode,
-                    },
-                    anchor_entry_idx: anchor,
-                    stashed_draft: draft,
-                    selected_prompt_index: None,
-                });
-                vec![Effect::RewindPreview {
-                    agent_id: id,
-                    session_id,
-                    target_prompt_index: target,
-                    mode,
-                }]
-            }
-        }
-    }
-}
-
-pub(super) fn dispatch_rewind_confirm(
-    app: &mut AppView,
-    target: usize,
-    mode: crate::views::rewind::RewindMode,
-) -> Vec<Effect> {
+pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -352,58 +255,7 @@ pub(super) fn dispatch_rewind_confirm(
         .map(|s| s.anchor_entry_idx)
         .unwrap_or(0);
     let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-    enter_executing_with_mode(agent, id, target, anchor, draft, mode)
-}
-
-pub(super) fn dispatch_rewind_conversation_only_confirm(
-    app: &mut AppView,
-    target: usize,
-) -> Vec<Effect> {
-    dispatch_rewind_confirm(
-        app,
-        target,
-        crate::views::rewind::RewindMode::ConversationOnly,
-    )
-}
-
-pub(super) fn dispatch_rewind_back_to_mode_select(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    if let Some(ref state) = agent.rewind_state {
-        let anchor = state.anchor_entry_idx;
-        let sel_pi = state.selected_prompt_index;
-        let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-
-        let (target, has_file_changes) = agent
-            .rewind_points
-            .as_ref()
-            .and_then(|pts| {
-                sel_pi
-                    .and_then(|pi| pts.iter().find(|p| p.prompt_index == pi))
-                    .or_else(|| pts.iter().max_by_key(|p| p.prompt_index))
-            })
-            .map(|p| (p.prompt_index, p.has_file_changes))
-            .unwrap_or((0, false));
-
-        agent.rewind_state = Some(crate::views::rewind::RewindState {
-            phase: crate::views::rewind::RewindPhase::ModeSelect {
-                target_prompt_index: target,
-                has_file_changes,
-                // Re-derive the inline context: while the inline editor is
-                // open the files-only row stays hidden on the way back too.
-                offer_files_only: agent.inline_edit.is_none(),
-                active_idx: 0,
-            },
-            anchor_entry_idx: anchor,
-            stashed_draft: draft,
-            selected_prompt_index: sel_pi,
-        });
-    }
-    vec![]
+    enter_executing(agent, id, target, anchor, draft)
 }
 
 /// "Yes, and don't ask again": quiet-persist confirm-before-rewind off, then execute.
@@ -420,11 +272,7 @@ pub(super) fn dispatch_rewind_confirm_never_ask(app: &mut AppView, target: usize
             rollback_value: crate::settings::SettingValue::Bool(true),
         });
     }
-    effects.extend(dispatch_rewind_confirm(
-        app,
-        target,
-        crate::views::rewind::RewindMode::All,
-    ));
+    effects.extend(dispatch_rewind_confirm(app, target));
     effects
 }
 
@@ -468,24 +316,6 @@ fn enter_executing(
     anchor: usize,
     draft: Option<StashedPrompt>,
 ) -> Vec<Effect> {
-    enter_executing_with_mode(
-        agent,
-        agent_id,
-        target,
-        anchor,
-        draft,
-        crate::views::rewind::RewindMode::All,
-    )
-}
-
-fn enter_executing_with_mode(
-    agent: &mut crate::app::agent_view::AgentView,
-    agent_id: AgentId,
-    target: usize,
-    anchor: usize,
-    draft: Option<StashedPrompt>,
-    mode: crate::views::rewind::RewindMode,
-) -> Vec<Effect> {
     let Some(session_id) = agent.session.session_id.clone() else {
         if let Some(d) = draft {
             agent.prompt.restore(d);
@@ -497,7 +327,6 @@ fn enter_executing_with_mode(
     agent.rewind_state = Some(RewindState {
         phase: RewindPhase::Executing {
             target_prompt_index: target,
-            mode,
         },
         anchor_entry_idx: anchor,
         stashed_draft: draft,
@@ -508,7 +337,6 @@ fn enter_executing_with_mode(
         agent_id,
         session_id,
         target_prompt_index: target,
-        mode,
     }]
 }
 
@@ -526,9 +354,6 @@ fn begin_rewind(
         agent.rewind_state = Some(RewindState {
             phase: RewindPhase::Confirm {
                 target_prompt_index: target,
-                mode: crate::views::rewind::RewindMode::All,
-                clean_files: Vec::new(),
-                conflicts: Vec::new(),
                 active_idx: 0,
                 prompt_preview,
             },
@@ -759,7 +584,7 @@ pub(super) fn handle_rewind_points_loaded(
     }
 
     let mut sorted = points;
-    sorted.sort_by_key(|b| std::cmp::Reverse(b.prompt_index));
+    sorted.sort_by(|a, b| b.prompt_index.cmp(&a.prompt_index));
     let draft = stashed.or_else(|| stash_prompt(&mut agent.prompt));
     let initial_anchor = sorted
         .first()
@@ -777,88 +602,6 @@ pub(super) fn handle_rewind_points_loaded(
         selected_prompt_index: None,
     });
     agent.scrollback.scroll_to_entry_center(initial_anchor);
-    vec![]
-}
-
-pub(super) fn handle_rewind_preview_complete(
-    app: &mut AppView,
-    agent_id: AgentId,
-    response: crate::views::rewind::RewindResponse,
-    target_prompt_index: usize,
-    mode: crate::views::rewind::RewindMode,
-) -> Vec<Effect> {
-    let Some(agent) = app.agents.get_mut(&agent_id) else {
-        return vec![];
-    };
-    if response.error.is_some() && response.clean_files.is_empty() && response.conflicts.is_empty()
-    {
-        let err = response.error.unwrap_or_default();
-        let anchor = agent
-            .rewind_state
-            .as_ref()
-            .map(|s| s.anchor_entry_idx)
-            .unwrap_or(0);
-        let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-        agent.rewind_state = Some(RewindState {
-            phase: RewindPhase::Error { message: err },
-            anchor_entry_idx: anchor,
-            stashed_draft: draft,
-            selected_prompt_index: None,
-        });
-        return vec![];
-    }
-    let conflicts: Vec<_> = response
-        .conflicts
-        .iter()
-        .map(crate::views::rewind::ConflictDisplay::from_conflict)
-        .collect();
-    let anchor = agent
-        .rewind_state
-        .as_ref()
-        .map(|s| s.anchor_entry_idx)
-        .unwrap_or(0);
-    let preview = agent
-        .rewind_points
-        .as_ref()
-        .and_then(|pts| pts.iter().find(|p| p.prompt_index == target_prompt_index))
-        .and_then(|p| p.prompt_preview.clone());
-    let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-    agent.rewind_state = Some(RewindState {
-        phase: RewindPhase::Confirm {
-            target_prompt_index,
-            mode,
-            clean_files: response.clean_files,
-            conflicts,
-            active_idx: 0,
-            prompt_preview: preview,
-        },
-        anchor_entry_idx: anchor,
-        stashed_draft: draft,
-        selected_prompt_index: None,
-    });
-    vec![]
-}
-
-pub(super) fn handle_rewind_preview_failed(
-    app: &mut AppView,
-    agent_id: AgentId,
-    error: String,
-) -> Vec<Effect> {
-    let Some(agent) = app.agents.get_mut(&agent_id) else {
-        return vec![];
-    };
-    let anchor = agent
-        .rewind_state
-        .as_ref()
-        .map(|s| s.anchor_entry_idx)
-        .unwrap_or(0);
-    let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-    agent.rewind_state = Some(RewindState {
-        phase: RewindPhase::Error { message: error },
-        anchor_entry_idx: anchor,
-        stashed_draft: draft,
-        selected_prompt_index: None,
-    });
     vec![]
 }
 

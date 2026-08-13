@@ -7,6 +7,7 @@
 //! the parent module's private helpers.
 use super::*;
 use futures::StreamExt;
+use tracing::Instrument;
 /// Whether a tool name is an MCP `create_pull_request` (qualified
 /// `server__create_pull_request` or bare).
 fn is_mcp_create_pull_request(tool_name: &str) -> bool {
@@ -14,6 +15,52 @@ fn is_mcp_create_pull_request(tool_name: &str) -> bool {
         Some((_, tool)) => tool == "create_pull_request",
         None => tool_name == "create_pull_request",
     }
+}
+/// One `tool.execution` span, wrapping a single dispatch attempt.
+///
+/// Outcome fields are declared `Empty` here because `record` on a field the span
+/// never declared is silently dropped; [`record_tool_span_outcome`] fills them in
+/// once the result is known.
+fn tool_execution_span(
+    parent: &tracing::Span,
+    session_id: &str,
+    prepared: &PreparedToolCall,
+    tool_call_id: &str,
+    retry: bool,
+) -> tracing::Span {
+    tracing::info_span!(
+        parent: parent,
+        "tool.execution",
+        session_id = %session_id,
+        tool_name = %prepared.tool_name,
+        // Same value under both names: `tool_call_id` is the join key, `tool_use_id`
+        // is kept for existing queries.
+        tool_use_id = %tool_call_id,
+        tool_call_id = %tool_call_id,
+        retry,
+        success = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+        tool_input_size_bytes = prepared.raw_arguments.len() as i64,
+        tool_result_size_bytes = tracing::field::Empty,
+    )
+}
+/// Stamp the dispatch outcome on `span` and close it, returning whether the call
+/// succeeded. Takes the span by value: these fields are recorded exactly once.
+fn record_tool_span_outcome(
+    span: tracing::Span,
+    result: &Result<ToolRunResult, xai_tool_runtime::ToolError>,
+) -> bool {
+    let (success, result_size) = match result {
+        Ok(tool_result) => (
+            !tool_result.output.is_error(),
+            tool_result.prompt_text.len() as i64,
+        ),
+        Err(_) => (false, 0),
+    };
+    span.record("success", success);
+    span.record("outcome", if success { "success" } else { "error" });
+    span.record("tool_result_size_bytes", result_size);
+    success
 }
 /// Blocking wait tools that should abort when a mid-turn interjection is pending.
 fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool {
@@ -130,52 +177,29 @@ pub(super) fn should_intercept_exit_plan_approval(
     }
     true
 }
-
-/// Client-facing and wire names for the exit-plan-mode gate tool.
-pub(super) fn is_exit_plan_mode_tool_name(name: &str) -> bool {
-    matches!(name, "exit_plan_mode" | "ExitPlanMode")
+/// Whether this tool call exits file-backed plan mode (not inline plan creation).
+pub(super) fn is_file_backed_exit_plan_input(tool_input: &ToolInput) -> bool {
+    if matches!(tool_input, ToolInput::ExitPlanMode(_)) {
+        return true;
+    }
+    false
 }
-
-/// When a multi-tool batch includes both normal tools and `exit_plan_mode`,
-/// split so non-exit tools run to completion first.
-///
-/// Named contract: a same-turn rewrite of session `plan.md` (or any other
-/// co-batched tool) must finish before `exit_plan_mode` parks approval and
-/// re-reads the plan. Otherwise prepare awaits the operator while the write
-/// is only prepared, not dispatched, so the panel and post-approve tool body
-/// freeze the pre-write plan (dogfood 2026-08-09: secrets plan rewritten in
-/// the same turn as exit still presented "Deploy automation").
-///
-/// Returns `Ok((others, exits))` when a split is needed, or `Err(original)`
-/// when the batch is exit-only / has no exit (caller keeps the original order).
-pub(super) fn split_tool_batch_before_exit_plan_mode(
-    tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
-) -> Result<
-    (
-        Vec<crate::sampling::types::ToolCallResponse>,
-        Vec<crate::sampling::types::ToolCallResponse>,
-    ),
+pub(super) fn is_file_backed_exit_plan_kind(
+    kind: Option<xai_grok_tools::types::tool::ToolKind>,
+) -> bool {
+    matches!(kind, Some(xai_grok_tools::types::tool::ToolKind::ExitPlan))
+}
+/// Split ExitPlan-kind calls into the tail so they run after the rest of the batch.
+fn split_exit_plan_tail(
+    calls: Vec<crate::sampling::types::ToolCallResponse>,
+    kind_of: impl Fn(&str) -> Option<xai_grok_tools::types::tool::ToolKind>,
+) -> (
     Vec<crate::sampling::types::ToolCallResponse>,
-> {
-    let has_exit = tool_calls
-        .iter()
-        .any(|c| is_exit_plan_mode_tool_name(&c.function.name));
-    let has_other = tool_calls
-        .iter()
-        .any(|c| !is_exit_plan_mode_tool_name(&c.function.name));
-    if !has_exit || !has_other {
-        return Err(tool_calls);
-    }
-    let mut others = Vec::with_capacity(tool_calls.len());
-    let mut exits = Vec::new();
-    for call in tool_calls {
-        if is_exit_plan_mode_tool_name(&call.function.name) {
-            exits.push(call);
-        } else {
-            others.push(call);
-        }
-    }
-    Ok((others, exits))
+    Vec<crate::sampling::types::ToolCallResponse>,
+) {
+    calls
+        .into_iter()
+        .partition(|call| !is_file_backed_exit_plan_kind(kind_of(&call.function.name)))
 }
 /// Verdict for a tool call evaluated against the plan-mode edit gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,21 +209,6 @@ pub(super) enum PlanEditGate {
     /// Grok-toolset edit outside the plan file (plan-file-only rule).
     RejectNonPlanFile,
 }
-/// Verdict for `ask_user_question` while plan mode is active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PlanAskUserGate {
-    /// Execute normally (plan mode inactive, or not the questionnaire tool).
-    Allow,
-    /// Plan mode active: multi-choice questionnaires are hard-blocked.
-    RejectQuestionnaire,
-}
-/// Model-facing rejection when the model still calls `ask_user_question`
-/// during plan mode (tool list should already omit it; this is fail-closed).
-pub(super) const PLAN_MODE_ASK_USER_REJECTED_MESSAGE: &str = "\
-Rejected: multi-choice questionnaires (ask_user_question) are not allowed in plan mode. \
-Put open questions as plain bullets in the plan file or freeform chat, then call \
-exit_plan_mode to present the plan. Do not use the questionnaire interface while planning \
-unless the user explicitly asked for legacy modal plan questions (for example /plan --legacy).";
 /// Gate edit-class tool calls while plan mode is active.
 ///
 /// Plan mode is read-only **in every permission mode, including
@@ -224,8 +233,7 @@ unless the user explicitly asked for legacy modal plan questions (for example /p
 /// Non-edit tools (bash, read, grep, MCP, web) are never gated here; they
 /// flow to the normal permission path, where yolo may still auto-approve
 /// them. `enter_plan_mode` / `exit_plan_mode` map to `AccessKind::Read` and
-/// are likewise never gated. Questionnaire blocking is a separate gate
-/// ([`plan_mode_ask_user_gate`]).
+/// are likewise never gated.
 pub(super) fn plan_mode_edit_gate(
     tracker: &crate::session::plan_mode::PlanModeTracker,
     tool_input: &ToolInput,
@@ -242,30 +250,6 @@ pub(super) fn plan_mode_edit_gate(
         _ => PlanEditGate::Allow,
     }
 }
-/// Hard-block `ask_user_question` while plan mode is **Active**.
-///
-/// Soft prompt bans are not enough: if the tool stays in the toolset, models
-/// still open multi-choice questionnaires for plan clarifications. The
-/// advertised tool list already omits it ([`filter_cursor_tools_by_plan_mode`]);
-/// this gate rejects any call that still arrives (stale list, forced call).
-///
-/// Default: reject whenever plan mode is Active. Outside Active (Inactive /
-/// Pending / ExitPending) the tool is allowed so non-plan sessions and
-/// non-plan use keep working. Explicit legacy `/plan --legacy` opt-in is not
-/// wired as a product flag yet; until then default plan mode always fails
-/// closed.
-pub(super) fn plan_mode_ask_user_gate(
-    tracker: &crate::session::plan_mode::PlanModeTracker,
-    tool_input: &ToolInput,
-) -> PlanAskUserGate {
-    if !tracker.is_active() {
-        return PlanAskUserGate::Allow;
-    }
-    match tool_input {
-        ToolInput::AskUserQuestion(_) => PlanAskUserGate::RejectQuestionnaire,
-        _ => PlanAskUserGate::Allow,
-    }
-}
 /// Typed view of an `exit_plan_mode` approval decision. The wire type
 /// (`ExitPlanModeExtResponse`) carries `outcome` as a string; both the mid-turn
 /// intercept and the resume re-park match on this enum instead. Unknown /
@@ -276,8 +260,6 @@ pub(super) enum PlanApprovalOutcome {
     Approved,
     Cancelled,
     Abandoned,
-    /// Clarifying question only — stay in plan mode; answer read-only; re-park.
-    Questions,
 }
 impl PlanApprovalOutcome {
     fn from_response(
@@ -286,7 +268,6 @@ impl PlanApprovalOutcome {
         match resp.outcome.as_str() {
             "approved" => Self::Approved,
             "abandoned" => Self::Abandoned,
-            "questions" => Self::Questions,
             _ => Self::Cancelled,
         }
     }
@@ -311,76 +292,16 @@ fn ext_method_no_client(err: &acp::Error) -> bool {
 /// Model-facing turn injected after a resumed plan is approved.
 const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
     "The user approved the plan. Implement the plan in plan.md.";
-
-/// Mid-turn tool result after a real plan-panel Approve (not soft-park alone,
-/// not always-approve permission mode, not bare `exit_plan_mode` tool success).
-fn approved_exit_plan_tool_message(plan_content: Option<&str>, plan_path_display: &str) -> String {
-    match plan_content {
-        Some(content) if !content.trim().is_empty() => format!(
-            "The user approved the plan via the plan panel CTAs. You can now implement. \
-             Implement the plan file at {plan_path_display}. The plan body below was re-read \
-             from disk at approval time; use it rather than earlier draft plan titles in this \
-             conversation.\n\n## Plan:\n{content}"
-        ),
-        _ => format!(
-            "The user approved exiting plan mode via the plan panel CTAs. \
-             No plan content was found at {plan_path_display} — you can proceed."
-        ),
-    }
-}
-
-/// No interactive client for `x.ai/exit_plan_mode` (headless / SDK). Plan mode
-/// exits with the plan body, but this is **not** a plan-panel Approve click.
-fn no_client_exit_plan_tool_message(plan_content: Option<&str>, plan_path_display: &str) -> String {
-    match plan_content {
-        Some(content) if !content.trim().is_empty() => format!(
-            "No interactive plan panel is available. Plan mode is exiting with the plan at \
-             {plan_path_display}. This is NOT a plan-panel Approve click and not operator \
-             auto-approve from always-approve permission mode. Proceed only when your \
-             environment does not require interactive plan approval.\n\n## Plan:\n{content}"
-        ),
-        _ => format!(
-            "No interactive plan panel is available. Plan mode is exiting; no plan content \
-             was found at {plan_path_display}. This is NOT a plan-panel Approve click."
-        ),
-    }
-}
-
 /// Shared "revise the plan" message for the request-changes outcome, used by
 /// both the mid-turn intercept and the resume re-park.
 fn revise_plan_message(feedback: &str) -> String {
     let feedback = feedback.trim();
     if feedback.is_empty() {
-        // Bare Revise CTA (no freeform): unpark is already done. Do not stall
-        // only on "what should change?" — rewrite from conversation context
-        // when possible, then re-present with exit_plan_mode.
-        "The user clicked Revise without written notes. Stay in plan mode. \
-         Rewrite plan.md based on the conversation and any earlier feedback. \
-         If the needed change is genuinely unclear, ask one short question, \
-         then revise. When the plan is ready, call exit_plan_mode again."
+        "The user wants to revise the plan. \
+         Ask the user what changes they would like to make."
             .to_string()
     } else {
-        format!(
-            "The user wants to revise the plan. Stay in plan mode, rewrite \
-             plan.md from their notes, then call exit_plan_mode again.\n\n\
-             The user said:\n{feedback}"
-        )
-    }
-}
-/// Shared clarifying-question message for the Questions outcome (not a rewrite).
-/// Plan mode stays Active; the agent must answer read-only and call
-/// `exit_plan_mode` again to re-present approval.
-fn questions_plan_message(feedback: &str) -> String {
-    let feedback = feedback.trim();
-    let preamble = "The user has a clarifying question about the plan \
-         (not requesting a rewrite). Answer read-only from the plan and \
-         existing research. Do not rewrite plan.md unless the user explicitly \
-         asks to change it. End by calling exit_plan_mode again to re-present \
-         the plan for approval.";
-    if feedback.is_empty() {
-        format!("{preamble} Ask the user what they want to know about the plan.")
-    } else {
-        format!("{preamble}\n\nThe user asked:\n{feedback}")
+        format!("The user wants to revise the plan. The user said:\n{feedback}")
     }
 }
 /// What the resume re-park does with the user's decision. Extracted
@@ -392,8 +313,6 @@ pub(super) enum ResumeAction {
     LeaveAndImplement,
     /// Request changes: stay in plan mode and start a revise turn (Plan mode).
     StayAndRevise(String),
-    /// Questions: stay in plan mode and start an answer-only turn (Plan mode).
-    StayAndAnswer(String),
     /// Abandoned: leave plan mode and wait for the user (no turn).
     LeaveOnly,
 }
@@ -402,9 +321,6 @@ fn resume_action_for(outcome: PlanApprovalOutcome, feedback: Option<String>) -> 
         PlanApprovalOutcome::Approved => ResumeAction::LeaveAndImplement,
         PlanApprovalOutcome::Cancelled => {
             ResumeAction::StayAndRevise(revise_plan_message(feedback.as_deref().unwrap_or("")))
-        }
-        PlanApprovalOutcome::Questions => {
-            ResumeAction::StayAndAnswer(questions_plan_message(feedback.as_deref().unwrap_or("")))
         }
         PlanApprovalOutcome::Abandoned => ResumeAction::LeaveOnly,
     }
@@ -440,49 +356,6 @@ impl SessionActor {
         &self,
         tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
     ) -> Result<ToolLoop, acp::Error> {
-        // Same-batch write(plan.md) + exit_plan_mode: run non-exit tools to
-        // completion first so prepare's plan re-read and soft-park see the
-        // rewritten body (not a pre-write snapshot frozen while write sits
-        // only in the prepared queue).
-        let tool_calls = match split_tool_batch_before_exit_plan_mode(tool_calls) {
-            Ok((others, exits)) => {
-                let first = Box::pin(self.execute_tool_calls(others)).await?;
-                match &first {
-                    ToolLoop::Continue => {}
-                    other => {
-                        for call in exits {
-                            let message = match other {
-                                ToolLoop::PermissionReject { .. } => format!(
-                                    "Tool execution cancelled due to earlier permission rejection for tool `{}`",
-                                    call.function.name
-                                ),
-                                ToolLoop::Cancelled => format!(
-                                    "Tool execution cancelled due to earlier user cancellation for tool `{}`",
-                                    call.function.name
-                                ),
-                                ToolLoop::FollowupMessage(_) => format!(
-                                    "Tool execution cancelled due to earlier user followup message for tool `{}`",
-                                    call.function.name
-                                ),
-                                _ => format!(
-                                    "Tool execution cancelled for tool `{}`",
-                                    call.function.name
-                                ),
-                            };
-                            self.chat_state_handle
-                                .push_tool_result(ConversationItem::tool_result(
-                                    call.id.clone(),
-                                    message,
-                                ));
-                        }
-                        return Ok(first);
-                    }
-                }
-                return Box::pin(self.execute_tool_calls(exits)).await;
-            }
-            Err(unchanged) => unchanged,
-        };
-
         if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
             tracing::Span::current().record("model_id", cfg.model.as_str());
         }
@@ -540,7 +413,7 @@ impl SessionActor {
         let mut approved: Vec<PreparedToolCall> = Vec::new();
         for call in tool_calls.into_iter() {
             if final_result.is_some() {
-                let message = match &final_result {
+                let message = match &*final_result {
                     Some(ToolLoop::PermissionReject { .. }) => {
                         format!(
                             "Tool execution cancelled due to earlier permission rejection for tool `{}`",
@@ -580,10 +453,7 @@ impl SessionActor {
                 )
                 .await;
             let call_name = call.function.name.clone();
-            match self
-                .prepare_tool_call(call, &mut deferred_followups)
-                .await?
-            {
+            match self.prepare_tool_call(call, deferred_followups).await? {
                 Ok(prepared) => approved.push(prepared),
                 Err(tool_loop) => {
                     self.events.tool_finished();
@@ -623,7 +493,7 @@ impl SessionActor {
                             | ToolLoop::FollowupMessage(_)
                     ) && final_result.is_none()
                     {
-                        final_result = Some(tool_loop);
+                        *final_result = Some(tool_loop);
                     }
                 }
             }
@@ -668,8 +538,17 @@ impl SessionActor {
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
                 let lock = lock_path_for_args(&prepared.parsed_args)
                     .and_then(|fp| file_locks.get(fp).cloned());
+                let tools_execute_span = tracing::Span::current();
                 async move {
                     let exec_start = std::time::Instant::now();
+                    let tool_span = tool_execution_span(
+                        &tools_execute_span,
+                        session_id.as_ref(),
+                        &prepared,
+                        &prepared.call_id,
+                        false,
+                    );
+                    let tool_span_for_record = tool_span.clone();
                     let run_tool = || {
                         let prepared = Arc::clone(&prepared);
                         let workspace_ops = workspace_ops.clone();
@@ -686,22 +565,26 @@ impl SessionActor {
                     };
                     let result = if interruptible {
                         let _wait_guard = BlockingWaitGuard::enter(blocking_wait_depth.clone());
-                        tokio::select! {
-                            biased;
-                            result = call_with_auth_retry(
-                                am.as_ref(),
-                                Some(&shared_recovery),
-                                &prepared.tool_name,
-                                run_tool,
-                            ) => result,
-                            _ = wait_for_pending_interjection(&pending_interjections) => {
-                                tracing::info!(
-                                    tool = %prepared.tool_name,
-                                    "abort wait tool: interjection pending"
-                                );
-                                Ok(interrupted_wait_tool_result(&prepared.parsed_args))
+                        async {
+                            tokio::select! {
+                                biased;
+                                result = call_with_auth_retry(
+                                    am.as_ref(),
+                                    Some(&shared_recovery),
+                                    &prepared.tool_name,
+                                    run_tool,
+                                ) => result,
+                                _ = wait_for_pending_interjection(&pending_interjections) => {
+                                    tracing::info!(
+                                        tool = %prepared.tool_name,
+                                        "abort wait tool: interjection pending"
+                                    );
+                                    Ok(interrupted_wait_tool_result(&prepared.parsed_args))
+                                }
                             }
                         }
+                        .instrument(tool_span)
+                        .await
                     } else {
                         call_with_auth_retry(
                             am.as_ref(),
@@ -709,22 +592,22 @@ impl SessionActor {
                             &prepared.tool_name,
                             run_tool,
                         )
+                        .instrument(tool_span)
                         .await
                     };
-                    let success = match &result {
-                        Ok(tool_result) => !tool_result.output.is_error(),
-                        Err(_) => false,
-                    };
+                    let duration_ms = exec_start.elapsed().as_millis() as u64;
+                    let success = record_tool_span_outcome(tool_span_for_record, &result);
                     xai_grok_telemetry::unified_log::info(
                         "shell.tool.exec_done",
                         Some(session_id.as_ref()),
                         Some(serde_json::json!({
                             "tool_name": prepared.tool_name.as_str(),
-                            "elapsed_ms": exec_start.elapsed().as_millis() as u64,
+                            "tool_call_id": prepared.call_id.as_str(),
+                            "elapsed_ms": duration_ms,
                             "success": success,
                         })),
                     );
-                    (idx, result)
+                    (idx, result, duration_ms)
                 }
             })
             .collect();
@@ -735,40 +618,43 @@ impl SessionActor {
         }
         let mut approved_slots: Vec<Option<PreparedToolCall>> =
             approved.into_iter().map(Some).collect();
-        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::unbounded_channel::<(usize, _)>();
-        let drainer = tokio::spawn(async move {
-            while let Some(item) = dispatch_stream.next().await {
-                if dispatch_tx.send(item).is_err() {
-                    break;
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::unbounded_channel::<(
+            usize,
+            Result<ToolRunResult, xai_tool_runtime::ToolError>,
+            u64,
+        )>();
+        let drainer = tokio::spawn(
+            async move {
+                while let Some(item) = dispatch_stream.next().await {
+                    if dispatch_tx.send(item).is_err() {
+                        break;
+                    }
                 }
             }
-        });
+            .in_current_span(),
+        );
         let _drainer_guard = crate::util::AbortOnDrop(drainer);
-        while let Some((idx, mut result)) = dispatch_rx.recv().await {
+        while let Some((idx, result, duration_ms)) = dispatch_rx.recv().await {
             let prepared = approved_slots[idx]
                 .take()
                 .expect("dispatch index should match an approved slot exactly once");
             self.signals_handle().record_tool_call(&prepared.tool_name);
-            let tool_start = self.events.tool_started(prepared.tool_name.clone());
+            let tool_call_id = if prepared.call_id.is_empty() {
+                tracing::warn!(
+                    tool = %prepared.tool_name,
+                    batch_idx = idx,
+                    "tool call id empty; synthesizing join key"
+                );
+                format!("missing-call-id-{idx}")
+            } else {
+                prepared.call_id.clone()
+            };
+            self.events.tool_started(
+                prepared.tool_name.clone(),
+                tool_call_id.clone(),
+                duration_ms,
+            );
             let mut post_tool_use_result: Option<serde_json::Value> = None;
-            if let Some((server, _)) =
-                crate::session::mcp_servers::parse_mcp_tool_name(&prepared.tool_name)
-                && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-            {
-                let auth_rejected = match &result {
-                    Err(err) => xai_grok_mcp::servers::is_auth_rejection_message(&err.to_string()),
-                    Ok(tool_result) => {
-                        tool_result.output.is_error()
-                            && xai_grok_mcp::servers::is_auth_rejection_message(
-                                &tool_result.prompt_text,
-                            )
-                    }
-                };
-                if auth_rejected && self.reactive_managed_reauth(&server).await.is_ok() {
-                    result = dispatch_tool(&self.workspace_ops, &prepared, &self.session_info.id.0)
-                        .await;
-                }
-            }
             let tool_result_size_bytes = match &result {
                 Ok(tool_result) => tool_result.prompt_text.len() as i64,
                 Err(_) => 0,
@@ -784,10 +670,11 @@ impl SessionActor {
                         .clone()
                         .or_else(|| prepared.dispatch_target_name.clone())
                         .unwrap_or_else(|| prepared.tool_name.clone());
+                    let drained = DrainedToolSuccess::new(tool_result);
                     post_tool_use_result = self
                         .hook_event_active(xai_grok_hooks::event::HookEventName::PostToolUse)
                         .then(|| {
-                            serde_json::to_value(&tool_result.output)
+                            serde_json::to_value(drained.output())
                                 .unwrap_or(serde_json::Value::Null)
                         });
                     let followups = self
@@ -796,7 +683,7 @@ impl SessionActor {
                             &prepared.call_id,
                             &prepared.tool_name,
                             &effective_tool_name,
-                            tool_result,
+                            drained,
                             prepared.concatenated_json_count,
                             &prepared.model_id,
                             &prepared.parsed_args,
@@ -901,13 +788,17 @@ impl SessionActor {
                     crate::session::events::ToolOutcome::InvalidTool
                 }
             };
-            let duration_ms = tool_start.elapsed().as_millis() as u64;
-            self.signals_handle()
-                .record_tool_duration(&prepared.tool_name, duration_ms);
+            self.signals_handle().record_tool_duration(
+                &prepared.tool_name,
+                &tool_call_id,
+                duration_ms,
+            );
             self.emit_event(crate::session::events::Event::ToolCompleted {
                 tool_name: prepared.tool_name.clone(),
                 duration_ms,
                 outcome: tool_outcome,
+                tool_call_id: tool_call_id.clone(),
+                source: crate::session::events::ToolCompletedSource::Shell,
             });
             self.observability_bridge
                 .emit(
@@ -941,16 +832,6 @@ impl SessionActor {
                     parameters: ext_parameters,
                 },
             );
-            tracing::info_span!(
-                "tool.execution",
-                tool_name = %prepared.tool_name,
-                tool_use_id = %prepared.call_id,
-                tool_input_size_bytes = prepared.raw_arguments.len() as i64,
-                tool_result_size_bytes = tool_result_size_bytes,
-                success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
-                outcome = <&'static str>::from(tool_outcome),
-            )
-            .in_scope(|| {});
             if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
                 tracing::info_span!(
                     "compaction.segment_read",
@@ -960,6 +841,8 @@ impl SessionActor {
                     // i64: redact drops u64 (serializes as string). None ⇒ field omitted.
                     segment_index = artifact.segment_index().map(|i| i as i64),
                     success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
+                    duration_ms = duration_ms as i64,
+                    tool_result_size_bytes = tool_result_size_bytes,
                 )
                 .in_scope(|| {});
             }
@@ -968,34 +851,13 @@ impl SessionActor {
                 | ToolLoop::Cancelled
                 | ToolLoop::FollowupMessage(_) => {
                     if final_result.is_none() {
-                        final_result = Some(tool_loop);
+                        *final_result = Some(tool_loop);
                     }
                 }
                 _ => {}
             }
         }
-        {
-            let _span = if !deferred_followups.is_empty() {
-                Some(
-                    tracing::info_span!(
-                        "tools.deferred_followups",
-                        count = deferred_followups.len()
-                    )
-                    .entered(),
-                )
-            } else {
-                None
-            };
-            for chat in deferred_followups {
-                self.chat_state_handle.push_user_message(chat);
-            }
-        }
-        self.drain_pending_interjections().await;
-        self.flush_pending_skill_reminders().await;
-        if let Some(final_result) = final_result {
-            return Ok(final_result);
-        }
-        Ok(ToolLoop::Continue)
+        Ok(())
     }
     /// Phase 1: pre-flight (MCP, args, hooks, permission, ExitPlanMode).
     pub(crate) async fn prepare_tool_call(
@@ -1043,14 +905,8 @@ impl SessionActor {
         }
         let mcp_parts = parse_mcp_tool_name(&call.function.name);
         let is_mcp_tool = mcp_parts.is_some();
-        if let Some((ref server, _)) = mcp_parts
-            && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-        {
-            let _span = tracing::info_span!("tool.refresh_managed_mcp").entered();
-            self.refresh_managed_mcp_if_stale().await;
-        }
         if is_mcp_tool && !self.mcp_state.lock().await.is_initialized() {
-            match self.mcp_strategy {
+            match self.mcp_strategy.get() {
                 McpInitStrategy::Blocking => {
                     let _span = tracing::info_span!("tool.wait_mcp_init").entered();
                     self.wait_for_mcp_initialized().await;
@@ -1149,31 +1005,7 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
-        let (ask_gate, plan_gate) = {
-            let tracker = self.plan_mode.lock();
-            (
-                plan_mode_ask_user_gate(&tracker, &tool_input),
-                plan_mode_edit_gate(&tracker, &tool_input, &access_kind),
-            )
-        };
-        if ask_gate != PlanAskUserGate::Allow {
-            tracing::info_span!(
-                "tool.decision",
-                tool_name = %call.function.name,
-                tool_use_id = %call.id,
-                decision = "deny",
-                source = "plan_mode_ask_user",
-                wait_ms = 0_i64,
-            )
-            .in_scope(|| {});
-            self.handle_tool_not_executed(
-                &call.id,
-                &tool_call_id,
-                PLAN_MODE_ASK_USER_REJECTED_MESSAGE.to_owned(),
-            )
-            .await?;
-            return Ok(Err(ToolLoop::Continue));
-        }
+        let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(
                 "tool.decision",
@@ -1273,95 +1105,7 @@ impl SessionActor {
             )
             .in_scope(|| {});
         }
-        // S3: agent scrub-disable must use scrub-specific permission options
-        // (AllowOnce / AllowAlways / Reject), never YOLO / Read auto-allow.
-        // Reject keeps scrub on; AllowAlways also persists settings off.
-        if crate::session::helpers::is_disable_ascii_scrub_tool(&call.function.name) {
-            // Already off (session or durable) — confirm without re-prompt.
-            if !crate::session::helpers::scrub_active() {
-                tracing::info_span!(
-                    "tool.decision",
-                    tool_name = %call.function.name,
-                    tool_use_id = %call.id,
-                    decision = "allow",
-                    source = "config",
-                    wait_ms = 0_i64,
-                )
-                .in_scope(|| {});
-            } else {
-                let _pending_guard =
-                    crate::session::pending_interaction::PendingInteractionGuard::new(
-                        self.pending_interactions.clone(),
-                        self.notifications.gateway.clone(),
-                        self.session_info.id.clone(),
-                        tool_call_id.to_string(),
-                        crate::session::pending_interaction::PendingKind::Permission,
-                    );
-                let perm_start = self.events.permission_requested(&call.function.name);
-                if !self.permissions.is_yolo_mode() {
-                    self.dispatch_notification_hook(
-                        "permission_prompt",
-                        Some("ASCII scrub disable requested".into()),
-                        None,
-                        Some("info".into()),
-                    )
-                    .await;
-                }
-                let flow = crate::session::helpers::request_agent_scrub_disable(
-                    &self.notifications.gateway,
-                    self.session_info.id.clone(),
-                    tool_call_id.to_string(),
-                )
-                .await;
-                let wait_ms = perm_start.elapsed().as_millis() as u64;
-                match flow {
-                    crate::session::helpers::ScrubDisableFlowResult::KeptOn => {
-                        self.events.permission_resolved(
-                            &call.function.name,
-                            xai_file_utils::events::types::PermissionDecision::Deny,
-                            perm_start,
-                        );
-                        tracing::info_span!(
-                            "tool.decision",
-                            tool_name = %call.function.name,
-                            tool_use_id = %call.id,
-                            decision = "deny",
-                            source = "user",
-                            wait_ms = wait_ms as i64,
-                        )
-                        .in_scope(|| {});
-                        let message = format!(
-                            "User rejected disabling ASCII scrub for tool `{}`. \
-                             Fancy punctuation will continue to be scrubbed.",
-                            call.function.name
-                        );
-                        self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                            .await?;
-                        return Ok(Err(ToolLoop::PermissionReject {
-                            tool_name: call.function.name.clone(),
-                            reason: "User rejected disabling ASCII scrub".to_owned(),
-                        }));
-                    }
-                    crate::session::helpers::ScrubDisableFlowResult::Disabled { always } => {
-                        self.events.permission_resolved(
-                            &call.function.name,
-                            xai_file_utils::events::types::PermissionDecision::Allow,
-                            perm_start,
-                        );
-                        tracing::info_span!(
-                            "tool.decision",
-                            tool_name = %call.function.name,
-                            tool_use_id = %call.id,
-                            decision = "allow",
-                            source = if always { "user_always" } else { "user" },
-                            wait_ms = wait_ms as i64,
-                        )
-                        .in_scope(|| {});
-                        // Fall through to tool body for model-facing confirmation.
-                    }
-                }
-            }
-        } else if !plan_file_auto_approve {
+        if !plan_file_auto_approve {
             let (perm_title, perm_kind, perm_raw_input) = tool_call_display
                 .as_ref()
                 .map(|(t, k, r)| (Some(t.clone()), Some(*k), Some(r.clone())))
@@ -1425,22 +1169,6 @@ impl SessionActor {
                 !self.session_info.id.0.is_empty(),
                 "permission reverse-request must carry a non-empty sessionId (design §5.4)"
             );
-            if !self.permissions.is_yolo_mode() {
-                self.dispatch_notification_hook(
-                    "permission_prompt",
-                    Some("Tool permission requested".into()),
-                    None,
-                    Some("info".into()),
-                )
-                .await;
-            }
-            if self.permissions.is_auto_mode() {
-                let conv = self.chat_state_handle.get_conversation().await;
-                let turns = super::build_classifier_turns(&conv, super::CLASSIFIER_REFRESH_TURNS);
-                if !turns.is_empty() {
-                    self.permissions.set_classifier_transcript(turns);
-                }
-            }
             let path_context = Some(xai_grok_workspace::permission::types::RequestPathContext {
                 real_cwd: std::path::PathBuf::from(self.session_info.cwd.as_str()),
                 display_cwd: self
@@ -1468,7 +1196,7 @@ impl SessionActor {
                     )
                     .await
             };
-            let _manager_event = resolution.event;
+            let manager_event = resolution.event;
             let decision = resolution.decision;
             self.events.permission_resolved(
                 &call.function.name,
@@ -1488,53 +1216,33 @@ impl SessionActor {
                 },
                 perm_start,
             );
-            let wait_ms = perm_start.elapsed().as_millis() as u64;
-            let (decision_outcome, _reject_reason) = match &decision {
-                Decision::Allow | Decision::Ask => {
-                    (xai_grok_telemetry::events::PermissionOutcome::Allow, None)
-                }
-                Decision::Reject(reason) | Decision::PolicyDeny(reason) => (
-                    xai_grok_telemetry::events::PermissionOutcome::Deny,
-                    Some(reason.to_string()),
-                ),
-                Decision::Cancelled => (
-                    xai_grok_telemetry::events::PermissionOutcome::Cancelled,
-                    None,
-                ),
-                Decision::FollowupMessage(_) => (
-                    xai_grok_telemetry::events::PermissionOutcome::Followup,
-                    None,
-                ),
-            };
+            let shell_wait_ms = perm_start.elapsed().as_millis() as u64;
+            let decision_outcome = crate::session::telemetry::permission_outcome(&decision);
+            let resolved = crate::session::telemetry::resolved_decision_telemetry(
+                manager_event.as_ref(),
+                &decision,
+                perm_mode,
+                shell_wait_ms,
+                self.permissions.is_yolo_mode(),
+            );
             tracing::info_span!(
                 "tool.decision",
                 tool_name = %call.function.name,
                 tool_use_id = %call.id,
                 decision = decision_outcome.as_str(),
-                source = crate::session::telemetry::permission_decision_source(
-                    &decision,
-                    self.permissions.is_yolo_mode(),
-                ),
-                wait_ms = wait_ms as i64,
+                source = resolved.source.as_deref().unwrap_or(""),
+                wait_ms = resolved.wait_ms as i64,
             )
             .in_scope(|| {});
             xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::events::PermissionDecisionPayload {
-                    tool_name: call.function.name.clone(),
-                    access_kind: telemetry_access_kind,
-                    decision: decision_outcome,
-                    wait_ms,
-                    permission_mode: perm_mode,
-                    source: Some(
-                        crate::session::telemetry::permission_decision_source(
-                            &decision,
-                            self.permissions.is_yolo_mode(),
-                        )
-                        .to_owned(),
-                    ),
-                    subagent_session_id: subagent_session_id.clone(),
-                    subagent_type: None,
-                },
+                crate::session::telemetry::permission_decision_payload(
+                    call.function.name.clone(),
+                    telemetry_access_kind,
+                    &decision,
+                    subagent_session_id.clone(),
+                    manager_event.as_ref(),
+                    resolved,
+                ),
             );
             match decision {
                 Decision::PolicyDeny(ref reason) | Decision::Reject(ref reason) => {
@@ -1593,10 +1301,11 @@ impl SessionActor {
             }
         }
         let is_exit_plan_mode = matches!(&tool_input, ToolInput::ExitPlanMode(_));
+        let is_file_backed_exit = is_file_backed_exit_plan_input(&tool_input);
         let is_cursor_switch_to_agent = false;
         let is_cursor_create_plan = false;
         let plan_file_path = self.plan_mode.lock().plan_file_path().to_path_buf();
-        let plan_read = if is_exit_plan_mode || is_cursor_switch_to_agent || is_cursor_create_plan {
+        let plan_read = if is_file_backed_exit || is_cursor_create_plan {
             let inline_cursor_plan: Option<PlanFileRead> = None;
             if let Some(plan) = inline_cursor_plan {
                 plan
@@ -1681,90 +1390,13 @@ impl SessionActor {
                         self.chat_state_handle.push_tool_result(tool_chat);
                         return Ok(Err(ToolLoop::Continue));
                     }
-                    PlanApprovalOutcome::Questions => {
-                        tracing::info!(
-                            "[exit_plan_mode] user questions about plan — staying in plan mode"
-                        );
-                        let message =
-                            questions_plan_message(parsed.feedback.as_deref().unwrap_or(""));
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        // Do not run exit_plan_mode tool body; plan mode stays Active.
-                        return Ok(Err(ToolLoop::Continue));
-                    }
                     PlanApprovalOutcome::Approved => {
-                        // Real panel CTA only. Do not run exit_plan_mode tool body
-                        // (its result is present-only and must not claim approval).
-                        tracing::info!(
-                            "[exit_plan_mode] user approved via plan panel — leaving plan mode"
-                        );
-                        self.leave_plan_mode_to_default();
-                        // Re-read disk at decision time so soft-park rewrites win.
-                        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
-                        let fresh = match tokio::fs::read_to_string(&plan_path).await {
-                            Ok(s) if !s.trim().is_empty() => Some(s),
-                            _ => None,
-                        };
-                        let path_display = plan_path.display().to_string();
-                        let message =
-                            approved_exit_plan_tool_message(fresh.as_deref(), &path_display);
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .title(Some("Plan mode exited".to_string()))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        return Ok(Err(ToolLoop::Continue));
+                        tracing::info!("[exit_plan_mode] user approved — executing tool");
                     }
                 },
                 Err(err) => {
                     if ext_method_no_client(&err) {
-                        // Headless / no UI: exit plan mode with honest no-panel
-                        // copy. Never claim plan-panel Approve or always-approve.
-                        tracing::debug!(
-                            %err,
-                            "exit_plan_mode: no client wired; leaving plan mode without panel approve"
-                        );
-                        self.leave_plan_mode_to_default();
-                        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
-                        let fresh = match tokio::fs::read_to_string(&plan_path).await {
-                            Ok(s) if !s.trim().is_empty() => Some(s),
-                            _ => plan_content.clone(),
-                        };
-                        let path_display = plan_path.display().to_string();
-                        let message =
-                            no_client_exit_plan_tool_message(fresh.as_deref(), &path_display);
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .title(Some("Plan mode exited".to_string()))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        return Ok(Err(ToolLoop::Continue));
+                        tracing::debug!(%err, "exit_plan_mode: no client wired; executing tool");
                     } else {
                         tracing::info!(
                             %err,
@@ -1948,17 +1580,9 @@ impl SessionActor {
             ResumeAction::LeaveOnly => {
                 tracing::info!("[exit_plan_mode] resume: user abandoned plan");
                 self.leave_plan_mode_to_default();
-                // Approval gate is clear — promote any prompts that were held
-                // while plan approval was open (see maybe_start_running_task).
-                SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
             }
             ResumeAction::StayAndRevise(text) => {
                 tracing::info!("[exit_plan_mode] resume: user requested changes");
-                self.start_resume_turn(text, PromptMode::Plan, completion_tx)
-                    .await;
-            }
-            ResumeAction::StayAndAnswer(text) => {
-                tracing::info!("[exit_plan_mode] resume: user has plan questions");
                 self.start_resume_turn(text, PromptMode::Plan, completion_tx)
                     .await;
             }
@@ -1985,24 +1609,14 @@ impl SessionActor {
         let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         let (respond_to, _rx) = oneshot::channel();
-        self.queue_input(
-            prompt_blocks,
-            prompt_id,
-            mode,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            false,
-            None,
-            None,
-            respond_to,
-            None,
-            None,
-        )
-        .await;
+        let _ = self
+            .queue_input(QueueInputRequest::new(
+                prompt_blocks,
+                prompt_id,
+                mode,
+                respond_to,
+            ))
+            .await;
         SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
     }
     /// Refine the initial (minimal) ToolCall that was registered during
@@ -2067,8 +1681,11 @@ impl SessionActor {
                 self.tool_context.cwd.as_path(),
             ),
             ToolInput::ReadFile(read_file) => {
+                if let Some(skill) = self.skill_for_read_path(&read_file.path).await {
+                    self.emit_skill_md_read(skill);
+                }
                 (
-                    format!("Read `{}`", read_file.path.clone()),
+                    format!("Read `{}`", read_file.path),
                     acp::ToolKind::Read,
                     vec![
                         acp::ToolCallLocation::new(read_file.path)
@@ -2161,6 +1778,7 @@ impl SessionActor {
                     xai_grok_telemetry::events::SkillDispatched {
                         skill_name: skill.skill.clone(),
                         plugin_source: None,
+                        trigger: xai_grok_telemetry::events::SkillTrigger::SkillTool,
                     },
                 );
                 tracing::info_span!(
@@ -2361,6 +1979,52 @@ impl SessionActor {
             .await;
         Ok((title, kind, raw_input))
     }
+    /// Resolves the path the way the read tool does, so `~` paths and forked sessions still match.
+    async fn skill_for_read_path(
+        &self,
+        path: &str,
+    ) -> Option<xai_grok_tools::implementations::skills::types::SkillInfo> {
+        if self.is_chat_kind {
+            return None;
+        }
+        let read_path = xai_grok_tools::types::resources::resolve_model_path(
+            self.tool_context.cwd.as_path(),
+            self.display_cwd.get().map(Path::new),
+            path,
+        );
+        if read_path.file_name().is_none_or(|name| name != "SKILL.md") {
+            return None;
+        }
+        let read_path = dunce::canonicalize(&read_path).unwrap_or(read_path);
+        self.slash_skills_for_resolve()
+            .await
+            .into_iter()
+            .find(|skill| {
+                crate::session::telemetry::is_same_skill_file(Path::new(&skill.path), &read_path)
+            })
+    }
+    fn emit_skill_md_read(&self, skill: xai_grok_tools::implementations::skills::types::SkillInfo) {
+        let skill_source = if skill.plugin_name.is_some() {
+            "plugin"
+        } else {
+            crate::session::telemetry::skill_source_label(
+                &skill.path,
+                self.session_info.cwd.as_str(),
+            )
+        };
+        tracing::info_span!(
+            "skill.activated",
+            skill_name = %skill.name,
+            invocation_trigger = "skill_md_read",
+            skill_source = skill_source,
+        )
+        .in_scope(|| {});
+        xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SkillDispatched {
+            skill_name: skill.name,
+            plugin_source: skill.plugin_name,
+            trigger: xai_grok_telemetry::events::SkillTrigger::SkillMdRead,
+        });
+    }
     async fn handle_tool_parse_error(
         &self,
         tool_call_id: &acp::ToolCallId,
@@ -2551,12 +2215,13 @@ impl SessionActor {
         call_id: &str,
         requested_tool_name: &str,
         effective_tool_name: &str,
-        result: ToolRunResult,
+        drained: DrainedToolSuccess,
         concatenated_json_count: usize,
         model_id: &str,
         tool_parsed_args: &serde_json::Value,
     ) -> Result<Vec<ConversationItem>, acp::Error> {
         use crate::session::acp_conversion::{acp_plan_update, acp_tool_update, maybe_rewrite};
+        let (mut result, mut tool_layer_images) = drained.into_parts();
         let consumed_ids =
             xai_grok_tools::reminders::task_completion::consumed_completion_ids(&result.output);
         if !consumed_ids.is_empty() {
@@ -2585,6 +2250,7 @@ impl SessionActor {
             let state = self.mcp_state.lock().await;
             state.mcp_tool_meta.get(effective_tool_name).cloned()
         };
+        tool_layer_images.extend(drain_tool_layer_extracted_images(&mut result.output));
         if let Some(mut tool_update) =
             acp_tool_update(&result.output, call_id, path_rewriter.as_ref(), tool_meta)
         {
@@ -2666,13 +2332,12 @@ impl SessionActor {
             }
         };
         let mut extracted_images = extraction.images;
-        let prompt_text = extraction.text;
-        if !self.is_cursor_harness()
-            && let ToolsToolOutput::ReadFile(ReadFileOutput::FileContent(ref fc)) = result.output
-        {
-            extracted_images.extend(fc.extracted_images.iter().cloned());
-        }
-        let mut prompt_text = maybe_rewrite(path_rewriter.as_ref(), prompt_text);
+        split_tool_layer_for_harness(
+            self.is_cursor_harness(),
+            &mut extracted_images,
+            tool_layer_images,
+        );
+        let mut prompt_text = maybe_rewrite(path_rewriter.as_ref(), extraction.text);
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =
                 result.output
@@ -2878,14 +2543,6 @@ impl SessionActor {
                     cap.start_stream(timestamp_ms);
                 }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
-                // Clear sticky Retrying chrome once the next HTTP stream is open.
-                // RetryState::Retrying is emitted before backoff/rebuild/execute;
-                // without this, the footer freezes on "Retrying (attempt N)" for
-                // the entire post-retry TTFB and early stream (no agent tokens yet).
-                self.send_xai_notification(XaiSessionUpdate::RetryState(
-                    crate::extensions::notification::RetryState::StreamResumed,
-                ))
-                .await;
             }
             SamplingEvent::FirstToken { .. } => {
                 self.emit_event(crate::session::events::Event::FirstToken);
@@ -2897,11 +2554,6 @@ impl SessionActor {
                 ..
             } => match channel {
                 SamplingChannel::Text => {
-                    // Assistant AI text only — scrub curly punctuation at the
-                    // stream choke so UI chunks, persistence, and streaming
-                    // capture stay consistent (default ON; env/config off).
-                    let text =
-                        crate::session::helpers::assistant_ascii_scrub::scrub_assistant_text(text);
                     {
                         let mut cap = self.streaming_turn_capture.lock();
                         if cap.prompt_id.is_none() {
@@ -2964,6 +2616,29 @@ impl SessionActor {
                     tool_index,
                     name,
                     arguments_delta,
+                })
+                .await;
+            }
+            SamplingEvent::ResponseStarted {
+                message_id,
+                model,
+                input_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                ..
+            } => {
+                self.send_buffered_xai_update(XaiSessionUpdate::ResponseStarted {
+                    message_id: Some(message_id),
+                    model: Some(model),
+                    input_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                })
+                .await;
+            }
+            SamplingEvent::ReasoningCompleted { signature, .. } => {
+                self.send_buffered_xai_update(XaiSessionUpdate::ReasoningCompleted {
+                    signature: Some(signature),
                 })
                 .await;
             }
@@ -3122,13 +2797,18 @@ impl SessionActor {
                 result,
                 ..
             } => {
-                self.signals_handle().record_tool_success(&name);
+                let status = backend_tool_call_status(result.as_ref());
+                if status == acp::ToolCallStatus::Failed {
+                    self.signals_handle().record_tool_failure(&name);
+                } else {
+                    self.signals_handle().record_tool_success(&name);
+                }
                 let (title, _kind, _raw_input) = backend_tool_display(&name);
                 self.send_update(
                     acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                         acp::ToolCallId::new(Arc::from(call_id.as_str())),
                         acp::ToolCallUpdateFields::new()
-                            .status(Some(acp::ToolCallStatus::Completed))
+                            .status(Some(status))
                             .title(Some(title))
                             .raw_output(result),
                     )),
@@ -3217,21 +2897,63 @@ mod execute_tool_call_parts_tests {
     }
 }
 #[cfg(test)]
-mod exit_plan_intercept_tests {
+mod exit_plan_tail_predicate_tests {
     use super::{
-        PlanFileRead, classify_plan_file_read, is_exit_plan_mode_tool_name,
-        should_intercept_exit_plan_approval, split_tool_batch_before_exit_plan_mode,
+        is_file_backed_exit_plan_input, is_file_backed_exit_plan_kind, split_exit_plan_tail,
     };
-    use crate::sampling::types::{ToolCallFunction, ToolCallResponse};
-
-    fn call(id: &str, name: &str) -> ToolCallResponse {
-        ToolCallResponse {
-            id: id.to_string(),
-            kind: "function".to_string(),
-            function: ToolCallFunction::new(name, "{}"),
+    use xai_grok_tools::types::ToolInput;
+    use xai_grok_tools::types::tool::ToolKind;
+    fn call(name: &str, args: &str) -> crate::sampling::types::ToolCallResponse {
+        crate::sampling::types::ToolCallResponse {
+            id: format!("call_{name}"),
+            kind: "function".into(),
+            function: crate::sampling::types::ToolCallFunction::new(name, args),
         }
     }
-
+    /// Wire name does not matter — only [`ToolKind::ExitPlan`].
+    fn kind_of(name: &str) -> Option<ToolKind> {
+        match name {
+            "exit_plan_mode" | "FinishPlan" => Some(ToolKind::ExitPlan),
+            _ => None,
+        }
+    }
+    #[test]
+    fn exit_plan_kind_is_file_backed_exit() {
+        assert!(is_file_backed_exit_plan_kind(Some(ToolKind::ExitPlan)));
+        assert!(!is_file_backed_exit_plan_kind(Some(ToolKind::Edit)));
+        assert!(!is_file_backed_exit_plan_kind(None));
+        assert!(is_file_backed_exit_plan_input(&ToolInput::ExitPlanMode(
+            xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeInput {}
+        )));
+    }
+    fn mixed(calls: Vec<crate::sampling::types::ToolCallResponse>) -> bool {
+        let (body, tail) = split_exit_plan_tail(calls, kind_of);
+        !body.is_empty() && !tail.is_empty()
+    }
+    #[test]
+    fn split_puts_exit_plan_in_tail() {
+        let write = call(
+            "search_replace",
+            r#"{"file_path":"/tmp/plan.md","old_string":"a","new_string":"b"}"#,
+        );
+        let exit = call("exit_plan_mode", "{}");
+        let renamed_exit = call("FinishPlan", "{}");
+        let create = call(
+            "CreatePlan",
+            r#"{"name":"p","overview":"o","plan":"plan body","todos":[]}"#,
+        );
+        assert!(mixed(vec![write.clone(), exit.clone()]));
+        assert!(mixed(vec![exit.clone(), write.clone()]));
+        assert!(mixed(vec![write.clone(), renamed_exit.clone()]));
+        assert!(!mixed(vec![exit.clone()]));
+        assert!(!mixed(vec![write.clone()]));
+        assert!(!mixed(vec![write.clone(), create.clone()]));
+        assert!(mixed(vec![write, exit, create]));
+    }
+}
+#[cfg(test)]
+mod exit_plan_intercept_tests {
+    use super::{PlanFileRead, classify_plan_file_read, should_intercept_exit_plan_approval};
     #[test]
     fn exit_plan_mode_empty_plan_still_intercepts() {
         assert!(should_intercept_exit_plan_approval(
@@ -3249,52 +2971,6 @@ mod exit_plan_intercept_tests {
             false,
             &PlanFileRead::Present("plan body".into()),
         ));
-    }
-
-    #[test]
-    fn is_exit_plan_mode_tool_name_matches_wire_and_client_ids() {
-        assert!(is_exit_plan_mode_tool_name("exit_plan_mode"));
-        assert!(is_exit_plan_mode_tool_name("ExitPlanMode"));
-        assert!(!is_exit_plan_mode_tool_name("write"));
-        assert!(!is_exit_plan_mode_tool_name("enter_plan_mode"));
-    }
-
-    /// Named contract: same-batch write + exit_plan_mode must run the write
-    /// pass first so park/re-read sees the rewritten plan.md, not a freeze of
-    /// the pre-write body.
-    #[test]
-    fn split_tool_batch_runs_non_exit_before_exit_plan_mode() {
-        let batch = vec![
-            call("w1", "write"),
-            call("t1", "todo_write"),
-            call("e1", "exit_plan_mode"),
-            call("e2", "ExitPlanMode"),
-        ];
-        let (others, exits) =
-            split_tool_batch_before_exit_plan_mode(batch).expect("mixed batch must split");
-        assert_eq!(
-            others
-                .iter()
-                .map(|c| c.function.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["write", "todo_write"]
-        );
-        assert_eq!(
-            exits
-                .iter()
-                .map(|c| c.function.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["exit_plan_mode", "ExitPlanMode"]
-        );
-        assert_eq!(others[0].id, "w1");
-        assert_eq!(exits[0].id, "e1");
-    }
-
-    #[test]
-    fn split_tool_batch_skips_when_exit_only_or_no_exit() {
-        assert!(split_tool_batch_before_exit_plan_mode(vec![call("e", "exit_plan_mode")]).is_err());
-        assert!(split_tool_batch_before_exit_plan_mode(vec![call("w", "write")]).is_err());
-        assert!(split_tool_batch_before_exit_plan_mode(vec![]).is_err());
     }
     #[test]
     fn create_plan_empty_still_intercepts() {
@@ -3366,10 +3042,7 @@ mod exit_plan_intercept_tests {
 }
 #[cfg(test)]
 mod plan_mode_edit_gate_tests {
-    use super::{
-        PLAN_MODE_ASK_USER_REJECTED_MESSAGE, PlanAskUserGate, PlanEditGate,
-        plan_mode_ask_user_gate, plan_mode_edit_gate,
-    };
+    use super::{PlanEditGate, plan_mode_edit_gate};
     use crate::session::plan_mode::PlanModeTracker;
     use xai_grok_tools::types::ToolInput;
     use xai_grok_workspace::permission::AccessKind;
@@ -3383,25 +3056,6 @@ mod plan_mode_edit_gate_tests {
     }
     fn gate(tracker: &PlanModeTracker, input: &ToolInput) -> PlanEditGate {
         plan_mode_edit_gate(tracker, input, &AccessKind::from(input))
-    }
-    fn ask_user_input() -> ToolInput {
-        use xai_grok_tools::implementations::grok_build::ask_user_question::{
-            AskUserQuestionInput, Question, QuestionOption,
-        };
-        ToolInput::AskUserQuestion(AskUserQuestionInput {
-            questions: vec![Question {
-                question: "Which follow-ups?".into(),
-                options: vec![QuestionOption {
-                    label: "A".into(),
-                    description: "option a".into(),
-                    preview: None,
-                    id: None,
-                }],
-                multi_select: None,
-                id: None,
-            }],
-            use_id_keyed_format: false,
-        })
     }
     fn search_replace(path: &str) -> ToolInput {
         use xai_grok_tools::implementations::grok_build::search_replace::SearchReplaceInput;
@@ -3501,56 +3155,11 @@ mod plan_mode_edit_gate_tests {
             "Pending means the model has no plan-mode instructions yet — don't gate"
         );
     }
-    /// Active plan mode hard-rejects ask_user_question (fail-closed even if
-    /// the tool somehow remains in the model tool list).
-    #[test]
-    fn active_plan_mode_rejects_ask_user_question() {
-        let t = active_tracker();
-        assert_eq!(
-            plan_mode_ask_user_gate(&t, &ask_user_input()),
-            PlanAskUserGate::RejectQuestionnaire
-        );
-        assert!(
-            PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("ask_user_question"),
-            "rejection must name the blocked tool"
-        );
-        assert!(
-            PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("plan file")
-                || PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("exit_plan_mode"),
-            "rejection must steer to plan.md / exit_plan_mode"
-        );
-    }
-    /// Outside Active plan mode, ask_user_question stays available (non-plan
-    /// sessions and general interactive Q&A).
-    #[test]
-    fn inactive_or_pending_allows_ask_user_question() {
-        let inactive = PlanModeTracker::new(std::path::PathBuf::from("/tmp/gate-session"));
-        assert_eq!(
-            plan_mode_ask_user_gate(&inactive, &ask_user_input()),
-            PlanAskUserGate::Allow
-        );
-        let mut pending = PlanModeTracker::new(std::path::PathBuf::from("/tmp/gate-session"));
-        assert!(pending.enter_pending());
-        assert_eq!(
-            plan_mode_ask_user_gate(&pending, &ask_user_input()),
-            PlanAskUserGate::Allow
-        );
-    }
-    /// Non-questionnaire tools are not blocked by the ask-user gate.
-    #[test]
-    fn ask_user_gate_does_not_block_other_tools() {
-        let t = active_tracker();
-        assert_eq!(
-            plan_mode_ask_user_gate(&t, &search_replace("/tmp/src/main.rs")),
-            PlanAskUserGate::Allow
-        );
-    }
 }
 #[cfg(test)]
 mod plan_approval_helper_tests {
     use super::{
-        PlanApprovalOutcome, ResumeAction, approved_exit_plan_tool_message, ext_method_no_client,
-        no_client_exit_plan_tool_message, questions_plan_message, resume_action_for,
+        PlanApprovalOutcome, ResumeAction, ext_method_no_client, resume_action_for,
         revise_plan_message,
     };
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
@@ -3575,10 +3184,6 @@ mod plan_approval_helper_tests {
             PlanApprovalOutcome::Cancelled
         );
         assert_eq!(
-            PlanApprovalOutcome::from_response(&resp("questions")),
-            PlanApprovalOutcome::Questions
-        );
-        assert_eq!(
             PlanApprovalOutcome::from_response(&resp("approve")),
             PlanApprovalOutcome::Cancelled
         );
@@ -3595,56 +3200,11 @@ mod plan_approval_helper_tests {
     }
     #[test]
     fn revise_plan_message_includes_feedback_when_present() {
-        // Bare Revise (empty freeform): push rewrite + re-present, not stall-only ask.
-        let empty = revise_plan_message("");
-        assert!(
-            empty.contains("clicked Revise") || empty.contains("without written notes"),
-            "empty revise must name bare Revise CTA: {empty}"
-        );
-        assert!(
-            empty.contains("Rewrite plan.md") || empty.contains("rewrite plan.md"),
-            "empty revise must push a plan rewrite: {empty}"
-        );
-        assert!(
-            empty.contains("exit_plan_mode again"),
-            "empty revise must re-present via exit_plan_mode: {empty}"
-        );
-        let blank = revise_plan_message("   ");
-        assert!(
-            blank.contains("exit_plan_mode again"),
-            "whitespace-only freeform is empty revise: {blank}"
-        );
+        assert!(revise_plan_message("").contains("Ask the user what changes"));
+        assert!(revise_plan_message("   ").contains("Ask the user what changes"));
         let with = revise_plan_message("use async");
         assert!(with.contains("The user said:"));
         assert!(with.contains("use async"));
-        assert!(
-            with.contains("exit_plan_mode again"),
-            "feedback revise must still re-present: {with}"
-        );
-    }
-    #[test]
-    fn questions_plan_message_is_not_revise_and_forbids_rewrite() {
-        let empty = questions_plan_message("");
-        assert!(
-            empty.contains("clarifying question"),
-            "empty questions message must name clarifying intent: {empty}"
-        );
-        assert!(
-            !empty.contains("wants to revise"),
-            "questions must not use the revise framing: {empty}"
-        );
-        assert!(
-            empty.contains("Do not rewrite plan.md"),
-            "questions must forbid plan rewrite: {empty}"
-        );
-        assert!(
-            empty.contains("exit_plan_mode again"),
-            "questions must re-park via exit_plan_mode: {empty}"
-        );
-        let with = questions_plan_message("why Redis?");
-        assert!(with.contains("why Redis?"));
-        assert!(with.contains("The user asked:"));
-        assert!(!with.contains("wants to revise"));
     }
     #[test]
     fn resume_action_maps_each_outcome() {
@@ -3660,69 +3220,6 @@ mod plan_approval_helper_tests {
             ResumeAction::StayAndRevise(text) => assert!(text.contains("tweak it")),
             other => panic!("expected StayAndRevise, got {other:?}"),
         }
-        match resume_action_for(PlanApprovalOutcome::Questions, Some("why Redis?".into())) {
-            ResumeAction::StayAndAnswer(text) => {
-                assert!(text.contains("why Redis?"));
-                assert!(text.contains("clarifying question"));
-                assert!(!text.contains("wants to revise"));
-            }
-            other => panic!("expected StayAndAnswer, got {other:?}"),
-        }
-    }
-
-    /// Named contract: only a real plan-panel Approve may tell the model to
-    /// implement. Bare soft-park / tool present language must not appear here.
-    #[test]
-    fn approved_exit_plan_message_names_panel_cta_and_embeds_body() {
-        let msg = approved_exit_plan_tool_message(Some("# Plan\nstep A\n"), "/tmp/s/plan.md");
-        assert!(
-            msg.contains("via the plan panel CTAs"),
-            "must name real panel Approve: {msg}"
-        );
-        assert!(
-            msg.contains("You can now implement") || msg.contains("implement"),
-            "must allow implement after real approve: {msg}"
-        );
-        assert!(msg.contains("step A"), "must embed re-read body: {msg}");
-        assert!(
-            msg.contains("re-read from disk at approval time"),
-            "must name post-approve disk re-read: {msg}"
-        );
-        assert!(
-            !msg.contains("NOT operator approval"),
-            "approved path must not use present-only copy: {msg}"
-        );
-    }
-
-    #[test]
-    fn approved_exit_plan_message_empty_plan_still_names_panel() {
-        let msg = approved_exit_plan_tool_message(None, "/tmp/s/plan.md");
-        assert!(msg.contains("via the plan panel CTAs"), "{msg}");
-        assert!(
-            msg.contains("No plan content") || msg.contains("no plan content"),
-            "{msg}"
-        );
-    }
-
-    /// Named contract: no-client / headless must not claim plan-panel Approve
-    /// or always-approve auto-approve.
-    #[test]
-    fn no_client_exit_plan_message_does_not_claim_panel_approve() {
-        let msg = no_client_exit_plan_tool_message(Some("# P\nok\n"), "/tmp/s/plan.md");
-        let lower = msg.to_lowercase();
-        assert!(
-            lower.contains("not a plan-panel approve") || lower.contains("not a plan panel"),
-            "must deny panel approve: {msg}"
-        );
-        assert!(
-            !lower.contains("has been approved") && !lower.contains("you can now start coding"),
-            "must not use false-approve tool copy: {msg}"
-        );
-        assert!(
-            lower.contains("always-approve") || lower.contains("permission mode"),
-            "must clarify always-approve is not plan approve: {msg}"
-        );
-        assert!(msg.contains("ok"), "must still embed plan: {msg}");
     }
 }
 #[cfg(test)]

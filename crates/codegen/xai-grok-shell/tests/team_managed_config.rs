@@ -2,9 +2,6 @@
 //! deployment-config endpoint. Proxy-side resolution is unit-tested in
 //! the cli-chat-proxy deployment-config route.
 //!
-//! This suite is dark (keyless): unsigned mock bodies are intentional.
-//! Armed/signed contracts live in `xai-grok-config` unit tests.
-//!
 //! Every test here MUST be `#[serial]`: they share one process-global
 //! `GROK_HOME` (the `grok_home` `OnceLock` allows a single value per process)
 //! and mutate that directory + process env, so concurrent tests would race.
@@ -29,13 +26,6 @@ fn team_identity(id: &str) -> ServingIdentity {
 fn test_home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        // Process-global dark (not thread-local `with_dark`) so tokio worker
-        // threads used by async `sync` / gate paths stay keyless.
-        xai_grok_config::signed_policy::test_seam::set_embedded_keys(Some(&[]));
-        assert!(
-            !xai_grok_config::signed_policy::verification_active(),
-            "team_managed_config suite must run keyless so unsigned mocks persist"
-        );
         let path = tempfile::TempDir::new().unwrap().keep();
         // SAFETY: set once at init before other threads read the vars.
         unsafe {
@@ -867,12 +857,6 @@ async fn bootstrap_fails_closed_when_managed_policy_compromised() {
         .await
         .expect("initial sync should succeed");
     std::fs::remove_file(home.join("requirements.toml")).unwrap();
-
-    // Offline after tamper: a live mock would re-serve the policy during
-    // bootstrap and the gate would go green. Same fixture as
-    // `managed_policy_gate_fails_closed_on_deleted_policy_offline`.
-    let (err_url, _c, _a) = spawn_mock_seq(vec![(500, "{}".to_string())]);
-    write_config(&home, &err_url);
 
     // The gate is bootstrap's first step, so it refuses before any config/model work.
     let cfg = xai_grok_shell::agent::config::Config::default();

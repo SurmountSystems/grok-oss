@@ -21,7 +21,9 @@ use reqwest::header::{
 };
 use serde::Serialize;
 
-use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
+use xai_grok_sampling_types::error::{
+    parse_error_code, try_parse_stream_error, user_facing_api_error_message,
+};
 use xai_grok_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
     ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
@@ -977,6 +979,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1145,6 +1148,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1346,6 +1350,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1514,6 +1519,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1698,6 +1704,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1827,6 +1834,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -2149,6 +2157,7 @@ impl SamplingClient {
                 model_metadata: info.model_metadata,
                 retry_after_secs: info.retry_after_secs,
                 should_retry: None,
+                error_code: info.error_code,
             })
     }
 }

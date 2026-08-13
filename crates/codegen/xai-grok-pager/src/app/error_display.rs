@@ -72,7 +72,6 @@ impl FormattedRequestFailure {
         banner_message(&self.headline, &self.detail)
     }
 
-    #[allow(dead_code)] // preferred when a SessionEvent block is the sink
     pub(crate) fn into_session_event(self) -> crate::scrollback::blocks::SessionEvent {
         crate::scrollback::blocks::SessionEvent::RequestFailed {
             status: self.status,

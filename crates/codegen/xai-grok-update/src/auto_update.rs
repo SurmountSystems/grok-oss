@@ -252,43 +252,56 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
     };
 
     match get_latest_version(inst, update_config).await {
-        Ok(latest_version) => {
-            let mut error = None;
-            // --check reports upgrades only; a rolled-back pointer isn't a "new version" to advertise here (auto-update converges separately).
-            let allow_downgrade = false;
-            let update_available =
-                match needs_update(&current_version, &latest_version, &channel, allow_downgrade) {
+        // --check shares the updater's decision, so it never advertises a version
+        // the policy would skip, clamp away, or can't satisfy.
+        Ok(latest) => match plan_for(&config::VersionPolicy::resolve(), latest) {
+            UpdatePlan::Install { target, .. } => {
+                let mut error = None;
+                let update_available = match needs_update(
+                    &current_version,
+                    &target,
+                    &channel,
+                    false,
+                ) {
                     Some(value) => value,
                     None => {
-                        // Distinguish parse failure from unsupported channel for clearer diagnostics.
+                        // Distinguish parse failure from unsupported channel.
                         let parse_ok = semver::Version::parse(&current_version).is_ok()
-                            && semver::Version::parse(&latest_version).is_ok();
+                            && semver::Version::parse(&target).is_ok();
                         error = Some(if parse_ok {
                             format!(
-                                "Unsupported release channel '{}' (current={}, latest={}). \
-                             Supported channels: stable, alpha, enterprise.",
-                                channel, current_version, latest_version
+                                "Unsupported release channel '{channel}' (current={current_version}, latest={target}). \
+                                     Supported channels: stable, alpha, enterprise."
                             )
                         } else {
                             format!(
-                                "Failed to parse versions (current={}, latest={})",
-                                current_version, latest_version
+                                "Failed to parse versions (current={current_version}, latest={target})"
                             )
                         });
                         false
                     }
                 };
-
-            UpdateStatus {
+                UpdateStatus {
+                    current_version,
+                    latest_version: Some(target),
+                    update_available,
+                    installer,
+                    channel,
+                    auto_update,
+                    error,
+                }
+            }
+            // Policy skips (anti-downgrade) or can't satisfy the floor: no upgrade.
+            UpdatePlan::Skip { latest } | UpdatePlan::Unavailable { latest, .. } => UpdateStatus {
                 current_version,
-                latest_version: Some(latest_version),
-                update_available,
+                latest_version: Some(latest),
+                update_available: false,
                 installer,
                 channel,
                 auto_update,
-                error,
-            }
-        }
+                error: None,
+            },
+        },
         Err(err) => UpdateStatus {
             current_version,
             latest_version: None,
@@ -301,6 +314,49 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
     }
 }
 
+enum UpdatePlan {
+    /// Anti-downgrade skip; `latest` is reported to the user.
+    Skip {
+        latest: String,
+    },
+    /// A hard `required_minimum` exceeds the latest release, so nothing satisfies it.
+    Unavailable {
+        latest: String,
+        target: String,
+    },
+    Install {
+        latest: String,
+        target: String,
+    },
+}
+
+/// Classify a fetched `latest` release under `policy`. Pure; `fetch_update_plan`
+/// is the IO wrapper. `--check` shares this so it can't diverge from the updater.
+fn plan_for(policy: &config::VersionPolicy, latest: String) -> UpdatePlan {
+    let Some(target) = policy.resolve_target(&latest) else {
+        return UpdatePlan::Skip { latest };
+    };
+    // A hard `required_minimum` can clamp above the latest release; that version
+    // doesn't exist.
+    if matches!(
+        (semver::Version::parse(&target), semver::Version::parse(&latest)),
+        (Ok(t), Ok(l)) if t > l
+    ) {
+        UpdatePlan::Unavailable { latest, target }
+    } else {
+        UpdatePlan::Install { latest, target }
+    }
+}
+
+async fn fetch_update_plan(
+    installer: &str,
+    update_config: &UpdateConfig,
+    policy: &config::VersionPolicy,
+) -> Result<UpdatePlan> {
+    let latest = fetch_latest_version(installer, update_config).await?;
+    Ok(plan_for(policy, latest))
+}
+
 /// Installer + version the leader/background path should converge to: an
 /// upgrade OR an authoritative-installer rollback. `None` means stay put. Gates
 /// on the installer (via `installer_allows_downgrade`) so npm is never
@@ -308,15 +364,21 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
 pub async fn auto_update_target(update_config: &UpdateConfig) -> Option<(&'static str, String)> {
     let installer = get_installer().await?;
     let current = get_installed_grok_version();
-    let latest = fetch_latest_version(installer, update_config).await.ok()?;
+    let policy = config::VersionPolicy::resolve();
+    let UpdatePlan::Install { target, .. } = fetch_update_plan(installer, update_config, &policy)
+        .await
+        .ok()?
+    else {
+        return None;
+    };
     needs_update(
         &current,
-        &latest,
+        &target,
         &update_config.channel,
         installer_allows_downgrade(installer),
     )
     .unwrap_or(false)
-    .then_some((installer, latest))
+    .then_some((installer, target))
 }
 
 /// Outcome of [`ensure_latest_on_disk`].
@@ -357,13 +419,18 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
     };
     heal_managed_install(installer).await;
     let allow_downgrade = installer_allows_downgrade(installer);
-    let latest = fetch_latest_version(installer, update_config).await?;
+    let policy = config::VersionPolicy::resolve();
+    let UpdatePlan::Install { target, .. } =
+        fetch_update_plan(installer, update_config, &policy).await?
+    else {
+        return Ok(outcome);
+    };
 
     let effective_current =
         disk_version_for_installer(installer).unwrap_or_else(get_installed_grok_version);
     if needs_update(
         &effective_current,
-        &latest,
+        &target,
         &update_config.channel,
         allow_downgrade,
     )
@@ -547,22 +614,25 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
     }
 
     let current_version = get_installed_grok_version();
-    let latest_version = match fetch_latest_version(installer, update_config).await {
-        Ok(v) => v,
-        Err(_) => return BackgroundUpdateCheck::none(),
+    let policy = config::VersionPolicy::resolve();
+    let target_version = match fetch_update_plan(installer, update_config, &policy).await {
+        Ok(UpdatePlan::Install { target, .. }) => target,
+        Ok(UpdatePlan::Skip { .. } | UpdatePlan::Unavailable { .. }) | Err(_) => {
+            return BackgroundUpdateCheck::none();
+        }
     };
 
     let allow_downgrade = installer_allows_downgrade(installer);
     if !needs_update(
         &current_version,
-        &latest_version,
+        &target_version,
         &update_config.channel,
         allow_downgrade,
     )
     .unwrap_or(false)
     {
         let stable_ptr = try_fetch_stable_pointer().await;
-        write_version_cache(&latest_version, stable_ptr.as_deref()).await;
+        write_version_cache(&target_version, stable_ptr.as_deref()).await;
         return BackgroundUpdateCheck::none();
     }
 
@@ -575,7 +645,7 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
     let disk_needs_download = match disk_version_for_installer(installer) {
         Some(disk) => needs_update(
             &disk,
-            &latest_version,
+            &target_version,
             &update_config.channel,
             allow_downgrade,
         )
@@ -597,14 +667,16 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
         }
     } else {
         tracing::info!(
-            latest_version = %latest_version,
+            target_version = %target_version,
             "Background update: target already on disk, skipping download"
         );
         None
     };
 
     BackgroundUpdateCheck {
-        update: Some(UpdateAvailable { latest_version }),
+        update: Some(UpdateAvailable {
+            latest_version: target_version,
+        }),
         download,
     }
 }
@@ -649,12 +721,13 @@ pub async fn run_update_if_available(
     }
 
     let current_version = get_installed_grok_version();
-    // Fetch without writing version.json — we only cache after confirming the
-    // update is not needed or after a successful blocking install. This prevents
-    // a failed background download from suppressing retries for the TTL window.
-    let latest_version = match fetch_latest_version(inst, update_config).await {
-        Ok(v) => v,
-        Err(_) => return Ok(false),
+    let policy = config::VersionPolicy::resolve();
+    // Don't write version.json here; only cache after confirming no update is
+    // needed or after a successful install, so a failed background download
+    // doesn't suppress retries for the TTL window.
+    let latest_version = match fetch_update_plan(inst, update_config, &policy).await {
+        Ok(UpdatePlan::Install { target, .. }) => target,
+        Ok(UpdatePlan::Skip { .. } | UpdatePlan::Unavailable { .. }) | Err(_) => return Ok(false),
     };
     if !needs_update(
         &current_version,
@@ -794,6 +867,7 @@ async fn run_update_subcommand(
             // Detach = new session (Ctrl+C isolation), not handle abandonment:
             // the child is still ours to wait() on.
             xai_grok_tools::util::detach_command(&mut cmd);
+            #[allow(clippy::disallowed_methods)] // the caller owns the returned handle
             let child = cmd.spawn()?;
             Ok(Some(child))
         }
@@ -844,6 +918,7 @@ pub fn restart_grok() -> Result<()> {
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        #[allow(clippy::disallowed_methods)] // the relaunched CLI replaces this process
         let _ = cmd.spawn()?;
         std::process::exit(0);
     }
@@ -1310,9 +1385,11 @@ async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) ->
 ///
 /// Download-phase side effects (download dir creation, binary fetch) are
 /// idempotent, so retrying with a different base after a partial failure is
-/// safe. Local activation ([`activate_verified_download`]: link swap,
-/// cleanup, config persist) runs once after the first successful download —
-/// its failures are not base-dependent, so they abort the install instead of
+/// safe. Smoke-test failures ([`SmokeTestFailure`]) are a property of the
+/// published artifact, not the CDN — retrying another base will not help.
+/// Local activation ([`activate_verified_download`]: link swap, cleanup,
+/// config persist) runs once after the first successful download — its
+/// failures are not base-dependent, so they abort the install instead of
 /// triggering a pointless re-download from the next base.
 #[doc(hidden)]
 pub async fn install_internal_from_bases(
@@ -1351,19 +1428,101 @@ pub async fn install_internal_from_bases(
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no CLI base URLs to try")))
 }
 
-const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// First-launch of a freshly downloaded macOS binary can exceed 10s (Rosetta
+/// AOT + Gatekeeper on ~140MB). A short cap false-fails a good artifact.
+const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-async fn smoke_test_binary(binary_path: &std::path::Path) -> bool {
-    let mut cmd = tokio::process::Command::new(binary_path);
-    cmd.arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    xai_grok_tools::util::detach_command(&mut cmd);
-    match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.status()).await {
-        Ok(Ok(status)) => status.success(),
-        _ => false,
+/// Retry budget for exec attempts refused with ETXTBSY. The failure window
+/// is normally the microseconds another spawn in this process sits between
+/// fork and exec (see [`smoke_test_binary`]), but on a heavily loaded
+/// machine that window can stretch, so the budget errs generous — a false
+/// "failed to run" both aborts this install and deletes the binary.
+const SMOKE_TEST_ETXTBSY_ATTEMPTS: u32 = 8;
+const SMOKE_TEST_ETXTBSY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
+
+fn truncate_err(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.len() <= max {
+        return s.to_string();
     }
+    let mut end = max.saturating_sub(3);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SmokeTestFailure {
+    #[error(
+        "downloaded binary failed to run (--version timed out after {}s).\n\
+         Your current version is unchanged.",
+        SMOKE_TEST_TIMEOUT.as_secs()
+    )]
+    Timeout,
+    #[error(
+        "downloaded binary failed to run (could not start: {0}).\n\
+         Your current version is unchanged."
+    )]
+    Spawn(String),
+    #[error("{}", nonzero_message(status, stderr))]
+    NonZero { status: String, stderr: String },
+}
+
+/// `--version` exited nonzero; include stderr only when there is any.
+fn nonzero_message(status: &str, stderr: &str) -> String {
+    let stderr_line = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("stderr: {stderr}\n")
+    };
+    format!(
+        "downloaded binary failed to run (--version exited {status}).\n\
+         {stderr_line}Your current version is unchanged."
+    )
+}
+
+async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<(), SmokeTestFailure> {
+    // ETXTBSY race: while a concurrent updater in this process is between
+    // fork and exec (pre_exec in detach_command forces the fork/exec path),
+    // its child briefly holds every open fd — including the write-side fd of
+    // a download that has just been renamed onto `binary_path`. Exec'ing a
+    // binary whose inode is still open for write fails with ETXTBSY even
+    // though the file is complete and healthy, so retry instead of failing
+    // the install (and deleting a racer's freshly installed binary).
+    let mut last_spawn = String::new();
+    for attempt in 1..=SMOKE_TEST_ETXTBSY_ATTEMPTS {
+        let mut cmd = tokio::process::Command::new(binary_path);
+        cmd.arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        xai_grok_tools::util::detach_command(&mut cmd);
+        match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.output()).await {
+            Err(_) => return Err(SmokeTestFailure::Timeout),
+            Ok(Ok(output)) if output.status.success() => return Ok(()),
+            Ok(Ok(output)) => {
+                let status = output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| output.status.to_string());
+                let stderr = truncate_err(&String::from_utf8_lossy(&output.stderr), 400);
+                return Err(SmokeTestFailure::NonZero { status, stderr });
+            }
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                last_spawn = e.to_string();
+                if attempt < SMOKE_TEST_ETXTBSY_ATTEMPTS {
+                    tokio::time::sleep(SMOKE_TEST_ETXTBSY_BACKOFF * attempt).await;
+                }
+            }
+            Ok(Err(e)) => return Err(SmokeTestFailure::Spawn(e.to_string())),
+        }
+    }
+    // Reached only when every attempt hit ETXTBSY; `last_spawn` holds the
+    // final spawn error.
+    Err(SmokeTestFailure::Spawn(last_spawn))
 }
 
 /// Test-only entry point: same as [`install_internal`] but reads from
@@ -1393,8 +1552,9 @@ struct VerifiedDownload {
 }
 
 /// Base-dependent install phase: resolve the version (per base when no
-/// target is pinned), download the binary, and smoke-test it. Failures here
-/// are worth retrying against another base URL.
+/// target is pinned), download the binary, and smoke-test it. Network /
+/// fetch failures here are worth retrying against another base URL.
+/// [`SmokeTestFailure`] is not — see [`install_internal_from_bases`].
 async fn download_verified_from_base(
     target: Option<&str>,
     update_config: &UpdateConfig,
@@ -1424,24 +1584,16 @@ async fn download_verified_from_base(
 
     eprintln!("  Downloading grok v{} ({})...", version, platform);
 
-    // Stage into a unique path, smoke-test the stage, then rename onto the
-    // shared versioned name. Never smoke or delete the shared dest: concurrent
-    // same-version installers race on that path (unlink / ETXTBSY under
-    // another racer's smoke → "downloaded binary failed to run").
-    // download_* writes via its own unique tmp then renames onto `staging`.
-    let staging = tmp_download_path(&binary_path);
-    download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &staging, true).await?;
-    if !smoke_test_binary(&staging).await {
-        let _ = tokio::fs::remove_file(&staging).await;
+    // Published already +x (see `publish_downloaded_artifact`).
+    download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &binary_path, true).await?;
+
+    // Smoke-test: run the binary before activating it. A truncated or
+    // corrupt download is caught here and never becomes the active grok.
+    if let Err(fail) = smoke_test_binary(&binary_path).await {
+        let _ = tokio::fs::remove_file(&binary_path).await;
         // No prefix: run_install_script's wrap adds "Auto-update failed:".
-        anyhow::bail!(
-            "downloaded binary failed to run.\n\
-             Your current version is unchanged.\n\
-             To update manually: {}",
-            manual_install_cmd()
-        );
+        return Err(fail.into());
     }
-    tokio::fs::rename(&staging, &binary_path).await?;
 
     Ok(VerifiedDownload {
         version,
@@ -2512,10 +2664,11 @@ pub async fn run_update(
     heal_managed_install(installer).await;
 
     let current_version = get_installed_grok_version();
+    let policy = config::VersionPolicy::resolve();
 
     // When --version is given, skip the latest-version check and install directly
     if let Some(version) = pinned_version {
-        if let Err(e) = crate::minimum_version::check_install_target(version) {
+        if let Err(e) = crate::version_policy::check_install_target(&policy, version) {
             anyhow::bail!("{e}");
         }
         eprintln!(
@@ -2544,18 +2697,33 @@ pub async fn run_update(
             .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(100));
-    let latest_version = fetch_latest_version(installer, update_config).await?;
+    let plan = fetch_update_plan(installer, update_config, &policy).await?;
     pb.finish_and_clear();
 
-    let install_target = match crate::minimum_version::apply_floor(&latest_version) {
-        Ok(t) => t,
-        Err(e) => anyhow::bail!("{e}"),
+    let (latest_version, install_target) = match plan {
+        UpdatePlan::Skip { latest } => {
+            // Cache so an explicit `grok update` doesn't re-prompt every run.
+            let stable_ptr = try_fetch_stable_pointer().await;
+            write_version_cache(&latest, stable_ptr.as_deref()).await;
+            eprintln!(
+                "The latest release ({latest}) is not an allowed update; \
+                 keeping the current version ({current_version})."
+            );
+            refresh_deployment_config().await;
+            return Ok(None);
+        }
+        UpdatePlan::Unavailable { latest, target } => {
+            anyhow::bail!(
+                "The required minimum version ({target}) is newer than the latest \
+                 available release ({latest}). Contact your administrator."
+            );
+        }
+        UpdatePlan::Install { latest, target } => (latest, target),
     };
     if install_target != latest_version {
         eprintln!(
-            "Latest available is {} but the configured minimum is higher; \
-             installing {} instead.",
-            latest_version, install_target
+            "Latest available is {latest_version}, but your configured version range \
+             allows {install_target}; installing that instead."
         );
     }
 

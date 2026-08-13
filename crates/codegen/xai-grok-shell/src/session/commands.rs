@@ -183,8 +183,7 @@ pub struct CancelOptions {
     pub cancel_subagents: bool,
     pub kill_background_tasks: bool,
     pub rewind_if_no_output: bool,
-    /// [`CancelTrigger::CtrlC`] arms the task-wake barrier and drops queued
-    /// task wakes. Other stop gestures (Esc / client) cancel the turn only.
+    /// [`CancelTrigger::is_stop_gesture`] arms the task-wake barrier.
     pub trigger: Option<CancelTrigger>,
     /// Drives the cancel-rate metric.
     pub user_initiated: bool,

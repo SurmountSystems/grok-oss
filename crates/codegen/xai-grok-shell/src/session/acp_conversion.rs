@@ -775,8 +775,6 @@ mod tests {
             summary_for_prompt: "tasks".to_string(),
             todos: vec![],
             state: xai_grok_tools::implementations::grok_build::todo::TodoState::default(),
-            progress: Default::default(),
-            warning: None,
         }));
         let update = acp_tool_update(&output, "call-1", None, None).unwrap();
         assert_eq!(update.fields.status, Some(acp::ToolCallStatus::Completed));
@@ -796,21 +794,18 @@ mod tests {
                 priority: TodoPriority::Medium,
                 status: TodoStatus::Completed,
                 meta: None,
-                size: None,
             },
             TodoItem {
                 content: "Dropped".to_string(),
                 priority: TodoPriority::Low,
                 status: TodoStatus::Cancelled,
                 meta: None,
-                size: None,
             },
             TodoItem {
                 content: "Stale spinner".to_string(),
                 priority: TodoPriority::High,
                 status: TodoStatus::InProgress,
                 meta: None,
-                size: None,
             },
         ];
 
@@ -866,12 +861,9 @@ mod tests {
                     status:
                         xai_grok_tools::implementations::grok_build::todo::TodoStatus::Completed,
                     meta: None,
-                    size: None,
                 },
             ],
             state: xai_grok_tools::implementations::grok_build::todo::TodoState::default(),
-            progress: Default::default(),
-            warning: None,
         }));
         let plan = acp_plan_update(&output).unwrap();
         assert_eq!(plan.entries.len(), 1);

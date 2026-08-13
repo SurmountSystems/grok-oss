@@ -229,12 +229,6 @@
         };
 
         let mut app = make_app_with_agent("sess-loop-load");
-        // Hermetic: a prior run's cancel-resume marker under GROK_HOME would
-        // auto-start a turn on SessionLoaded and block /loop drain.
-        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
-            "/tmp",
-            "sess-loop-load",
-        );
         // Opposite of both the seed and the pre-resume value, so only the load
         // response can produce the detached wording asserted below.
         app.scheduler_background_loops_seed = false;

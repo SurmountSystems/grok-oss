@@ -46,7 +46,7 @@ pub fn collect_crashed() -> io::Result<Vec<ActiveSession>> {
 /// Includes stale rows with dead PIDs until [`collect_crashed`] runs. Callers
 /// that need only live processes should filter with PID liveness themselves.
 pub fn list() -> io::Result<Vec<ActiveSession>> {
-    list_in(&crate::util::grok_home::grok_home())
+    list_in(&xai_grok_config::grok_home())
 }
 
 // -- Injectable-root variants (`_in`) for testing ---------------------------

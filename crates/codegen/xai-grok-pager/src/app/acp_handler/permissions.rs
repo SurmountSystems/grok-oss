@@ -533,8 +533,7 @@ fn session_event_settles_turn(event: &crate::scrollback::blocks::SessionEvent) -
 
 /// Live auto recap when scrollback already has a recap after the last user
 /// prompt. Replay still rebuilds history as stored.
-#[allow(dead_code)] // auto-recap gate; prefer should_drop_late_auto_recap at call sites today
-pub(crate) fn should_drop_duplicate_auto_recap(
+pub(super) fn should_drop_duplicate_auto_recap(
     auto: bool,
     is_replay: bool,
     scrollback: &crate::scrollback::state::ScrollbackState,
@@ -542,7 +541,6 @@ pub(crate) fn should_drop_duplicate_auto_recap(
     auto && !is_replay && scrollback_has_recap_since_last_user(scrollback)
 }
 
-#[allow(dead_code)] // helper for should_drop_duplicate_auto_recap
 fn scrollback_has_recap_since_last_user(
     scrollback: &crate::scrollback::state::ScrollbackState,
 ) -> bool {

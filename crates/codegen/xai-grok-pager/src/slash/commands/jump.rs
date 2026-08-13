@@ -17,8 +17,6 @@ impl SlashCommand for JumpCommand {
         true
     }
 
-    /// Minimal mode has no interactive scrollback pane to scroll — the
-    /// terminal's own scrollback covers it (same gate as `/find`).
     fn mode_support(&self) -> ModeSupport {
         ModeSupport::FullscreenOnly(Remedy::SwitchMode {
             why: "minimal scrolls with your terminal's native scrollback",
@@ -69,20 +67,5 @@ mod tests {
             result,
             CommandResult::Action(Action::JumpShowPicker)
         ));
-    }
-
-    #[test]
-    fn fullscreen_only_in_minimal() {
-        // Native terminal scrollback replaces in-app scrolling in minimal.
-        assert!(
-            !JumpCommand
-                .mode_support()
-                .supports(crate::app::ScreenMode::Minimal)
-        );
-        assert!(
-            JumpCommand
-                .mode_support()
-                .supports(crate::app::ScreenMode::Fullscreen)
-        );
     }
 }

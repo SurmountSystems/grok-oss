@@ -16,7 +16,7 @@ pub use layout::compute_paint_window;
 pub use timeline::TimelineEntry;
 pub use types::*;
 
-use layout::LayoutCache;
+use layout::{LayoutCache, StructuralScrollAnchor};
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
@@ -37,8 +37,10 @@ use crate::appearance::AppearanceConfig;
 use crate::render::Renderable;
 use crate::theme::Theme;
 
-/// Defers expensive off-screen warm-measure across a drag resize until the
-/// width settles for a full frame (see [`ScrollbackState::begin_frame`]).
+/// Lifecycle of a scroll-up warm-up that a resize postponed until the width
+/// settles. Settling is measured in FRAMES, not `prepare_layout` calls: one
+/// frame prepares layout several times, so a call-based rule would run the
+/// warm-up during the very resize that deferred it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum DeferredWarmAbove {
     #[default]
@@ -86,9 +88,15 @@ pub struct ScrollbackState {
     /// Minimal mode only: lowest entry index that *might* be uncommitted (not
     /// yet printed into native scrollback). A lower-bound perf hint so the
     /// per-frame commit pass is O(new) rather than O(history); the authoritative
-    /// state is the `committed` id-set above. Clamped to `entries.len()` on
-    /// every removal so a `shift_remove` / `remove_from` can never strand it
-    /// past the end. Unused (always 0) in the alt-screen / inline modes.
+    /// state is the `committed` id-set above. Unused (always 0) in the
+    /// alt-screen / inline modes.
+    ///
+    /// **Contract for every mutation that shifts entry positions:** the cursor
+    /// may be moved *down* freely (the scan re-skips committed entries via the
+    /// id-set; the only cost is a longer walk), but it must never end up
+    /// *above* an uncommitted entry's index. An entry below the cursor is
+    /// scanned by nobody — neither committed to native scrollback nor drawn in
+    /// the live tail — so it silently vanishes.
     commit_scan_cursor: usize,
 
     /// Minimal mode only: a bounded ring of entry IDs that were committed to
@@ -125,10 +133,6 @@ pub struct ScrollbackState {
     /// prompt at the viewport top while still enabling follow for new content.
     follow_preserve_scroll: bool,
 
-    /// Viewport-top pin across structural mutations (fold/expand/remove).
-    /// See [`layout::StructuralScrollAnchor`] and arm/consume helpers there.
-    pub(super) structural_scroll_anchor: Option<layout::StructuralScrollAnchor>,
-
     // Selection
     /// Currently selected entry index.
     selected: Option<usize>,
@@ -157,12 +161,15 @@ pub struct ScrollbackState {
     /// Layout cache for navigation (entry heights, prompt descriptors).
     layout_cache: Option<LayoutCache>,
 
+    /// One-shot viewport-top anchor armed by a structural entry mutation
+    /// (removal/insertion) just before it invalidates the layout cache, and
+    /// consumed by the next `prepare_layout` — see [`StructuralScrollAnchor`].
+    structural_scroll_anchor: Option<StructuralScrollAnchor>,
+
     // Sticky modes
     /// Display mode applied to thinking blocks when they finish running.
     /// Defaults to `Collapsed` (auto-collapse on finish).
-    /// Sticky finish mode for thinking blocks: `Expanded` or `Collapsed`.
-    /// Toggled by `expand_all_thinking()` (Ctrl+E). Live streaming thoughts use
-    /// `Truncated` until finished (or until Ctrl+E expands them immediately).
+    /// Toggled by `expand_all_thinking()` (Ctrl+E) between `Expanded` and `Collapsed`.
     thinking_display_mode: DisplayMode,
 
     // Animation
@@ -184,15 +191,13 @@ pub struct ScrollbackState {
     /// of an O(n) full rebuild.
     gaps_may_be_dirty: bool,
 
+    warm_above: DeferredWarmAbove,
+
     /// Last observed [`ffmpeg_available`](crate::inline_media_ffmpeg::ffmpeg_available).
     /// A false→true flip (user installs ffmpeg mid-session) must rebuild the
     /// layout so reserved heights match the now-full-size posters — otherwise a
     /// poster paints over the text below its (still banner-sized) reservation.
     ffmpeg_available_snapshot: bool,
-
-    /// Resize-drag deferral for `warm_measure_pages_above` (see
-    /// [`DeferredWarmAbove`] / [`Self::begin_frame`]).
-    warm_above: DeferredWarmAbove,
 
     /// Set of group-start EntryIds whose group has been manually expanded
     /// by the user (pressing l/Enter on the group header). When a group's
@@ -248,7 +253,6 @@ impl ScrollbackState {
             viewport_height: 0,
             follow_mode: true,
             follow_preserve_scroll: false,
-            structural_scroll_anchor: None,
             selected: None,
             selection_box: None,
             turns: Vec::new(),
@@ -256,17 +260,14 @@ impl ScrollbackState {
             view_mode: ViewMode::AllTurns,
             last_width: 0,
             layout_cache: None,
-            thinking_display_mode: if crate::appearance::cache::load_always_expand_thinking() {
-                DisplayMode::Expanded
-            } else {
-                DisplayMode::Collapsed
-            },
+            structural_scroll_anchor: None,
+            thinking_display_mode: DisplayMode::Collapsed,
             tick: 0,
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
             gaps_may_be_dirty: false,
-            ffmpeg_available_snapshot: false,
             warm_above: DeferredWarmAbove::Idle,
+            ffmpeg_available_snapshot: false,
             expanded_groups: HashSet::new(),
             generation: 0,
             content_generation: 0,
@@ -587,31 +588,7 @@ impl ScrollbackState {
         let mut entry = entry;
         entry.id = id;
 
-        // Fresh Edit entries at the block's Collapsed default adopt the
-        // state-owned materialize policy. An explicit non-Collapsed mode
-        // survives; an explicit Collapsed is indistinguishable from the
-        // default and may be upgraded by the effective expanded default.
-        if let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block
-            && entry.display_mode == DisplayMode::Collapsed
-        {
-            entry.display_mode = edit_default_display_mode(
-                self.appearance
-                    .scrollback
-                    .blocks
-                    .edit
-                    .effective_expanded(crate::appearance::cache::load_collapsed_edit_blocks()),
-                edit,
-            );
-        }
-
-        // Always-expand-thinking: open new thinking fully (live Truncated default
-        // would hide body until Ctrl+E). Sticky finish mode is Expanded too.
-        if matches!(entry.block, RenderBlock::Thinking(_))
-            && (self.thinking_display_mode == DisplayMode::Expanded
-                || crate::appearance::cache::load_always_expand_thinking())
-        {
-            entry.display_mode = DisplayMode::Expanded;
-        }
+        self.apply_edit_default_display_mode(&mut entry);
 
         // Track if this entry is running
         if entry.is_running {
@@ -668,9 +645,9 @@ impl ScrollbackState {
         self.push(ScrollbackEntry::new(block))
     }
 
-    /// Add a finalized block positioned immediately **before** the entry
-    /// `anchor`, instead of at the end. Falls back to [`Self::push_block`]
-    /// when `anchor` is no longer present.
+    /// Add a finalized block positioned immediately **before** the entry `anchor`,
+    /// instead of at the end. Falls back to [`Self::push_block`] when `anchor` is
+    /// no longer present.
     ///
     /// # Precondition
     ///
@@ -693,9 +670,33 @@ impl ScrollbackState {
         self.next_id += 1;
         let mut entry = ScrollbackEntry::new(block);
         entry.id = id;
+        self.apply_edit_default_display_mode(&mut entry);
+        if entry.is_running {
+            self.running.insert(id);
+        }
+        self.entries.shift_insert(index, id, entry);
 
-        // Same materialize policy as [`Self::push`] for Edit defaults and
-        // always-expand-thinking.
+        if let Some(selected) = self.selected.as_mut()
+            && *selected >= index
+        {
+            *selected += 1;
+        }
+        self.commit_scan_cursor = self.commit_scan_cursor.min(index);
+
+        if self.batch_depth == 0 {
+            self.rebuild_turns();
+        }
+        self.gaps_may_be_dirty = true;
+        self.invalidate_layout_cache();
+        self.bump_content_generation();
+        id
+    }
+
+    /// Fresh Edit entries at the block's Collapsed default adopt the
+    /// state-owned materialize policy. An explicit non-Collapsed mode
+    /// survives; an explicit Collapsed is indistinguishable from the
+    /// default and may be upgraded by the effective expanded default.
+    fn apply_edit_default_display_mode(&self, entry: &mut ScrollbackEntry) {
         if let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block
             && entry.display_mode == DisplayMode::Collapsed
         {
@@ -708,34 +709,6 @@ impl ScrollbackState {
                 edit,
             );
         }
-        if matches!(entry.block, RenderBlock::Thinking(_))
-            && (self.thinking_display_mode == DisplayMode::Expanded
-                || crate::appearance::cache::load_always_expand_thinking())
-        {
-            entry.display_mode = DisplayMode::Expanded;
-        }
-
-        if entry.is_running {
-            self.running.insert(id);
-        }
-        self.entries.shift_insert(index, id, entry);
-
-        if let Some(selected) = self.selected.as_mut()
-            && *selected >= index
-        {
-            *selected += 1;
-        }
-        // Cursor may only move down freely; after a mid-list insert it must
-        // not sit past the new uncommitted entry (see field contract).
-        self.commit_scan_cursor = self.commit_scan_cursor.min(index);
-
-        if self.batch_depth == 0 {
-            self.rebuild_turns();
-        }
-        self.gaps_may_be_dirty = true;
-        self.invalidate_layout_cache();
-        self.bump_content_generation();
-        id
     }
 
     /// Remove an entry by EntryId. No-op if the id is not present.
@@ -744,37 +717,25 @@ impl ScrollbackState {
     /// that was pushed at turn start. Returns `true` if an entry was removed.
     pub fn remove_entry(&mut self, id: EntryId) -> bool {
         // Capture the index before the removal shifts everything after it down.
-        let removed_index = self.entries.get_index_of(&id);
-        // Arm while entry indices and the layout cache still agree — the next
-        // `prepare_layout` Case 1 re-pins the pre-removal viewport top.
-        self.arm_structural_scroll_anchor();
-        if self.entries.shift_remove(&id).is_none() {
+        let Some(removed_index) = self.entries.get_index_of(&id) else {
             return false;
-        }
+        };
+        // Anchor the viewport top before the removal shifts indices, then
+        // re-point it at the survivor if this removal deleted its entry.
+        self.arm_structural_scroll_anchor();
+        self.entries.shift_remove(&id);
+        self.migrate_structural_anchor_past_removal(id, removed_index);
         self.running.remove(&id);
         self.dirty_heights.remove(&id);
         self.committed.remove(&id);
         self.expanded_groups.remove(&id);
-        if let Some(idx) = removed_index {
-            self.migrate_structural_anchor_past_removal(id, idx);
-        }
         if let Some(sel) = self.selected
             && sel >= self.entries.len()
         {
             self.selected = self.entries.len().checked_sub(1);
         }
-        // Keep the minimal-mode commit cursor pointing at the same *entry*: a
-        // mid-list `shift_remove` below the cursor shifts every later entry
-        // down one, so the cursor must move down with them. Clamping alone is
-        // NOT enough — with entries past the cursor, `min(cursor, len)` leaves
-        // the cursor unchanged and the first uncommitted entry slides below it,
-        // where no commit/tail walk ever looks again (it would silently vanish
-        // from minimal mode's scrollback AND live tail). A decremented cursor
-        // can only be *low*, which is safe: the walk re-skips already-committed
-        // entries via the authoritative `committed` id-set.
-        if let Some(idx) = removed_index
-            && idx < self.commit_scan_cursor
-        {
+        // Clamping alone is not enough here — see the cursor's contract.
+        if removed_index < self.commit_scan_cursor {
             self.commit_scan_cursor -= 1;
         }
         self.commit_scan_cursor = self.commit_scan_cursor.min(self.entries.len());
@@ -786,9 +747,8 @@ impl ScrollbackState {
     }
 
     pub fn remove_from(&mut self, index: usize) -> Vec<ScrollbackEntry> {
-        // Arm before the bulk pop so a manually parked viewport re-pins; after
-        // the tail is gone prune any anchor whose entry vanished with no
-        // later survivor.
+        // Anchor a viewport parked above the cut; pruned below if the
+        // anchored entry itself is in the removed tail.
         self.arm_structural_scroll_anchor();
         let mut removed = Vec::new();
         while self.entries.len() > index {
@@ -882,11 +842,7 @@ impl ScrollbackState {
     /// failed") that can accept a live `stop`/`stop_failure` batch arriving
     /// after the marker (viewer order). The walk skips blocks appended after
     /// the marker. A stamped batch needs the marker to carry the same prompt
-    /// id — and treats parked markers as transparent: they never
-    /// accept hooks themselves (their turn is still running), and pid-exact
-    /// attribution cannot misattach, so a late prior-turn batch may cross
-    /// the current turn's not-yet-settled boundary into its own turn's
-    /// marker. An unstamped batch is positional (tail only) and stops at ANY
+    /// id. An unstamped batch is positional (tail only) and stops at ANY
     /// terminal-event marker — without a pid there is no proof it belongs
     /// further back. A same-name repeat (e.g. the session-end `stop`) is
     /// always refused.
@@ -901,14 +857,6 @@ impl ScrollbackState {
             };
             if !b.event.is_turn_terminal() {
                 continue;
-            }
-            if !b.accepts_stop_hooks() {
-                // Parked: transparent to a stamped batch, a hard stop for
-                // a positional one.
-                if batch_prompt_id.is_some() {
-                    continue;
-                }
-                return None;
             }
             if b.stop_hooks.iter().any(|(name, _)| name == event_name) {
                 return None;
@@ -927,9 +875,8 @@ impl ScrollbackState {
     /// entry and collapse it so the right-justified summary — not the
     /// fold-out detail — is the resting state. Returns `false` unless the
     /// entry is a turn-terminal session event the batch can be attributed to
-    /// (see [`Self::latest_turn_marker_accepting`]) — never a parked
-    /// marker; re-checked here so a stray caller can't attach hooks to the
-    /// wrong entry.
+    /// (see [`Self::latest_turn_marker_accepting`]); re-checked here so a
+    /// stray caller can't attach hooks to the wrong entry.
     pub fn attach_stop_hooks_to_marker(
         &mut self,
         id: EntryId,
@@ -943,7 +890,7 @@ impl ScrollbackState {
         let RenderBlock::SessionEvent(ref mut block) = entry.block else {
             return false;
         };
-        if !block.accepts_stop_hooks() {
+        if !block.event.is_turn_terminal() {
             return false;
         }
         let attributable = match (batch_prompt_id, block.prompt_id.as_deref()) {
@@ -960,113 +907,6 @@ impl ScrollbackState {
         }
         entry.invalidate_cache();
         self.mark_structurally_dirty(id);
-        true
-    }
-
-    /// Fold a turn completion into a tail-adjacent parked "Worked for X"
-    /// marker from the same prompt turn: the parked row already IS the
-    /// turn's boundary, so it takes the final elapsed + stop hooks in place
-    /// (unparked) instead of an identical row stacking beneath it. Returns
-    /// `false` (caller pushes a fresh marker) when the tail doesn't match,
-    /// the event isn't a completion (a failure/cancel is a different
-    /// outcome), or minimal mode already committed the row — print-once: an
-    /// in-place mutation would never reach the terminal.
-    pub fn fold_completion_into_tail_parked_marker(
-        &mut self,
-        event: &super::blocks::SessionEvent,
-        stop_hooks: &[(String, Vec<super::blocks::tool::HookRunEntry>)],
-        prompt_id: Option<&str>,
-    ) -> bool {
-        use super::blocks::SessionEvent;
-        // `is_none` also keeps `None` from matching a pid-less parked marker.
-        if prompt_id.is_none() || !matches!(event, SessionEvent::TurnCompleted { .. }) {
-            return false;
-        }
-        let tail_match = self.last().and_then(|entry| match &entry.block {
-            RenderBlock::SessionEvent(b) if b.parked && b.prompt_id.as_deref() == prompt_id => {
-                Some(entry.id)
-            }
-            _ => None,
-        });
-        let Some(id) = tail_match else {
-            return false;
-        };
-        if self.is_committed(id) {
-            return false;
-        }
-        let Some(entry) = self.entries.get_mut(&id) else {
-            return false;
-        };
-        let RenderBlock::SessionEvent(ref mut b) = entry.block else {
-            return false;
-        };
-        b.event = event.clone();
-        b.parked = false;
-        b.stop_hooks = stop_hooks.to_vec();
-        // A hook-carrying marker rests Collapsed (the right-justified summary)
-        // on every sibling path — fresh pushes via `default_display_mode` and
-        // `attach_stop_hooks_to_marker` — so the fold matches.
-        if b.has_stop_hook_content() && !entry.display_mode_pinned {
-            entry.display_mode = DisplayMode::Collapsed;
-        }
-        entry.invalidate_cache();
-        self.mark_structurally_dirty(id);
-        // The marker's searchable text changed (parked elapsed → final).
-        self.bump_content_generation();
-        true
-    }
-
-    /// Update elapsed on the most recent parked "Worked for X" marker for
-    /// `prompt_id` in place. Used so mid-park duration ticks refresh one
-    /// transcript row instead of stacking a new one each second.
-    ///
-    /// Returns `false` when no matching uncommitted parked marker exists
-    /// (caller may push a first marker). Committed rows (minimal print-once)
-    /// stay frozen — mutating them would never reach the terminal.
-    pub fn refresh_parked_marker_elapsed(
-        &mut self,
-        prompt_id: &str,
-        elapsed: std::time::Duration,
-    ) -> bool {
-        use super::blocks::SessionEvent;
-        let id = (0..self.len()).rev().find_map(|i| {
-            let entry = self.get(i)?;
-            match &entry.block {
-                RenderBlock::SessionEvent(b)
-                    if b.parked && b.prompt_id.as_deref() == Some(prompt_id) =>
-                {
-                    Some(entry.id)
-                }
-                _ => None,
-            }
-        });
-        let Some(id) = id else {
-            return false;
-        };
-        if self.is_committed(id) {
-            return false;
-        }
-        let Some(entry) = self.entries.get_mut(&id) else {
-            return false;
-        };
-        let RenderBlock::SessionEvent(ref mut b) = entry.block else {
-            return false;
-        };
-        let already = matches!(
-            &b.event,
-            SessionEvent::TurnCompleted {
-                elapsed: Some(e)
-            } if *e == elapsed
-        );
-        if already {
-            return true;
-        }
-        b.event = SessionEvent::TurnCompleted {
-            elapsed: Some(elapsed),
-        };
-        entry.invalidate_cache();
-        self.mark_structurally_dirty(id);
-        self.bump_content_generation();
         true
     }
 
@@ -1550,13 +1390,7 @@ impl ScrollbackState {
         if self.entries.contains_key(&id) && !self.flashing.contains(&id) {
             self.flashing.push(id);
         }
-        // Prefer the always-expand setting over sticky Ctrl+E mode so new
-        // finishes stay open while the preference is on.
-        let thinking_mode = if crate::appearance::cache::load_always_expand_thinking() {
-            DisplayMode::Expanded
-        } else {
-            self.thinking_display_mode
-        };
+        let thinking_mode = self.thinking_display_mode;
         let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
         if let Some(entry) = self.get_by_id_mut(id) {
             entry.is_running = false;
@@ -1756,6 +1590,11 @@ impl ScrollbackState {
         // Update viewport height
         self.viewport_height = height;
 
+        // Take an armed StructuralScrollAnchor unconditionally so it never
+        // outlives the first layout pass after its mutation; only the
+        // same-width full rebuild below applies it.
+        let structural_anchor = self.structural_scroll_anchor.take();
+
         // Case 1: Cache missing or width changed - full rebuild
         if self.layout_cache.is_none() || width != self.last_width {
             // A width change re-wraps every entry, so the absolute wrapped-row
@@ -1771,21 +1610,12 @@ impl ScrollbackState {
                 } else {
                     None
                 };
-            // Same-width structural rebuild (removal/insert): consume the
-            // one-shot EntryId anchor armed by the mutation. Width changes drop
-            // it — rows_into_span is only meaningful at the armed width.
-            let width_changed = width != self.last_width;
-            let structural = if width_changed {
-                self.structural_scroll_anchor = None;
-                None
-            } else {
-                self.structural_scroll_anchor.take()
-            };
 
+            let width_changed = width != self.last_width;
             let resized = width_changed && self.last_width != 0;
             if width_changed {
                 for entry in self.entries.values_mut() {
-                    entry.invalidate_cache();
+                    entry.invalidate_width_caches();
                 }
                 self.last_width = width;
             }
@@ -1796,8 +1626,13 @@ impl ScrollbackState {
             // is rebuilt at the new width (before settle clamps / re-pins to it).
             if let Some(anchor) = scroll_anchor {
                 self.restore_scroll_anchor(anchor);
+            } else if !width_changed {
+                // Same-width rebuild forced by a structural mutation: re-pin
+                // the pre-mutation viewport-top content by stable EntryId. On
+                // a width change the anchor is dropped instead — its row
+                // offset is meaningless after a re-wrap.
+                self.apply_structural_scroll_anchor(structural_anchor, width);
             }
-            self.apply_structural_scroll_anchor(structural, width);
             self.fixup_hidden_selection();
             self.handle_follow_mode();
             // Upgrade the on-screen entries to EXACT heights (O(viewport), not
@@ -1806,9 +1641,9 @@ impl ScrollbackState {
             // Pre-measure a few pages above the bottom so the first scroll-up is
             // glitch-free (no-op unless bottom-pinned).
             //
-            // Warming off-screen pages on every event of a drag, only to throw
-            // the work away at the next width, is the single largest cost of a
-            // resize — hence the deferral until width settles for a frame.
+            // Warming three off-screen pages on every event of a drag, only
+            // to throw the work away at the next width, profiled as the single
+            // largest cost of a resize — hence the deferral.
             if resized {
                 self.warm_above = DeferredWarmAbove::Deferred;
             } else {
@@ -1822,6 +1657,10 @@ impl ScrollbackState {
 
         // Case 2: Some entries have dirty heights - incremental update
         if !self.dirty_heights.is_empty() {
+            // Viewport-top identity BEFORE heights change. Case 2 retains
+            // the cache (no insert/remove), so the plain index stays valid
+            // for the duration of this call.
+            let top_anchor = self.viewport_top_anchor_point();
             let changes = self.update_dirty_entry_heights(width);
             self.dirty_heights.clear();
 
@@ -1842,10 +1681,6 @@ impl ScrollbackState {
                     // usize, so tall sessions are not truncated).
                     let new_total = (self.total_height as i64 + total_delta as i64).max(0);
                     self.total_height = new_total as usize;
-                    // Manual viewport: growth/shrink fully above the top must
-                    // move scroll_offset with the content, or the parked marker
-                    // jolts down/up while virtual_y shifts under a sticky offset.
-                    self.compensate_scroll_for_upstream_height_deltas(&changes);
                 }
             } else if self.gaps_may_be_dirty {
                 // Heights didn't change, but structural state is dirty (e.g.,
@@ -1860,6 +1695,12 @@ impl ScrollbackState {
                 self.compute_total_height_from_cache();
             }
 
+            // Re-pin the pre-change viewport-top row: geometry above it may
+            // have shifted virtual_y while the absolute scroll_offset stayed
+            // put (an exact no-op for changes at/below the top).
+            if let Some((entry_idx, rows_into_span)) = top_anchor {
+                self.repin_viewport_top_to_entry(entry_idx, rows_into_span);
+            }
             self.handle_follow_mode();
             // A scroll/content change may have brought estimated entries into
             // view (e.g. streaming while scrolled up); measure them exactly.
@@ -2482,17 +2323,6 @@ mod tests {
         };
 
         let mut state = ScrollbackState::new();
-        // A parked marker renders mid-turn — it must never accept hooks, at
-        // the lookup and at the mutation site alike.
-        let mut parked_block =
-            crate::scrollback::blocks::SessionEventBlock::new(SessionEvent::TurnCompleted {
-                elapsed: Some(std::time::Duration::from_secs(1)),
-            });
-        parked_block.parked = true;
-        let parked = state.push_block(RenderBlock::SessionEvent(parked_block));
-        assert_eq!(state.latest_turn_marker_accepting("stop", None), None);
-        assert!(!state.attach_stop_hooks_to_marker(parked, "stop".into(), entries(), None));
-
         let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }));
@@ -2626,68 +2456,6 @@ mod tests {
         ));
         assert_eq!(
             state.latest_turn_marker_accepting("stop", Some("pid-new")),
-            None
-        );
-    }
-
-    #[test]
-    fn stamped_stop_hooks_cross_parked_marker_to_their_turns_marker() {
-        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
-        use crate::scrollback::blocks::{SessionEvent, SessionEventBlock};
-        let entries = || {
-            vec![HookRunEntry {
-                name: "h".into(),
-                status: HookRunStatus::Success {
-                    elapsed: std::time::Duration::from_millis(1),
-                },
-                output: None,
-            }]
-        };
-
-        // A prior turn's settled marker, then the current turn's parked
-        // EndLine at the tail (viewer/reattach shape).
-        let mut state = ScrollbackState::new();
-        let prior = state.push_block(RenderBlock::SessionEvent(
-            SessionEventBlock::with_stop_hooks(
-                SessionEvent::TurnCompleted {
-                    elapsed: Some(std::time::Duration::from_secs(2)),
-                },
-                Vec::new(),
-                Some("pid-a".into()),
-            ),
-        ));
-        let mut parked_block = SessionEventBlock::new(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(1)),
-        });
-        parked_block.parked = true;
-        parked_block.prompt_id = Some("pid-b".into());
-        let parked = state.push_block(RenderBlock::SessionEvent(parked_block));
-
-        // A late batch stamped for the PRIOR turn crosses the parked marker
-        // (pid-exact attribution cannot misattach) and merges into its own
-        // turn's marker; the parked marker itself is untouched.
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", Some("pid-a")),
-            Some(prior)
-        );
-        assert!(state.attach_stop_hooks_to_marker(prior, "stop".into(), entries(), Some("pid-a")));
-        match &state.get_by_id(parked).unwrap().block {
-            RenderBlock::SessionEvent(b) => {
-                assert!(b.parked);
-                assert!(b.stop_hooks.is_empty(), "the parked marker stays clean");
-            }
-            other => panic!("expected the parked marker, got {other:?}"),
-        }
-
-        // The parked turn's own pid still never accepts (its Stop hooks
-        // cannot have fired yet), and an unstamped positional batch stops at
-        // the parked tail marker as before.
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop_failure", Some("pid-b")),
-            None
-        );
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop_failure", None),
             None
         );
     }
@@ -3406,6 +3174,98 @@ mod tests {
     }
 
     #[test]
+    fn insert_block_before_positions_and_keeps_ids_unique() {
+        let mut state = ScrollbackState::new();
+        let a = state.push_block(stub_block("a"));
+        let c = state.push_block(stub_block("c"));
+
+        let b = state.insert_block_before(c, stub_block("b"));
+
+        assert_eq!(state.len(), 3);
+        assert_eq!(state.index_of_id(a), Some(0));
+        assert_eq!(state.index_of_id(b), Some(1));
+        assert_eq!(state.index_of_id(c), Some(2));
+        assert_ne!(b, a);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn insert_block_before_falls_back_to_push_when_the_anchor_is_gone() {
+        let mut state = ScrollbackState::new();
+        let a = state.push_block(stub_block("a"));
+        assert!(state.remove_entry(a));
+
+        let id = state.insert_block_before(a, stub_block("late"));
+        assert_eq!(state.len(), 1);
+        assert_eq!(state.index_of_id(id), Some(0));
+    }
+
+    #[test]
+    fn insert_block_before_keeps_the_selection_on_its_entry() {
+        let mut state = ScrollbackState::new();
+        state.push_block(stub_block("a"));
+        let anchor = state.push_block(stub_block("b"));
+        state.set_selected(Some(1)); // "b"
+
+        state.insert_block_before(anchor, stub_block("inserted"));
+
+        assert_eq!(state.index_of_id(anchor), Some(2));
+        assert_eq!(state.selected(), Some(2));
+    }
+
+    #[test]
+    fn insert_block_before_never_strands_the_entry_below_the_commit_frontier() {
+        // The shape minimal produces: a committed prefix, the cursor parked at
+        // the first uncommitted entry, and a block anchored above that entry.
+        let mut state = ScrollbackState::new();
+        let a = state.push_block(stub_block("a"));
+        let b = state.push_block(stub_block("b"));
+        let anchor = state.push(ScrollbackEntry::running(stub_block("running tool")));
+        state.mark_committed(0);
+        state.mark_committed(1);
+        state.set_commit_scan_cursor(2);
+
+        let inserted = state.insert_block_before(anchor, stub_block("inserted"));
+
+        assert_eq!(state.index_of_id(inserted), Some(2));
+        assert!(
+            state.commit_scan_cursor() <= 2,
+            "cursor must be pulled back to (at most) the insertion point, got {}",
+            state.commit_scan_cursor()
+        );
+        assert!(state.is_committed(a));
+        assert!(state.is_committed(b));
+        assert!(!state.is_committed(inserted));
+        assert!(!state.is_committed(anchor));
+    }
+
+    #[test]
+    #[should_panic(expected = "already committed")]
+    fn insert_block_before_rejects_an_already_committed_anchor() {
+        let mut state = ScrollbackState::new();
+        let anchor = state.push_block(stub_block("printed"));
+        state.mark_committed(0);
+        state.insert_block_before(anchor, stub_block("too late"));
+    }
+
+    #[test]
+    fn insert_block_before_rebuilds_turn_indices() {
+        // Turns are positional, so a mid-list insert must rebuild them.
+        let mut state = ScrollbackState::new();
+        state.push_block(RenderBlock::user_prompt("turn one"));
+        let anchor = state.push_block(stub_block("work"));
+        state.push_block(RenderBlock::user_prompt("turn two"));
+
+        state.insert_block_before(anchor, stub_block("inserted"));
+
+        // turn one = [0, 3), turn two = [3, 4)
+        assert_eq!(state.turn_containing(0), Some(0));
+        assert_eq!(state.turn_containing(1), Some(0));
+        assert_eq!(state.turn_containing(2), Some(0));
+        assert_eq!(state.turn_containing(3), Some(1));
+    }
+
+    #[test]
     fn set_pending_user_input_toggles_flag_and_reports_change() {
         let mut state = ScrollbackState::new();
         let id = state.push_block(stub_block("waiting"));
@@ -3527,125 +3387,6 @@ mod tests {
 
         assert_eq!(
             state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded
-        );
-    }
-
-    /// Contract: `[ui].always_expand_thinking` keeps streaming + finished
-    /// thinking fully expanded without pressing Ctrl+E.
-    #[test]
-    fn always_expand_thinking_opens_streaming_and_keeps_finish_expanded() {
-        crate::appearance::cache::set_always_expand_thinking(true);
-        let mut state = ScrollbackState::new();
-        let id = state.push_block(RenderBlock::thinking_streaming());
-        state.set_last_running(true);
-        state.push_chunk_to_thinking(id, "deep thoughts");
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded,
-            "streaming thinking must open fully when always_expand_thinking is on"
-        );
-
-        state.finish_running(id);
-
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded,
-            "finished thinking must stay expanded when always_expand_thinking is on"
-        );
-        crate::appearance::cache::set_always_expand_thinking(false);
-    }
-
-    #[test]
-    fn apply_always_expand_thinking_opens_existing_collapsed() {
-        crate::appearance::cache::set_always_expand_thinking(false);
-        let mut state = ScrollbackState::new();
-        let id = state.push_block(RenderBlock::thinking("earlier thoughts"));
-        state.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
-
-        state.apply_always_expand_thinking(true);
-
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded
-        );
-        // New streaming thought also opens fully via sticky Expanded.
-        let live = state.push_block(RenderBlock::thinking_streaming());
-        assert_eq!(
-            state.get_by_id(live).unwrap().display_mode,
-            DisplayMode::Expanded
-        );
-        state.apply_always_expand_thinking(false);
-    }
-
-    /// Contract: Ctrl+E / `expand_all_thinking` must expand the *current*
-    /// turn's streaming thinking immediately. Running thoughts use
-    /// `DisplayMode::Truncated` (last-N body), not `Collapsed`. Treating only
-    /// `Collapsed` as "needs expand" made the toggle choose collapse and left
-    /// the sticky mode as the only lasting effect (felt deferred to next turn).
-    #[test]
-    fn expand_all_thinking_expands_truncated_running_immediately() {
-        let mut state = ScrollbackState::new();
-        let id = state.push_block(RenderBlock::thinking_streaming());
-        state.set_last_running(true);
-        // Enough lines that Truncated and Expanded differ (truncated keeps last N).
-        let body = (0..40)
-            .map(|i| format!("reasoning line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.push_chunk_to_thinking(id, &body);
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Truncated,
-            "streaming thinking starts Truncated"
-        );
-        assert_eq!(
-            state.thinking_fold_label(),
-            "expand thinking",
-            "label must offer expand while any thinking is not fully open"
-        );
-
-        state.expand_all_thinking();
-
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded,
-            "Ctrl+E must open the live thinking block on this press, not only sticky for later"
-        );
-        assert_eq!(state.thinking_fold_label(), "collapse thinking");
-
-        // Second press collapses running thoughts back to the streaming default.
-        state.expand_all_thinking();
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Truncated,
-            "collapse of a running thought returns to Truncated, not finished Collapsed"
-        );
-    }
-
-    /// Finished collapsed + live Truncated: one Ctrl+E expands both now.
-    #[test]
-    fn expand_all_thinking_expands_collapsed_and_truncated_together() {
-        let mut state = ScrollbackState::new();
-        let done = state.push_block(RenderBlock::thinking("earlier thoughts"));
-        state.get_by_id_mut(done).unwrap().display_mode = DisplayMode::Collapsed;
-
-        let live = state.push_block(RenderBlock::thinking_streaming());
-        state.set_last_running(true);
-        state.push_chunk_to_thinking(live, "line0\nline1\nline2\nline3\nline4\nline5");
-        assert_eq!(
-            state.get_by_id(live).unwrap().display_mode,
-            DisplayMode::Truncated
-        );
-
-        state.expand_all_thinking();
-
-        assert_eq!(
-            state.get_by_id(done).unwrap().display_mode,
-            DisplayMode::Expanded
-        );
-        assert_eq!(
-            state.get_by_id(live).unwrap().display_mode,
             DisplayMode::Expanded
         );
     }

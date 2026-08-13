@@ -53,11 +53,20 @@ pub fn media_open_button_col(content_width: u16, is_video: bool) -> u16 {
     content_width.saturating_sub(label_w) / 2
 }
 
-/// Width reserved for the timestamp (+ bubble ⧉ when both on) on message blocks.
+/// Width reserved for the timestamp on message blocks.
 ///
-/// Matches `EntryRenderer::timestamp_reserved()` / `message_right_chrome_reserve`.
+/// Matches the constant in `EntryRenderer::timestamp_reserved()`.
 fn timestamp_reserved_for_block(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    crate::scrollback::wrappers::message_right_chrome_reserve(block, appearance)
+    if appearance.show_timestamps
+        && matches!(
+            block,
+            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+        )
+    {
+        10
+    } else {
+        0
+    }
 }
 
 /// A reusable scratch buffer for rendering clipped entries.
@@ -512,6 +521,8 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         } else {
             (first_visible_content_y, content_skip)
         };
+        let mut screen_y = first_visible_content_y;
+
         // Labeled group header (either fold family): one synthetic selectable
         // row so drag/copy on the header yields the aggregated label text.
         // Plain-count headers carry no label and stay non-selectable.
@@ -535,12 +546,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 joiner_to_previous: None,
             });
         }
-        for ((block_line_idx, line), screen_y) in mapped_lines
-            .iter()
-            .enumerate()
-            .skip(content_skip)
-            .zip(first_visible_content_y..)
-        {
+        for (block_line_idx, line) in mapped_lines.iter().enumerate().skip(content_skip) {
             if screen_y >= max_y {
                 break;
             }
@@ -589,6 +595,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 }
                 result.selection_model.push_line(resolved_line);
             }
+            screen_y += 1;
         }
 
         // Collect hyperlinks for the link overlay. Group headers render

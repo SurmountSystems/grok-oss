@@ -7,7 +7,6 @@ use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 ///
 /// Shared by agent-prompt send and dashboard dispatch so vim/shell muscle
 /// memory (`:wq`, `:q`, `exit`, …) stays one list.
-#[allow(dead_code)] // bare-text quit in agent prompt / dashboard
 pub(crate) fn is_exit_alias(text: &str) -> bool {
     matches!(
         text.trim().to_ascii_lowercase().as_str(),

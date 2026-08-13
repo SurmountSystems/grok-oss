@@ -29,12 +29,11 @@ use xai_grok_shell::agent::config::UiConfig;
 /// `SettingsRegistry::defaults().all()`.
 const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compact_mode",
-    "hide_header",
     "screen_mode",
     "show_timestamps",
     "show_timeline",
     "page_flip_on_send",
-    "scrub_ascii_punct",
+    "confirm_before_rewind",
     "combine_queued_prompts",
     "simple_mode",
     "vim_mode",
@@ -57,38 +56,18 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "coding_data_sharing",
     "default_selected_permission",
     "plan_mode",
-    "plan_approval_park",
     "show_tips",
     "auto_update",
     "fork_secondary_model",
     "show_thinking_blocks",
-    "always_expand_thinking",
     "prompt_suggestions",
-    "auto_run_implement",
-    "economic_mode",
-    // Token Economy ([token_economy]) + resume canceled turn.
-    "token_economy.cap_implement_effort_when_economic",
-    "token_economy.max_implement_effort",
-    "token_economy.min_implement_effort",
-    "token_economy.desired_implement_effort",
-    "token_economy.lock_implement_effort",
-    "token_economy.show_period_pacing",
-    "token_economy.local_spend_ledger",
-    "token_economy.reconcile_management_usage",
-    "resume_canceled_turn_on_restart",
-    "auto_compact_threshold_percent",
     "group_tool_verbs",
     "collapsed_edit_blocks",
     "respect_manual_folds",
-    "bubble_copy_buttons",
     "hunk_tracker_mode",
     "voice_keybind_enabled",
     "voice_capture_mode",
     "voice_stt_language",
-    "notifications.session_recap",
-    "notifications.session_recap_threshold_secs",
-    "features.session_recap",
-    "cancel_subagents_on_turn_cancel",
     // Contextual-hints group + its per-tip child toggles (exercised via the
     // group sub-sheet, not as top-level rows).
     "contextual_hints",
@@ -137,15 +116,6 @@ fn matrix_is_subset_of_registry() {
 fn make_state() -> SettingsModalState {
     // Voice rows are hidden when the process gate is off (default until startup).
     xai_grok_pager::app::set_voice_mode_enabled_for_test(true);
-    // Shell-owned live caches seed from `$GROK_HOME/config.toml` on first
-    // `load_*`. Pin product defaults so a developer machine with real config
-    // (e.g. `[ui].render_mermaid = "on"`) cannot break settings_e2e.
-    xai_grok_pager::appearance::cache::set_render_mermaid(
-        xai_grok_pager::appearance::RenderMermaid::Auto,
-    );
-    // Token Economy live cache: same hermetic pin (operator may set
-    // min_implement_effort = 2 for always-a-reviewer).
-    xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
     SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
         UiConfig::default(),
@@ -237,9 +207,6 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         ("compact_mode", Action::SetCompactMode(b)) => {
             assert_eq!(b, expected, "SetCompactMode value differs from expected")
         }
-        ("hide_header", Action::SetHideHeader(b)) => {
-            assert_eq!(b, expected, "SetHideHeader value differs from expected")
-        }
         ("show_timestamps", Action::SetTimestamps(b)) => {
             assert_eq!(b, expected, "SetTimestamps value differs from expected")
         }
@@ -249,10 +216,10 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         ("page_flip_on_send", Action::SetPageFlipOnSend(b)) => {
             assert_eq!(b, expected, "SetPageFlipOnSend value differs from expected")
         }
-        ("scrub_ascii_punct", Action::SetScrubAsciiPunct(b)) => {
+        ("confirm_before_rewind", Action::SetConfirmBeforeRewind(b)) => {
             assert_eq!(
                 b, expected,
-                "SetScrubAsciiPunct value differs from expected"
+                "SetConfirmBeforeRewind value differs from expected"
             )
         }
         ("combine_queued_prompts", Action::SetCombineQueuedPrompts(b)) => {
@@ -304,34 +271,10 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
                 "SetRespectManualFolds value differs from expected"
             )
         }
-        ("bubble_copy_buttons", Action::SetBubbleCopyButtons(b)) => {
-            assert_eq!(
-                b, expected,
-                "SetBubbleCopyButtons value differs from expected"
-            )
-        }
-        ("notifications.session_recap", Action::SetNotificationsSessionRecap(b)) => {
-            assert_eq!(
-                b, expected,
-                "SetNotificationsSessionRecap value differs from expected"
-            )
-        }
-        ("features.session_recap", Action::SetFeaturesSessionRecap(b)) => {
-            assert_eq!(
-                b, expected,
-                "SetFeaturesSessionRecap value differs from expected"
-            )
-        }
         ("show_thinking_blocks", Action::SetShowThinkingBlocks(b)) => {
             assert_eq!(
                 b, expected,
                 "SetShowThinkingBlocks value differs from expected"
-            )
-        }
-        ("always_expand_thinking", Action::SetAlwaysExpandThinking(b)) => {
-            assert_eq!(
-                b, expected,
-                "SetAlwaysExpandThinking value differs from expected"
             )
         }
         ("prompt_suggestions", Action::SetPromptSuggestions(b)) => {
@@ -339,55 +282,6 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
                 b, expected,
                 "SetPromptSuggestions value differs from expected"
             )
-        }
-        ("auto_run_implement", Action::SetAutoRunImplement(b)) => {
-            assert_eq!(
-                b, expected,
-                "SetAutoRunImplement value differs from expected"
-            )
-        }
-        ("economic_mode", Action::SetEconomicMode(b)) => {
-            assert_eq!(b, expected, "SetEconomicMode value differs from expected")
-        }
-        ("resume_canceled_turn_on_restart", Action::SetResumeCanceledTurnOnRestart(b)) => {
-            assert_eq!(
-                b, expected,
-                "SetResumeCanceledTurnOnRestart value differs from expected"
-            )
-        }
-        (
-            "token_economy.cap_implement_effort_when_economic",
-            Action::SetTokenEconomyBool { field, value },
-        ) => {
-            assert_eq!(field, "cap_implement_effort_when_economic");
-            assert_eq!(
-                value, expected,
-                "SetTokenEconomyBool(cap_implement_effort_when_economic) value differs"
-            );
-        }
-        ("token_economy.show_period_pacing", Action::SetTokenEconomyBool { field, value }) => {
-            assert_eq!(field, "show_period_pacing");
-            assert_eq!(
-                value, expected,
-                "SetTokenEconomyBool(show_period_pacing) value differs"
-            );
-        }
-        ("token_economy.local_spend_ledger", Action::SetTokenEconomyBool { field, value }) => {
-            assert_eq!(field, "local_spend_ledger");
-            assert_eq!(
-                value, expected,
-                "SetTokenEconomyBool(local_spend_ledger) value differs"
-            );
-        }
-        (
-            "token_economy.reconcile_management_usage",
-            Action::SetTokenEconomyBool { field, value },
-        ) => {
-            assert_eq!(field, "reconcile_management_usage");
-            assert_eq!(
-                value, expected,
-                "SetTokenEconomyBool(reconcile_management_usage) value differs"
-            );
         }
         ("group_tool_verbs", Action::SetGroupToolVerbs(b)) => {
             assert_eq!(b, expected, "SetGroupToolVerbs value differs from expected")
@@ -511,12 +405,12 @@ fn space_on_page_flip_on_send_dispatches_typed_setter() {
 }
 
 #[test]
-fn space_on_scrub_ascii_punct_dispatches_typed_setter() {
+fn space_on_confirm_before_rewind_dispatches_typed_setter() {
     let mut s = make_state();
-    navigate_to(&mut s, "scrub_ascii_punct");
+    navigate_to(&mut s, "confirm_before_rewind");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    let default_on = UiConfig::default().scrub_ascii_punct_enabled();
-    assert_set_bool_action(outcome, "scrub_ascii_punct", !default_on);
+    let default_on = UiConfig::default().confirm_before_rewind_enabled();
+    assert_set_bool_action(outcome, "confirm_before_rewind", !default_on);
 }
 
 #[test]
@@ -778,21 +672,6 @@ fn mouse_click_on_page_flip_on_send_indicator_toggles_in_one_click() {
 }
 
 #[test]
-fn mouse_click_on_scrub_ascii_punct_indicator_toggles_in_one_click() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "scrub_ascii_punct") as u16;
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        72,
-        row_y,
-    );
-    let default_on = UiConfig::default().scrub_ascii_punct_enabled();
-    assert_set_bool_action(outcome, "scrub_ascii_punct", !default_on);
-}
-
-#[test]
 fn mouse_click_on_combine_queued_prompts_indicator_toggles_in_one_click() {
     let mut s = make_state();
     synth_rects(&mut s);
@@ -805,6 +684,21 @@ fn mouse_click_on_combine_queued_prompts_indicator_toggles_in_one_click() {
     );
     let default_on = UiConfig::default().combine_queued_prompts.unwrap_or(false);
     assert_set_bool_action(outcome, "combine_queued_prompts", !default_on);
+}
+
+#[test]
+fn mouse_click_on_confirm_before_rewind_indicator_toggles_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "confirm_before_rewind") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    let default_on = UiConfig::default().confirm_before_rewind_enabled();
+    assert_set_bool_action(outcome, "confirm_before_rewind", !default_on);
 }
 
 /// Value-column click toggles `remember_tool_approvals` in one click.
@@ -1265,9 +1159,10 @@ fn filter_with_multiple_matches_navigates_between_settings() {
     assert_eq!(s.selected, simple_idx);
 
     // Drop the second keyword (Backspace x8 to remove "minimal" — 7
-    // chars + 1 space). "ascii" alone matches both simple_mode and
-    // scrub_ascii_punct (both declare the keyword). Asserts the filter
-    // broadens correctly when one AND keyword drops out.
+    // chars + 1 space). Now "ascii" alone still matches only
+    // simple_mode but we're back to a single-keyword filter that
+    // doesn't ambiguously broaden. Asserts the "filter still narrows
+    // correctly when one keyword drops out" property.
     for _ in 0..8 {
         let _ = handle_settings_key(&mut s, &press(KeyCode::Backspace));
     }
@@ -1280,7 +1175,7 @@ fn filter_with_multiple_matches_navigates_between_settings() {
             _ => None,
         })
         .collect();
-    assert_eq!(after_pop_keys, vec!["scrub_ascii_punct", "simple_mode"]);
+    assert_eq!(after_pop_keys, vec!["simple_mode"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,12 +1556,11 @@ fn filter_multi_word_with_one_unmatched_word_shows_zero_settings() {
 #[test]
 fn filter_and_semantics_narrow_strictly() {
     let reg = SettingsRegistry::defaults();
-    // "ascii" matches simple_mode and scrub_ascii_punct (both keywords).
+    // "ascii" matches only simple_mode (keyword).
     let single = reg.search("ascii");
-    assert_eq!(single.len(), 2);
-    let single_keys: Vec<&str> = single.iter().map(|m| m.key).collect();
-    assert_eq!(single_keys, vec!["scrub_ascii_punct", "simple_mode"]);
-    // "ascii minimal" — conjunction keeps only simple_mode.
+    assert_eq!(single.len(), 1);
+    assert_eq!(single[0].key, "simple_mode");
+    // "ascii minimal" — both simple_mode keywords. Still 1 match.
     let conjunction = reg.search("ascii minimal");
     assert_eq!(conjunction.len(), 1);
     assert_eq!(conjunction[0].key, "simple_mode");
@@ -1814,7 +1708,7 @@ fn render_with_filter_active_and_small_viewport_clamps_scroll() {
     );
     let visible = s.filtered_indices().len();
     assert!(
-        s.scroll_offset <= visible.saturating_sub(1),
+        s.scroll_offset <= visible.saturating_sub(1).max(0),
         "scroll_offset ({}) must be within filtered_indices bounds ({})",
         s.scroll_offset,
         visible
@@ -1926,28 +1820,18 @@ fn registry_kind_membership_through_pr_14() {
         bool_keys,
         vec![
             "compact_mode",
-            "hide_header",
             "group_tool_verbs",
             "collapsed_edit_blocks",
             "invert_scroll",
             "display_refresh_auto_cadence",
             "multiline_mode",
             "prompt_suggestions",
-            "auto_run_implement",
-            "economic_mode",
-            "resume_canceled_turn_on_restart",
-            "token_economy.cap_implement_effort_when_economic",
-            "token_economy.show_period_pacing",
-            "token_economy.local_spend_ledger",
-            "token_economy.reconcile_management_usage",
             "respect_manual_folds",
-            "bubble_copy_buttons",
             "show_thinking_blocks",
-            "always_expand_thinking",
             "show_timeline",
             "show_timestamps",
             "page_flip_on_send",
-            "scrub_ascii_punct",
+            "confirm_before_rewind",
             "combine_queued_prompts",
             "simple_mode",
             "vim_mode",
@@ -1956,8 +1840,6 @@ fn registry_kind_membership_through_pr_14() {
             "auto_update",
             "show_tips",
             "voice_keybind_enabled",
-            "notifications.session_recap",
-            "features.session_recap",
             // Per-tip contextual-hint children (hidden from the top-level list,
             // toggled inside the group sub-sheet) are still Bool settings.
             "contextual_hints.undo",
@@ -1979,16 +1861,13 @@ fn registry_kind_membership_through_pr_14() {
     assert_eq!(
         enum_keys,
         vec![
-            "auto_compact_threshold_percent",
             "auto_dark_theme",
             "auto_light_theme",
-            "cancel_subagents_on_turn_cancel",
             "coding_data_sharing",
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
             "permission_mode",
-            "plan_approval_park",
             "plan_mode",
             "render_mermaid",
             "screen_mode",
@@ -2019,17 +1898,8 @@ fn registry_kind_membership_through_pr_14() {
     sorted_int.sort();
     assert_eq!(
         sorted_int,
-        vec![
-            "max_thoughts_width",
-            "notifications.session_recap_threshold_secs",
-            "scroll_lines",
-            "scroll_speed",
-            "token_economy.desired_implement_effort",
-            "token_economy.lock_implement_effort",
-            "token_economy.max_implement_effort",
-            "token_economy.min_implement_effort",
-        ],
-        "Int kind membership drift (PR 8 + Token Economy)",
+        vec!["max_thoughts_width", "scroll_lines", "scroll_speed"],
+        "Int kind membership drift (PR 8)",
     );
 
     let group_keys = by_kind.remove("Group").unwrap_or_default();
@@ -2060,16 +1930,13 @@ fn enum_settings_membership_through_pr_14() {
     assert_eq!(
         enum_keys,
         vec![
-            "auto_compact_threshold_percent",
             "auto_dark_theme",
             "auto_light_theme",
-            "cancel_subagents_on_turn_cancel",
             "coding_data_sharing",
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
             "permission_mode",
-            "plan_approval_park",
             "plan_mode",
             "render_mermaid",
             "screen_mode",
@@ -2091,16 +1958,14 @@ fn defaults_round_trip_through_registry() {
     let pager = PagerLocalSnapshot::default();
 
     // `current_value_for` for these keys reads process-wide caches, not `ui`.
-    // Reset to defaults so a sibling test / real `$GROK_HOME` seed can't leak in.
+    // Reset to defaults so a sibling test on this worker thread can't leak in.
     xai_grok_pager::appearance::cache::set_keep_text_selection(
         xai_grok_pager::appearance::TextSelection::Flash,
     );
     xai_grok_pager::appearance::cache::set_show_thinking_blocks(true);
     xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
-    xai_grok_pager::appearance::cache::set_auto_run_implement(true);
     xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
     xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
-    xai_grok_pager::appearance::cache::set_scrub_ascii_punct(true);
     xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
     xai_grok_pager::appearance::cache::set_scroll_mode(
         xai_grok_pager::appearance::ScrollMode::Auto,
@@ -2108,29 +1973,24 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_invert_scroll(false);
     // 3 = the registry default shown while the profile is in charge.
     xai_grok_pager::appearance::cache::set_scroll_lines(3);
-    xai_grok_pager::appearance::cache::set_render_mermaid(
-        xai_grok_pager::appearance::RenderMermaid::Auto,
-    );
-    xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
 
     // Hard-coded per-key expectations (independent of registry).
     let expected = |key: &str| -> SettingValue {
         match key {
             "compact_mode" => SettingValue::Bool(false),
-            "hide_header" => SettingValue::Bool(false),
             "screen_mode" => SettingValue::Enum("fullscreen"),
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),
-            "scrub_ascii_punct" => SettingValue::Bool(true),
+            "confirm_before_rewind" => SettingValue::Bool(true),
             "combine_queued_prompts" => SettingValue::Bool(false),
             "simple_mode" => SettingValue::Bool(true),
             "vim_mode" => SettingValue::Bool(false),
             "remember_tool_approvals" => SettingValue::Bool(false),
             "toolset.ask_user_question.timeout_enabled" => SettingValue::Bool(true),
             "keep_text_selection" => SettingValue::Enum("flash"),
-            "theme" => SettingValue::Enum("doge"),
-            "auto_dark_theme" => SettingValue::Enum("doge"),
+            "theme" => SettingValue::Enum("groknight"),
+            "auto_dark_theme" => SettingValue::Enum("groknight"),
             "auto_light_theme" => SettingValue::Enum("grokday"),
             "render_mermaid" => SettingValue::Enum("auto"),
             "multiline_mode" => SettingValue::Bool(false),
@@ -2141,7 +2001,7 @@ fn defaults_round_trip_through_registry() {
             "scroll_mode" => SettingValue::Enum("auto"),
             "scroll_lines" => SettingValue::Int(3),
             "invert_scroll" => SettingValue::Bool(false),
-            "display_refresh_auto_cadence" => SettingValue::Bool(false),
+            "display_refresh_auto_cadence" => SettingValue::Bool(true),
             "coding_data_sharing" => SettingValue::Enum("opt-out"),
             "default_selected_permission" => SettingValue::Enum("always_allow_all_sessions"),
             "hunk_tracker_mode" => SettingValue::Enum("agent_only"),
@@ -2149,34 +2009,14 @@ fn defaults_round_trip_through_registry() {
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
             "plan_mode" => SettingValue::Enum("off"),
-            "plan_approval_park" => SettingValue::Enum("soft"),
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
             "fork_secondary_model" => SettingValue::String(String::new()),
             "show_thinking_blocks" => SettingValue::Bool(true),
-            "always_expand_thinking" => SettingValue::Bool(false),
             "prompt_suggestions" => SettingValue::Bool(true),
-            "auto_run_implement" => SettingValue::Bool(true),
-            "economic_mode" => SettingValue::Bool(true),
-            "resume_canceled_turn_on_restart" => SettingValue::Bool(true),
-            // Token Economy — TokenEconomyConfig::default() / registry meta.
-            "token_economy.cap_implement_effort_when_economic" => SettingValue::Bool(true),
-            "token_economy.show_period_pacing" => SettingValue::Bool(true),
-            "token_economy.local_spend_ledger" => SettingValue::Bool(true),
-            "token_economy.reconcile_management_usage" => SettingValue::Bool(true),
-            "token_economy.max_implement_effort" => SettingValue::Int(3),
-            "token_economy.min_implement_effort" => SettingValue::Int(1),
-            "token_economy.desired_implement_effort" => SettingValue::Int(2),
-            "token_economy.lock_implement_effort" => SettingValue::Int(0),
-            "auto_compact_threshold_percent" => SettingValue::Enum("95"),
             "group_tool_verbs" => SettingValue::Bool(true),
             "collapsed_edit_blocks" => SettingValue::Bool(false),
             "respect_manual_folds" => SettingValue::Bool(false),
-            "bubble_copy_buttons" => SettingValue::Bool(true),
-            "notifications.session_recap" => SettingValue::Bool(true),
-            "notifications.session_recap_threshold_secs" => SettingValue::Int(30),
-            "features.session_recap" => SettingValue::Bool(true),
-            "cancel_subagents_on_turn_cancel" => SettingValue::Enum("ask"),
             // Per-tip contextual-hint children default ON (inherit → true).
             "contextual_hints.undo" => SettingValue::Bool(true),
             "contextual_hints.plan_mode" => SettingValue::Bool(true),
@@ -2240,11 +2080,10 @@ fn settings_value_payload_matches_kind() {
         let outcome = handle_settings_key(&mut state, &press(KeyCode::Char(' ')));
         match outcome {
             SettingsKeyOutcome::Action(Action::SetCompactMode(_))
-            | SettingsKeyOutcome::Action(Action::SetHideHeader(_))
             | SettingsKeyOutcome::Action(Action::SetTimestamps(_))
             | SettingsKeyOutcome::Action(Action::SetTimeline(_))
             | SettingsKeyOutcome::Action(Action::SetPageFlipOnSend(_))
-            | SettingsKeyOutcome::Action(Action::SetScrubAsciiPunct(_))
+            | SettingsKeyOutcome::Action(Action::SetConfirmBeforeRewind(_))
             | SettingsKeyOutcome::Action(Action::SetCombineQueuedPrompts(_))
             | SettingsKeyOutcome::Action(Action::SetSimpleMode(_))
             | SettingsKeyOutcome::Action(Action::SetMultilineMode(_))
@@ -2255,20 +2094,12 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetAutoUpdate(_))
             | SettingsKeyOutcome::Action(Action::SetRespectManualFolds(_))
             | SettingsKeyOutcome::Action(Action::SetShowThinkingBlocks(_))
-            | SettingsKeyOutcome::Action(Action::SetAlwaysExpandThinking(_))
             | SettingsKeyOutcome::Action(Action::SetPromptSuggestions(_))
-            | SettingsKeyOutcome::Action(Action::SetAutoRunImplement(_))
-            | SettingsKeyOutcome::Action(Action::SetEconomicMode(_))
-            | SettingsKeyOutcome::Action(Action::SetResumeCanceledTurnOnRestart(_))
-            | SettingsKeyOutcome::Action(Action::SetTokenEconomyBool { .. })
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
             | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
-            | SettingsKeyOutcome::Action(Action::SetVoiceKeybindEnabled(_))
-            | SettingsKeyOutcome::Action(Action::SetBubbleCopyButtons(_))
-            | SettingsKeyOutcome::Action(Action::SetNotificationsSessionRecap(_))
-            | SettingsKeyOutcome::Action(Action::SetFeaturesSessionRecap(_)) => {}
+            | SettingsKeyOutcome::Action(Action::SetVoiceKeybindEnabled(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
                 meta.key, other
@@ -2355,10 +2186,10 @@ fn repeat_j_navigation_is_processed() {
     };
     let outcome = handle_settings_key(&mut s, &key);
     // From the initial state (compact_mode), Repeat j advances to the next
-    // Appearance row: hide_header.
+    // Appearance row: screen_mode.
     assert!(matches!(outcome, SettingsKeyOutcome::Changed));
     match &s.rows[s.selected] {
-        RowEntry::Setting { key, .. } => assert_eq!(*key, "hide_header"),
+        RowEntry::Setting { key, .. } => assert_eq!(*key, "screen_mode"),
         _ => panic!("expected setting row after Repeat j"),
     }
 }
@@ -2652,47 +2483,24 @@ fn pr4_theme_preview_and_commit_e2e() {
     let theme_meta = reg
         .find("theme")
         .expect("registry must contain `theme` for PR 4");
-    // Neighbor of the default: prefer the next choice; if default is last
-    // (e.g. doge), use the previous choice and navigate Up instead of Down.
-    let (
-        default_canonical,
-        default_idx,
-        choices_count,
-        neighbor_canonical,
-        neighbor_idx,
-        step_away,
-    ) = match &theme_meta.kind {
-        SettingKind::Enum {
-            default, choices, ..
-        } => {
-            let default_idx = choices
-                .iter()
-                .position(|c| c.canonical == *default)
-                .expect("theme default must exist in choices");
-            let (neighbor_idx, step_away) = if default_idx + 1 < choices.len() {
-                (default_idx + 1, KeyCode::Down)
-            } else if default_idx > 0 {
-                (default_idx - 1, KeyCode::Up)
-            } else {
-                panic!("test requires a neighbor choice beside the default");
-            };
-            let neighbor = choices[neighbor_idx].canonical;
-            (
-                *default,
-                default_idx,
-                choices.len(),
-                neighbor,
-                neighbor_idx,
-                step_away,
-            )
-        }
-        other => panic!("expected Enum kind for `theme`, got {other:?}"),
-    };
-    let step_back = match step_away {
-        KeyCode::Down => KeyCode::Up,
-        KeyCode::Up => KeyCode::Down,
-        other => panic!("unexpected step key {other:?}"),
-    };
+    let (default_canonical, default_idx, choices_count, next_canonical, next_idx) =
+        match &theme_meta.kind {
+            SettingKind::Enum {
+                default, choices, ..
+            } => {
+                let default_idx = choices
+                    .iter()
+                    .position(|c| c.canonical == *default)
+                    .expect("theme default must exist in choices");
+                assert!(
+                    default_idx + 1 < choices.len(),
+                    "test requires at least one choice AFTER the default; reorder?"
+                );
+                let next = choices[default_idx + 1].canonical;
+                (*default, default_idx, choices.len(), next, default_idx + 1)
+            }
+            other => panic!("expected Enum kind for `theme`, got {other:?}"),
+        };
     assert!(
         choices_count >= 3,
         "PR 4 test requires ≥3 theme choices, got {choices_count}",
@@ -2720,7 +2528,7 @@ fn pr4_theme_preview_and_commit_e2e() {
         } => {
             assert_eq!(*key, "theme");
             // choices_idx points at the registry's default (derived
-            // dynamically — no hardcoded index).
+            // dynamically — no hardcoded "1").
             assert_eq!(*choices_idx, default_idx);
             match original_value {
                 SettingValue::Enum(s) => *s,
@@ -2731,25 +2539,25 @@ fn pr4_theme_preview_and_commit_e2e() {
     };
     assert_eq!(original_canonical, default_canonical);
 
-    // Step away → preview-navigate to neighbor. The dispatched Action
+    // Down → preview-navigate to next choice. The dispatched Action
     // is now a PREVIEW (no persist).
-    let outcome = handle_settings_key(&mut s, &press(step_away));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Down));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(
-                name, neighbor_canonical,
+                name, next_canonical,
                 "preview dispatch must carry the canonical of the new focused choice",
             );
         }
-        other => panic!("expected Action::PreviewTheme(\"{neighbor_canonical}\"), got {other:?}"),
+        other => panic!("expected Action::PreviewTheme(\"{next_canonical}\"), got {other:?}"),
     }
     match s.mode() {
-        SettingsModalMode::PickingEnum { choices_idx, .. } => assert_eq!(choices_idx, neighbor_idx),
-        ref other => panic!("expected PickingEnum after step away, got {other:?}"),
+        SettingsModalMode::PickingEnum { choices_idx, .. } => assert_eq!(choices_idx, next_idx),
+        ref other => panic!("expected PickingEnum after Down, got {other:?}"),
     }
 
-    // Step back → preview-revert to default.
-    let outcome = handle_settings_key(&mut s, &press(step_back));
+    // Up → preview-revert to default.
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Up));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(name, default_canonical);
@@ -2757,8 +2565,8 @@ fn pr4_theme_preview_and_commit_e2e() {
         other => panic!("expected Action::PreviewTheme(\"{default_canonical}\"), got {other:?}"),
     }
 
-    // Step away again so commit lands on a non-default canonical.
-    let _ = handle_settings_key(&mut s, &press(step_away));
+    // Down again so commit lands on a non-default canonical.
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
 
     // Enter → COMMIT. Dispatches `Action::SetTheme(current_canonical)`
     // — a typed Action variant carrying the current preview value.
@@ -2768,13 +2576,11 @@ fn pr4_theme_preview_and_commit_e2e() {
     match outcome {
         SettingsKeyOutcome::Action(Action::SetTheme(name)) => {
             assert_eq!(
-                name, neighbor_canonical,
+                name, next_canonical,
                 "Enter must commit the current preview, not the original"
             );
         }
-        other => {
-            panic!("expected Action::SetTheme(\"{neighbor_canonical}\") commit, got {other:?}")
-        }
+        other => panic!("expected Action::SetTheme(\"{next_canonical}\") commit, got {other:?}"),
     }
     assert!(
         matches!(s.mode(), SettingsModalMode::Browse),
@@ -5501,28 +5307,23 @@ fn default_selected_permission_mouse_click_on_indicator_opens_picker_in_one_clic
     }
 }
 
-/// The `/privacy` slash command's argument parser
-/// is case-insensitive and supports a deliberately-pared-down list of
-/// unambiguous-semantic aliases. The unit-level coverage lives in the
-/// slash command module; this e2e test pins the integration contract
-/// (the parser is reachable from the slash command and produces the
-/// expected `Action`).
-///
-/// Product contract: `/privacy` only opens the coding-data settings row.
-/// Trailing args (including former opt-in/out aliases) are ignored, not
-/// applied as a preference change from the prompt.
-///
-/// `parse_privacy_arg` was removed with that product change. Integration
-/// tests cannot build `CommandExecCtx` (`screen_mode` is crate-private), so
-/// the contract is owned by unit tests in `slash::commands::privacy`
-/// (`arguments_are_ignored_not_honored`,
-/// `privacy_opens_settings_row_in_every_screen_mode`).
+/// `/privacy` takes no arguments: it opens the settings page and nothing
+/// else. The alias parser it used to carry (`opt-in`, `share`, `out`, …) is
+/// gone — a one-word prompt alias could flip a privacy preference with none
+/// of the disclosure copy in front of the user, and the ambiguous forms
+/// (`on`/`off`) risked landing on the opposite of the intent.
 #[test]
-fn privacy_slash_command_no_longer_exports_parse_privacy_arg() {
-    // Compile-time residual: this test used to import
-    // `xai_grok_pager::slash::commands::privacy::parse_privacy_arg`.
-    // Keeping a named test documents the intentional export removal.
-    // Privacy arg parsing lives only as ignored trailing text in PrivacyCommand.
+fn pr9_privacy_slash_command_takes_no_arguments() {
+    use xai_grok_pager::slash::commands::builtin_commands;
+    use xai_grok_pager::slash::registry::CommandRegistry;
+
+    let reg = CommandRegistry::new(builtin_commands());
+    let cmd = reg.get("privacy").expect("/privacy must be registered");
+    assert!(
+        !cmd.takes_args(),
+        "/privacy must not advertise an argument slot"
+    );
+    assert_eq!(cmd.usage(), "/privacy");
 }
 
 // ---------------------------------------------------------------------------
@@ -7419,22 +7220,23 @@ fn invert_scroll_renders_under_mouse_shell_owned_default_false() {
 }
 
 // ---------------------------------------------------------------------------
-// display_refresh_auto_cadence — SHELL-owned Bool (Appearance, default false)
+// display_refresh_auto_cadence — SHELL-owned Bool (Appearance, default ON)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn display_refresh_auto_cadence_space_dispatches_typed_setter() {
+    // Default is on; space toggles off.
     let mut s = make_state();
     navigate_to(&mut s, "display_refresh_auto_cadence");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "display_refresh_auto_cadence", true);
+    assert_set_bool_action(outcome, "display_refresh_auto_cadence", false);
 }
 
 #[test]
 fn display_refresh_auto_cadence_enter_dispatches_typed_setter() {
-    // Seed on so Enter toggles off.
+    // Seed off so Enter toggles on.
     let mut ui = UiConfig::default();
-    ui.display_refresh.auto_cadence_enabled = Some(true);
+    ui.display_refresh.auto_cadence_enabled = Some(false);
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
         ui,
@@ -7445,11 +7247,12 @@ fn display_refresh_auto_cadence_enter_dispatches_typed_setter() {
     );
     navigate_to(&mut s, "display_refresh_auto_cadence");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "display_refresh_auto_cadence", false);
+    assert_set_bool_action(outcome, "display_refresh_auto_cadence", true);
 }
 
 #[test]
 fn display_refresh_auto_cadence_mouse_click_two_stage_toggles() {
+    // Default is on; second body-click toggles off.
     let mut s = make_state();
     synth_rects(&mut s);
     let row_y = row_idx_for(&s, "display_refresh_auto_cadence") as u16;
@@ -7469,7 +7272,7 @@ fn display_refresh_auto_cadence_mouse_click_two_stage_toggles() {
         10,
         row_y,
     );
-    assert_set_bool_action(outcome, "display_refresh_auto_cadence", true);
+    assert_set_bool_action(outcome, "display_refresh_auto_cadence", false);
 }
 
 #[test]
@@ -7485,7 +7288,7 @@ fn display_refresh_auto_cadence_meta_appearance_shell_restart_hidden_minimal() {
     assert_eq!(meta.label, "Match display refresh rate");
     match &meta.kind {
         SettingKind::Bool { default } => {
-            assert!(!default, "display_refresh_auto_cadence must default OFF")
+            assert!(*default, "display_refresh_auto_cadence must default ON")
         }
         other => panic!("expected Bool kind for display_refresh_auto_cadence, got {other:?}"),
     }
@@ -7498,13 +7301,13 @@ fn display_refresh_auto_cadence_defaults_roundtrip_via_current_value_for() {
     let pager = PagerLocalSnapshot::default();
     let value = current_value_for("display_refresh_auto_cadence", &ui, &pager)
         .expect("current_value_for(display_refresh_auto_cadence) must resolve");
-    assert_eq!(value, SettingValue::Bool(false));
-
-    let mut ui_on = UiConfig::default();
-    ui_on.display_refresh.auto_cadence_enabled = Some(true);
-    let value = current_value_for("display_refresh_auto_cadence", &ui_on, &pager)
-        .expect("current_value_for(display_refresh_auto_cadence) must resolve");
     assert_eq!(value, SettingValue::Bool(true));
+
+    let mut ui_off = UiConfig::default();
+    ui_off.display_refresh.auto_cadence_enabled = Some(false);
+    let value = current_value_for("display_refresh_auto_cadence", &ui_off, &pager)
+        .expect("current_value_for(display_refresh_auto_cadence) must resolve");
+    assert_eq!(value, SettingValue::Bool(false));
 }
 
 // ---------------------------------------------------------------------------
@@ -7590,8 +7393,7 @@ fn show_thinking_blocks_renders_under_appearance_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for show_thinking_blocks, got {other:?}"),
     }
-    // always_expand_thinking sits between show_thinking_blocks and
-    // respect_manual_folds in Appearance order.
+    // Must sit immediately above respect_manual_folds in the registry order.
     let keys: Vec<&str> = reg
         .all()
         .iter()
@@ -7602,45 +7404,16 @@ fn show_thinking_blocks_renders_under_appearance_category_shell_owned() {
         .iter()
         .position(|k| *k == "show_thinking_blocks")
         .expect("show_thinking_blocks in Appearance");
-    let always_idx = keys
-        .iter()
-        .position(|k| *k == "always_expand_thinking")
-        .expect("always_expand_thinking in Appearance");
     let respect_idx = keys
         .iter()
         .position(|k| *k == "respect_manual_folds")
         .expect("respect_manual_folds in Appearance");
     assert_eq!(
         show_idx + 1,
-        always_idx,
-        "always_expand_thinking must follow show_thinking_blocks; \
-         Appearance order: {keys:?}"
-    );
-    assert_eq!(
-        always_idx + 1,
         respect_idx,
-        "always_expand_thinking must sit immediately above respect_manual_folds; \
+        "show_thinking_blocks must be immediately above respect_manual_folds; \
          Appearance order: {keys:?}"
     );
-    let always_meta = reg
-        .find("always_expand_thinking")
-        .expect("always_expand_thinking must be registered");
-    assert_eq!(always_meta.category, SettingCategory::Appearance);
-    assert_eq!(always_meta.owner, SettingOwner::Shell);
-    match &always_meta.kind {
-        SettingKind::Bool { default } => assert!(!*default, "always expand default must be false"),
-        other => panic!("expected Bool kind for always_expand_thinking, got {other:?}"),
-    }
-}
-
-#[test]
-fn always_expand_thinking_space_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_always_expand_thinking(false);
-    let mut s = make_state();
-    navigate_to(&mut s, "always_expand_thinking");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "always_expand_thinking", true);
-    xai_grok_pager::appearance::cache::set_always_expand_thinking(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -7656,285 +7429,6 @@ fn prompt_suggestions_space_dispatches_typed_setter() {
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     assert_set_bool_action(outcome, "prompt_suggestions", true);
     xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
-}
-
-// ---------------------------------------------------------------------------
-// auto_run_implement — SHELL-owned Bool (Agent, default true)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn auto_run_implement_space_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_auto_run_implement(false);
-    let mut s = make_state();
-    navigate_to(&mut s, "auto_run_implement");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "auto_run_implement", true);
-    xai_grok_pager::appearance::cache::set_auto_run_implement(true);
-}
-
-#[test]
-fn auto_run_implement_enter_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_auto_run_implement(false);
-    let mut s = make_state();
-    navigate_to(&mut s, "auto_run_implement");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "auto_run_implement", true);
-    xai_grok_pager::appearance::cache::set_auto_run_implement(true);
-}
-
-#[test]
-fn auto_run_implement_mouse_click_two_stage_toggles() {
-    xai_grok_pager::appearance::cache::set_auto_run_implement(false);
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "auto_run_implement") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "first click on a different row body should only select, got: {outcome:?}"
-    );
-    assert_eq!(s.selected, row_y as usize);
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert_set_bool_action(outcome, "auto_run_implement", true);
-    xai_grok_pager::appearance::cache::set_auto_run_implement(true);
-}
-
-#[test]
-fn auto_run_implement_cache_on_dispatches_off() {
-    xai_grok_pager::appearance::cache::set_auto_run_implement(true);
-    let mut s = SettingsModalState::new(
-        Arc::new(SettingsRegistry::defaults()),
-        UiConfig::default(),
-        PagerLocalSnapshot::default(),
-    );
-    navigate_to(&mut s, "auto_run_implement");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "auto_run_implement", false);
-    xai_grok_pager::appearance::cache::set_auto_run_implement(true);
-}
-
-#[test]
-fn auto_run_implement_renders_under_agent_category_shell_owned() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("auto_run_implement")
-        .expect("auto_run_implement must be registered");
-    assert_eq!(meta.category, SettingCategory::Agent);
-    assert_eq!(meta.owner, SettingOwner::Shell);
-    match &meta.kind {
-        SettingKind::Bool { default } => assert!(*default, "default must be true"),
-        other => panic!("expected Bool kind for auto_run_implement, got {other:?}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// economic_mode — SHELL-owned Bool (Agent, default true)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn economic_mode_space_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_economic_mode(false);
-    let mut s = make_state();
-    navigate_to(&mut s, "economic_mode");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "economic_mode", true);
-    xai_grok_pager::appearance::cache::set_economic_mode(true);
-}
-
-#[test]
-fn economic_mode_enter_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_economic_mode(false);
-    let mut s = make_state();
-    navigate_to(&mut s, "economic_mode");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "economic_mode", true);
-    xai_grok_pager::appearance::cache::set_economic_mode(true);
-}
-
-#[test]
-fn economic_mode_cache_on_dispatches_off() {
-    xai_grok_pager::appearance::cache::set_economic_mode(true);
-    let mut s = SettingsModalState::new(
-        Arc::new(SettingsRegistry::defaults()),
-        UiConfig::default(),
-        PagerLocalSnapshot::default(),
-    );
-    navigate_to(&mut s, "economic_mode");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "economic_mode", false);
-    xai_grok_pager::appearance::cache::set_economic_mode(true);
-}
-
-#[test]
-fn economic_mode_renders_under_agent_category_shell_owned() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("economic_mode")
-        .expect("economic_mode must be registered");
-    assert_eq!(meta.category, SettingCategory::Agent);
-    assert_eq!(meta.owner, SettingOwner::Shell);
-    match &meta.kind {
-        SettingKind::Bool { default } => assert!(*default, "default must be true"),
-        other => panic!("expected Bool kind for economic_mode, got {other:?}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// auto_compact_threshold_percent — SHELL-owned dual Enum (Session, default "95")
-// ---------------------------------------------------------------------------
-
-/// Enter on the auto-compact row opens the picker seeded at the default `95`.
-#[test]
-fn enter_on_auto_compact_threshold_row_enters_picking_enum() {
-    let mut s = make_state();
-    navigate_to(&mut s, "auto_compact_threshold_percent");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "Enter on auto_compact_threshold_percent row must transition to PickingEnum, got {outcome:?}"
-    );
-    match &s.mode() {
-        SettingsModalMode::PickingEnum {
-            key,
-            original_value,
-            ..
-        } => {
-            assert_eq!(*key, "auto_compact_threshold_percent");
-            assert_eq!(
-                original_value,
-                &SettingValue::Enum("95"),
-                "default dual threshold → original '95'"
-            );
-        }
-        other => panic!("expected PickingEnum mode, got {other:?}"),
-    }
-}
-
-/// Nav in the picker must not dispatch a preview Action (`supports_preview: false`).
-#[test]
-fn auto_compact_threshold_picker_nav_does_not_dispatch_preview() {
-    for nav_key in &[
-        KeyCode::Down,
-        KeyCode::Char('j'),
-        KeyCode::Up,
-        KeyCode::Char('k'),
-    ] {
-        let mut s = make_state();
-        navigate_to(&mut s, "auto_compact_threshold_percent");
-        let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
-
-        if matches!(nav_key, KeyCode::Up | KeyCode::Char('k')) {
-            let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
-        }
-
-        let outcome = handle_settings_key(&mut s, &press(*nav_key));
-        assert!(
-            matches!(outcome, SettingsKeyOutcome::Changed),
-            "Nav key {nav_key:?} in auto_compact_threshold picker MUST NOT dispatch a preview              Action. Got {outcome:?}",
-        );
-        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
-    }
-}
-
-/// Enter on a focused choice commits via `Action::SetAutoCompactThreshold`.
-/// Seed is `95` (index 2); one Down moves to `98` (index 3).
-#[test]
-fn auto_compact_threshold_picker_enter_dispatches_set_commit() {
-    use xai_grok_pager::settings::AutoCompactThresholdChoice;
-    let mut s = make_state();
-    navigate_to(&mut s, "auto_compact_threshold_percent");
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    // Fresh state seeds at "95"; Down moves to "98".
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    match outcome {
-        SettingsKeyOutcome::Action(Action::SetAutoCompactThreshold(choice)) => {
-            assert_eq!(
-                choice,
-                AutoCompactThresholdChoice::Percent(98),
-                "Enter must commit 98% → SetAutoCompactThreshold(Percent(98))"
-            );
-        }
-        other => panic!("expected Action::SetAutoCompactThreshold commit, got {other:?}"),
-    }
-    assert!(
-        matches!(s.mode(), SettingsModalMode::Browse),
-        "Enter commit must return to Browse"
-    );
-}
-
-/// Catalog is EXACTLY the dual percent + Grok 4.5 token presets in order.
-#[test]
-fn auto_compact_threshold_choices_use_canonical_strings() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg.find("auto_compact_threshold_percent").unwrap();
-    let canonicals: Vec<&str> = match &meta.kind {
-        SettingKind::Enum { choices, .. } => choices.iter().map(|c| c.canonical).collect(),
-        _ => panic!("auto_compact_threshold_percent must be Enum"),
-    };
-    assert_eq!(
-        canonicals,
-        vec!["85", "90", "95", "98", "200k", "475k"],
-        "auto_compact_threshold_percent catalog must stay in sync with          parse_auto_compact_threshold_canonical",
-    );
-}
-
-/// Value-column click opens the picker in one click (mouse ↔ keyboard parity).
-#[test]
-fn mouse_click_on_auto_compact_threshold_indicator_opens_picker_in_one_click() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "auto_compact_threshold_percent") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        72,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "value click must open picker in one click, got: {outcome:?}",
-    );
-    match &s.mode() {
-        SettingsModalMode::PickingEnum { key, .. } => {
-            assert_eq!(*key, "auto_compact_threshold_percent")
-        }
-        _ => panic!("value click on auto_compact_threshold_percent must enter PickingEnum"),
-    }
-}
-
-#[test]
-fn auto_compact_threshold_renders_under_session_category_shell_owned() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("auto_compact_threshold_percent")
-        .expect("auto_compact_threshold_percent must be registered");
-    assert_eq!(meta.category, SettingCategory::Session);
-    assert_eq!(meta.owner, SettingOwner::Shell);
-    match &meta.kind {
-        SettingKind::Enum { default, .. } => {
-            assert_eq!(*default, "95", "default must be 95%")
-        }
-        other => panic!("expected Enum kind for auto_compact_threshold_percent, got {other:?}"),
-    }
-    assert!(
-        !meta.restart_required,
-        "auto-compact threshold live-applies to open sessions (restart_required: false)"
-    );
 }
 
 #[test]
@@ -8185,7 +7679,7 @@ fn group_tool_verbs_renders_under_appearance_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for group_tool_verbs, got {other:?}"),
     }
-    // Appearance order: respect_manual_folds → bubble_copy_buttons → group_tool_verbs.
+    // Must sit immediately below respect_manual_folds in the registry order.
     let keys: Vec<&str> = reg
         .all()
         .iter()
@@ -8196,24 +7690,14 @@ fn group_tool_verbs_renders_under_appearance_category_shell_owned() {
         .iter()
         .position(|k| *k == "respect_manual_folds")
         .expect("respect_manual_folds in Appearance");
-    let bubble_idx = keys
-        .iter()
-        .position(|k| *k == "bubble_copy_buttons")
-        .expect("bubble_copy_buttons in Appearance");
     let group_idx = keys
         .iter()
         .position(|k| *k == "group_tool_verbs")
         .expect("group_tool_verbs in Appearance");
     assert_eq!(
         respect_idx + 1,
-        bubble_idx,
-        "bubble_copy_buttons must sit immediately below respect_manual_folds; \
-         Appearance order: {keys:?}"
-    );
-    assert_eq!(
-        bubble_idx + 1,
         group_idx,
-        "group_tool_verbs must sit immediately below bubble_copy_buttons; \
+        "group_tool_verbs must be immediately below respect_manual_folds; \
          Appearance order: {keys:?}"
     );
 }
@@ -8322,421 +7806,4 @@ fn collapsed_edit_blocks_renders_under_appearance_category_shell_owned() {
         "collapsed_edit_blocks must be immediately below group_tool_verbs; \
          Appearance order: {keys:?}"
     );
-}
-
-// ---------------------------------------------------------------------------
-// hide_header — SHARED Bool (Appearance, default false)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn hide_header_space_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "hide_header");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "hide_header", true);
-}
-
-#[test]
-fn hide_header_enter_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "hide_header");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "hide_header", true);
-}
-
-#[test]
-fn hide_header_mouse_click_two_stage_toggles() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "hide_header") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "first click on a different row body should only select, got: {outcome:?}"
-    );
-    assert_eq!(s.selected, row_y as usize);
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert_set_bool_action(outcome, "hide_header", true);
-}
-
-#[test]
-fn hide_header_renders_under_appearance_category_shared() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("hide_header")
-        .expect("hide_header must be registered");
-    assert_eq!(meta.category, SettingCategory::Appearance);
-    assert_eq!(meta.owner, SettingOwner::Shared);
-    match &meta.kind {
-        SettingKind::Bool { default } => assert!(!*default, "default must be false"),
-        other => panic!("expected Bool kind for hide_header, got {other:?}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Session recap Settings rows (operator-requested Settings gaps)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn search_recap_finds_session_recap_settings() {
-    let reg = SettingsRegistry::defaults();
-    let hits = reg.search("recap");
-    let keys: Vec<&str> = hits.iter().map(|m| m.key).collect();
-    assert!(
-        keys.contains(&"notifications.session_recap"),
-        "search(recap) must find auto recap; got {keys:?}"
-    );
-    assert!(
-        keys.contains(&"features.session_recap"),
-        "search(recap) must find master recap; got {keys:?}"
-    );
-    assert!(
-        keys.contains(&"notifications.session_recap_threshold_secs"),
-        "search(recap) must find threshold; got {keys:?}"
-    );
-}
-
-#[test]
-fn notifications_session_recap_space_dispatches_typed_setter() {
-    // Default ON → toggle to false.
-    let mut s = make_state();
-    navigate_to(&mut s, "notifications.session_recap");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "notifications.session_recap", false);
-}
-
-#[test]
-fn notifications_session_recap_enter_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "notifications.session_recap");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "notifications.session_recap", false);
-}
-
-#[test]
-fn features_session_recap_space_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "features.session_recap");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "features.session_recap", false);
-}
-
-#[test]
-fn features_session_recap_is_session_shell_restart_required() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("features.session_recap")
-        .expect("features.session_recap must be registered");
-    assert_eq!(meta.category, SettingCategory::Session);
-    assert_eq!(meta.owner, SettingOwner::Shell);
-    assert!(meta.restart_required);
-}
-
-#[test]
-fn bubble_copy_buttons_space_dispatches_typed_setter() {
-    // Default ON → toggle to false.
-    let mut s = make_state();
-    navigate_to(&mut s, "bubble_copy_buttons");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
-}
-
-#[test]
-fn bubble_copy_buttons_enter_dispatches_typed_setter() {
-    let mut s = make_state();
-    navigate_to(&mut s, "bubble_copy_buttons");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
-}
-
-#[test]
-fn bubble_copy_buttons_mouse_click_two_stage_toggles() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "bubble_copy_buttons") as u16;
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "first click on a different row body should only select, got: {outcome:?}"
-    );
-    assert_eq!(s.selected, row_y as usize);
-
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        10,
-        row_y,
-    );
-    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
-}
-
-#[test]
-fn bubble_copy_buttons_renders_under_appearance_pager_owned() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("bubble_copy_buttons")
-        .expect("bubble_copy_buttons must be registered");
-    assert_eq!(meta.category, SettingCategory::Appearance);
-    assert_eq!(meta.owner, SettingOwner::Pager);
-    match &meta.kind {
-        SettingKind::Bool { default } => assert!(*default),
-        other => panic!("expected Bool kind for bubble_copy_buttons, got {other:?}"),
-    }
-}
-
-#[test]
-fn cancel_subagents_on_turn_cancel_enter_opens_picker_and_commits() {
-    let mut s = make_state();
-    navigate_to(&mut s, "cancel_subagents_on_turn_cancel");
-    // Enter opens enum picker.
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "Enter should open enum picker, got {outcome:?}"
-    );
-    // Move to always_stop (index 1) and commit.
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    match outcome {
-        SettingsKeyOutcome::Action(Action::SetCancelSubagentsOnTurnCancel(s)) => {
-            assert_eq!(s, "always_stop");
-        }
-        other => panic!("expected SetCancelSubagentsOnTurnCancel, got {other:?}"),
-    }
-}
-
-#[test]
-fn cancel_subagents_registered_under_agent() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg
-        .find("cancel_subagents_on_turn_cancel")
-        .expect("cancel_subagents_on_turn_cancel must be registered");
-    assert_eq!(meta.category, SettingCategory::Agent);
-    assert_eq!(meta.owner, SettingOwner::Shared);
-}
-
-#[test]
-fn session_recap_threshold_int_stepper_commits() {
-    let mut s = make_state();
-    navigate_to(&mut s, "notifications.session_recap_threshold_secs");
-    // Enter opens int stepper.
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert!(
-        matches!(outcome, SettingsKeyOutcome::Changed),
-        "Enter should open int stepper, got {outcome:?}"
-    );
-    // Bump up then commit.
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Right));
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    match outcome {
-        SettingsKeyOutcome::Action(Action::SetNotificationsSessionRecapThresholdSecs(v)) => {
-            assert!(v > 30, "stepper should bump above default 30, got {v}");
-        }
-        other => panic!("expected SetNotificationsSessionRecapThresholdSecs, got {other:?}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Token Economy + resume canceled turn (Settings GUI wiring)
-// ---------------------------------------------------------------------------
-
-/// Bool keys under Token Economy + resume. Default ON → Space emits false.
-const TOKEN_ECONOMY_BOOL_KEYS: &[&str] = &[
-    "token_economy.cap_implement_effort_when_economic",
-    "token_economy.show_period_pacing",
-    "token_economy.local_spend_ledger",
-    "token_economy.reconcile_management_usage",
-    "resume_canceled_turn_on_restart",
-];
-
-/// Int keys under Token Economy: (key, default, field name).
-const TOKEN_ECONOMY_INT_KEYS: &[(&str, i64, &str)] = &[
-    (
-        "token_economy.max_implement_effort",
-        3,
-        "max_implement_effort",
-    ),
-    (
-        "token_economy.min_implement_effort",
-        1,
-        "min_implement_effort",
-    ),
-    (
-        "token_economy.desired_implement_effort",
-        2,
-        "desired_implement_effort",
-    ),
-    (
-        "token_economy.lock_implement_effort",
-        0,
-        "lock_implement_effort",
-    ),
-];
-
-#[test]
-fn token_economy_and_resume_bools_space_dispatch_typed_setters() {
-    for &key in TOKEN_ECONOMY_BOOL_KEYS {
-        let mut s = make_state();
-        navigate_to(&mut s, key);
-        let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-        // All of these default ON.
-        assert_set_bool_action(outcome, key, false);
-    }
-}
-
-#[test]
-fn token_economy_and_resume_bools_mouse_two_stage_toggles() {
-    for &key in TOKEN_ECONOMY_BOOL_KEYS {
-        let mut s = make_state();
-        synth_rects(&mut s);
-        let row_y = row_idx_for(&s, key) as u16;
-
-        let outcome = handle_settings_mouse(
-            &mut s,
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            10,
-            row_y,
-        );
-        assert!(
-            matches!(outcome, SettingsKeyOutcome::Changed),
-            "first click on `{key}` should only select, got {outcome:?}"
-        );
-        assert_eq!(s.selected, row_y as usize);
-
-        let outcome = handle_settings_mouse(
-            &mut s,
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            10,
-            row_y,
-        );
-        assert_set_bool_action(outcome, key, false);
-    }
-}
-
-#[test]
-fn token_economy_ints_stepper_commit_dispatches_typed_setters() {
-    for &(key, default, field) in TOKEN_ECONOMY_INT_KEYS {
-        let mut s = make_state();
-        navigate_to(&mut s, key);
-        let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-        assert!(
-            matches!(outcome, SettingsKeyOutcome::Changed),
-            "Enter on `{key}` must open int stepper, got {outcome:?}"
-        );
-        let default_s = default.to_string();
-        assert_eq!(
-            s.editing_buffer(),
-            Some(default_s.as_str()),
-            "buffer for `{key}` must seed from default {default}"
-        );
-
-        // Up = +1.
-        let _ = handle_settings_key(&mut s, &press(KeyCode::Up));
-        let expected = default + 1;
-        let expected_s = expected.to_string();
-        assert_eq!(s.editing_buffer(), Some(expected_s.as_str()));
-
-        let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-        match outcome {
-            SettingsKeyOutcome::Action(Action::SetTokenEconomyInt { field: f, value: v }) => {
-                assert_eq!(f, field, "field for `{key}`");
-                assert_eq!(v, expected, "value for `{key}`");
-            }
-            other => panic!("expected SetTokenEconomyInt for `{key}`, got {other:?}"),
-        }
-        assert!(matches!(s.mode(), SettingsModalMode::Browse));
-    }
-}
-
-#[test]
-fn token_economy_ints_mouse_click_opens_editor() {
-    for &(key, _default, _field) in TOKEN_ECONOMY_INT_KEYS {
-        let mut s = make_state();
-        synth_rects(&mut s);
-        let row_y = row_idx_for(&s, key) as u16;
-
-        let _ = handle_settings_mouse(
-            &mut s,
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            10,
-            row_y,
-        );
-        let outcome = handle_settings_mouse(
-            &mut s,
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            10,
-            row_y,
-        );
-        assert!(
-            matches!(outcome, SettingsKeyOutcome::Changed),
-            "second click on `{key}` must enter the editor, got {outcome:?}"
-        );
-        assert!(
-            matches!(s.mode(), SettingsModalMode::EditingValue { key: k, .. } if k == key),
-            "mode must be EditingValue({key}), got {:?}",
-            s.mode(),
-        );
-    }
-}
-
-#[test]
-fn token_economy_and_resume_meta_categories_and_bounds() {
-    let reg = SettingsRegistry::defaults();
-
-    for &key in TOKEN_ECONOMY_BOOL_KEYS {
-        let meta = reg
-            .find(key)
-            .unwrap_or_else(|| panic!("`{key}` registered"));
-        if key == "resume_canceled_turn_on_restart" {
-            assert_eq!(meta.category, SettingCategory::Session);
-        } else {
-            assert_eq!(meta.category, SettingCategory::Agent, "{key}");
-        }
-        assert_eq!(meta.owner, SettingOwner::Shell, "{key}");
-        match &meta.kind {
-            SettingKind::Bool { default } => assert!(*default, "{key} default ON"),
-            other => panic!("expected Bool for `{key}`, got {other:?}"),
-        }
-    }
-
-    for &(key, default, _field) in TOKEN_ECONOMY_INT_KEYS {
-        let meta = reg
-            .find(key)
-            .unwrap_or_else(|| panic!("`{key}` registered"));
-        assert_eq!(meta.category, SettingCategory::Agent, "{key}");
-        assert_eq!(meta.owner, SettingOwner::Shell, "{key}");
-        match &meta.kind {
-            SettingKind::Int {
-                default: d,
-                min,
-                max,
-            } => {
-                assert_eq!(*d, default, "{key} default");
-                if key == "token_economy.lock_implement_effort" {
-                    assert_eq!((*min, *max), (0, 5), "{key} bounds");
-                } else {
-                    assert_eq!((*min, *max), (1, 5), "{key} bounds");
-                }
-            }
-            other => panic!("expected Int for `{key}`, got {other:?}"),
-        }
-    }
 }

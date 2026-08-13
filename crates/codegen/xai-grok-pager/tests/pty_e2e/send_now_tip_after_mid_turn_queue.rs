@@ -2,8 +2,8 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// After queuing a follow-up mid-turn, the ephemeral tip advertises interject
-/// (`… to interject`). Opt into contextual hints explicitly so the tip cannot
+/// After queuing a follow-up mid-turn, the ephemeral tip advertises send-now
+/// (`… to send now`). Opt into contextual hints explicitly so the tip cannot
 /// be soft-disabled by remote defaults in CI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]

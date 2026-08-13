@@ -27,7 +27,6 @@ fn option(id: &str, kind: acp::PermissionOptionKind) -> acp::PermissionOption {
 fn open_permission(agent: &mut AgentView) {
     let mut perm = make_followup_permission_state();
     perm.focus = PermissionFocus::Options;
-    perm.active_idx = 0;
     perm.options = vec![
         option("allow-once", acp::PermissionOptionKind::AllowOnce),
         option("allow-always", acp::PermissionOptionKind::AllowAlways),

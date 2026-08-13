@@ -290,11 +290,8 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_timeout_kills_grandchildren_and_returns_promptly() {
-        // External `/bin/echo` exits after write so the pid line is not stuck
-        // in the shell's fully-buffered stdout pipe (builtin `echo` can lose
-        // the line when the tree is SIGKILL'd on timeout).
-        let mut request = make_request("sleep 5 & /bin/echo bgpid=$!; sleep 5");
-        request.timeout = std::time::Duration::from_millis(500);
+        let mut request = make_request("sleep 5 & echo bgpid=$!; sleep 5");
+        request.timeout = std::time::Duration::from_millis(300);
 
         let started = std::time::Instant::now();
         let result = LocalTerminalRunner.run(request).await.unwrap();

@@ -228,7 +228,7 @@ fn publish_query_matches(
             hits.push((i, sc));
         }
     }
-    hits.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
+    hits.sort_unstable_by(|a, b| b.1.cmp(&a.1));
     if hits.len() > MAX_RESULTS {
         hits.truncate(MAX_RESULTS);
     }
@@ -531,7 +531,13 @@ impl HistorySearchState {
 
     /// Set hovered index. Returns `true` if changed.
     pub fn set_hovered(&mut self, index: Option<usize>) -> bool {
-        let clamped = index.filter(|&i| i < self.snapshot.items.len());
+        let clamped = index.and_then(|i| {
+            if i < self.snapshot.items.len() {
+                Some(i)
+            } else {
+                None
+            }
+        });
         let changed = clamped != self.hovered;
         self.hovered = clamped;
         changed

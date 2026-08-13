@@ -202,23 +202,20 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 agent.cancel_editing_queued_for_lost_row();
             }
         }
-        // Resolve a queue-row soft interject that was parked while its row was
+        // Resolve a queue-row send-now that was parked while its row was
         // still an optimistic echo: the broadcast just confirmed the row, so
         // fire the interject with the authoritative version (racing it
-        // earlier would have no-opped shell-side and dropped the intent).
+        // earlier would have no-opped shell-side and dropped the send-now).
         let fire = app.agents.get_mut(&aid).and_then(|agent| {
             agent.resolve_send_now_awaiting_confirm(&raw_entries, running_prompt_id.as_deref())
         });
         if let Some((id, expected_version)) = fire {
             if let Some(agent) = app.agents.get_mut(&aid) {
-                // Soft only — mirror `dispatch_queue_interject_shared`. Never
-                // arm send-now cancel or paint a cancel-and-send user block;
-                // multi-client paint is the shell interjection broadcast.
-                agent.suppress_parked_marker_on_interject();
-                agent.show_toast("Interjection sent");
+                // Same arming contract as `dispatch_queue_interject_shared`.
+                super::super::dispatch::arm_send_now_and_paint(agent, &id, None);
             }
             crate::unified_log::info(
-                "prompt.queue_interject_confirmed",
+                "prompt.queue_send_now_confirmed",
                 Some(&session_id),
                 Some(serde_json::json!({ "prompt_id": id, "version": expected_version })),
             );

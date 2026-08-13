@@ -17,7 +17,6 @@
 //! independent of leader mode.
 
 use crate::app::actions::Action;
-use crate::slash::AppCtx;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::{ModeSupport, Remedy};
 
@@ -57,12 +56,6 @@ impl SlashCommand for DashboardCommand {
         })
     }
 
-    /// Hide from the dropdown in minimal mode (mode_support also refuses typed
-    /// `/dashboard` there). Feature-flag gating is external via the registry.
-    fn visible(&self, ctx: &AppCtx) -> bool {
-        !ctx.screen_mode.is_minimal()
-    }
-
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
         CommandResult::Action(Action::OpenDashboard)
     }
@@ -97,33 +90,6 @@ mod tests {
             cmd.run(&mut ctx, ""),
             CommandResult::Action(Action::OpenDashboard)
         ));
-    }
-
-    /// Feature-flag gating is applied externally by the registry
-    /// (`set_dashboard_visible`), not via `visible()` — `AppCtx` carries no
-    /// dashboard state. `visible()` only gates on screen mode: offered in
-    /// fullscreen/inline, hidden from the minimal-mode dropdown (where the
-    /// dashboard has nothing to open and dispatch would just refuse).
-    #[test]
-    fn visible_everywhere_except_minimal() {
-        let models = ModelState::default();
-        let cmd = DashboardCommand;
-        let ctx = |screen_mode| AppCtx {
-            models: &models,
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            billing_surface_visible: true,
-            workflows_available: true,
-            screen_mode,
-            usage_command_visible: true,
-            current_title: None,
-        };
-        assert!(cmd.visible(&ctx(crate::app::ScreenMode::Fullscreen)));
-        assert!(cmd.visible(&ctx(crate::app::ScreenMode::Inline)));
-        assert!(
-            !cmd.visible(&ctx(crate::app::ScreenMode::Minimal)),
-            "the dashboard (and its /sessions alias) must not be offered in minimal mode"
-        );
     }
 
     #[test]

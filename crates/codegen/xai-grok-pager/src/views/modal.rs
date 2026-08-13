@@ -229,11 +229,9 @@ pub enum ActiveModal {
         entries_query: Option<String>,
         /// Source filter for the modal session picker.
         source_filter: crate::views::session_picker::SourceFilter,
-        /// Session armed for delete, captured as `(source, session_id, cwd)` when
-        /// `d` is pressed so the `y` confirm always has a valid cwd even if
-        /// the picker lists change underneath it. `Some` only while the
-        /// focused row is armed; cleared on cancel / completion.
-        pending_delete: Option<(String, String, String)>,
+        /// Session armed for delete via `d` (see
+        /// [`crate::views::session_picker::PendingDelete`]).
+        pending_delete: Option<crate::views::session_picker::PendingDelete>,
     },
     /// How-to documentation list modal (wider picker style).
     DocPicker {
@@ -323,7 +321,7 @@ pub enum ActiveModal {
         /// different note's review modal.
         rewrite_nonce: u64,
     },
-    /// `/limits` spend meters popup (live countdown; not a scrollback dump).
+    /// `/limits` modal (included SuperGrok period limits + extras + console).
     Limits {
         state: Box<crate::views::limits_modal::LimitsModalState>,
     },
@@ -374,13 +372,11 @@ pub enum PaletteCommand {
     OpenAgentsModal,
 }
 /// Build the default set of palette entries with section grouping.
-///
-/// `sharing_enabled` controls whether `/share` is included. `screen_mode`
-/// exposes the draft-preserving external-editor row only in minimal mode.
 pub(crate) fn default_palette_entries(
     sharing_enabled: bool,
-    screen_mode: crate::app::ScreenMode,
+    slash: &crate::slash::SlashController,
 ) -> Vec<PaletteEntry> {
+    let screen_mode = slash.screen_mode();
     let mut entries = vec![
         // ── Session ──
         PaletteEntry {
@@ -407,6 +403,11 @@ pub(crate) fn default_palette_entries(
             label: "Back to Home".into(),
             shortcut: "/home".into(),
             command: PaletteCommand::Home,
+        },
+        PaletteEntry {
+            label: "Delete This Session".into(),
+            shortcut: "/delete".into(),
+            command: PaletteCommand::SlashCommand("/delete".into()),
         },
         PaletteEntry {
             label: "Resume Session".into(),
@@ -578,6 +579,15 @@ pub(crate) fn default_palette_entries(
         {
             return false;
         }
+        if let PaletteCommand::SlashCommand(text) = &entry.command
+            && let Some(invocation) = crate::slash::parse_invocation(text.trim())
+            && !slash
+                .registry()
+                .mode_support(invocation.token)
+                .supports(screen_mode)
+        {
+            return false;
+        }
         screen_mode.is_minimal() || !matches!(entry.command, PaletteCommand::EditPromptExternal)
     });
     entries
@@ -587,9 +597,9 @@ pub(crate) fn default_palette_entries(
 pub(crate) fn filter_palette_entries(
     query: &str,
     sharing_enabled: bool,
-    screen_mode: crate::app::ScreenMode,
+    slash: &crate::slash::SlashController,
 ) -> Vec<PaletteEntry> {
-    let all = default_palette_entries(sharing_enabled, screen_mode);
+    let all = default_palette_entries(sharing_enabled, slash);
     let query_lower = query.to_lowercase();
     if query_lower.is_empty() {
         return all;
@@ -677,10 +687,10 @@ impl ActiveModal {
             ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
             ActiveModal::MemoryBrowser { .. } => "Memory",
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
-            ActiveModal::UsageInfo { .. } => "Usage",
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
-            ActiveModal::Limits { .. } => crate::views::limits_modal::MODAL_TITLE,
+            ActiveModal::UsageInfo { .. } => "Usage",
+            ActiveModal::Limits { .. } => "Limits",
         }
     }
 }
@@ -1313,9 +1323,15 @@ mod palette_sharing_tests {
             .iter()
             .any(|e| matches!(&e.command, PaletteCommand::SlashCommand(s) if s.trim() == "/share"))
     }
+    fn slash(mode: crate::app::ScreenMode) -> crate::slash::SlashController {
+        let mut controller =
+            crate::slash::SlashController::with_builtins(std::path::PathBuf::from("."));
+        controller.set_screen_mode(mode);
+        controller
+    }
     #[test]
     fn default_palette_includes_share_when_enabled() {
-        let entries = default_palette_entries(true, crate::app::ScreenMode::Fullscreen);
+        let entries = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
         assert!(
             has_share(&entries),
             "/share should be present when sharing_enabled=true"
@@ -1323,7 +1339,7 @@ mod palette_sharing_tests {
     }
     #[test]
     fn default_palette_includes_dashboard() {
-        let entries = default_palette_entries(true, crate::app::ScreenMode::Fullscreen);
+        let entries = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
         let has_dashboard = entries.iter().any(
             |e| matches!(&e.command, PaletteCommand::SlashCommand(s) if s.trim() == "/dashboard"),
         );
@@ -1337,15 +1353,57 @@ mod palette_sharing_tests {
             "palette entry must use the 'Agent Dashboard' label"
         );
     }
+    fn slash_rows(mode: crate::app::ScreenMode) -> Vec<String> {
+        default_palette_entries(true, &slash(mode))
+            .into_iter()
+            .filter_map(|entry| match entry.command {
+                PaletteCommand::SlashCommand(text) => Some(text.trim().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+    #[test]
+    fn palette_drops_slash_rows_the_mode_cannot_run() {
+        let minimal = slash_rows(crate::app::ScreenMode::Minimal);
+        for gated in ["/theme", "/dashboard", "/tutorial"] {
+            assert!(!minimal.contains(&gated.to_string()), "{gated} in minimal");
+        }
+        assert!(
+            minimal.contains(&"/compact".to_string()),
+            "mode-agnostic rows stay: {minimal:?}"
+        );
+        let fullscreen = slash_rows(crate::app::ScreenMode::Fullscreen);
+        for offered in ["/theme", "/dashboard", "/tutorial"] {
+            assert!(
+                fullscreen.contains(&offered.to_string()),
+                "{offered} missing in fullscreen"
+            );
+        }
+    }
+    #[test]
+    fn every_palette_slash_row_resolves_to_a_registered_command() {
+        let builtins = crate::slash::commands::builtin_commands();
+        for row in slash_rows(crate::app::ScreenMode::Fullscreen) {
+            let invocation = crate::slash::parse_invocation(&row)
+                .unwrap_or_else(|| panic!("palette row {row:?} is not a slash invocation"));
+            assert!(
+                builtins
+                    .iter()
+                    .any(|command| command.name() == invocation.token
+                        || command.aliases().contains(&invocation.token)),
+                "palette row {row:?} names no builtin command"
+            );
+        }
+    }
     #[test]
     fn edit_prompt_palette_entry_is_minimal_only() {
-        let minimal = default_palette_entries(true, crate::app::ScreenMode::Minimal);
+        let minimal = default_palette_entries(true, &slash(crate::app::ScreenMode::Minimal));
         assert!(
             minimal
                 .iter()
                 .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
         );
-        let fullscreen = default_palette_entries(true, crate::app::ScreenMode::Fullscreen);
+        let fullscreen = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
         assert!(
             !fullscreen
                 .iter()
@@ -1354,7 +1412,7 @@ mod palette_sharing_tests {
     }
     #[test]
     fn default_palette_omits_share_when_disabled() {
-        let entries = default_palette_entries(false, crate::app::ScreenMode::Fullscreen);
+        let entries = default_palette_entries(false, &slash(crate::app::ScreenMode::Fullscreen));
         assert!(
             !has_share(&entries),
             "/share must not appear in palette when sharing_enabled=false"
@@ -1362,12 +1420,13 @@ mod palette_sharing_tests {
     }
     #[test]
     fn filter_palette_omits_share_when_disabled() {
-        let entries = filter_palette_entries("", false, crate::app::ScreenMode::Fullscreen);
+        let entries = filter_palette_entries("", false, &slash(crate::app::ScreenMode::Fullscreen));
         assert!(
             !has_share(&entries),
             "/share must not appear in unfiltered palette when sharing_enabled=false"
         );
-        let entries = filter_palette_entries("share", false, crate::app::ScreenMode::Fullscreen);
+        let entries =
+            filter_palette_entries("share", false, &slash(crate::app::ScreenMode::Fullscreen));
         assert!(
             !has_share(&entries),
             "/share must not appear when filtering for 'share' with sharing_enabled=false"
@@ -1375,7 +1434,8 @@ mod palette_sharing_tests {
     }
     #[test]
     fn filter_palette_includes_share_when_enabled_and_matched() {
-        let entries = filter_palette_entries("share", true, crate::app::ScreenMode::Fullscreen);
+        let entries =
+            filter_palette_entries("share", true, &slash(crate::app::ScreenMode::Fullscreen));
         assert!(
             has_share(&entries),
             "/share should match a 'share' query when sharing_enabled=true"
@@ -1384,7 +1444,7 @@ mod palette_sharing_tests {
     #[test]
     fn palette_tools_section_routes_each_tab_to_itself() {
         use crate::views::extensions_modal::ExtensionsTab;
-        let entries = default_palette_entries(true, crate::app::ScreenMode::Fullscreen);
+        let entries = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
         for (label, expected) in [
             ("Hooks", ExtensionsTab::Hooks),
             ("Plugins", ExtensionsTab::Plugins),

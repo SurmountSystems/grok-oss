@@ -6,15 +6,29 @@ use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
 #[test]
 fn format_acp_error_reads_detail_from_wrapped_data() {
     let bare = acp::Error::invalid_params().data("model does not support tools");
-    assert_eq!(format_acp_error(& bare, false), "model does not support tools");
+    assert_eq!(format_acp_error(&bare, false), "model does not support tools");
     let wrapped = acp::Error::invalid_params()
         .data(
-            serde_json::json!(
-                { "message" : "model does not support tools", "promptUsage" : {
-                "inputTokens" : 12, "outputTokens" : 0, "numTurns" : 1 } }
-            ),
+            serde_json::json!({
+            "message": "model does not support tools",
+            "promptUsage": { "inputTokens": 12, "outputTokens": 0, "numTurns": 1 }
+        }),
         );
-    assert_eq!(format_acp_error(& wrapped, false), "model does not support tools");
+    assert_eq!(format_acp_error(&wrapped, false), "model does not support tools");
+}
+#[test]
+fn format_acp_error_formats_http_500_dump() {
+    let err = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": "API error (status 500 Internal Server Error): {\"error\":\"upstream exploded\"}",
+            "http_status": 500
+        }),
+        );
+    assert_eq!(
+            format_acp_error(&err, false),
+            "Server error (500) \u{2014} Something went wrong on our side. Wait a minute and send again."
+        );
 }
 #[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
@@ -24,35 +38,38 @@ fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
     };
     let cap_body = "The service is temporarily at capacity. Please retry your request shortly.";
     let capacity = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
-        .data(format!("API error (status 429 Too Many Requests): {cap_body}"));
-    assert_eq!(format_acp_error(& capacity, false), cap_body);
-    assert_eq!(format_acp_error(& capacity, true), cap_body);
+        .data(format!(
+            "API error (status 429 Too Many Requests): {cap_body}"
+        ));
+    assert_eq!(format_acp_error(&capacity, false), cap_body);
+    assert_eq!(format_acp_error(&capacity, true), cap_body);
     let rpm_body = "You are sending requests too quickly. Please slow down, or upgrade to a Grok subscription for higher limits: https://grok.com/supergrok";
     let rpm = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
         .data(format!("API error (status 429 Too Many Requests): {rpm_body}"));
-    assert!(format_acp_error(& rpm, false).contains("grok.com/supergrok"));
-    assert_eq!(format_acp_error(& rpm, true), RATE_LIMITED_USER_MESSAGE_API_KEY);
+    assert!(format_acp_error(&rpm, false).contains("grok.com/supergrok"));
+    assert_eq!(format_acp_error(&rpm, true), RATE_LIMITED_USER_MESSAGE_API_KEY);
     let empty = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited");
-    assert_eq!(format_acp_error(& empty, false), RATE_LIMITED_USER_MESSAGE_OAUTH);
-    assert_eq!(format_acp_error(& empty, true), RATE_LIMITED_USER_MESSAGE_API_KEY);
+    assert_eq!(format_acp_error(&empty, false), RATE_LIMITED_USER_MESSAGE_OAUTH);
+    assert_eq!(format_acp_error(&empty, true), RATE_LIMITED_USER_MESSAGE_API_KEY);
     let free = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
         .data(
             "API error (status 429 Too Many Requests): \
              subscription:free-usage-exhausted: You have used all your free usage.",
         );
-    assert_eq!(format_acp_error(& free, false), FREE_USAGE_USER_MESSAGE);
-    assert_eq!(format_acp_error(& free, true), FREE_USAGE_USER_MESSAGE);
+    assert_eq!(format_acp_error(&free, false), FREE_USAGE_USER_MESSAGE);
+    assert_eq!(format_acp_error(&free, true), FREE_USAGE_USER_MESSAGE);
     let free_wrapped = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
         .data(
-            serde_json::json!(
-                { "message" :
-                "API error (status 429 Too Many Requests): \
+            serde_json::json!({
+                "message": "API error (status 429 Too Many Requests): \
                     subscription:free-usage-exhausted: You have used all your free usage.",
-                "promptUsage" : { "inputTokens" : 12, "outputTokens" : 0, "numTurns" : 1
-                } }
-            ),
+                "promptUsage": { "inputTokens": 12, "outputTokens": 0, "numTurns": 1 }
+            }),
         );
-    assert_eq!(format_acp_error(& free_wrapped, false), FREE_USAGE_USER_MESSAGE);
+    assert_eq!(
+            format_acp_error(&free_wrapped, false),
+            FREE_USAGE_USER_MESSAGE
+        );
 }
 /// Non-empty token ranges ride the wire block meta as `skillTokenRanges`
 /// byte pairs; the text itself is untouched.
@@ -82,15 +99,16 @@ fn plain_prompt_block_no_meta_when_ranges_empty() {
 fn prompt_request_meta_stamps_screen_mode() {
     let meta = prompt_request_meta("p-1", Some("minimal"));
     assert_eq!(
-        meta, serde_json::json!({ "promptId" : "p-1", "screenMode" : "minimal" })
-    );
+            meta,
+            serde_json::json!({ "promptId": "p-1", "screenMode": "minimal" })
+        );
 }
 /// Without a screen mode (`SessionFlags::default()` in tests), the key is
 /// omitted — the legacy `{"promptId": …}` wire shape stays byte-identical.
 #[test]
 fn prompt_request_meta_omits_screen_mode_when_unset() {
     let meta = prompt_request_meta("p-2", None);
-    assert_eq!(meta, serde_json::json!({ "promptId" : "p-2" }));
+    assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
 /// Text-only interjections must omit the `content` key entirely — the
 /// legacy `x.ai/interject` wire shape stays byte-identical.
@@ -99,7 +117,7 @@ fn interject_params_omit_content_when_no_blocks() {
     let sid = acp::SessionId::new("s1");
     let params = build_interject_params(&sid, "steer", "i1", None);
     let obj = params.as_object().unwrap();
-    assert!(! obj.contains_key("content"), "content key must be absent");
+    assert!(!obj.contains_key("content"), "content key must be absent");
     assert_eq!(obj["sessionId"], "s1");
     assert_eq!(obj["text"], "steer");
     assert_eq!(obj["interjectionId"], "i1");
@@ -107,11 +125,15 @@ fn interject_params_omit_content_when_no_blocks() {
 }
 #[test]
 fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
-    let payload = serde_json::json!(
-        { "sessions" : [{ "sessionId" : "conv_abc", "cwd" : "", "summary" :
-        "Compare GPU vendors", "source" : "conversation", "_meta" : { "x.ai/session" : {
-        "kind" : "chat" } } }] }
-    );
+    let payload = serde_json::json!({
+            "sessions": [{
+                "sessionId": "conv_abc",
+                "cwd": "",
+                "summary": "Compare GPU vendors",
+                "source": "conversation",
+                "_meta": { "x.ai/session": { "kind": "chat" } }
+            }]
+        });
     let entries = parse_session_picker_entries(&payload);
     assert_eq!(entries.len(), 1, "conversation must not vanish");
     assert_eq!(entries[0].id, "conv_abc");
@@ -120,32 +142,49 @@ fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
 }
 #[test]
 fn picker_keeps_old_conversation_past_cutoff() {
-    let payload = serde_json::json!(
-        { "sessions" : [{ "sessionId" : "conv_old", "cwd" : "", "summary" :
-        "Ancient chat", "source" : "conversation", "updatedAt" : "2020-01-01T00:00:00Z",
-        "_meta" : { "x.ai/session" : { "kind" : "chat" } } }] }
-    );
+    let payload = serde_json::json!({
+            "sessions": [{
+                "sessionId": "conv_old",
+                "cwd": "",
+                "summary": "Ancient chat",
+                "source": "conversation",
+                "updatedAt": "2020-01-01T00:00:00Z",
+                "_meta": { "x.ai/session": { "kind": "chat" } }
+            }]
+        });
     let entries = parse_session_picker_entries(&payload);
     assert_eq!(entries.len(), 1, "old conversation must still render");
     assert_eq!(entries[0].source, "conversation");
 }
 #[test]
 fn picker_drops_local_with_missing_updated_at() {
-    let payload = serde_json::json!(
-        { "sessions" : [{ "sessionId" : "local_no_ts", "cwd" : "/Users/me/xai", "summary"
-        : "no timestamp", "source" : "local" }] }
-    );
+    let payload = serde_json::json!({
+            "sessions": [{
+                "sessionId": "local_no_ts",
+                "cwd": "/Users/me/xai",
+                "summary": "no timestamp",
+                "source": "local"
+            }]
+        });
     let entries = parse_session_picker_entries(&payload);
-    assert!(entries.is_empty(), "local rows still require a parseable updatedAt");
+    assert!(
+            entries.is_empty(),
+            "local rows still require a parseable updatedAt"
+        );
 }
 /// Untitled grok.com chats must stay listed, rendered as "Untitled".
 #[test]
 fn picker_keeps_untitled_conversation_as_untitled() {
-    let payload = serde_json::json!(
-        { "sessions" : [{ "sessionId" : "conv_untitled", "cwd" : "", "summary" : "",
-        "source" : "conversation", "updatedAt" : "2026-07-01T00:00:00Z", "_meta" : {
-        "x.ai/session" : { "kind" : "chat" } } }] }
-    );
+    let payload = serde_json::json!({
+            "sessions": [{
+                "sessionId": "conv_untitled",
+                "cwd": "",
+                "summary": "",
+                "source": "conversation",
+                "updatedAt": "2026-07-01T00:00:00Z",
+                "_meta": { "x.ai/session": { "kind": "chat" } }
+            }]
+        });
     let entries = parse_session_picker_entries(&payload);
     assert_eq!(entries.len(), 1, "untitled conversation must not vanish");
     assert_eq!(entries[0].summary, "Untitled");
@@ -154,46 +193,52 @@ fn picker_keeps_untitled_conversation_as_untitled() {
 /// Canary: the empty-summary drop still applies to Build rows.
 #[test]
 fn picker_still_drops_build_row_with_empty_summary() {
-    let payload = serde_json::json!(
-        { "sessions" : [{ "sessionId" : "local_empty", "cwd" :
-        "/nonexistent/effects-test", "summary" : "", "source" : "local", "updatedAt" :
-        "2026-07-01T00:00:00Z" }] }
-    );
+    let payload = serde_json::json!({
+            "sessions": [{
+                "sessionId": "local_empty",
+                "cwd": "/nonexistent/effects-test",
+                "summary": "",
+                "source": "local",
+                "updatedAt": "2026-07-01T00:00:00Z"
+            }]
+        });
     let entries = parse_session_picker_entries(&payload);
     assert!(entries.is_empty(), "empty-summary Build rows stay dropped");
 }
 #[test]
 fn session_list_partial_parses_reasons() {
     let payload = |reason: &str| {
-        serde_json::json!(
-            { "sessions" : [], "_meta" : { "x.ai/partial" : { "conversations" : true,
-            "reason" : reason } } }
-        )
+        serde_json::json!({
+                "sessions": [],
+                "_meta": { "x.ai/partial": { "conversations": true, "reason": reason } }
+            })
     };
     assert_eq!(
-        parse_session_list_partial(& payload("no_oauth")),
-        Some(ConversationsPartial::NoOauth)
-    );
+            parse_session_list_partial(&payload("no_oauth")),
+            Some(ConversationsPartial::NoOauth)
+        );
     assert_eq!(
-        parse_session_list_partial(& payload("timeout")),
-        Some(ConversationsPartial::Timeout)
-    );
+            parse_session_list_partial(&payload("timeout")),
+            Some(ConversationsPartial::Timeout)
+        );
     assert_eq!(
-        parse_session_list_partial(& payload("error")), Some(ConversationsPartial::Error)
-    );
+            parse_session_list_partial(&payload("error")),
+            Some(ConversationsPartial::Error)
+        );
     assert_eq!(
-        parse_session_list_partial(& payload("something_new")),
-        Some(ConversationsPartial::Error)
-    );
+            parse_session_list_partial(&payload("something_new")),
+            Some(ConversationsPartial::Error)
+        );
 }
 #[test]
 fn session_list_partial_absent_for_healthy_or_meta_less_responses() {
-    let healthy = serde_json::json!(
-        { "sessions" : [], "_meta" : { "x.ai/partial" : { "conversations" : false } } }
-    );
-    assert_eq!(parse_session_list_partial(& healthy), None);
-    let legacy = serde_json::json!({ "sessions" : [] });
-    assert_eq!(parse_session_list_partial(& legacy), None);
+    let healthy = serde_json::json!({
+            "sessions": [],
+            "_meta": { "x.ai/partial": { "conversations": false } }
+        });
+    assert_eq!(parse_session_list_partial(&healthy), None);
+    let legacy = serde_json::json!({ "sessions": [] });
+    assert_eq!(parse_session_list_partial(&legacy), None);
 }
 /// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome
 /// lives at `result.outcome`. Probing the top level (the pre-fix code)
@@ -224,64 +269,76 @@ fn parse_kill_outcome_round_trips_agent_serialization() {
             }),
         )
         .unwrap();
-    assert_eq!(parse_kill_outcome(& wire), Some(KillOutcome::NotFound));
+    assert_eq!(parse_kill_outcome(&wire), Some(KillOutcome::NotFound));
 }
 /// Error envelopes and malformed payloads yield `None` (clear pending
 /// state, keep the row).
 #[test]
 fn parse_kill_outcome_none_for_error_or_malformed() {
     assert_eq!(
-        parse_kill_outcome(r#"{"result":null,"error":"session not found"}"#), None
-    );
+            parse_kill_outcome(r#"{"result":null,"error":"session not found"}"#),
+            None
+        );
     assert_eq!(parse_kill_outcome("not json"), None);
     assert_eq!(parse_kill_outcome("{}"), None);
     assert_eq!(
-        parse_kill_outcome(r#"{"result":{"taskId":"t-1","outcome":"exploded"}}"#), None
-    );
+            parse_kill_outcome(r#"{"result":{"taskId":"t-1","outcome":"exploded"}}"#),
+            None
+        );
 }
 /// Typed `outcome`: `Cancelled` → `StoppedLive`; `AlreadyFinished` /
 /// `NotFound` → `NothingLive` (carrying the real status when known).
 #[test]
 fn parse_subagent_kill_outcome_reads_typed_outcome() {
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":true,"outcome":{"kind":"cancelled"}}}"#),
-        SubagentKillOutcome::StoppedLive)
-    );
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"already_finished","status":"completed"}}}"#),
-        SubagentKillOutcome::NothingLive { status : Some(s) } if s == "completed")
-    );
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"not_found"}}}"#),
-        SubagentKillOutcome::NothingLive { status : None })
-    );
+    assert!(matches!(
+            parse_subagent_kill_outcome(
+                r#"{"result":{"subagentId":"sa-1","cancelled":true,"outcome":{"kind":"cancelled"}}}"#
+            ),
+            SubagentKillOutcome::StoppedLive
+        ));
+    assert!(matches!(
+            parse_subagent_kill_outcome(
+                r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"already_finished","status":"completed"}}}"#
+            ),
+            SubagentKillOutcome::NothingLive { status: Some(s) } if s == "completed"
+        ));
+    assert!(matches!(
+            parse_subagent_kill_outcome(
+                r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"not_found"}}}"#
+            ),
+            SubagentKillOutcome::NothingLive { status: None }
+        ));
 }
 /// An older shell sends no `outcome`; the parser falls back to the legacy
 /// `cancelled` bool (true → `StoppedLive`, false → `NothingLive`).
 #[test]
 fn parse_subagent_kill_outcome_falls_back_to_legacy_bool() {
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":true}}"#),
-        SubagentKillOutcome::StoppedLive)
-    );
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":false}}"#),
-        SubagentKillOutcome::NothingLive { status : None })
-    );
+    assert!(matches!(
+            parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":true}}"#),
+            SubagentKillOutcome::StoppedLive
+        ));
+    assert!(matches!(
+            parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":false}}"#),
+            SubagentKillOutcome::NothingLive { status: None }
+        ));
 }
 /// An unknown future `kind` deserializes to `Unknown` (via `#[serde(other)]`)
 /// and falls back to the always-present `cancelled` bool — not `RpcFailed`,
 /// which would leave the row stuck.
 #[test]
 fn parse_subagent_kill_outcome_unknown_kind_falls_back_to_legacy_bool() {
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":true,"outcome":{"kind":"some_future_kind"}}}"#),
-        SubagentKillOutcome::StoppedLive)
-    );
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"some_future_kind"}}}"#),
-        SubagentKillOutcome::NothingLive { status : None })
-    );
+    assert!(matches!(
+            parse_subagent_kill_outcome(
+                r#"{"result":{"subagentId":"sa-1","cancelled":true,"outcome":{"kind":"some_future_kind"}}}"#
+            ),
+            SubagentKillOutcome::StoppedLive
+        ));
+    assert!(matches!(
+            parse_subagent_kill_outcome(
+                r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"some_future_kind"}}}"#
+            ),
+            SubagentKillOutcome::NothingLive { status: None }
+        ));
 }
 /// Round-trip through the agent's own serializer guards the two sides
 /// against drifting apart.
@@ -300,36 +357,40 @@ fn parse_subagent_kill_outcome_round_trips_agent_serialization() {
             }),
         )
         .unwrap();
-    assert!(
-        matches!(parse_subagent_kill_outcome(& wire), SubagentKillOutcome::NothingLive {
-        status : Some(s) } if s == "failed")
-    );
+    assert!(matches!(
+            parse_subagent_kill_outcome(&wire),
+            SubagentKillOutcome::NothingLive { status: Some(s) } if s == "failed"
+        ));
 }
 /// A top-level payload (no `result` envelope), error envelopes, and
 /// malformed payloads are a failed RPC (`RpcFailed`) — the caller must NOT
 /// finalize a possibly-live row.
 #[test]
 fn parse_subagent_kill_outcome_rpc_failed_for_error_or_malformed() {
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"cancelled":true}"#),
-        SubagentKillOutcome::RpcFailed)
-    );
-    assert!(
-        matches!(parse_subagent_kill_outcome(r#"{"result":null,"error":"session not found"}"#),
-        SubagentKillOutcome::RpcFailed)
-    );
-    assert!(
-        matches!(parse_subagent_kill_outcome("not json"), SubagentKillOutcome::RpcFailed)
-    );
-    assert!(matches!(parse_subagent_kill_outcome("{}"), SubagentKillOutcome::RpcFailed));
+    assert!(matches!(
+            parse_subagent_kill_outcome(r#"{"cancelled":true}"#),
+            SubagentKillOutcome::RpcFailed
+        ));
+    assert!(matches!(
+            parse_subagent_kill_outcome(r#"{"result":null,"error":"session not found"}"#),
+            SubagentKillOutcome::RpcFailed
+        ));
+    assert!(matches!(
+            parse_subagent_kill_outcome("not json"),
+            SubagentKillOutcome::RpcFailed
+        ));
+    assert!(matches!(
+            parse_subagent_kill_outcome("{}"),
+            SubagentKillOutcome::RpcFailed
+        ));
 }
 /// Image-bearing interjections carry the blocks as a `content` array.
 #[test]
 fn interject_params_carry_content_when_blocks_present() {
     let sid = acp::SessionId::new("s1");
-    let blocks = vec![
-        acp::ContentBlock::Text(acp::TextContent::new("look at [Image #1]",))
-    ];
+    let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "look at [Image #1]",
+        ))];
     let params = build_interject_params(
         &sid,
         "look at [Image #1]",
@@ -338,7 +399,7 @@ fn interject_params_carry_content_when_blocks_present() {
     );
     let content = params["content"].as_array().expect("content array");
     assert_eq!(content.len(), 1);
-    assert_eq!(content[0] ["text"], "look at [Image #1]");
+    assert_eq!(content[0]["text"], "look at [Image #1]");
 }
 /// A billing config with every field unset, for use as a base in
 /// `credit_balance_from_config` tests via struct-update syntax.
@@ -352,10 +413,10 @@ fn empty_billing_config() -> BillingConfig {
         on_demand_used: None,
         prepaid_balance: None,
         is_unified_billing_user: None,
-        product_usage: vec![],
         billing_period_start: None,
         billing_period_end: None,
         history: vec![],
+        product_usage: vec![],
     }
 }
 #[test]
@@ -366,65 +427,22 @@ fn credit_balance_prefers_credit_usage_percent_over_limit_used() {
         used: Some(Cent { val: 9_000 }),
         ..empty_billing_config()
     };
-    let bal = credit_balance_from_config(c);
-    assert_eq!(bal.usage_pct, 42.0);
-    assert!(bal.included_usage_known);
+    assert_eq!(credit_balance_from_config(c).usage_pct, 42.0);
 }
-
-/// Named contract: empty billing config is honest absence, not a silent 0%.
-#[test]
-fn credit_balance_empty_config_marks_included_unknown() {
-    let bal = credit_balance_from_config(empty_billing_config());
-    assert!(
-        !bal.included_usage_known,
-        "no percent and no limit/used pair must not claim a known 0%"
-    );
-    assert_eq!(bal.usage_pct, 0.0, "placeholder only when unknown");
-}
-
-/// Named contract: explicit 0% on the wire is a true zero (known reading).
-#[test]
-fn credit_balance_explicit_zero_percent_is_known() {
-    let c = BillingConfig {
-        credit_usage_percent: Some(0.0),
-        ..empty_billing_config()
-    };
-    let bal = credit_balance_from_config(c);
-    assert!(bal.included_usage_known);
-    assert_eq!(bal.usage_pct, 0.0);
-}
-#[test]
-fn credit_balance_forwards_grok_build_usage_pct_from_product_usage() {
-    // Named contract: FetchBilling → CreditBalance carries PRODUCT_GROK_BUILD %
-    // so in-TUI /limits --json can show grokBuildUsagePct after cache warm.
-    let c = BillingConfig {
-        credit_usage_percent: Some(65.0),
-        product_usage: vec![xai_grok_shell::extensions::billing::ProductUsageEntry {
-            product: Some(
-                xai_grok_shell::extensions::billing::PRODUCT_GROK_BUILD.into(),
-            ),
-            usage_percent: Some(61.2),
-        }],
-        ..empty_billing_config()
-    };
-    assert_eq!(credit_balance_from_config(c).grok_build_usage_pct, Some(61.2));
-    assert_eq!(
-        credit_balance_from_config(empty_billing_config()).grok_build_usage_pct,
-        None,
-        "no productUsage → no invent"
-    );
-}
-
 #[test]
 fn credit_balance_forwards_is_unified_billing_user() {
     let c = BillingConfig {
         is_unified_billing_user: Some(true),
         ..empty_billing_config()
     };
-    assert_eq!(credit_balance_from_config(c).is_unified_billing_user, Some(true));
     assert_eq!(
-        credit_balance_from_config(empty_billing_config()).is_unified_billing_user, None
-    );
+            credit_balance_from_config(c).is_unified_billing_user,
+            Some(true)
+        );
+    assert_eq!(
+            credit_balance_from_config(empty_billing_config()).is_unified_billing_user,
+            None
+        );
 }
 #[test]
 fn credit_balance_falls_back_to_limit_used_when_percent_absent() {
@@ -457,9 +475,9 @@ fn credit_balance_prefers_current_period_end_over_billing_period_end() {
         ..empty_billing_config()
     };
     assert_eq!(
-        credit_balance_from_config(c).period_end_display.as_deref(),
-        Some(expected_period_end_display(end).as_str())
-    );
+            credit_balance_from_config(c).period_end_display.as_deref(),
+            Some(expected_period_end_display(end).as_str())
+        );
 }
 #[test]
 fn credit_balance_period_end_uses_local_timezone() {
@@ -474,14 +492,21 @@ fn credit_balance_period_end_uses_local_timezone() {
         ..empty_billing_config()
     };
     assert_eq!(
-        credit_balance_from_config(winter_cfg).period_end_display.as_deref(),
-        Some(expected_period_end_display(winter).as_str())
-    );
+            credit_balance_from_config(winter_cfg)
+                .period_end_display
+                .as_deref(),
+            Some(expected_period_end_display(winter).as_str())
+        );
     assert_eq!(
-        credit_balance_from_config(summer_cfg).period_end_display.as_deref(),
-        Some(expected_period_end_display(summer).as_str())
-    );
-    assert_ne!(expected_period_end_display(winter), expected_period_end_display(summer));
+            credit_balance_from_config(summer_cfg)
+                .period_end_display
+                .as_deref(),
+            Some(expected_period_end_display(summer).as_str())
+        );
+    assert_ne!(
+            expected_period_end_display(winter),
+            expected_period_end_display(summer)
+        );
 }
 #[test]
 fn credit_balance_falls_back_to_billing_period_end() {
@@ -491,9 +516,9 @@ fn credit_balance_falls_back_to_billing_period_end() {
         ..empty_billing_config()
     };
     assert_eq!(
-        credit_balance_from_config(c).period_end_display.as_deref(),
-        Some(expected_period_end_display(end).as_str())
-    );
+            credit_balance_from_config(c).period_end_display.as_deref(),
+            Some(expected_period_end_display(end).as_str())
+        );
 }
 #[test]
 fn credit_balance_period_end_falls_back_when_current_period_has_no_end() {
@@ -508,15 +533,17 @@ fn credit_balance_period_end_falls_back_when_current_period_has_no_end() {
         ..empty_billing_config()
     };
     assert_eq!(
-        credit_balance_from_config(c).period_end_display.as_deref(),
-        Some(expected_period_end_display(end).as_str())
-    );
+            credit_balance_from_config(c).period_end_display.as_deref(),
+            Some(expected_period_end_display(end).as_str())
+        );
 }
 #[test]
 fn credit_balance_period_end_none_when_unavailable() {
     assert!(
-        credit_balance_from_config(empty_billing_config()).period_end_display.is_none()
-    );
+            credit_balance_from_config(empty_billing_config())
+                .period_end_display
+                .is_none()
+        );
 }
 #[test]
 fn credit_balance_clamps_new_percent_above_100() {
@@ -542,7 +569,7 @@ fn credit_balance_effective_equals_usage_when_no_on_demand() {
         ..empty_billing_config()
     };
     let bal = credit_balance_from_config(c);
-    assert!(! bal.pay_as_you_go);
+    assert!(!bal.pay_as_you_go);
     assert_eq!(bal.on_demand_cap_cents, None);
     assert_eq!(bal.effective_usage_pct, 40.0);
 }
@@ -563,10 +590,9 @@ fn credit_balance_effective_uses_on_demand_ratio_when_included_exhausted() {
 }
 #[test]
 fn parse_auto_topup_present_rule_resolves() {
-    let v = serde_json::json!(
-        { "rule" : { "enabled" : true, "topupAmount" : { "val" : 2000 },
-        "maxAmountPerMonth" : { "val" : 10000 } } }
-    );
+    let v = serde_json::json!({
+            "rule": {"enabled": true, "topupAmount": {"val": 2000}, "maxAmountPerMonth": {"val": 10000}}
+        });
     match parse_auto_topup_response(&v) {
         crate::views::credit_bar::AutoTopupFetch::Resolved(at) => {
             assert!(at.enabled);
@@ -578,10 +604,10 @@ fn parse_auto_topup_present_rule_resolves() {
 }
 #[test]
 fn parse_auto_topup_empty_body_resolves_to_disabled() {
-    for v in [serde_json::json!({}), serde_json::json!({ "rule" : null })] {
+    for v in [serde_json::json!({}), serde_json::json!({ "rule": null })] {
         match parse_auto_topup_response(&v) {
             crate::views::credit_bar::AutoTopupFetch::Resolved(at) => {
-                assert!(! at.enabled);
+                assert!(!at.enabled);
             }
             other => panic!("expected Resolved(disabled), got {other:?}"),
         }
@@ -589,10 +615,10 @@ fn parse_auto_topup_empty_body_resolves_to_disabled() {
 }
 #[test]
 fn parse_auto_topup_rule_without_enabled_is_disabled() {
-    let v = serde_json::json!({ "rule" : { "topupAmount" : { "val" : 500 } } });
+    let v = serde_json::json!({ "rule": {"topupAmount": {"val": 500}} });
     match parse_auto_topup_response(&v) {
         crate::views::credit_bar::AutoTopupFetch::Resolved(at) => {
-            assert!(! at.enabled);
+            assert!(!at.enabled);
             assert_eq!(at.topup_amount_cents, Some(500));
         }
         other => panic!("expected Resolved(disabled), got {other:?}"),
@@ -636,11 +662,11 @@ fn credit_balance_effective_blends_budget_for_legacy_shape_under_100() {
 #[test]
 fn parse_worktree_restore_payload_full() {
     use xai_grok_workspace::session::git::RestoreDegree;
-    let value = serde_json::json!(
-        { "codeRestored" : true, "restoreSummary" :
-        "checked out abc12345, staged: true, unstaged: false, untracked: 3",
-        "restoreDegree" : "full", }
-    );
+    let value = serde_json::json!({
+            "codeRestored": true,
+            "restoreSummary": "checked out abc12345, staged: true, unstaged: false, untracked: 3",
+            "restoreDegree": "full",
+        });
     let (restored, summary, degree) = parse_worktree_restore_payload(&value);
     assert!(restored);
     assert_eq!(degree, Some(RestoreDegree::Full));
@@ -649,19 +675,19 @@ fn parse_worktree_restore_payload_full() {
 #[test]
 fn parse_worktree_restore_payload_head_only() {
     use xai_grok_workspace::session::git::RestoreDegree;
-    let value = serde_json::json!(
-        { "codeRestored" : true, "restoreSummary" :
-        "checked out abc (session registry disabled — staged/unstaged/untracked not restored)",
-        "restoreDegree" : "head_only", }
-    );
+    let value = serde_json::json!({
+            "codeRestored": true,
+            "restoreSummary": "checked out abc (session registry disabled — staged/unstaged/untracked not restored)",
+            "restoreDegree": "head_only",
+        });
     let (_, _, degree) = parse_worktree_restore_payload(&value);
     assert_eq!(degree, Some(RestoreDegree::HeadOnly));
 }
 #[test]
 fn parse_worktree_restore_payload_missing_fields() {
-    let value = serde_json::json!({ "codeRestored" : false });
+    let value = serde_json::json!({ "codeRestored": false });
     let (restored, summary, degree) = parse_worktree_restore_payload(&value);
-    assert!(! restored);
+    assert!(!restored);
     assert!(summary.is_none());
     assert!(degree.is_none());
 }
@@ -669,19 +695,24 @@ fn parse_worktree_restore_payload_missing_fields() {
 /// silently round-tripping a bogus value.
 #[test]
 fn parse_worktree_restore_payload_rejects_unknown_degree() {
-    let value = serde_json::json!(
-        { "codeRestored" : true, "restoreSummary" : "x", "restoreDegree" : "full_", }
-    );
+    let value = serde_json::json!({
+            "codeRestored": true,
+            "restoreSummary": "x",
+            "restoreDegree": "full_",
+        });
     let (_, _, degree) = parse_worktree_restore_payload(&value);
     assert!(degree.is_none(), "typo must produce None");
 }
 #[test]
 fn parse_session_load_restore_meta_full_shape() {
     use xai_grok_workspace::session::git::RestoreDegree;
-    let meta = serde_json::json!(
-        { "codeRestore" : { "restored" : true, "summary" : "checked out abc12345",
-        "degree" : "head_only", } }
-    );
+    let meta = serde_json::json!({
+            "codeRestore": {
+                "restored": true,
+                "summary": "checked out abc12345",
+                "degree": "head_only",
+            }
+        });
     let (restored, summary, degree) = parse_session_load_restore_meta(meta.as_object());
     assert!(restored);
     assert_eq!(summary.as_deref(), Some("checked out abc12345"));
@@ -690,24 +721,24 @@ fn parse_session_load_restore_meta_full_shape() {
 #[test]
 fn parse_session_load_restore_meta_absent_returns_false() {
     let (restored, summary, degree) = parse_session_load_restore_meta(None);
-    assert!(! restored);
+    assert!(!restored);
     assert!(summary.is_none());
     assert!(degree.is_none());
 }
 #[test]
 fn parse_session_load_restore_meta_no_coderestore_key() {
-    let meta = serde_json::json!({ "other" : 1 });
+    let meta = serde_json::json!({ "other": 1 });
     let (restored, summary, degree) = parse_session_load_restore_meta(meta.as_object());
-    assert!(! restored);
+    assert!(!restored);
     assert!(summary.is_none());
     assert!(degree.is_none());
 }
 /// Parser must reject unknown degree strings in the meta path.
 #[test]
 fn parse_session_load_restore_meta_rejects_unknown_degree() {
-    let meta = serde_json::json!(
-        { "codeRestore" : { "restored" : true, "summary" : "x", "degree" : "weird" } }
-    );
+    let meta = serde_json::json!({
+            "codeRestore": { "restored": true, "summary": "x", "degree": "weird" }
+        });
     let (_, _, degree) = parse_session_load_restore_meta(meta.as_object());
     assert!(degree.is_none());
 }
@@ -733,9 +764,9 @@ async fn persist_setting_type_mismatch_errors_compact_mode() {
     let r = persist_setting("compact_mode", SettingValue::String("nope".into())).await;
     let err = r.expect_err("compact_mode with String payload must return Err");
     assert!(
-        err.contains("persist_setting(compact_mode) expected Bool"),
-        "error message must mention key + expected kind, got: {err}",
-    );
+            err.contains("persist_setting(compact_mode) expected Bool"),
+            "error message must mention key + expected kind, got: {err}",
+        );
 }
 /// Type-mismatch for `show_timestamps`.
 #[tokio::test]
@@ -745,9 +776,9 @@ async fn persist_setting_type_mismatch_errors_show_timestamps() {
         .await;
     let err = r.expect_err("show_timestamps with String payload must return Err");
     assert!(
-        err.contains("persist_setting(show_timestamps) expected Bool"),
-        "error message must mention key + expected kind, got: {err}",
-    );
+            err.contains("persist_setting(show_timestamps) expected Bool"),
+            "error message must mention key + expected kind, got: {err}",
+        );
 }
 /// Type-mismatch for `show_timeline`.
 #[tokio::test]
@@ -756,9 +787,9 @@ async fn persist_setting_type_mismatch_errors_show_timeline() {
     let r = persist_setting("show_timeline", SettingValue::String("nope".into())).await;
     let err = r.expect_err("show_timeline with String payload must return Err");
     assert!(
-        err.contains("persist_setting(show_timeline) expected Bool"),
-        "error message must mention key + expected kind, got: {err}",
-    );
+            err.contains("persist_setting(show_timeline) expected Bool"),
+            "error message must mention key + expected kind, got: {err}",
+        );
 }
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
@@ -767,8 +798,20 @@ async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
         .await;
     let err = r.expect_err("page_flip_on_send with String payload must return Err");
     assert!(
-        err.contains("persist_setting(page_flip_on_send) expected Bool"), "got: {err}",
-    );
+            err.contains("persist_setting(page_flip_on_send) expected Bool"),
+            "got: {err}",
+        );
+}
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_confirm_before_rewind() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("confirm_before_rewind", SettingValue::String("nope".into()))
+        .await;
+    let err = r.expect_err("confirm_before_rewind with String payload must return Err");
+    assert!(
+            err.contains("persist_setting(confirm_before_rewind) expected Bool"),
+            "got: {err}",
+        );
 }
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
@@ -780,9 +823,9 @@ async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
         .await;
     let err = r.expect_err("combine_queued_prompts with String payload must return Err");
     assert!(
-        err.contains("persist_setting(combine_queued_prompts) expected Bool"),
-        "got: {err}",
-    );
+            err.contains("persist_setting(combine_queued_prompts) expected Bool"),
+            "got: {err}",
+        );
 }
 /// Type-mismatch for `simple_mode`.
 #[tokio::test]
@@ -791,24 +834,23 @@ async fn persist_setting_type_mismatch_errors_simple_mode() {
     let r = persist_setting("simple_mode", SettingValue::Int(42)).await;
     let err = r.expect_err("simple_mode with Int payload must return Err");
     assert!(
-        err.contains("persist_setting(simple_mode) expected Bool"),
-        "error message must mention key + expected kind, got: {err}",
-    );
+            err.contains("persist_setting(simple_mode) expected Bool"),
+            "error message must mention key + expected kind, got: {err}",
+        );
 }
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// Spawn a fake ACP agent that counts ExtNotifications for `method`.
-/// Exits when the channel closes.
-fn spawn_fake_acp_agent_counting(
+/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
+/// notifications. Exits when the channel closes.
+fn spawn_fake_acp_agent(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
-    method: &'static str,
 ) -> Arc<AtomicUsize> {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let xai_acp_lib::AcpAgentMessage::ExtNotification(args) = msg {
-                if args.request.method.as_ref() == method {
+                if args.request.method.as_ref() == "x.ai/yolo_mode_changed" {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 }
                 let _ = args.response_tx.send(Ok(()));
@@ -816,13 +858,6 @@ fn spawn_fake_acp_agent_counting(
         }
     });
     counter
-}
-/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
-/// notifications. Exits when the channel closes.
-fn spawn_fake_acp_agent(
-    rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
-) -> Arc<AtomicUsize> {
-    spawn_fake_acp_agent_counting(rx, "x.ai/yolo_mode_changed")
 }
 /// Redirect `GROK_HOME` to a tempdir for test isolation.
 fn setup_grok_home_in_tempdir() -> tempfile::TempDir {
@@ -889,8 +924,9 @@ fn unregister_best_effort_is_nonblocking_under_lock_contention() {
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
     worker.join().expect("worker thread");
     assert!(
-        returned, "contended unregister blocked on the shared flock instead of skipping",
-    );
+            returned,
+            "contended unregister blocked on the shared flock instead of skipping",
+        );
     assert_eq!(
             xai_grok_active_sessions::list_in(dir.path())
                 .expect("list")
@@ -926,147 +962,21 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(
-        counter.load(Ordering::SeqCst), 1,
-        "ACP `x.ai/yolo_mode_changed` notification must fire exactly once \
+            counter.load(Ordering::SeqCst),
+            1,
+            "ACP `x.ai/yolo_mode_changed` notification must fire exactly once \
              on BestEffort path (regardless of disk outcome)",
-    );
+        );
     assert!(
-        matches!(result, TaskResult::SettingPersisted { .. } |
-        TaskResult::SettingPersistFailedBestEffort { .. },),
-        "BestEffort path must return SettingPersisted (Ok) or \
+            matches!(
+                result,
+                TaskResult::SettingPersisted { .. }
+                    | TaskResult::SettingPersistFailedBestEffort { .. },
+            ),
+            "BestEffort path must return SettingPersisted (Ok) or \
              SettingPersistFailedBestEffort (Err), got {result:?}",
-    );
+        );
 }
-/// Helper notify: fires exactly one `x.ai/auto_compact_threshold_changed`.
-#[tokio::test]
-async fn notify_auto_compact_threshold_changed_fires_acp_once() {
-    use crate::settings::SettingValue;
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter =
-        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
-    notify_auto_compact_threshold_changed(&tx, &SettingValue::Enum("98")).await;
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        1,
-        "notify helper must fire ACP auto_compact_threshold_changed once"
-    );
-}
-
-/// Unparseable / wrong kind must not spam ACP (no silent mass-reset).
-#[tokio::test]
-async fn notify_auto_compact_threshold_changed_skips_invalid_value() {
-    use crate::settings::SettingValue;
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter =
-        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
-    notify_auto_compact_threshold_changed(&tx, &SettingValue::Bool(true)).await;
-    notify_auto_compact_threshold_changed(&tx, &SettingValue::Enum("not-a-choice")).await;
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        0,
-        "invalid live-apply values must not fire ACP"
-    );
-}
-
-/// Shipped path: `Effect::PersistSetting` for auto-compact fires ACP only after
-/// successful disk write (same gating as yolo permission mode).
-#[tokio::test]
-async fn persist_auto_compact_threshold_fires_acp_on_disk_success() {
-    use crate::settings::SettingValue;
-    use std::path::Path;
-    let _guard = setup_grok_home_in_tempdir();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter =
-        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
-    let mut tasks = JoinSet::new();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    execute(
-        Effect::PersistSetting {
-            key: "auto_compact_threshold_percent",
-            value: SettingValue::Enum("98"),
-            rollback_value: SettingValue::Enum("95"),
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-    let result = tasks
-        .join_next()
-        .await
-        .expect("persist task should complete")
-        .expect("persist task should not panic");
-    assert!(
-        matches!(
-            result,
-            TaskResult::SettingPersisted {
-                key: "auto_compact_threshold_percent",
-                ..
-            }
-        ),
-        "disk Ok must yield SettingPersisted, got {result:?}"
-    );
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        1,
-        "ACP auto_compact_threshold_changed must fire exactly once after disk Ok"
-    );
-}
-
-/// Disk failure (kind mismatch) must not notify open sessions.
-#[tokio::test]
-async fn persist_auto_compact_threshold_no_acp_on_disk_failure() {
-    use crate::settings::SettingValue;
-    use std::path::Path;
-    let _guard = setup_grok_home_in_tempdir();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter =
-        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
-    let mut tasks = JoinSet::new();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    execute(
-        Effect::PersistSetting {
-            key: "auto_compact_threshold_percent",
-            value: SettingValue::Bool(true),
-            rollback_value: SettingValue::Enum("95"),
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-    let result = tasks
-        .join_next()
-        .await
-        .expect("persist task should complete")
-        .expect("persist task should not panic");
-    assert!(
-        matches!(
-            result,
-            TaskResult::SettingPersistFailed {
-                key: "auto_compact_threshold_percent",
-                ..
-            }
-        ),
-        "kind mismatch must yield SettingPersistFailed, got {result:?}"
-    );
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        0,
-        "disk failure must not live-apply via ACP"
-    );
-}
-
 /// WithRollback: notification count matches disk outcome
 /// (1 on Ok, 0 on Err).
 #[tokio::test]
@@ -1089,16 +999,16 @@ async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollbac
     match result {
         TaskResult::SettingPersisted { .. } => {
             assert_eq!(
-                count, 1,
-                "WithRollback + disk Ok must fire ACP notification exactly once",
-            );
+                    count, 1,
+                    "WithRollback + disk Ok must fire ACP notification exactly once",
+                );
         }
         TaskResult::SettingPersistFailed { .. } => {
             assert_eq!(
-                count, 0,
-                "WithRollback + disk Err must SUPPRESS the ACP notification \
+                    count, 0,
+                    "WithRollback + disk Err must SUPPRESS the ACP notification \
                      (Issue 3 — keeps agent and pager state consistent on rollback)",
-            );
+                );
         }
         other => {
             panic!("expected SettingPersisted or SettingPersistFailed, got {other:?}")
@@ -1121,10 +1031,11 @@ async fn persist_permission_mode_no_session_id_suppresses_acp() {
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(
-        counter.load(Ordering::SeqCst), 0,
-        "session_id=None must suppress the ACP notification — sessionless \
+            counter.load(Ordering::SeqCst),
+            0,
+            "session_id=None must suppress the ACP notification — sessionless \
              agents have no ACP channel to notify",
-    );
+        );
 }
 /// BestEffort + disk failure must NOT return `SettingPersisted`.
 #[tokio::test]
@@ -1142,14 +1053,14 @@ async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant()
     match result {
         TaskResult::SettingPersisted { key, value } => {
             assert_eq!(key, "permission_mode");
-            assert_eq!(value, crate ::settings::SettingValue::Enum("always-approve"));
+            assert_eq!(value, crate::settings::SettingValue::Enum("always-approve"));
         }
         TaskResult::SettingPersistFailedBestEffort { key, error: _ } => {
             assert_eq!(
-                key, "permission_mode",
-                "BestEffort failure MUST report key=permission_mode and \
+                    key, "permission_mode",
+                    "BestEffort failure MUST report key=permission_mode and \
                      NOT lie about success via SettingPersisted",
-            );
+                );
         }
         other => {
             panic!(
@@ -1165,55 +1076,58 @@ async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant()
 fn should_send_yolo_acp_with_rollback_suppresses_on_err() {
     let result: Result<(), String> = Err("simulated disk failure".to_string());
     assert!(
-        ! should_send_yolo_acp_notification(& result,
-        PermissionModePersist::WithRollback("ask")),
-        "WithRollback + Err MUST suppress the ACP notification",
-    );
+            !should_send_yolo_acp_notification(&result, PermissionModePersist::WithRollback("ask")),
+            "WithRollback + Err MUST suppress the ACP notification",
+        );
     assert!(
-        ! should_send_yolo_acp_notification(& result,
-        PermissionModePersist::WithRollback("always-approve")),
-        "WithRollback + Err MUST suppress regardless of the prior canonical",
-    );
+            !should_send_yolo_acp_notification(
+                &result,
+                PermissionModePersist::WithRollback("always-approve")
+            ),
+            "WithRollback + Err MUST suppress regardless of the prior canonical",
+        );
     assert!(
-        ! should_send_yolo_acp_notification(& result,
-        PermissionModePersist::WithRollback("default")),
-        "WithRollback + Err MUST suppress for the 'default' prior canonical too",
-    );
+            !should_send_yolo_acp_notification(
+                &result,
+                PermissionModePersist::WithRollback("default")
+            ),
+            "WithRollback + Err MUST suppress for the 'default' prior canonical too",
+        );
 }
 /// (Ok, WithRollback) → FIRE for all canonicals.
 #[test]
 fn should_send_yolo_acp_with_rollback_fires_on_ok() {
     let ok: Result<(), String> = Ok(());
     assert!(
-        should_send_yolo_acp_notification(& ok,
-        PermissionModePersist::WithRollback("ask")),
-        "WithRollback + Ok must fire the ACP notification (happy path)",
-    );
+            should_send_yolo_acp_notification(&ok, PermissionModePersist::WithRollback("ask")),
+            "WithRollback + Ok must fire the ACP notification (happy path)",
+        );
     assert!(
-        should_send_yolo_acp_notification(& ok,
-        PermissionModePersist::WithRollback("always-approve")),
-        "WithRollback + Ok fires regardless of the prior canonical",
-    );
+            should_send_yolo_acp_notification(
+                &ok,
+                PermissionModePersist::WithRollback("always-approve")
+            ),
+            "WithRollback + Ok fires regardless of the prior canonical",
+        );
     assert!(
-        should_send_yolo_acp_notification(& ok,
-        PermissionModePersist::WithRollback("default")),
-        "WithRollback + Ok fires for 'default' prior canonical too",
-    );
+            should_send_yolo_acp_notification(&ok, PermissionModePersist::WithRollback("default")),
+            "WithRollback + Ok fires for 'default' prior canonical too",
+        );
 }
 #[test]
 fn should_send_yolo_acp_best_effort_fires_on_both_outcomes() {
     let ok: Result<(), String> = Ok(());
     let err: Result<(), String> = Err("simulated".to_string());
     assert!(
-        should_send_yolo_acp_notification(& ok, PermissionModePersist::BestEffort),
-        "BestEffort + Ok must notify",
-    );
+            should_send_yolo_acp_notification(&ok, PermissionModePersist::BestEffort),
+            "BestEffort + Ok must notify",
+        );
     assert!(
-        should_send_yolo_acp_notification(& err, PermissionModePersist::BestEffort),
-        "BestEffort + Err must STILL notify (cycle_mode contract \
+            should_send_yolo_acp_notification(&err, PermissionModePersist::BestEffort),
+            "BestEffort + Err must STILL notify (cycle_mode contract \
              — the cycle_mode state machine doesn't have a clean \
              single-field rollback)",
-    );
+        );
 }
 #[test]
 fn route_permission_mode_result_ok_returns_persisted() {
@@ -1225,7 +1139,7 @@ fn route_permission_mode_result_ok_returns_persisted() {
     match result {
         TaskResult::SettingPersisted { key, value } => {
             assert_eq!(key, "permission_mode");
-            assert_eq!(value, crate ::settings::SettingValue::Enum("always-approve"));
+            assert_eq!(value, crate::settings::SettingValue::Enum("always-approve"));
         }
         other => panic!("Ok must return SettingPersisted, got {other:?}"),
     }
@@ -1240,7 +1154,7 @@ fn route_permission_mode_result_err_with_rollback_off_routes_to_failed() {
     match result {
         TaskResult::SettingPersistFailed { key, rollback_value, error } => {
             assert_eq!(key, "permission_mode");
-            assert_eq!(rollback_value, crate ::settings::SettingValue::Enum("ask"));
+            assert_eq!(rollback_value, crate::settings::SettingValue::Enum("ask"));
             assert_eq!(error, "simulated");
         }
         other => {
@@ -1259,10 +1173,11 @@ fn route_permission_mode_result_err_with_rollback_on_routes_to_failed() {
         TaskResult::SettingPersistFailed { key, rollback_value, error } => {
             assert_eq!(key, "permission_mode");
             assert_eq!(
-                rollback_value, crate ::settings::SettingValue::Enum("always-approve"),
-                "prev_canonical='always-approve' must route to canonical \
+                    rollback_value,
+                    crate::settings::SettingValue::Enum("always-approve"),
+                    "prev_canonical='always-approve' must route to canonical \
                      'always-approve' for rollback",
-            );
+                );
             assert_eq!(error, "simulated");
         }
         other => {
@@ -1282,10 +1197,11 @@ fn route_permission_mode_result_err_with_rollback_default_routes_to_failed() {
         TaskResult::SettingPersistFailed { key, rollback_value, error } => {
             assert_eq!(key, "permission_mode");
             assert_eq!(
-                rollback_value, crate ::settings::SettingValue::Enum("default"),
-                "PR 11: prev_canonical='default' must roll back to canonical 'default', \
+                    rollback_value,
+                    crate::settings::SettingValue::Enum("default"),
+                    "PR 11: prev_canonical='default' must roll back to canonical 'default', \
                      NOT collapse onto 'ask' through a bool projection",
-            );
+                );
             assert_eq!(error, "simulated");
         }
         other => {
@@ -1305,9 +1221,10 @@ fn route_permission_mode_result_ok_preserves_default_canonical() {
         TaskResult::SettingPersisted { key, value } => {
             assert_eq!(key, "permission_mode");
             assert_eq!(
-                value, crate ::settings::SettingValue::Enum("default"),
-                "PR 11: 'default' canonical must survive the route fn intact",
-            );
+                    value,
+                    crate::settings::SettingValue::Enum("default"),
+                    "PR 11: 'default' canonical must survive the route fn intact",
+                );
         }
         other => panic!("Ok must return SettingPersisted, got {other:?}"),
     }
@@ -1332,9 +1249,7 @@ fn route_permission_mode_result_err_best_effort_routes_to_dedicated_variant() {
             )
         }
         other => {
-            panic!(
-                "BestEffort + Err must return SettingPersistFailedBestEffort, got {other:?}",
-            )
+            panic!("BestEffort + Err must return SettingPersistFailedBestEffort, got {other:?}",)
         }
     }
 }
@@ -1353,8 +1268,8 @@ fn marketplace_outcome_succeeded_only_accepts_success_status() {
         requires_reload: false,
         requires_restart: false,
     };
-    assert!(marketplace_outcome_succeeded(& success));
-    assert!(! marketplace_outcome_succeeded(& failed));
+    assert!(marketplace_outcome_succeeded(&success));
+    assert!(!marketplace_outcome_succeeded(&failed));
 }
 #[tokio::test]
 async fn check_marketplace_updates_dispatches_update_and_skips_failed_notifications() {
@@ -1376,17 +1291,31 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
             if let AcpAgentMessage::ExtMethod(args) = msg {
                 match args.request.method.as_ref() {
                     "x.ai/marketplace/list" => {
-                        let response = serde_json::json!(
-                            { "result" : { "sources" : [{ "sourceName" : "test-source",
-                            "sourceKind" : "git", "sourceUrlOrPath" :
-                            "https://example.com/plugins.git", "plugins" : [{ "name" :
-                            "test-plugin", "version" : "2.0.0", "description" : null,
-                            "category" : null, "author" : null, "tags" : [],
-                            "relativePath" : "plugins/test-plugin", "skillCount" : 0,
-                            "hasHooks" : false, "hasAgents" : false, "hasMcp" : false,
-                            "installStatus" : "update_available", "installedVersion" :
-                            "1.0.0" }], "error" : null }] } }
-                        );
+                        let response = serde_json::json!({
+                                "result": {
+                                    "sources": [{
+                                        "sourceName": "test-source",
+                                        "sourceKind": "git",
+                                        "sourceUrlOrPath": "https://example.com/plugins.git",
+                                        "plugins": [{
+                                            "name": "test-plugin",
+                                            "version": "2.0.0",
+                                            "description": null,
+                                            "category": null,
+                                            "author": null,
+                                            "tags": [],
+                                            "relativePath": "plugins/test-plugin",
+                                            "skillCount": 0,
+                                            "hasHooks": false,
+                                            "hasAgents": false,
+                                            "hasMcp": false,
+                                            "installStatus": "update_available",
+                                            "installedVersion": "1.0.0"
+                                        }],
+                                        "error": null
+                                    }]
+                                }
+                            });
                         let raw = serde_json::value::RawValue::from_string(
                                 response.to_string(),
                             )
@@ -1405,8 +1334,7 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
                             MarketplaceAction::Update {
                                 source_url_or_path,
                                 plugin_relative_path,
-                            }
-if source_url_or_path == "https://example.com/plugins.git"
+                            } if source_url_or_path == "https://example.com/plugins.git"
                                 && plugin_relative_path == "plugins/test-plugin" => {
                                 saw_update_for_task.store(true, Ordering::SeqCst);
                             }
@@ -1420,7 +1348,7 @@ if source_url_or_path == "https://example.com/plugins.git"
                             requires_reload: false,
                             requires_restart: false,
                         };
-                        let response = serde_json::json!({ "result" : outcome });
+                        let response = serde_json::json!({ "result": outcome });
                         let raw = serde_json::value::RawValue::from_string(
                                 response.to_string(),
                             )
@@ -1475,8 +1403,8 @@ if source_url_or_path == "https://example.com/plugins.git"
     }
     assert_eq!(action_calls.load(Ordering::SeqCst), 1);
     assert!(saw_update.load(Ordering::SeqCst));
-    assert!(! saw_wrong_action.load(Ordering::SeqCst));
-    assert!(! saw_success_notification.load(Ordering::SeqCst));
+    assert!(!saw_wrong_action.load(Ordering::SeqCst));
+    assert!(!saw_success_notification.load(Ordering::SeqCst));
 }
 #[tokio::test]
 async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
@@ -1524,7 +1452,7 @@ async fn foreign_resume_detection_runs_as_task_result() {
         &SessionFlags::default(),
         &progress_tx,
     );
-    assert!(! quit);
+    assert!(!quit);
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::ForeignResumeCwdCanonicalized {
             canonical_cwd,
@@ -1551,7 +1479,7 @@ async fn foreign_resume_detection_runs_as_task_result() {
         &SessionFlags::default(),
         &progress_tx,
     );
-    assert!(! quit);
+    assert!(!quit);
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::ForeignResumeHintDetected {
             canonical_cwd: result_cwd,
@@ -1588,14 +1516,16 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
                 let browse = params.get("query").is_none();
                 captured_for_task.lock().unwrap().push(params);
                 let body = if fail {
-                    serde_json::json!({ "error" : "boom" })
+                    serde_json::json!({ "error": "boom" })
                 } else if browse {
-                    serde_json::json!(
-                        { "result" : { "sessions" : [], "_meta" : { "x.ai/listScope" :
-                        "repo" }, } }
-                    )
+                    serde_json::json!({
+                            "result": {
+                                "sessions": [],
+                                "_meta": { "x.ai/listScope": "repo" },
+                            }
+                        })
                 } else {
-                    serde_json::json!({ "result" : { "sessions" : [] } })
+                    serde_json::json!({ "result": { "sessions": [] } })
                 };
                 let raw = serde_json::value::RawValue::from_string(body.to_string())
                     .expect("serialize list response");
@@ -1626,7 +1556,10 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             assert!(sessions.is_empty());
             assert_eq!(seq, 7, "seq must be echoed, not reconstructed");
             assert_eq!(query.as_deref(), Some("hit"), "query must be echoed");
-            assert!(! scope.is_relaxed(), "search responses carry no relaxed scope");
+            assert!(
+                    !scope.is_relaxed(),
+                    "search responses carry no relaxed scope"
+                );
         }
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
@@ -1640,9 +1573,9 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             assert_eq!(seq, 8);
             assert_eq!(query, None);
             assert!(
-                scope.is_relaxed(),
-                "_meta[\"x.ai/listScope\"] must parse into the task result"
-            );
+                    scope.is_relaxed(),
+                    "_meta[\"x.ai/listScope\"] must parse into the task result"
+                );
         }
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
@@ -1656,27 +1589,77 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             assert_eq!(error, "boom");
             assert_eq!(seq, 9);
             assert_eq!(
-                query.as_deref(), Some("fail-me"),
-                "failure must echo the query (gates the indicator clear)"
-            );
+                    query.as_deref(),
+                    Some("fail-me"),
+                    "failure must echo the query (gates the indicator clear)"
+                );
         }
         other => panic!("expected SessionListFailed, got {other:?}"),
     }
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 3);
-    assert_eq!(captured[0] ["query"], "hit");
-    assert_eq!(captured[0] ["limit"], 30);
-    assert!(captured[0] ["cwd"].is_string());
+    assert_eq!(captured[0]["query"], "hit");
+    assert_eq!(captured[0]["limit"], 30);
+    assert!(captured[0]["cwd"].is_string());
     assert!(
-        captured[0].get("allowRelax").is_none(),
-        "search fetches must not opt into relaxing: {:?}", captured[0]
-    );
+            captured[0].get("allowRelax").is_none(),
+            "search fetches must not opt into relaxing: {:?}",
+            captured[0]
+        );
     assert!(
-        captured[1].get("query").is_none(),
-        "plain fetch must not send a query key: {:?}", captured[1]
+            captured[1].get("query").is_none(),
+            "plain fetch must not send a query key: {:?}",
+            captured[1]
+        );
+    assert_eq!(
+            captured[1]["allowRelax"], true,
+            "browse fetches opt into relaxing"
+        );
+    assert_eq!(captured[2]["query"], "fail-me");
+}
+#[tokio::test]
+async fn fetch_session_list_sends_kind_facet_filter() {
+    use std::sync::{Arc, Mutex};
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                let params: serde_json::Value = serde_json::from_str(
+                        args.request.params.get(),
+                    )
+                    .expect("params JSON");
+                captured_for_task.lock().unwrap().push(params);
+                let body = serde_json::json!({ "result": { "sessions": [] } });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("ser");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+            }
+        }
+    });
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::FetchSessionList {
+            query: None,
+            seq: 1,
+            kind_filter: Some(vec!["build".into()]),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
     );
-    assert_eq!(captured[1] ["allowRelax"], true, "browse fetches opt into relaxing");
-    assert_eq!(captured[2] ["query"], "fail-me");
+    let _ = tasks.join_next().await;
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+            captured[0]["_meta"]["x.ai/facetFilters"]["kind"],
+            serde_json::json!(["build"])
+        );
 }
 #[tokio::test]
 async fn fetch_workflows_list_sends_session_id() {
@@ -1694,7 +1677,7 @@ async fn fetch_workflows_list_sends_session_id() {
                     )
                     .expect("params JSON");
                 captured_for_task.lock().unwrap().push(params);
-                let body = serde_json::json!({ "result" : { "workflows" : [] } });
+                let body = serde_json::json!({ "result": { "workflows": [] } });
                 let raw = serde_json::value::RawValue::from_string(body.to_string())
                     .expect("serialize workflows response");
                 let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
@@ -1729,7 +1712,7 @@ async fn fetch_workflows_list_sends_session_id() {
     }
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0] ["sessionId"], "test-session");
+    assert_eq!(captured[0]["sessionId"], "test-session");
     assert!(captured[0].get("cwd").is_none());
 }
 /// The debounce arm must echo `query` and `seq` exactly. Awaits the real
@@ -1824,15 +1807,16 @@ fn agent_profile_names_are_valid_builtins() {
     for (flags, expected_name) in test_cases {
         let profile = flags.agent_profile();
         assert_eq!(
-            profile, Some(* expected_name),
-            "flags {flags:?} should produce profile {expected_name:?}"
-        );
+                profile,
+                Some(*expected_name),
+                "flags {flags:?} should produce profile {expected_name:?}"
+            );
         let builtin = BuiltinAgentName::from_str(expected_name);
         assert!(
-            builtin.is_ok(),
-            "profile name {expected_name:?} is not a valid BuiltinAgentName: {:?}",
-            builtin.err()
-        );
+                builtin.is_ok(),
+                "profile name {expected_name:?} is not a valid BuiltinAgentName: {:?}",
+                builtin.err()
+            );
     }
 }
 /// Default flags produce no agent profile (uses grok-build default).
@@ -1997,9 +1981,9 @@ fn to_meta_emits_ask_user_question_false_when_disabled() {
                     )
                 });
             assert_eq!(
-                meta["askUserQuestion"], false,
-                "askUserQuestion must be false (plan={plan}, subagents={subagents}); meta={meta:?}"
-            );
+                    meta["askUserQuestion"], false,
+                    "askUserQuestion must be false (plan={plan}, subagents={subagents}); meta={meta:?}"
+                );
         }
     }
 }
@@ -2018,9 +2002,9 @@ fn to_meta_omits_ask_user_question_when_enabled() {
             };
             if let Some(meta) = flags.to_meta() {
                 assert!(
-                    meta.get("askUserQuestion").is_none(),
-                    "askUserQuestion must be absent when enabled (plan={plan}, subagents={subagents}); meta={meta:?}"
-                );
+                        meta.get("askUserQuestion").is_none(),
+                        "askUserQuestion must be absent when enabled (plan={plan}, subagents={subagents}); meta={meta:?}"
+                    );
             }
         }
     }
@@ -2035,10 +2019,10 @@ fn to_meta_emits_auto_mode_when_enabled() {
     let meta = flags.to_meta().expect("auto_mode must emit meta");
     assert_eq!(meta["autoMode"], true);
     assert_eq!(
-        meta["yoloMode"], false,
-        "yoloMode must be explicitly false, not omitted (absent key falls \
+            meta["yoloMode"], false,
+            "yoloMode must be explicitly false, not omitted (absent key falls \
              back to the shell's connect-time default / leader injection)"
-    );
+        );
 }
 /// yoloMode must ride the meta explicitly for BOTH polarities — absent
 /// key ≠ off (see the emit-site comment in `to_meta`). Pins the
@@ -2052,9 +2036,10 @@ fn to_meta_always_emits_yolo_mode_explicitly() {
         };
         let meta = flags.to_meta().expect("permission seeds must always emit meta");
         assert_eq!(
-            meta["yoloMode"], serde_json::json!(yolo),
-            "yoloMode must be explicit (yolo={yolo}); meta={meta:?}"
-        );
+                meta["yoloMode"],
+                serde_json::json!(yolo),
+                "yoloMode must be explicit (yolo={yolo}); meta={meta:?}"
+            );
     }
 }
 #[test]
@@ -2067,10 +2052,11 @@ fn to_meta_chat_mode_stamps_kind_and_omits_agent_profile() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("chat_mode must emit meta");
-    assert_eq!(meta["x.ai/session"] ["kind"], "chat");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
     assert!(
-        meta.get("agentProfile").is_none(), "K12: chat mode must omit Build agentProfile"
-    );
+            meta.get("agentProfile").is_none(),
+            "K12: chat mode must omit Build agentProfile"
+        );
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2093,11 +2079,11 @@ fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
         scrub_chat_workspace_bind_meta(&mut meta);
     }
     let meta = meta.expect("chat_kind must produce meta");
-    assert_eq!(meta["x.ai/session"] ["kind"], "chat");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
     assert!(
-        meta.get("agentProfile").is_none(),
-        "entry chat_kind must strip Build agentProfile"
-    );
+            meta.get("agentProfile").is_none(),
+            "entry chat_kind must strip Build agentProfile"
+        );
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2108,10 +2094,14 @@ fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
 fn assert_chat_meta_has_no_workspace_bind_keys(meta: &serde_json::Value) {
     for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
         assert!(
-            meta.get(* key).is_none(),
-            "chat meta must not include workspace-bind key {key:?}: {meta}"
-        );
+                meta.get(*key).is_none(),
+                "chat meta must not include workspace-bind key {key:?}: {meta}"
+            );
     }
+    assert!(
+            meta.get("x.ai/cloud_existing_workspace").is_none(),
+            "chat meta without attach must not include existing workspace: {meta}"
+        );
 }
 #[test]
 fn chat_create_meta_never_includes_workspace_bind_keys_when_cloud_fields_set() {
@@ -2123,7 +2113,7 @@ fn chat_create_meta_never_includes_workspace_bind_keys_when_cloud_fields_set() {
     apply_chat_kind_meta(&mut meta);
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat create must emit meta");
-    assert_eq!(meta["x.ai/session"] ["kind"], "chat");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2139,15 +2129,172 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
         obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("srv-poison"));
         obj.insert(
             "x.ai/cloud_existing_workspace".into(),
-            serde_json::json!({ "server_id" : "srv-poison", "cwd" : "/ws", }),
+            serde_json::json!({
+                    "server_id": "srv-poison",
+                    "cwd": "/ws",
+                }),
         );
     }
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat load must emit meta");
-    assert_eq!(meta["x.ai/session"] ["kind"], "chat");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
+}
+/// Attach stamp keeps existing workspace + local intent; envId / Direct hub stay stripped.
+#[cfg(feature = "local-workspace")]
+#[test]
+fn scrub_chat_workspace_matrix_attach_exception() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let mut meta = Some(acp::Meta::new());
+    {
+        let obj = meta.as_mut().unwrap();
+        obj.insert("envId".into(), serde_json::json!("env-x"));
+        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("hub-x"));
+        obj.insert(
+            "x.ai/cloud_existing_workspace".into(),
+            serde_json::json!({"server_id": "srv-x", "cwd": "/ws"}),
+        );
+    }
+    scrub_chat_workspace_bind_meta(&mut meta);
+    let scrubbed = meta.as_ref().unwrap();
+    assert!(scrubbed.get("envId").is_none());
+    assert!(scrubbed.get("x.ai/cloud_server_id").is_none());
+    assert!(scrubbed.get("x.ai/cloud_existing_workspace").is_none());
+    let mut meta = Some(acp::Meta::new());
+    apply_local_workspace_meta(
+        &mut meta,
+        &LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-dogfood".into()),
+        },
+    );
+    {
+        let obj = meta.as_mut().unwrap();
+        obj.insert("envId".into(), serde_json::json!("env-must-go"));
+        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("hub-must-go"));
+    }
+    scrub_chat_workspace_bind_meta(&mut meta);
+    let scrubbed = meta.as_ref().unwrap();
+    assert!(scrubbed.get("envId").is_none(), "envId must stay scrubbed");
+    assert!(
+            scrubbed.get("x.ai/cloud_server_id").is_none(),
+            "Direct hub must stay scrubbed"
+        );
+    assert_eq!(
+            scrubbed["x.ai/cloud_existing_workspace"]["server_id"],
+            "srv-dogfood"
+        );
+    assert_eq!(scrubbed["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(scrubbed["x.ai/local_workspace"]["server_id"], "srv-dogfood");
+    assert_eq!(scrubbed["x.ai/local_workspace"]["cwd"], "/tmp/repo");
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn to_meta_chat_attach_stamps_local_and_existing() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: true,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-1".into()),
+        }),
+        ..Default::default()
+    };
+    let meta = flags.to_meta().expect("meta");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-1");
+    assert!(meta.get("envId").is_none());
+    assert!(meta.get("x.ai/cloud_server_id").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn to_meta_chat_own_stamps_intent_without_existing() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: true,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Own,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo-own")),
+            server_id: None,
+        }),
+        ..Default::default()
+    };
+    let meta = flags.to_meta().expect("meta");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "own");
+    assert_eq!(meta["x.ai/local_workspace"]["cwd"], "/tmp/repo-own");
+    assert!(meta["x.ai/local_workspace"].get("server_id").is_none());
+    assert!(
+            meta.get("x.ai/cloud_existing_workspace").is_none(),
+            "own must not stamp existing; shell mints server_id"
+        );
+    assert!(meta.get("envId").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn mid_session_add_params_scrub_envid() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let params = mid_session_add_local_workspace_params(
+        "sess-1",
+        &LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-add".into()),
+        },
+    );
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["meta"]["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(
+            params["meta"]["x.ai/cloud_existing_workspace"]["server_id"],
+            "srv-add"
+        );
+    assert!(params["meta"].get("envId").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn reject_non_fs_only_advertised_tools_matrix() {
+    let fs_only = ["workspace.fs_list", "workspace.fs_read_file", "workspace.put_files"];
+    assert!(reject_non_fs_only_advertised_tools(Some(&fs_only[..])).is_ok());
+    assert!(
+            reject_non_fs_only_advertised_tools(None)
+                .unwrap_err()
+                .contains("uncheckable")
+        );
+    assert!(
+            reject_non_fs_only_advertised_tools(Some(&[][..]))
+                .unwrap_err()
+                .contains("empty")
+        );
+    let with_exec = ["workspace.fs_list", "workspace.bash", "terminal.exec"];
+    let err = reject_non_fs_only_advertised_tools(Some(&with_exec[..])).unwrap_err();
+    assert!(err.contains("FS-only"), "{err}");
+    assert!(err.contains("workspace.bash"), "{err}");
+    assert!(err.contains("terminal.exec"), "{err}");
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn finalize_chat_session_meta_stamps_attach_on_worktree_path() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: false,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-wt".into()),
+        }),
+        ..Default::default()
+    };
+    let mut meta = flags.to_meta();
+    finalize_chat_session_meta(&mut meta, true, &flags);
+    let meta = meta.expect("meta");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-wt");
+    assert!(meta.get("envId").is_none());
 }
 #[test]
 fn to_meta_yolo_suppresses_auto_mode() {
@@ -2159,9 +2306,9 @@ fn to_meta_yolo_suppresses_auto_mode() {
     let meta = flags.to_meta().expect("yolo must emit meta");
     assert_eq!(meta["yoloMode"], true);
     assert_eq!(
-        meta["autoMode"], false,
-        "yolo wins; autoMode must be explicitly false (not omitted)"
-    );
+            meta["autoMode"], false,
+            "yolo wins; autoMode must be explicitly false (not omitted)"
+        );
 }
 /// Verify that each resolved profile name produces a valid
 /// `AgentDefinition` whose name matches the expected kebab-case string.
@@ -2177,8 +2324,9 @@ fn agent_profile_definitions_have_correct_names() {
         let builtin = BuiltinAgentName::from_str(name).unwrap();
         let def = builtin.definition();
         assert_eq!(
-            def.name, name, "definition name should match the kebab-case profile name"
-        );
+                def.name, name,
+                "definition name should match the kebab-case profile name"
+            );
     }
 }
 fn make_session_info(
@@ -2205,46 +2353,93 @@ fn make_session_info(
             context: ContextInfo {
                 used,
                 total,
-                auto_compact_threshold_percent: 95,
+                auto_compact_threshold_percent: 85,
                 ..Default::default()
             },
         },
     }
 }
 #[test]
+fn format_session_info_session_auth_ignores_api_key_env() {
+    let info = make_session_info("auto", None, 1000, 10000);
+    let text = format_session_info(&info, None, false, false, true);
+    assert!(text.contains("Auth method: OAuth"), "{text}");
+    assert!(!text.contains("Manage account and credits"), "{text}");
+    assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
+    assert!(!text.contains("console.x.ai"), "{text}");
+    assert!(!text.contains("grok login"), "{text}");
+}
+#[test]
+fn format_session_info_api_key_without_env() {
+    let info = make_session_info("auto", None, 1000, 10000);
+    let text = format_session_info(&info, None, false, true, false);
+    assert!(text.contains("Auth method: API key\n"), "{text}");
+    assert!(!text.contains("XAI_API_KEY"), "{text}");
+    assert!(!text.contains("Manage account and credits"), "{text}");
+    assert!(
+            text.contains("Run `grok login` to use your SuperGrok subscription instead."),
+            "{text}"
+        );
+    assert!(!text.contains("grok.com"), "{text}");
+}
+#[test]
+fn format_session_info_api_key_auth_suggests_grok_login() {
+    let info = make_session_info("auto", None, 1000, 10000);
+    let text = format_session_info(&info, None, false, true, true);
+    assert!(text.contains("Auth method: API key (XAI_API_KEY)"), "{text}");
+    assert!(!text.contains("Manage account and credits"), "{text}");
+    assert!(
+            text.contains("Run `grok login` to use your SuperGrok subscription instead."),
+            "{text}"
+        );
+    assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
+    assert!(!text.contains("console.x.ai"), "{text}");
+    assert!(!text.contains("grok.com"), "{text}");
+}
+#[test]
+fn format_session_info_session_only_shows_oauth() {
+    let info = make_session_info("auto", None, 1000, 10000);
+    let text = format_session_info(&info, None, false, false, false);
+    assert!(text.contains("Auth method: OAuth"), "{text}");
+    assert!(!text.contains("Manage account and credits"), "{text}");
+    assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
+    assert!(!text.contains("console.x.ai"), "{text}");
+    assert!(!text.contains("grok login"), "{text}");
+}
+#[test]
 fn format_session_info_shows_conversation_id_when_present() {
     let mut info = make_session_info("auto", None, 1000, 10000);
     info.data.conversation_id = Some("conv_abc123".into());
-    let text = format_session_info(&info, None, false);
+    let text = format_session_info(&info, None, false, false, false);
     assert!(text.contains("Conversation ID: conv_abc123"));
     assert!(text.contains("Session ID: test-session-id"));
 }
 #[test]
 fn format_session_info_shows_resolved_when_enabled_and_different() {
     let info = make_session_info("grok-4.5", Some("grok-4.3"), 1000, 10000);
-    let text = format_session_info(&info, None, true);
+    let text = format_session_info(&info, None, true, false, false);
     assert!(text.contains("Model: grok-4.5 (grok-4.3)"));
 }
 #[test]
 fn format_session_info_hides_resolved_when_disabled() {
     let info = make_session_info("grok-4.5", Some("grok-4.3"), 1000, 10000);
-    let text = format_session_info(&info, None, false);
+    let text = format_session_info(&info, None, false, false, false);
     assert!(text.contains("Model: grok-4.5"));
-    assert!(! text.contains("grok-4.3"));
+    assert!(!text.contains("grok-4.3"));
 }
 #[test]
 fn format_session_info_no_parens_when_resolved_matches_requested() {
     let info = make_session_info("grok-4.5", Some("grok-4.5"), 1000, 10000);
-    let text = format_session_info(&info, None, true);
+    let text = format_session_info(&info, None, true, false, false);
     assert!(text.contains("Model: grok-4.5"));
-    assert!(! text.contains("(grok-4.5)"));
+    assert!(!text.contains("(grok-4.5)"));
 }
 #[test]
 fn format_session_info_shows_model_hash_when_catalog_flag_set() {
     let mut info = make_session_info("v9", None, 1000, 10000);
     info.data.model_fingerprint = Some("abc123".into());
     info.data.show_model_fingerprint = true;
-    let text = format_session_info(&info, None, false);
+    let text = format_session_info(&info, None, false, false, false);
     assert!(text.contains("Model Hash: abc123"));
 }
 #[test]
@@ -2252,15 +2447,15 @@ fn format_session_info_hides_model_hash_for_noncoding_without_flag() {
     let mut info = make_session_info("v9", None, 1000, 10000);
     info.data.model_fingerprint = Some("abc123".into());
     info.data.show_model_fingerprint = false;
-    let text = format_session_info(&info, None, false);
-    assert!(! text.contains("Model Hash"));
+    let text = format_session_info(&info, None, false, false, false);
+    assert!(!text.contains("Model Hash"));
 }
 #[test]
 fn format_session_info_shows_model_hash_for_coding_slug_without_flag() {
     let mut info = make_session_info("grok-build", None, 1000, 10000);
     info.data.model_fingerprint = Some("abc123".into());
     info.data.show_model_fingerprint = false;
-    let text = format_session_info(&info, None, false);
+    let text = format_session_info(&info, None, false, false, false);
     assert!(text.contains("Model Hash: abc123"));
 }
 #[test]
@@ -2283,32 +2478,63 @@ fn session_picker_summary_preserves_normal_text() {
 #[test]
 fn sanitize_user_error_strips_auth_prefixes() {
     assert_eq!(
-        sanitize_user_error("Authentication required: Login timed out after 10 minutes. Please try again."),
-        "Login timed out after 10 minutes. Please try again."
-    );
+            sanitize_user_error(
+                "Authentication required: Login timed out after 10 minutes. Please try again."
+            ),
+            "Login timed out after 10 minutes. Please try again."
+        );
     assert_eq!(
-        sanitize_user_error("Authentication failed: something went wrong"),
-        "something went wrong"
-    );
+            sanitize_user_error("Authentication failed: something went wrong"),
+            "something went wrong"
+        );
     assert_eq!(
-        sanitize_user_error("Login timed out after 10 minutes. Please try again."),
-        "Login timed out after 10 minutes. Please try again."
-    );
+            sanitize_user_error("Login timed out after 10 minutes. Please try again."),
+            "Login timed out after 10 minutes. Please try again."
+        );
 }
 #[test]
 fn sanitize_user_error_collapses_disk_full() {
     assert_eq!(
-        sanitize_user_error("couldn't create worktree: Internal error: \"hub error: Worktree creation failed: not enough free disk space\""),
-        "Out of disk space."
+            sanitize_user_error(
+                "couldn't create worktree: Internal error: \"hub error: Worktree creation failed: not enough free disk space\""
+            ),
+            "No space left on device"
+        );
+    assert_eq!(
+            sanitize_user_error(
+                "couldn't create worktree: failed to copy index: No space left on device (os error 28)"
+            ),
+            "No space left on device"
+        );
+    assert_eq!(
+            sanitize_user_error("Internal error: \"Disk quota exceeded or out of space.\""),
+            "No space left on device"
+        );
+    assert_eq!(
+            sanitize_user_error("couldn't create worktree: failed to get HEAD commit from source"),
+            "couldn't create worktree: failed to get HEAD commit from source"
+        );
+}
+/// Production ordering of the deferred worktree resume failure: the
+/// detail is sanitized FIRST, then composed — sanitizing the composed
+/// message would collapse a disk-full chain whole and erase the title
+/// hint for a deferred local-miss target.
+#[test]
+fn worktree_resume_failure_sanitizes_detail_before_hint() {
+    let raw = "failed to copy index: No space left on device (os error 28)";
+    let msg = worktree_resume_failure_message(
+        Some("typo title"),
+        &sanitize_user_error(raw),
     );
     assert_eq!(
-        sanitize_user_error("couldn't create worktree: failed to copy index: No space left on device (os error 28)"),
-        "Out of disk space."
-    );
-    assert_eq!(
-        sanitize_user_error("couldn't create worktree: failed to get HEAD commit from source"),
-        "couldn't create worktree: failed to get HEAD commit from source"
-    );
+            msg,
+            format!(
+                "couldn't resume worktree session: No space left on device; {}",
+                crate::app::session_title_resolve::title_miss_hint("typo title")
+            )
+        );
+    let id_msg = worktree_resume_failure_message(None, &sanitize_user_error(raw));
+    assert_eq!(id_msg, "couldn't resume worktree session: No space left on device");
 }
 /// A resume-picker entry converts to a **dormant** dashboard roster row
 /// (the non-leader idle source) preserving title, cwd, model, worktree
@@ -2332,7 +2558,7 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         branch: None,
         repo_name: "repo-app".to_string(),
         worktree_label: Some("wt".to_string()),
-        last_turn_summary: None,
+        last_turn_summary: Some("Fixed the parser".to_string()),
         card_detail: None,
     };
     let roster = session_picker_entry_to_roster(&entry);
@@ -2342,8 +2568,21 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert!(roster.is_worktree, "worktree_label present → is_worktree");
     assert_eq!(roster.model_id.as_deref(), Some("grok-4"));
     assert_eq!(roster.activity, RosterActivity::Dormant);
-    assert!(! roster.resident);
+    assert_eq!(
+            roster.last_turn_summary.as_deref(),
+            Some("Fixed the parser")
+        );
+    assert!(!roster.resident);
     assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
+}
+#[test]
+fn rewind_execute_params_sends_conversation_only_with_force() {
+    let params = rewind_execute_params("sess-1", 3);
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["targetPromptIndex"], 3);
+    assert_eq!(params["force"], true);
+    assert_eq!(params["mode"], REWIND_MODE_WIRE);
+    assert_eq!(params["mode"], "conversation_only");
 }

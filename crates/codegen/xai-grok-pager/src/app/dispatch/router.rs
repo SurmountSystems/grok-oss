@@ -34,10 +34,9 @@ use super::modes::{
     set_permission_mode, set_plan_mode, set_yolo_mode,
 };
 use super::notes::{
-    dispatch_add_session_note, dispatch_enter_feedback_mode, dispatch_enter_remember_mode,
-    dispatch_open_feedback_pane, dispatch_save_remember_note_from_modal, dispatch_send_btw,
-    dispatch_send_btw_follow_up, dispatch_send_feedback, dispatch_send_recap,
-    dispatch_send_remember_note, dispatch_show_notes,
+    dispatch_enter_remember_mode, dispatch_open_feedback_pane,
+    dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
+    dispatch_send_recap, dispatch_send_remember_note,
 };
 use super::permissions::{
     dispatch_permission_cancel, dispatch_permission_followup, dispatch_permission_select,
@@ -48,17 +47,15 @@ use super::prompt::{
     dispatch_show_plan_nudge, dispatch_show_undo_tip, dispatch_show_word_select_tip,
 };
 use super::queue;
-use super::queue::{dispatch_drain_queue, dispatch_force_drain_queue};
+use super::queue::dispatch_drain_queue;
 use super::rewind::{
-    dispatch_inline_edit_submit, dispatch_rewind, dispatch_rewind_back_to_mode_select,
-    dispatch_rewind_cancel_offer, dispatch_rewind_confirm, dispatch_rewind_confirm_never_ask,
-    dispatch_rewind_conversation_only_confirm, dispatch_rewind_dismiss,
-    dispatch_rewind_dismiss_error, dispatch_rewind_picker_select, dispatch_rewind_select_mode,
-    dispatch_rewind_show_picker,
+    dispatch_inline_edit_submit, dispatch_rewind, dispatch_rewind_cancel_offer,
+    dispatch_rewind_confirm, dispatch_rewind_confirm_never_ask, dispatch_rewind_dismiss,
+    dispatch_rewind_dismiss_error, dispatch_rewind_picker_select, dispatch_rewind_show_picker,
 };
 use super::session::foreign::dispatch_fetch_session_list;
 use super::session::fork::{
-    apply_persist_worktree_mode, dispatch_fork, dispatch_fork_resolved, dispatch_project_selected,
+    apply_persist_worktree_mode, dispatch_fork, dispatch_fork_resolved,
     dispatch_startup_fork_session,
 };
 use super::session::lifecycle::{
@@ -77,24 +74,19 @@ use super::session::load::{
 use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
 use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
-    preview_auto_light_theme, preview_theme, set_always_expand_thinking,
-    set_ask_user_question_timeout_enabled, set_auto_compact_threshold, set_auto_dark_theme,
-    set_auto_light_theme, set_auto_run_implement, set_auto_update, set_bubble_copy_buttons,
-    set_cancel_subagents_on_turn_cancel, set_collapsed_edit_blocks, set_combine_queued_prompts,
-    set_compact_mode, set_confirm_before_rewind, set_contextual_hint_image_input,
-    set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
-    set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
-    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-    set_economic_mode, set_features_session_recap, set_fork_secondary_model, set_group_tool_verbs,
-    set_hide_header, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
-    set_max_thoughts_width, set_multiline_mode, set_notifications_session_recap,
-    set_notifications_session_recap_threshold_secs, set_page_flip_on_send, set_plan_approval_park,
-    set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_resume_canceled_turn_on_restart, set_screen_mode,
-    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_scrub_ascii_punct,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_token_economy_bool, set_token_economy_int, set_vim_mode,
-    set_voice_capture_mode, set_voice_keybind_enabled, set_voice_stt_language,
+    preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
+    set_auto_dark_theme, set_auto_light_theme, set_auto_update, set_collapsed_edit_blocks,
+    set_combine_queued_prompts, set_compact_mode, set_confirm_before_rewind,
+    set_contextual_hint_image_input, set_contextual_hint_plan_mode, set_contextual_hint_send_now,
+    set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap, set_contextual_hint_undo,
+    set_contextual_hint_word_select, set_default_model, set_default_selected_permission,
+    set_display_refresh_auto_cadence, set_fork_secondary_model, set_group_tool_verbs,
+    set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection, set_max_thoughts_width,
+    set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions, set_remember_tool_approvals,
+    set_render_mermaid, set_respect_manual_folds, set_screen_mode, set_scroll_lines,
+    set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips, set_simple_mode,
+    set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
+    set_voice_keybind_enabled, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -103,24 +95,21 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_clear_completed_todos, dispatch_copy_session_id, dispatch_manage_billing,
-    dispatch_open_gboom, dispatch_open_tutorial, dispatch_privacy_banner_opt_in,
-    dispatch_privacy_banner_opt_out, dispatch_share_session, dispatch_show_context_info,
-    dispatch_show_limits, dispatch_show_limits_json, dispatch_show_privacy_info,
-    dispatch_show_queue, dispatch_show_release_notes, dispatch_show_session_info,
-    dispatch_show_spend, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
+    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_tutorial,
+    dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out, dispatch_share_session,
+    dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
+    dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
     dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
-    dispatch_copy_entry_content, dispatch_dump_input_log, dispatch_export_conversation,
-    dispatch_open_block_viewer, dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
+    dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
+    dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
     dispatch_open_transcript_pager,
 };
 use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
     dispatch_demote_to_background, dispatch_kill_bg_task, dispatch_kill_subagent,
-    persist_cancel_resume_on_graceful_quit,
 };
 use super::voice::{dispatch_enable_voice_mode, dispatch_voice_stop, dispatch_voice_toggle};
 use crate::app::actions::{Action, Effect};
@@ -160,9 +149,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => {
-            // SIGTERM / first signal / /exit all land here. Mid-turn: write the
-            // same cancel-resume marker as Esc so reopen can re-queue once.
-            persist_cancel_resume_on_graceful_quit(app);
             if let Some(tx) = &app.voice_cmd_tx {
                 let _ = tx.try_send(xai_grok_voice::VoiceCommand::Shutdown);
             }
@@ -171,35 +157,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects
         }
         Action::QuitForUpdate => {
-            persist_cancel_resume_on_graceful_quit(app);
             let mut effects = unregister_all_active_sessions(app);
             app.quit_for_update = true;
             effects.push(Effect::Quit);
             effects
-        }
-        Action::RebuildAndRelaunch => {
-            let ActiveView::Agent(agent_id) = app.active_view else {
-                return vec![];
-            };
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
-                    fraction: 0.0,
-                    detail: "Starting rebuild".into(),
-                });
-                agent.show_toast_ticks("Rebuild 0%  Starting rebuild", 255);
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(
-                        "Starting /rebuild: resolve source tree, just install, \
-                     soft-relaunch leaders, signal peer TUIs to re-exec, then re-exec this session on the new binary.",
-                    ));
-            }
-            let start_dir =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            vec![Effect::RunRebuild {
-                start_dir,
-                agent_id,
-            }]
         }
         Action::ResumeForeignSession => {
             let Some(hint) = app.take_foreign_resume_hint() else {
@@ -231,6 +192,55 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects
         }
         Action::NewSession => dispatch_new_session(app),
+        #[cfg(feature = "local-workspace")]
+        Action::ConfirmWelcomeLocalWorkspaceAck => {
+            match crate::views::welcome::workspace_mode::confirm_welcome_local_workspace_ack(
+                &app.cwd, false,
+            ) {
+                Ok(cfg) => {
+                    app.welcome_workspace_mode =
+                        crate::views::welcome::WelcomeWorkspaceMode::LocalWorkspace;
+                    app.welcome_session_local_workspace = Some(Some(cfg));
+                    app.welcome_local_workspace_ack_pending = false;
+                    let effects = if app.deferred_startup.worktree {
+                        app.deferred_startup.worktree = false;
+                        let label = app.deferred_startup.worktree_label.take();
+                        let git_ref = app.deferred_startup.worktree_ref.take();
+                        let load_session_id = match app.deferred_startup.session.take() {
+                            Some(crate::app::session_startup::DeferredSessionStartup::Load {
+                                session_id,
+                                ..
+                            }) => Some(session_id),
+                            other => {
+                                app.deferred_startup.session = other;
+                                None
+                            }
+                        };
+                        let preferred = app.deferred_startup.preferred_session_id.take();
+                        dispatch_new_worktree_session(
+                            app,
+                            load_session_id,
+                            label,
+                            None,
+                            None,
+                            git_ref,
+                            preferred,
+                        )
+                    } else {
+                        dispatch_new_session(app)
+                    };
+                    if !crate::app::event_loop::welcome_oneshot_applies_to_effects(&effects) {
+                        app.welcome_session_local_workspace = None;
+                    }
+                    effects
+                }
+                Err(err) => {
+                    tracing::warn!("welcome local-workspace ack: {err}");
+                    app.show_toast(&format!("Local workspace: {err}"));
+                    vec![]
+                }
+            }
+        }
         Action::ChooseNewSessionMode => open_new_session_question(app),
         Action::ExitSession | Action::ExitSessionConfirmed => dispatch_exit_session(app),
         Action::DeleteCurrentSession => open_delete_current_session_question(app),
@@ -383,7 +393,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowWordSelectTip => dispatch_show_word_select_tip(app),
         Action::AcceptWordSelectTip => dispatch_accept_word_select_tip(app),
         Action::DrainQueue => dispatch_drain_queue(app),
-        Action::ForceDrainQueue => dispatch_force_drain_queue(app),
         Action::QueueRemoveShared {
             id,
             expected_version,
@@ -574,12 +583,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             app.fps_hud.toggle();
             vec![]
         }
-        Action::CaptureTuiScreenshot => {
-            // Capture runs in the event loop after present, where the
-            // terminal buffer is available. Flag only here (sync dispatch).
-            app.pending_tui_screenshot = true;
-            vec![]
-        }
         Action::ToggleScrollLog => {
             let msg = match app.scroll_state.toggle_scroll_log() {
                 Some(path) => format!("scroll log: recording to {}", path.display()),
@@ -609,10 +612,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::CopyBlockContent => {
             dispatch_copy_block_content(app);
-            vec![]
-        }
-        Action::CopyEntryContent { idx } => {
-            dispatch_copy_entry_content(app, idx);
             vec![]
         }
         Action::CopyAssistantMessage { n, file_path } => {
@@ -917,13 +916,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 let resolved_effort = agent.session.models.reasoning_effort;
                 let unchanged =
                     prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;
-                // Keep the original rollback target across overwrite stashes.
-                // `.and_then(|p| p.prev_model_id).or(prev_model)` would drop a
-                // deliberate `None` and pick up the intermediate optimistic model.
-                let rollback_prev = match agent.session.deferred_model_switch.take() {
-                    Some(prior) => prior.prev_model_id,
-                    None => prev_model,
-                };
+                let rollback_prev = agent
+                    .session
+                    .deferred_model_switch
+                    .take()
+                    .and_then(|prior| prior.prev_model_id)
+                    .or(prev_model);
                 agent.session.deferred_model_switch =
                     Some(crate::app::agent::DeferredModelSwitch {
                         model_id: model_id.clone(),
@@ -996,8 +994,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::CancelTurn => dispatch_cancel_turn(app),
-        Action::ToggleGlobalPause => super::global_pause::dispatch_toggle_global_pause(app),
-        Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
         Action::KillSubagent(subagent_id) => dispatch_kill_subagent(app, subagent_id),
@@ -1015,31 +1011,60 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::OpenTutorial => dispatch_open_tutorial(app),
         Action::RenameSession { title } => dispatch_rename_session(app, title),
+        Action::ResetSessionTitleToAuto => dispatch_reset_session_title(app),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
-        Action::ShowLimits => dispatch_show_limits(app),
-        Action::ShowSpend => dispatch_show_spend(app),
-        Action::ShowLimitsJson => dispatch_show_limits_json(app),
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
-        Action::ClearCompletedTodos => dispatch_clear_completed_todos(app),
-        Action::AddSessionNote { text, tags } => dispatch_add_session_note(app, text, tags),
-        Action::ShowNotes => dispatch_show_notes(app),
+        Action::ShowLimits => super::status::dispatch_show_limits(app),
+        Action::ShowSpend => super::status::dispatch_show_spend(app),
+        Action::ShowLimitsJson => super::status::dispatch_show_limits_json(app),
+        Action::ClearCompletedTodos => super::status::dispatch_clear_completed_todos(app),
+        Action::AddSessionNote { text, tags } => {
+            super::notes::dispatch_add_session_note(app, text, tags)
+        }
+        Action::ShowNotes => super::notes::dispatch_show_notes(app),
+        Action::RebuildAndRelaunch => {
+            let crate::app::app_view::ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
+                    fraction: 0.0,
+                    detail: "Starting rebuild".into(),
+                });
+                agent.show_toast("Starting rebuild");
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Starting /rebuild: resolve source tree, just install, \
+                     then re-exec this session on the new binary.",
+                    ));
+            }
+            let start_dir =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            vec![crate::app::actions::Effect::RunRebuild {
+                start_dir,
+                agent_id,
+            }]
+        }
+        Action::CaptureTuiScreenshot => {
+            app.pending_tui_screenshot = true;
+            vec![]
+        }
+        Action::ToggleGlobalPause => super::global_pause::dispatch_toggle_global_pause(app),
+        Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
-        Action::EnterFeedbackMode => dispatch_enter_feedback_mode(app),
         Action::OpenFeedbackPane => dispatch_open_feedback_pane(app),
-        Action::ResetSessionTitleToAuto => dispatch_reset_session_title(app),
         Action::SendFeedback(text) => dispatch_send_feedback(app, text),
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
         Action::SendBtw(question) => dispatch_send_btw(app, question),
-        Action::SendBtwFollowUp(question) => dispatch_send_btw_follow_up(app, question),
         Action::SendRecap { auto } => dispatch_send_recap(app, auto),
-        Action::ShowPrivacyInfo => dispatch_show_privacy_info(app),
         Action::SetCodingDataSharing { opted_in } => set_coding_data_sharing(
             app,
             opted_in,
@@ -1060,23 +1085,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetInvertScroll(v) => set_invert_scroll(app, v),
         Action::SetScrollLines(v) => set_scroll_lines(app, v),
         Action::SetShowThinkingBlocks(v) => set_show_thinking_blocks(app, v),
-        Action::SetAlwaysExpandThinking(v) => set_always_expand_thinking(app, v),
         Action::SetGroupToolVerbs(v) => set_group_tool_verbs(app, v),
         Action::SetCollapsedEditBlocks(v) => set_collapsed_edit_blocks(app, v),
         Action::SetPromptSuggestions(v) => set_prompt_suggestions(app, v),
-        Action::SetAutoRunImplement(v) => set_auto_run_implement(app, v),
-        Action::SetEconomicMode(v) => set_economic_mode(app, v),
-        Action::SetResumeCanceledTurnOnRestart(v) => set_resume_canceled_turn_on_restart(app, v),
-        Action::SetTokenEconomyBool { field, value } => set_token_economy_bool(app, field, value),
-        Action::SetTokenEconomyInt { field, value } => set_token_economy_int(app, field, value),
         Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
-        Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
-        Action::SetCancelSubagentsOnTurnCancel(s) => set_cancel_subagents_on_turn_cancel(app, s),
-        Action::SetNotificationsSessionRecap(v) => set_notifications_session_recap(app, v),
-        Action::SetNotificationsSessionRecapThresholdSecs(v) => {
-            set_notifications_session_recap_threshold_secs(app, v)
-        }
-        Action::SetFeaturesSessionRecap(v) => set_features_session_recap(app, v),
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
         Action::SetScreenMode(s) => set_screen_mode(app, s),
@@ -1089,13 +1101,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),
-        Action::SetHideHeader(v) => set_hide_header(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
         Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),
         Action::SetConfirmBeforeRewind(v) => set_confirm_before_rewind(app, v),
-        Action::SetScrubAsciiPunct(v) => set_scrub_ascii_punct(app, v),
-        Action::SetPlanApprovalPark(v) => set_plan_approval_park(app, v),
         Action::SetCombineQueuedPrompts(v) => set_combine_queued_prompts(app, v),
         Action::SetSimpleMode(v) => set_simple_mode(app, v),
         Action::SetContextualHintUndo(v) => set_contextual_hint_undo(app, v),
@@ -1115,15 +1124,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetMaxThoughtsWidth(v) => set_max_thoughts_width(app, v),
         Action::SetShowTips(v) => set_show_tips(app, v),
         Action::SetAutoUpdate(v) => set_auto_update(app, v),
-        Action::SetAutoCompactThreshold(v) => set_auto_compact_threshold(app, v),
         Action::SetDisplayRefreshAutoCadence(v) => set_display_refresh_auto_cadence(app, v),
         Action::PreviewTheme(v) => preview_theme(app, v),
         Action::PreviewAutoDarkTheme(v) => preview_auto_dark_theme(app, v),
         Action::PreviewAutoLightTheme(v) => preview_auto_light_theme(app, v),
         Action::OpenSettings => dispatch_open_settings(app, None),
         Action::OpenSettingsFocus { key } => dispatch_open_settings(app, Some(key)),
-        Action::PrivacyBannerAccept => dispatch_privacy_banner_opt_in(app),
-        Action::PrivacyBannerCustomize => dispatch_privacy_banner_opt_out(app),
         Action::PrivacyBannerOptIn => dispatch_privacy_banner_opt_in(app),
         Action::PrivacyBannerOptOut => dispatch_privacy_banner_opt_out(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
@@ -1252,11 +1258,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             );
             effects
         }
-        Action::ProjectSelected {
-            path,
-            stashed_prompt,
-            disable_picker,
-        } => dispatch_project_selected(app, path, stashed_prompt, disable_picker),
         Action::NewSessionAnswered {
             worktree,
             persist_mode,
@@ -1486,15 +1487,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::RewindPickerSelect(prompt_index) => {
             dispatch_rewind_picker_select(app, prompt_index)
         }
-        Action::RewindSelectMode(mode, target) => dispatch_rewind_select_mode(app, mode, target),
-        Action::RewindConfirm(target, mode) => dispatch_rewind_confirm(app, target, mode),
+        Action::RewindConfirm(target) => dispatch_rewind_confirm(app, target),
         Action::RewindConfirmNeverAsk(target) => dispatch_rewind_confirm_never_ask(app, target),
-        Action::RewindConversationOnlyConfirm(target) => {
-            dispatch_rewind_conversation_only_confirm(app, target)
-        }
         Action::RewindCancelOffer => dispatch_rewind_cancel_offer(app),
         Action::RewindDismiss => dispatch_rewind_dismiss(app),
-        Action::RewindBackToModeSelect => dispatch_rewind_back_to_mode_select(app),
         Action::RewindDismissError => dispatch_rewind_dismiss_error(app),
         Action::InlineEditSubmit => dispatch_inline_edit_submit(app),
         Action::JumpShowPicker => dispatch_jump_show_picker(app),

@@ -205,22 +205,8 @@ impl BlockContent for AgentMessageBlock {
         self.mermaid.len() as u16
     }
 
-    /// Magenta Agent rail only while the turn is active (`ctx.is_running`).
-    ///
-    /// Streaming / thinking / tool-running: left `┃` in `theme.accent_running`
-    /// (magenta under DOGE). Once the turn is finished the rail goes away
-    /// (black / no accent) so scrollback is not permanently pink. Human green
-    /// rails stay always-on on user prompts only.
-    fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
-        if !ctx.is_running {
-            return None;
-        }
-        let theme = crate::theme::Theme::current();
-        let color = match theme.accent_running {
-            ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
-            c => c,
-        };
-        Some(AccentStyle::static_color(color))
+    fn accent(&self, _ctx: &BlockContext) -> Option<AccentStyle> {
+        None
     }
 
     fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
@@ -251,13 +237,9 @@ mod tests {
     use crate::scrollback::types::Selectable;
 
     fn ctx(width: u16, raw: bool) -> BlockContext {
-        ctx_running(width, raw, false)
-    }
-
-    fn ctx_running(width: u16, raw: bool, is_running: bool) -> BlockContext {
         BlockContext {
             mode: crate::scrollback::DisplayMode::Expanded,
-            is_running,
+            is_running: false,
             width,
             raw,
             max_lines: None,
@@ -265,124 +247,6 @@ mod tests {
             is_selected: false,
             cwd: None,
         }
-    }
-
-    /// Finished agent messages paint no left rail (no permanent magenta).
-    #[test]
-    fn agent_message_block_accent_none_when_finished() {
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-
-        let blocks = [
-            AgentMessageBlock::new("hello"),
-            AgentMessageBlock::streaming(),
-            AgentMessageBlock::new("```mermaid\nA-->B\n```\n"),
-        ];
-        for block in blocks {
-            assert!(
-                block.accent(&ctx_running(80, false, false)).is_none(),
-                "finished agent turn must not keep a magenta left rail"
-            );
-        }
-    }
-
-    /// Active / streaming agent turn: static magenta left rail (`accent_running`).
-    #[test]
-    fn agent_message_block_accent_is_static_agent_rail_while_running() {
-        use ratatui::style::Color;
-
-        // Mutex so Theme::current() and accent() cannot race other pin_theme tests.
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
-
-        let theme = crate::theme::Theme::current();
-        let expected = match theme.accent_running {
-            Color::Reset => Color::Cyan,
-            c => c,
-        };
-        let blocks = [
-            AgentMessageBlock::new("hello"),
-            AgentMessageBlock::streaming(),
-            AgentMessageBlock::new("```mermaid\nA-->B\n```\n"),
-        ];
-        for block in blocks {
-            let accent = block
-                .accent(&ctx_running(80, false, true))
-                .expect("active agent turn must return a left accent rail");
-            assert!(
-                !accent.animated,
-                "Agent rail is static (not wave-animated like running tools)"
-            );
-            assert_eq!(
-                accent.color, expected,
-                "rail must share the Agent accent_running token (Reset→Cyan)"
-            );
-            assert!(
-                !matches!(accent.color, Color::Gray | Color::DarkGray),
-                "Agent rail must not paint ANSI gray: {:?}",
-                accent.color
-            );
-        }
-    }
-
-    /// DOGE table: active Agent rail is pure magenta. Finished → no rail.
-    #[test]
-    fn agent_message_block_accent_is_magenta_rail_under_doge_while_running() {
-        use ratatui::style::Color;
-
-        let doge = crate::theme::Theme::doge();
-        assert_eq!(
-            doge.accent_running,
-            Color::Rgb(255, 0, 255),
-            "DOGE accent_running must be pure magenta for Agent chrome"
-        );
-        assert_ne!(doge.accent_running, doge.accent_user);
-        assert_ne!(doge.accent_running, Color::Rgb(0, 255, 255)); // not cyan
-
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-
-        assert!(
-            AgentMessageBlock::new("hi")
-                .accent(&ctx_running(80, false, false))
-                .is_none(),
-            "finished agent under DOGE: no magenta rail"
-        );
-
-        let accent = AgentMessageBlock::new("hi")
-            .accent(&ctx_running(80, false, true))
-            .expect("active agent rail on");
-        assert!(!accent.animated, "Agent rail is static");
-        assert!(
-            !matches!(
-                accent.color,
-                Color::Gray | Color::DarkGray | Color::Rgb(255, 255, 255)
-            ),
-            "Agent rail must not be gray/white: {:?}",
-            accent.color
-        );
-        let live = crate::theme::Theme::current().accent_running;
-        let expected = match live {
-            Color::Reset => Color::Cyan,
-            c => c,
-        };
-        assert_eq!(accent.color, expected);
-        if live == Color::Rgb(255, 0, 255) {
-            assert_eq!(accent.color, Color::Rgb(255, 0, 255));
-        }
-    }
-
-    /// `RenderBlock::accent_color` for AgentMessage is None (no permanent rail).
-    #[test]
-    fn render_block_agent_message_accent_color_is_none_when_finished() {
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-        let block = crate::scrollback::block::RenderBlock::agent_message("hi");
-        assert_eq!(
-            block.accent_color(),
-            None,
-            "finished agent lookup must not advertise a permanent magenta rail"
-        );
     }
 
     #[test]

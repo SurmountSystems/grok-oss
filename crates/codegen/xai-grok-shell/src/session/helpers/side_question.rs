@@ -78,10 +78,6 @@ pub fn side_question_reminder(tag: &str, follow_up: bool) -> String {
 
 /// Truncate trailing incomplete assistant tool-call / tool-result runs so the
 /// snapshot is valid for Anthropic Messages (and other strict APIs).
-///
-/// Also drops trailing [`ConversationItem::Reasoning`] left behind when a
-/// mid-turn assistant (with in-flight tool calls) is popped — unpaired
-/// reasoning would otherwise go out on the wire as an orphaned prefix.
 pub fn truncate_incomplete_tool_run(items: &mut Vec<ConversationItem>) {
     while let Some(last) = items.last() {
         match last {
@@ -91,9 +87,6 @@ pub fn truncate_incomplete_tool_run(items: &mut Vec<ConversationItem>) {
             ConversationItem::ToolResult(_) => {
                 items.pop();
             }
-            ConversationItem::Reasoning(_) => {
-                items.pop();
-            }
             _ => break,
         }
     }
@@ -101,10 +94,9 @@ pub fn truncate_incomplete_tool_run(items: &mut Vec<ConversationItem>) {
 
 /// Build conversation items for a side-question request.
 ///
-/// Starts from a parent-session snapshot (caller applies Messages-only
-/// reasoning strip when needed), truncates incomplete tool runs (and any
-/// reasoning orphaned by that trim), appends prior btw turns as user/assistant
-/// pairs, then the new question wrapped in a system-reminder.
+/// Starts from a parent-session snapshot (already reasoning-stripped by the
+/// caller), truncates incomplete tool runs, appends prior btw turns as
+/// user/assistant pairs, then the new question wrapped in a system-reminder.
 pub fn build_side_question_items(
     mut parent_items: Vec<ConversationItem>,
     prior_turns: &[BtwPriorTurn],

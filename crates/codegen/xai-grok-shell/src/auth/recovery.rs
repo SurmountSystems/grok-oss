@@ -341,7 +341,10 @@ impl UnauthorizedRecovery {
                     // preferred_method=api_key forbids automatic OIDC mint.
                     if !self.auth_manager.grok_com_config().blocks_automatic_oidc()
                         && self.auth_manager.is_devbox_environment()
-                        && let Ok(auth) = self.auth_manager.try_devbox_recovery().await
+                        && let Ok(auth) = self
+                            .auth_manager
+                            .try_devbox_recovery(Some(&self.rejected_token))
+                            .await
                     {
                         return Ok(auth);
                     }

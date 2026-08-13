@@ -182,8 +182,6 @@ In the interactive TUI, press `Ctrl+G` to toggle the tasks pane. This pane lists
 - Monitor and `/loop` tasks, each with a live line-count badge
 - The task ID for each entry
 
-In **minimal mode** (or whenever you want a text snapshot), `/tasks` commits the same inventory as a system block. When you have left mid-session annotations with `/note`, that snapshot includes a notes count (see [slash commands — `/note`](04-slash-commands.md#note)).
-
 To toggle the prompt queue instead, press `Ctrl+;`.
 
 ---

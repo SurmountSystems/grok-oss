@@ -252,16 +252,6 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         .bg_tool_call_to_task
         .insert(tool_call_id.clone(), task_id.clone());
 
-    // Ext notifications reorder vs session updates: work registering after
-    // its awaiting wait must re-evaluate the skipped park. Root only — child
-    // tasks never enter root `bg_tasks`.
-    // (Re-borrow: `resolve_target_view` consumed the earlier `&mut`.)
-    if !matches!(matched, SessionMatch::Child(_))
-        && let Some((_, _, agent)) = resolve_notif_agent(app, &session_notif.session_id)
-    {
-        agent.maybe_push_parked_marker();
-    }
-
     is_active
 }
 

@@ -280,12 +280,6 @@ pub struct PagerLocalSnapshot {
     pub show_tips: Option<bool>,
     /// `[cli].auto_update` mirror. `None` = no TOML override → default `true`.
     pub auto_update: Option<bool>,
-    /// `[session].auto_compact_threshold_percent` mirror.
-    /// `None` = no TOML override → default 95 (unless tokens are set).
-    pub auto_compact_threshold_percent: Option<u8>,
-    /// `[session].auto_compact_threshold_tokens` mirror.
-    /// When `Some`, absolute-token mode wins over percent for the session tier.
-    pub auto_compact_threshold_tokens: Option<u64>,
     /// Process-wide vim-mode scrollback flag. Mirrors
     /// `appearance::cache::load_vim_mode()` at snapshot time.
     pub vim_mode: bool,
@@ -306,16 +300,10 @@ pub struct PagerLocalSnapshot {
     /// language actually in effect when `[ui].voice_stt_language` is unset but
     /// an explicit `[voice].language` applies.
     pub voice_stt_language: String,
-    /// Live auto session-recap preference (`[ui.notifications] session_recap`).
-    pub notifications_session_recap: bool,
-    /// Live auto recap debounce seconds.
-    pub notifications_session_recap_threshold_secs: u64,
-    /// Effective/user `[features] session_recap` preference (default true).
-    /// Restart-required for shell ACP re-advertise; modal shows this mirror.
-    pub features_session_recap: bool,
-    /// Always-on bubble ⧉ chrome (`[scrollback.display] bubble_copy_buttons`).
-    pub bubble_copy_buttons: bool,
-    /// Mirrors `AgentView::scheduler_background_loops` (fallback true).
+    /// Mirrors `AgentView::scheduler_background_loops` — the value the shell
+    /// pinned for THIS session — falling back to
+    /// `AppView::scheduler_background_loops_seed` before the session response
+    /// lands. `/loop` reads it to describe where a scheduled fire runs.
     pub scheduler_background_loops: bool,
 }
 
@@ -332,8 +320,6 @@ impl Default for PagerLocalSnapshot {
             plan_mode_active: false,
             show_tips: None,
             auto_update: None,
-            auto_compact_threshold_percent: None,
-            auto_compact_threshold_tokens: None,
             vim_mode: false,
             // Matches the registry default and
             // `appearance::cache::SCROLL_SPEED_DEFAULT`. Bare `u8::default()`
@@ -343,11 +329,7 @@ impl Default for PagerLocalSnapshot {
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
-            notifications_session_recap: true,
-            notifications_session_recap_threshold_secs: 30,
-            features_session_recap: true,
-            bubble_copy_buttons: crate::appearance::ScrollbackDisplayConfig::default()
-                .bubble_copy_buttons,
+            // Matches `resolve_scheduler_background_loops`'s default.
             scheduler_background_loops: true,
         }
     }
@@ -362,111 +344,6 @@ pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
     } else {
         "hold"
     }
-}
-
-/// Parsed auto-compact modal choice: percent of window or absolute tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AutoCompactThresholdChoice {
-    Percent(u8),
-    Tokens(u64),
-}
-
-impl AutoCompactThresholdChoice {
-    /// Registry / toast canonical string.
-    pub fn as_canonical(self) -> &'static str {
-        match self {
-            Self::Percent(p) => canonical_auto_compact_threshold_percent(p),
-            Self::Tokens(t) => canonical_auto_compact_threshold_tokens(t),
-        }
-    }
-}
-
-/// Map a numeric percent onto a modal enum canonical (`"85"`…`"98"`).
-///
-/// Exact matches pass through; any other value snaps to the nearest percent
-/// choice so the picker always has a selected row.
-pub fn canonical_auto_compact_threshold_percent(percent: u8) -> &'static str {
-    match percent {
-        85 => "85",
-        90 => "90",
-        95 => "95",
-        98 => "98",
-        other => {
-            const CHOICES: &[(u8, &str)] = &[(85, "85"), (90, "90"), (95, "95"), (98, "98")];
-            CHOICES
-                .iter()
-                .min_by_key(|(c, _)| c.abs_diff(other))
-                .map(|(_, s)| *s)
-                .unwrap_or("95")
-        }
-    }
-}
-
-/// Map an absolute token count onto a modal enum canonical (`"200k"` / `"475k"`).
-///
-/// Exact Grok 4.5 card presets pass through; other values snap to the nearest
-/// token preset so the picker has a selected row.
-pub fn canonical_auto_compact_threshold_tokens(tokens: u64) -> &'static str {
-    use xai_grok_shell::util::config::{
-        GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
-    };
-    match tokens {
-        t if t == GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS => "200k",
-        t if t == GROK_45_DEFAULT_AUTO_COMPACT_TOKENS => "475k",
-        other => {
-            const CHOICES: &[(u64, &str)] = &[
-                (GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS, "200k"),
-                (GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, "475k"),
-            ];
-            CHOICES
-                .iter()
-                .min_by_key(|(c, _)| c.abs_diff(other))
-                .map(|(_, s)| *s)
-                .unwrap_or("200k")
-        }
-    }
-}
-
-/// Resolve the live modal canonical from session percent and/or tokens mirrors.
-///
-/// Token mode wins when `tokens` is `Some` (matches shell resolver session tier).
-pub fn canonical_auto_compact_threshold(percent: Option<u8>, tokens: Option<u64>) -> &'static str {
-    if let Some(t) = tokens.filter(|&t| t > 0) {
-        return canonical_auto_compact_threshold_tokens(t);
-    }
-    let pct =
-        percent.unwrap_or(xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
-    canonical_auto_compact_threshold_percent(pct)
-}
-
-/// Parse a modal enum canonical into percent or absolute tokens.
-///
-/// Accepts `"85"`…`"98"` (percent) and `"200k"` / `"475k"` (Grok 4.5 card).
-pub fn parse_auto_compact_threshold_canonical(
-    canonical: &str,
-) -> Option<AutoCompactThresholdChoice> {
-    use xai_grok_shell::util::config::{
-        GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
-    };
-    let s = canonical.trim();
-    match s {
-        "200k" | "200K" => Some(AutoCompactThresholdChoice::Tokens(
-            GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
-        )),
-        "475k" | "475K" => Some(AutoCompactThresholdChoice::Tokens(
-            GROK_45_DEFAULT_AUTO_COMPACT_TOKENS,
-        )),
-        other => {
-            let n: u8 = other.parse().ok()?;
-            matches!(n, 85 | 90 | 95 | 98).then_some(AutoCompactThresholdChoice::Percent(n))
-        }
-    }
-}
-
-/// Backward-compatible alias: percent-only canonicalize (nearest of 85/90/95/98).
-#[inline]
-pub fn canonical_auto_compact_threshold_from_percent(percent: u8) -> &'static str {
-    canonical_auto_compact_threshold_percent(percent)
 }
 
 /// Canonicalize a raw voice STT language to a settings choice.
@@ -634,20 +511,17 @@ pub fn current_value_for(
     match key {
         // SHARED — UiConfig source of truth, pager keeps a cache.
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
-        "hide_header" => Some(SettingValue::Bool(ui.hide_header)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
         // Cache is the send-path source of truth (same pattern as group_tool_verbs).
         "page_flip_on_send" => Some(SettingValue::Bool(
             crate::appearance::cache::load_page_flip_on_send(),
         )),
-        "scrub_ascii_punct" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_scrub_ascii_punct(),
-        )),
         // Cache is the drain-path source of truth (same pattern as page_flip_on_send).
         "combine_queued_prompts" => Some(SettingValue::Bool(
             crate::appearance::cache::load_combine_queued_prompts(),
         )),
+        "confirm_before_rewind" => Some(SettingValue::Bool(ui.confirm_before_rewind_enabled())),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints — `None` (inherit) reads as the default ON.
         "contextual_hints.undo" => {
@@ -656,7 +530,6 @@ pub fn current_value_for(
         "contextual_hints.plan_mode" => Some(SettingValue::Bool(
             ui.contextual_hints.plan_mode.unwrap_or(true),
         )),
-        "plan_approval_park" => Some(SettingValue::Enum(ui.plan_approval_park_mode())),
         "contextual_hints.image_input" => Some(SettingValue::Bool(
             ui.contextual_hints.image_input.unwrap_or(true),
         )),
@@ -705,10 +578,6 @@ pub fn current_value_for(
             crate::appearance::cache::load_show_thinking_blocks(),
         )),
         // Live cache (like `show_thinking_blocks`).
-        "always_expand_thinking" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_always_expand_thinking(),
-        )),
-        // Live cache (like `show_thinking_blocks`).
         "group_tool_verbs" => Some(SettingValue::Bool(
             crate::appearance::cache::load_group_tool_verbs(),
         )),
@@ -720,50 +589,6 @@ pub fn current_value_for(
         "prompt_suggestions" => Some(SettingValue::Bool(
             crate::appearance::cache::load_prompt_suggestions(),
         )),
-        // Live cache (like `prompt_suggestions`).
-        "auto_run_implement" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_auto_run_implement(),
-        )),
-        "economic_mode" => Some(SettingValue::Bool(
-            crate::appearance::cache::load_economic_mode(),
-        )),
-        "resume_canceled_turn_on_restart" => Some(SettingValue::Bool(
-            ui.resume_canceled_turn_on_restart_enabled(),
-        )),
-        "token_economy.cap_implement_effort_when_economic" => {
-            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-            Some(SettingValue::Bool(cfg.cap_implement_effort_when_economic))
-        }
-        "token_economy.show_period_pacing" => {
-            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-            Some(SettingValue::Bool(cfg.show_period_pacing))
-        }
-        "token_economy.local_spend_ledger" => {
-            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-            Some(SettingValue::Bool(cfg.local_spend_ledger))
-        }
-        "token_economy.reconcile_management_usage" => {
-            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-            Some(SettingValue::Bool(cfg.reconcile_management_usage))
-        }
-        "token_economy.max_implement_effort" => {
-            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-            Some(SettingValue::Int(i64::from(cfg.max_implement_effort)))
-        }
-        "token_economy.min_implement_effort" => {
-            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-            Some(SettingValue::Int(i64::from(cfg.min_implement_effort)))
-        }
-        "token_economy.desired_implement_effort" => {
-            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-            Some(SettingValue::Int(i64::from(cfg.desired_implement_effort)))
-        }
-        "token_economy.lock_implement_effort" => {
-            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-            Some(SettingValue::Int(i64::from(
-                cfg.lock_implement_effort.unwrap_or(0),
-            )))
-        }
         "respect_manual_folds" => Some(SettingValue::Bool(pager.respect_manual_folds)),
         // SHELL — canonicalized from `[ui].hunk_tracker_mode`.
         "hunk_tracker_mode" => Some(SettingValue::Enum(canonical_hunk_tracker_mode(
@@ -795,14 +620,14 @@ pub fn current_value_for(
             ui.theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
-                .unwrap_or("doge"),
+                .unwrap_or("groknight"),
         )),
         "auto_dark_theme" => Some(SettingValue::Enum(
             ui.auto_dark_theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
                 .filter(|s| *s != "auto")
-                .unwrap_or("doge"),
+                .unwrap_or("groknight"),
         )),
         "auto_light_theme" => Some(SettingValue::Enum(
             ui.auto_light_theme
@@ -875,46 +700,31 @@ pub fn current_value_for(
         // CLI batch: snapshot mirrors; `None` → effective default `true`.
         "show_tips" => Some(SettingValue::Bool(pager.show_tips.unwrap_or(true))),
         "auto_update" => Some(SettingValue::Bool(pager.auto_update.unwrap_or(true))),
-        // Session auto-compact: token mode wins; else percent (default 95).
-        "auto_compact_threshold_percent" => {
-            Some(SettingValue::Enum(canonical_auto_compact_threshold(
-                pager.auto_compact_threshold_percent,
-                pager.auto_compact_threshold_tokens,
-            )))
-        }
-        // fork_secondary_model: baseline value folds to empty string.
+        // fork_secondary_model: baseline value folds to empty string. The
+        // mirror persists the ModelId slug but the DynamicEnum canonicals
+        // are catalog display names, so resolve via the snapshot; a stale
+        // id passes through raw.
         "fork_secondary_model" => Some(SettingValue::String({
             let baseline = xai_grok_shell::models::default_model();
             if ui.fork_secondary_model == baseline {
                 String::new()
             } else {
-                ui.fork_secondary_model.clone()
+                pager
+                    .available_models
+                    .iter()
+                    .find(|(_, id)| id.0.as_ref() == ui.fork_secondary_model.as_str())
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| ui.fork_secondary_model.clone())
             }
         })),
-        // Auto away-recap: live notification service / snapshot wins; disk
-        // `ui.notifications.session_recap` is the seed when the modal opens.
-        "notifications.session_recap" => {
-            Some(SettingValue::Bool(pager.notifications_session_recap))
-        }
-        "notifications.session_recap_threshold_secs" => Some(SettingValue::Int(
-            pager.notifications_session_recap_threshold_secs as i64,
-        )),
-        // Master recap feature flag (restart-required). Snapshot mirrors
-        // user config; default true.
-        "features.session_recap" => Some(SettingValue::Bool(pager.features_session_recap)),
-        // Sticky cancel-subagents preference.
-        "cancel_subagents_on_turn_cancel" => Some(SettingValue::Enum(
-            match ui.cancel_subagents_on_turn_cancel.as_deref() {
-                Some("always_stop") => "always_stop",
-                Some("always_continue") => "always_continue",
-                _ => "ask",
-            },
-        )),
-        // Always-on bubble copy chrome (pager.toml).
-        "bubble_copy_buttons" => Some(SettingValue::Bool(pager.bubble_copy_buttons)),
 
         _ => None,
     }
+}
+
+/// Consent chooser: no docs tip, and no `d` reset (hint or key).
+pub fn is_consent_chooser(key: &str) -> bool {
+    key == "coding_data_sharing"
 }
 
 /// Default value for `key`, derived from the registry metadata.
@@ -959,12 +769,6 @@ mod tests {
                     assert_eq!(
                         *default, ui.compact_mode,
                         "compact_mode default drifts from UiConfig::default()"
-                    );
-                }
-                ("hide_header", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default, ui.hide_header,
-                        "hide_header default drifts from UiConfig::default()"
                     );
                 }
                 // Per-tip contextual hints: `None` (inherit) → default ON.
@@ -1040,11 +844,11 @@ mod tests {
                         "page_flip_on_send default drifts from UiConfig::default()"
                     );
                 }
-                ("scrub_ascii_punct", SettingKind::Bool { default }) => {
+                ("confirm_before_rewind", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
-                        ui.scrub_ascii_punct_enabled(),
-                        "scrub_ascii_punct default drifts from UiConfig::default()"
+                        ui.confirm_before_rewind_enabled(),
+                        "confirm_before_rewind default drifts from UiConfig::default()"
                     );
                 }
                 ("combine_queued_prompts", SettingKind::Bool { default }) => {
@@ -1070,7 +874,7 @@ mod tests {
                         .theme
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
-                        .unwrap_or("doge");
+                        .unwrap_or("groknight");
                     assert_eq!(
                         *default, expected,
                         "theme default drifts from UiConfig::default()",
@@ -1086,7 +890,7 @@ mod tests {
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
                         .filter(|s| *s != "auto")
-                        .unwrap_or("doge");
+                        .unwrap_or("groknight");
                     assert_eq!(
                         *default, expected,
                         "auto_dark_theme default drifts from UiConfig::default()",
@@ -1119,18 +923,6 @@ mod tests {
                         *default, expected,
                         "permission_mode default drifts from UiConfig::default()'s \
                          None → 'ask' fallback (load_permission_mode contract)",
-                    );
-                }
-                ("plan_approval_park", SettingKind::Enum { default, .. }) => {
-                    assert_eq!(
-                        *default,
-                        UiConfig::PLAN_APPROVAL_PARK_DEFAULT,
-                        "plan_approval_park default drifts from UiConfig::PLAN_APPROVAL_PARK_DEFAULT"
-                    );
-                    assert_eq!(
-                        *default,
-                        ui.plan_approval_park_mode(),
-                        "plan_approval_park default drifts from UiConfig::default()"
                     );
                 }
                 // default_model: no UiConfig mirror, resolved dynamically.
@@ -1174,20 +966,6 @@ mod tests {
                          (matches auto_update.rs's `.unwrap_or(true)`)"
                     );
                 }
-                // Session auto-compact: no UiConfig field; default pinned to
-                // the shell/compaction crate constant (95).
-                ("auto_compact_threshold_percent", SettingKind::Enum { default, .. }) => {
-                    assert_eq!(
-                        *default,
-                        crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL,
-                        "auto_compact_threshold_percent registry default must be \"95\""
-                    );
-                    assert_eq!(
-                        xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
-                        95,
-                        "shell DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT drifted from 95"
-                    );
-                }
                 // vim_mode: Option<bool>; None → false.
                 ("vim_mode", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -1222,14 +1000,6 @@ mod tests {
                         "show_thinking_blocks default drifts from UiConfig::default()"
                     );
                 }
-                // always_expand_thinking: Option<bool>; None → false (client default).
-                ("always_expand_thinking", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.always_expand_thinking.unwrap_or(false),
-                        "always_expand_thinking default drifts from UiConfig::default()"
-                    );
-                }
                 // group_tool_verbs: Option<bool>; None → true (client default).
                 ("group_tool_verbs", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -1255,67 +1025,6 @@ mod tests {
                         ui.prompt_suggestions.unwrap_or(true),
                         "prompt_suggestions default drifts from UiConfig::default()"
                     );
-                }
-                // auto_run_implement: Option<bool>; None → true (client default).
-                ("auto_run_implement", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.auto_run_implement.unwrap_or(true),
-                        "auto_run_implement default drifts from UiConfig::default()"
-                    );
-                    assert!(*default, "auto_run_implement must default ON");
-                }
-                // economic_mode: Option<bool>; None → true (client default).
-                ("economic_mode", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.economic_mode.unwrap_or(true),
-                        "economic_mode default drifts from UiConfig::default()"
-                    );
-                    assert!(*default, "economic_mode must default ON");
-                }
-                ("resume_canceled_turn_on_restart", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.resume_canceled_turn_on_restart.unwrap_or(true),
-                        "resume_canceled_turn_on_restart default drifts from UiConfig"
-                    );
-                    assert!(*default, "resume_canceled_turn_on_restart must default ON");
-                }
-                // Token Economy: defaults anchored on TokenEconomyConfig::default().
-                (
-                    "token_economy.cap_implement_effort_when_economic",
-                    SettingKind::Bool { default },
-                ) => {
-                    assert!(*default);
-                }
-                ("token_economy.show_period_pacing", SettingKind::Bool { default }) => {
-                    assert!(*default);
-                }
-                ("token_economy.local_spend_ledger", SettingKind::Bool { default }) => {
-                    assert!(*default);
-                }
-                ("token_economy.reconcile_management_usage", SettingKind::Bool { default }) => {
-                    assert!(*default);
-                }
-                ("token_economy.max_implement_effort", SettingKind::Int { default, min, max }) => {
-                    assert_eq!(*default, 3);
-                    assert_eq!((*min, *max), (1, 5));
-                }
-                ("token_economy.min_implement_effort", SettingKind::Int { default, min, max }) => {
-                    assert_eq!(*default, 1);
-                    assert_eq!((*min, *max), (1, 5));
-                }
-                (
-                    "token_economy.desired_implement_effort",
-                    SettingKind::Int { default, min, max },
-                ) => {
-                    assert_eq!(*default, 2);
-                    assert_eq!((*min, *max), (1, 5));
-                }
-                ("token_economy.lock_implement_effort", SettingKind::Int { default, min, max }) => {
-                    assert_eq!(*default, 0);
-                    assert_eq!((*min, *max), (0, 5));
                 }
                 ("keep_text_selection", SettingKind::Enum { default, .. }) => {
                     let expected = if ui.keep_text_selection_enabled() {
@@ -1481,34 +1190,6 @@ mod tests {
                          models::default_model() — drift here breaks the empty-fold contract",
                     );
                 }
-                ("notifications.session_recap", SettingKind::Bool { default }) => {
-                    assert!(
-                        *default,
-                        "notifications.session_recap must default ON (auto away-recap)"
-                    );
-                    assert_eq!(
-                        ui.notifications.session_recap.unwrap_or(true),
-                        *default,
-                        "notifications.session_recap default drifts from UiConfig"
-                    );
-                }
-                (
-                    "notifications.session_recap_threshold_secs",
-                    SettingKind::Int { default, .. },
-                ) => {
-                    assert_eq!(*default, 30);
-                    assert_eq!(
-                        ui.notifications.session_recap_threshold_secs.unwrap_or(30) as i64,
-                        *default,
-                    );
-                }
-                ("features.session_recap", SettingKind::Bool { default }) => {
-                    assert!(*default, "features.session_recap master must default ON");
-                }
-                ("cancel_subagents_on_turn_cancel", SettingKind::Enum { default, .. }) => {
-                    assert_eq!(*default, "ask");
-                    assert_eq!(ui.cancel_subagents_on_turn_cancel, None);
-                }
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
@@ -1548,18 +1229,6 @@ mod tests {
                         "respect_manual_folds default drifts from ScrollConfig::default() — \
                          the appearance config is the source of truth"
                     );
-                }
-                ("bubble_copy_buttons", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default, pager.bubble_copy_buttons,
-                        "bubble_copy_buttons default drifts from PagerLocalSnapshot::default()"
-                    );
-                    assert_eq!(
-                        *default,
-                        crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
-                        "bubble_copy_buttons default drifts from ScrollbackDisplayConfig"
-                    );
-                    assert!(*default, "bubble_copy_buttons must default ON");
                 }
                 // plan_mode: per-session, not persisted.
                 ("plan_mode", SettingKind::Enum { default, .. }) => {
@@ -1634,79 +1303,6 @@ mod tests {
         assert_eq!(canonical_voice_capture_mode(Some("hold_send")), "hold");
         assert_eq!(canonical_voice_capture_mode(Some("")), "hold");
         assert_eq!(canonical_voice_capture_mode(None), "hold");
-    }
-
-    #[test]
-    fn canonical_auto_compact_threshold_exact_and_nearest() {
-        assert_eq!(canonical_auto_compact_threshold_percent(85), "85");
-        assert_eq!(canonical_auto_compact_threshold_percent(90), "90");
-        assert_eq!(canonical_auto_compact_threshold_percent(95), "95");
-        assert_eq!(canonical_auto_compact_threshold_percent(98), "98");
-        // Midpoints / off-catalog snap to nearest discrete choice.
-        assert_eq!(canonical_auto_compact_threshold_percent(87), "85");
-        assert_eq!(canonical_auto_compact_threshold_percent(88), "90");
-        assert_eq!(canonical_auto_compact_threshold_percent(93), "95");
-        assert_eq!(canonical_auto_compact_threshold_percent(100), "98");
-        assert_eq!(canonical_auto_compact_threshold_percent(0), "85");
-        assert_eq!(
-            parse_auto_compact_threshold_canonical("98"),
-            Some(AutoCompactThresholdChoice::Percent(98))
-        );
-        assert_eq!(
-            parse_auto_compact_threshold_canonical("200k"),
-            Some(AutoCompactThresholdChoice::Tokens(200_000))
-        );
-        assert_eq!(
-            parse_auto_compact_threshold_canonical("475k"),
-            Some(AutoCompactThresholdChoice::Tokens(475_000))
-        );
-        assert_eq!(canonical_auto_compact_threshold_tokens(200_000), "200k");
-        assert_eq!(canonical_auto_compact_threshold_tokens(475_000), "475k");
-        assert_eq!(parse_auto_compact_threshold_canonical("91"), None);
-        assert_eq!(parse_auto_compact_threshold_canonical("bogus"), None);
-    }
-
-    /// Product contract: unset mirrors resolve to the 95% default choice.
-    #[test]
-    fn auto_compact_threshold_current_value_defaults_to_95() {
-        let pager = PagerLocalSnapshot::default();
-        let ui = UiConfig::default();
-        assert_eq!(
-            current_value_for("auto_compact_threshold_percent", &ui, &pager),
-            Some(SettingValue::Enum("95")),
-        );
-        assert_eq!(
-            canonical_auto_compact_threshold(None, None),
-            "95",
-            "default auto-compact preference must be 95%"
-        );
-        let pager = PagerLocalSnapshot {
-            auto_compact_threshold_percent: Some(98),
-            ..Default::default()
-        };
-        assert_eq!(
-            current_value_for("auto_compact_threshold_percent", &ui, &pager),
-            Some(SettingValue::Enum("98")),
-        );
-        // Token mode wins over percent when both are set.
-        let pager = PagerLocalSnapshot {
-            auto_compact_threshold_percent: Some(98),
-            auto_compact_threshold_tokens: Some(200_000),
-            ..Default::default()
-        };
-        assert_eq!(
-            current_value_for("auto_compact_threshold_percent", &ui, &pager),
-            Some(SettingValue::Enum("200k")),
-        );
-        // Off-catalog numeric still snaps for the picker row.
-        let pager = PagerLocalSnapshot {
-            auto_compact_threshold_percent: Some(70),
-            ..Default::default()
-        };
-        assert_eq!(
-            current_value_for("auto_compact_threshold_percent", &ui, &pager),
-            Some(SettingValue::Enum("85")),
-        );
     }
 
     /// With the UI key unset, `current_value_for` shows the live language
@@ -1839,7 +1435,7 @@ mod tests {
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
         assert_eq!(
             value,
-            SettingValue::Enum("doge"),
+            SettingValue::Enum("groknight"),
             "corrupted `auto_dark_theme = \"auto\"` must fall back to canonical default",
         );
     }
@@ -1868,7 +1464,52 @@ mod tests {
         };
         let pager = PagerLocalSnapshot::default();
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
-        assert_eq!(value, SettingValue::Enum("doge"));
+        assert_eq!(value, SettingValue::Enum("groknight"));
+    }
+
+    /// The persisted `fork_secondary_model` slug resolves to the catalog
+    /// display name (matching the `default_model` row and the DynamicEnum
+    /// picker canonicals); the baseline still folds to the empty sentinel
+    /// and a slug missing from the catalog passes through raw.
+    #[test]
+    fn fork_secondary_model_current_value_resolves_display_name() {
+        let slug = "grok-4.5-fast";
+        assert_ne!(
+            slug,
+            xai_grok_shell::models::default_model(),
+            "test slug must differ from the baseline or the empty-fold arm masks the lookup",
+        );
+        let pager = PagerLocalSnapshot {
+            available_models: vec![(
+                "Grok 4.5 Fast".to_string(),
+                acp::ModelId::new(std::sync::Arc::from(slug)),
+            )],
+            ..Default::default()
+        };
+        let ui = UiConfig {
+            fork_secondary_model: slug.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            current_value_for("fork_secondary_model", &ui, &pager),
+            Some(SettingValue::String("Grok 4.5 Fast".to_string())),
+        );
+
+        // Baseline folds to the empty "no override" sentinel.
+        assert_eq!(
+            current_value_for("fork_secondary_model", &UiConfig::default(), &pager),
+            Some(SettingValue::String(String::new())),
+        );
+
+        // Stale slug (not in the catalog) passes through unresolved.
+        let stale_ui = UiConfig {
+            fork_secondary_model: "retired-model".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            current_value_for("fork_secondary_model", &stale_ui, &pager),
+            Some(SettingValue::String("retired-model".to_string())),
+        );
     }
 
     /// Keywords must be lowercase and non-empty.
@@ -1936,25 +1577,6 @@ mod tests {
     }
 
     /// Search is a literal substring multi-word AND match.
-    #[test]
-    fn search_recap_finds_session_recap_rows() {
-        let reg = SettingsRegistry::defaults();
-        let hits = reg.search("recap");
-        let keys: std::collections::HashSet<&str> = hits.iter().map(|m| m.key).collect();
-        assert!(
-            keys.contains("notifications.session_recap"),
-            "search(recap) missing auto recap: {keys:?}"
-        );
-        assert!(
-            keys.contains("features.session_recap"),
-            "search(recap) missing master: {keys:?}"
-        );
-        assert!(
-            keys.contains("notifications.session_recap_threshold_secs"),
-            "search(recap) missing threshold: {keys:?}"
-        );
-    }
-
     #[test]
     fn search_multi_word_and() {
         let reg = SettingsRegistry::defaults();

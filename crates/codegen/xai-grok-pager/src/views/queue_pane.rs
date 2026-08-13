@@ -869,9 +869,6 @@ impl QueuePane {
     /// If `overlay_area` is provided and the selected entry is multiline,
     /// renders a preview overlay showing the full content.
     ///
-    /// `show_interject` controls the row `[Interject]` button: mid-turn soft
-    /// interject. Callers pass primary `turn_running` (background children
-    /// alone do not force idle Interject chrome).
     pub fn render(
         &mut self,
         area: Rect,
@@ -879,7 +876,7 @@ impl QueuePane {
         focused: bool,
         layout_cfg: &LayoutConfig,
         overlay_area: Option<Rect>,
-        show_interject: bool,
+        is_turn_running: bool,
     ) {
         // Detect a theme switch and refresh the list chrome style. Its
         // `selection_bg` (the focused-row highlight) is captured from the
@@ -1029,12 +1026,11 @@ impl QueuePane {
                             .bind(Rect::new(edit_x, screen_y, edit_w, 1), entry.id);
                     }
 
-                    if show_interject {
+                    if is_turn_running {
                         // Compact action wording; same mouse hit-test as before
-                        // (soft interject mid-turn, or force-drain while held).
-                        // Leftmost in the chain, flush against [edit] for the
-                        // same no-seam reason.
-                        let interject_label = "[Interject]";
+                        // (force-interject). Leftmost in the chain, flush
+                        // against [edit] for the same no-seam reason.
+                        let interject_label = "[Send now]";
                         let interject_w = interject_label.len() as u16;
                         if let Some(interject_x) = fits(right, interject_w) {
                             // Brighten the fg on hover (same hover color as the
@@ -1634,9 +1630,9 @@ mod tests {
         );
     }
 
-    /// `[edit]` renders even when Interject is not offered — the keyboard `e`
-    /// edit works regardless of turn state — while `[Interject]` stays hidden
-    /// when `show_interject` is false, and the chain stays flush: [edit][cancel].
+    /// `[edit]` renders even when no turn is running — the keyboard `e` edit
+    /// works regardless of turn state — while `[Send now]` stays hidden, and
+    /// the chain stays flush: [edit][cancel].
     #[test]
     fn edit_button_renders_when_turn_not_running() {
         let mut pane = QueuePane::new();
@@ -1649,12 +1645,12 @@ mod tests {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        // Focused + no interject affordance → [edit] and [cancel] only.
+        // Focused + turn NOT running → [edit] and [cancel], no [Send now].
         pane.render(area, &mut buf, true, &layout_cfg, None, false);
 
         assert!(
             pane.send_now.rect.is_none(),
-            "[Interject] hidden when show_interject is false"
+            "[Send now] only renders mid-turn"
         );
         let edit = pane
             .edit_button
@@ -1665,32 +1661,8 @@ mod tests {
         assert_eq!(
             edit.x + edit.width,
             cancel.x,
-            "[edit] must sit flush against [cancel] when [Interject] is hidden"
+            "[edit] must sit flush against [cancel] when [Send now] is hidden"
         );
-    }
-
-    /// When the caller sets `show_interject` (primary turn running), the
-    /// `[Interject]` button paints even if the parent view is otherwise idle
-    /// in tests. Real idle + children passes `show_interject=false`.
-    #[test]
-    fn interject_button_renders_when_show_interject_true() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "queued mid-turn follow-up"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        let ids = pane.entry_ids();
-        pane.list_state.select_by_id(ids[0]);
-
-        let area = Rect::new(0, 0, 80, 1);
-        let mut buf = Buffer::empty(area);
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        pane.render(area, &mut buf, true, &layout_cfg, None, true);
-
-        assert!(
-            pane.send_now.rect.is_some(),
-            "[Interject] must render when show_interject is true"
-        );
-        assert_eq!(pane.send_now.entry_id, Some(ids[0]));
     }
 
     /// On panes too narrow for the full `[Send now][edit][cancel]` chain, a

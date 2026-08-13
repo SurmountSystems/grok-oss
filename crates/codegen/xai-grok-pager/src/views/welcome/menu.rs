@@ -53,7 +53,8 @@ pub fn render_menu(
     .areas(area);
 
     let mut rects = Vec::with_capacity(items.len());
-    for ((i, (key, label)), y) in items.iter().enumerate().zip(menu_centered.y..) {
+    let mut y = menu_centered.y;
+    for (i, (key, label)) in items.iter().enumerate() {
         if y >= menu_centered.y + menu_centered.height {
             break;
         }
@@ -131,6 +132,8 @@ pub fn render_menu(
                 }
             }
         }
+
+        y += 1;
     }
 
     rects

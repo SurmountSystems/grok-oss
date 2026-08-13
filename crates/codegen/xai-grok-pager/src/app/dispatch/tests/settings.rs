@@ -346,69 +346,6 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
     );
     assert!(!app.agents[&id].session.model_switch_pending);
 }
-/// Resume-canceled-on-restart: default on, flip off emits PersistSetting
-/// with correct key/value/rollback, and live UiConfig updates immediately.
-#[test]
-fn set_resume_canceled_turn_on_restart_persists_and_updates_ui() {
-    use crate::settings::SettingValue;
-    let mut app = test_app_with_agent();
-    assert!(
-        app.current_ui.resume_canceled_turn_on_restart_enabled(),
-        "default must be on"
-    );
-    let effects = dispatch(Action::SetResumeCanceledTurnOnRestart(false), &mut app);
-    assert_eq!(effects.len(), 1);
-    match &effects[0] {
-        Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        } => {
-            assert_eq!(*key, "resume_canceled_turn_on_restart");
-            assert_eq!(value, &SettingValue::Bool(false));
-            assert_eq!(rollback_value, &SettingValue::Bool(true));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-    assert!(!app.current_ui.resume_canceled_turn_on_restart_enabled());
-    // Idempotent when already off.
-    let again = dispatch(Action::SetResumeCanceledTurnOnRestart(false), &mut app);
-    assert!(again.is_empty());
-    // Restore on.
-    let on = dispatch(Action::SetResumeCanceledTurnOnRestart(true), &mut app);
-    assert_eq!(on.len(), 1);
-    assert!(app.current_ui.resume_canceled_turn_on_restart_enabled());
-}
-
-/// Token Economy bool from Settings emits PersistSetting under the dotted key.
-#[test]
-fn set_token_economy_bool_emits_persist_setting() {
-    use crate::settings::SettingValue;
-    xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
-    let mut app = test_app_with_agent();
-    let effects = dispatch(
-        Action::SetTokenEconomyBool {
-            field: "show_period_pacing",
-            value: false,
-        },
-        &mut app,
-    );
-    assert_eq!(effects.len(), 1);
-    match &effects[0] {
-        Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        } => {
-            assert_eq!(*key, "token_economy.show_period_pacing");
-            assert_eq!(value, &SettingValue::Bool(false));
-            // Rollback is the prior disk value (defaults true when unset).
-            assert_eq!(rollback_value, &SettingValue::Bool(true));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-}
-
 /// `set_compact_mode(app, new)` emits exactly one
 /// `Effect::PersistSetting` with the correct payload — `value`
 /// matches `new`, `rollback_value` matches the prior cache value.
@@ -1028,9 +965,7 @@ fn deep_link_preview_esc_closes_modal_and_forwards_revert_action() {
     );
     match outcome {
         InputOutcome::Action(Action::PreviewTheme(name)) => {
-            // Revert uses the theme that was live when the chooser opened.
-            // Surmount product default is doge (not monorepo groknight).
-            assert_eq!(name, "doge");
+            assert_eq!(name, "groknight");
         }
         other => panic!("expected Action(PreviewTheme), got {other:?}"),
     }
@@ -1265,10 +1200,6 @@ fn dispatch_open_reset_confirm_no_op_in_release_when_no_settings_modal() {
 fn every_setting_has_action_for_reset_arm() {
     use crate::settings::current_value_for;
     with_theme_test_env(|| {
-        // Pin Token Economy live cache to product defaults so a developer
-        // `$GROK_HOME` (e.g. min_implement_effort = 2) cannot poison the
-        // move-away → reset round-trip.
-        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
         let reg = crate::settings::SettingsRegistry::defaults();
         for meta in reg.all() {
             if matches!(meta.kind, crate::settings::SettingKind::Group { .. }) {
@@ -1503,141 +1434,6 @@ fn pr13_set_show_tips_emits_persist_with_rollback() {
     }
     assert_eq!(app.show_tips, Some(true));
 }
-// ── auto_compact_threshold (percent or tokens) ─────────────────────
-
-#[test]
-fn set_auto_compact_threshold_first_commit_of_default_persists() {
-    use crate::settings::{AutoCompactThresholdChoice, SettingValue};
-    let mut app = test_app_with_agent();
-    assert_eq!(app.auto_compact_threshold_percent, None);
-    assert_eq!(app.auto_compact_threshold_tokens, None);
-    let effects = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(95)),
-        &mut app,
-    );
-    assert_eq!(
-        effects.len(),
-        1,
-        "first commit of the default must persist (not silently no-op)"
-    );
-    assert_eq!(app.auto_compact_threshold_percent, Some(95));
-    assert_eq!(app.auto_compact_threshold_tokens, None);
-    match &effects[0] {
-        Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        } => {
-            assert_eq!(*key, "auto_compact_threshold_percent");
-            assert_eq!(*value, SettingValue::Enum("95"));
-            // prev was None → effective default 95 is the rollback canonical.
-            assert_eq!(*rollback_value, SettingValue::Enum("95"));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-}
-
-/// Product contract: built-in default preference is 95% (not a token preset).
-#[test]
-fn auto_compact_threshold_default_is_95_percent() {
-    use crate::settings::{
-        AutoCompactThresholdChoice, SettingValue, canonical_auto_compact_threshold,
-    };
-    assert_eq!(
-        xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
-        95
-    );
-    assert_eq!(canonical_auto_compact_threshold(None, None), "95");
-    assert_eq!(
-        crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL,
-        "95"
-    );
-    // Dispatching the default choice leaves percent mode active.
-    let mut app = test_app_with_agent();
-    let _ = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(95)),
-        &mut app,
-    );
-    assert_eq!(app.auto_compact_threshold_percent, Some(95));
-    assert_eq!(app.auto_compact_threshold_tokens, None);
-    // Token preset is opt-in, not the default.
-    let effects = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Tokens(200_000)),
-        &mut app,
-    );
-    assert_eq!(app.auto_compact_threshold_tokens, Some(200_000));
-    assert_eq!(app.auto_compact_threshold_percent, None);
-    match &effects[0] {
-        Effect::PersistSetting { value, .. } => {
-            assert_eq!(*value, SettingValue::Enum("200k"));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-}
-
-#[test]
-fn set_auto_compact_threshold_idempotent_re_commit() {
-    use crate::settings::AutoCompactThresholdChoice;
-    let mut app = test_app_with_agent();
-    let _ = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
-        &mut app,
-    );
-    assert_eq!(app.auto_compact_threshold_percent, Some(98));
-    let effects = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "re-committing the same value must be idempotent, got {effects:?}"
-    );
-}
-
-#[test]
-fn set_auto_compact_threshold_toast_includes_restart_marker() {
-    use crate::settings::AutoCompactThresholdChoice;
-    let mut app = test_app_with_agent();
-    let _ = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
-        &mut app,
-    );
-    let toast = read_toast(&app);
-    assert!(
-        toast.contains("98%"),
-        "toast must include the value, got {toast:?}"
-    );
-    assert!(
-        toast.contains("restart to apply"),
-        "toast must include the deferred-effect cue, got {toast:?}"
-    );
-}
-
-#[test]
-fn auto_compact_rollback_from_none_state_restores_none() {
-    use crate::settings::{AutoCompactThresholdChoice, SettingValue};
-    let mut app = test_app_with_agent();
-    assert_eq!(app.auto_compact_threshold_percent, None);
-    let effects = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
-        &mut app,
-    );
-    let rollback_value = match &effects[0] {
-        Effect::PersistSetting { rollback_value, .. } => rollback_value.clone(),
-        _ => panic!("expected PersistSetting"),
-    };
-    // Effective default before first commit is 95.
-    assert_eq!(rollback_value, SettingValue::Enum("95"));
-    assert_eq!(app.auto_compact_threshold_percent, Some(98));
-    apply_setting_rollback(&mut app, "auto_compact_threshold_percent", &rollback_value);
-    assert_eq!(
-        app.auto_compact_threshold_percent, None,
-        "rollback from prev=None must restore None (not Some(95)) so AppView \
-         stays in sync with disk after a failed first-commit persist"
-    );
-    assert_eq!(app.auto_compact_threshold_tokens, None);
-}
-
 /// Idempotency — re-committing the same value is a no-op
 /// (no Effect). Mirror of `set_auto_compact_threshold_percent_idempotent_re_commit`.
 #[test]
@@ -1834,14 +1630,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "auto_update" => {
             let _ = dispatch(Action::SetAutoUpdate(false), app);
         }
-        "auto_compact_threshold_percent" => {
-            let _ = dispatch(
-                Action::SetAutoCompactThreshold(
-                    crate::settings::AutoCompactThresholdChoice::Percent(98),
-                ),
-                app,
-            );
-        }
         "vim_mode" => {
             let _ = dispatch(Action::SetVimMode(true), app);
         }
@@ -1878,9 +1666,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "show_thinking_blocks" => {
             let _ = dispatch(Action::SetShowThinkingBlocks(true), app);
         }
-        "always_expand_thinking" => {
-            let _ = dispatch(Action::SetAlwaysExpandThinking(true), app);
-        }
         "group_tool_verbs" => {
             let _ = dispatch(Action::SetGroupToolVerbs(false), app);
         }
@@ -1889,87 +1674,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "prompt_suggestions" => {
             let _ = dispatch(Action::SetPromptSuggestions(false), app);
-        }
-        "auto_run_implement" => {
-            let _ = dispatch(Action::SetAutoRunImplement(false), app);
-        }
-        "economic_mode" => {
-            let _ = dispatch(Action::SetEconomicMode(false), app);
-        }
-        "resume_canceled_turn_on_restart" => {
-            let _ = dispatch(Action::SetResumeCanceledTurnOnRestart(false), app);
-        }
-        "token_economy.cap_implement_effort_when_economic" => {
-            let _ = dispatch(
-                Action::SetTokenEconomyBool {
-                    field: "cap_implement_effort_when_economic",
-                    value: false,
-                },
-                app,
-            );
-        }
-        "token_economy.show_period_pacing" => {
-            let _ = dispatch(
-                Action::SetTokenEconomyBool {
-                    field: "show_period_pacing",
-                    value: false,
-                },
-                app,
-            );
-        }
-        "token_economy.local_spend_ledger" => {
-            let _ = dispatch(
-                Action::SetTokenEconomyBool {
-                    field: "local_spend_ledger",
-                    value: false,
-                },
-                app,
-            );
-        }
-        "token_economy.reconcile_management_usage" => {
-            let _ = dispatch(
-                Action::SetTokenEconomyBool {
-                    field: "reconcile_management_usage",
-                    value: false,
-                },
-                app,
-            );
-        }
-        "token_economy.max_implement_effort" => {
-            let _ = dispatch(
-                Action::SetTokenEconomyInt {
-                    field: "max_implement_effort",
-                    value: 5,
-                },
-                app,
-            );
-        }
-        "token_economy.min_implement_effort" => {
-            let _ = dispatch(
-                Action::SetTokenEconomyInt {
-                    field: "min_implement_effort",
-                    value: 2,
-                },
-                app,
-            );
-        }
-        "token_economy.desired_implement_effort" => {
-            let _ = dispatch(
-                Action::SetTokenEconomyInt {
-                    field: "desired_implement_effort",
-                    value: 3,
-                },
-                app,
-            );
-        }
-        "token_economy.lock_implement_effort" => {
-            let _ = dispatch(
-                Action::SetTokenEconomyInt {
-                    field: "lock_implement_effort",
-                    value: 2,
-                },
-                app,
-            );
         }
         "respect_manual_folds" => {
             let _ = dispatch(
@@ -2011,37 +1715,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 Action::SetDefaultSelectedPermission("allow_once".to_string()),
                 app,
             );
-        }
-        "hide_header" => {
-            let _ = dispatch(Action::SetHideHeader(true), app);
-        }
-        "scrub_ascii_punct" => {
-            // Registry default is ON; flip off to leave default.
-            let _ = dispatch(Action::SetScrubAsciiPunct(false), app);
-        }
-        "bubble_copy_buttons" => {
-            let away = !crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons;
-            let _ = dispatch(Action::SetBubbleCopyButtons(away), app);
-        }
-        "plan_approval_park" => {
-            // Default is soft; force modal to leave default.
-            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_string()), app);
-        }
-        "cancel_subagents_on_turn_cancel" => {
-            // Default is ask; pick always_stop to leave default.
-            let _ = dispatch(
-                Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
-                app,
-            );
-        }
-        "notifications.session_recap" => {
-            let _ = dispatch(Action::SetNotificationsSessionRecap(false), app);
-        }
-        "notifications.session_recap_threshold_secs" => {
-            let _ = dispatch(Action::SetNotificationsSessionRecapThresholdSecs(60), app);
-        }
-        "features.session_recap" => {
-            let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
         }
         other => {
             panic!(
@@ -2142,7 +1815,6 @@ fn set_simple_mode_propagates_to_every_agent() {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2587,55 +2259,6 @@ fn set_show_thinking_blocks_applies_persists_and_rolls_back() {
         crate::appearance::cache::load_show_thinking_blocks(),
         "rollback must restore cache",
     );
-}
-#[test]
-fn set_always_expand_thinking_applies_persists_and_rolls_back() {
-    crate::appearance::cache::set_always_expand_thinking(false);
-    let mut app = test_app_with_agent();
-    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::PersistSetting {
-                key: "always_expand_thinking",
-                value: crate::settings::SettingValue::Bool(true),
-                rollback_value: crate::settings::SettingValue::Bool(false),
-            }]
-        ),
-        "expected exactly one PersistSetting effect, got {effects:?}",
-    );
-    assert!(crate::appearance::cache::load_always_expand_thinking());
-    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    assert!(effects.is_empty(), "redundant set must be a no-op");
-    let _ = apply_setting_rollback(
-        &mut app,
-        "always_expand_thinking",
-        &crate::settings::SettingValue::Bool(false),
-    );
-    assert!(
-        !crate::appearance::cache::load_always_expand_thinking(),
-        "rollback must restore cache",
-    );
-}
-#[test]
-fn set_always_expand_thinking_expands_existing_thinking() {
-    use crate::scrollback::block::RenderBlock;
-    use crate::scrollback::types::DisplayMode;
-    crate::appearance::cache::set_always_expand_thinking(false);
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
-    let id = agent
-        .scrollback
-        .push_block(RenderBlock::thinking("collapsed-until-setting"));
-    agent.scrollback.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
-    let _ = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
-    assert_eq!(
-        agent.scrollback.get_by_id(id).unwrap().display_mode,
-        DisplayMode::Expanded,
-        "turning always_expand_thinking on must expand existing thinking"
-    );
-    crate::appearance::cache::set_always_expand_thinking(false);
 }
 #[test]
 fn set_group_tool_verbs_applies_persists_and_rolls_back() {
@@ -3645,33 +3268,18 @@ fn set_auto_dark_theme_does_not_apply_when_theme_is_not_auto() {
 /// GrokNight. Using a non-truecolor theme avoids the clamp
 /// uncertainty. The "live apply" contract is what we're testing
 /// — the specific theme picked is incidental.
-///
-/// Intermediate kind after `SetTheme("auto")` is intentionally not
-/// pinned to `GrokNight`: under `cargo test` (shared process) other
-/// tests can leave a non-default `AUTO_THEME_CONFIG` until the next
-/// seed. Process-per-test runners (`cargo nextest`) make that rare;
-/// the load-bearing assert is the post-commit `GrokDay` apply.
 #[test]
 fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
     with_theme_test_env(|| {
         crate::theme::system_appearance::set_mock(Some(
             crate::theme::system_appearance::SystemAppearance::Dark,
         ));
-        // Re-seed under the held test lock so resolve_auto cannot
-        // observe another test's AUTO_THEME_CONFIG between setup and
-        // SetTheme("auto").
-        crate::theme::cache::seed_auto_theme_defaults_for_test();
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetTheme("auto".into()), &mut app);
-        assert!(
-            crate::theme::cache::is_auto_mode(),
-            "SetTheme(auto) must enable auto mode before auto_dark_theme commit",
-        );
-        let before = crate::theme::cache::current_kind();
-        assert_ne!(
-            before,
-            crate::theme::ThemeKind::GrokDay,
-            "pre-commit kind must differ from the grokday value we are about to apply",
+        assert!(crate::theme::cache::is_auto_mode());
+        assert_eq!(
+            crate::theme::cache::current_kind(),
+            crate::theme::ThemeKind::GrokNight,
         );
         let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
         assert_eq!(

@@ -30,7 +30,6 @@ fn item(content: &str, status: TodoStatus) -> TodoItem {
         priority: TodoPriority::default(),
         status,
         meta: None,
-        size: None,
     }
 }
 

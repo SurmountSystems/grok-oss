@@ -304,7 +304,7 @@ fn write_store_to(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
 /// `Unsupported` for exactly this `auth.json` path. Path-scoped so parallel
 /// tests in the same process do not sabotage each other.
 #[cfg(test)]
-pub(crate) static WRITE_FAULT_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+pub(super) static WRITE_FAULT_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 /// Atomic write: tmp + rename. Unix `rename(2)` replaces atomically;
 /// Windows `rename` requires removing the target first.

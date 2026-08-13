@@ -933,16 +933,6 @@ fn auth_complete_restores_view_after_mid_session_login() {
 #[test]
 fn session_loaded_drains_pending_first_prompt_to_front() {
     let mut app = fork_test_app();
-    let sid = "new-fork-sid";
-    // Host ~/.grok can retain an eager cancel-resume marker from a prior
-    // run (drain re-writes after start). Clear so this contract stays
-    // about pending_first_prompt drain, not resume pollution.
-    let cwd = app
-        .agents
-        .get(&AgentId(0))
-        .map(|a| a.session.cwd.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/tmp".into());
-    let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd, sid);
     dispatch(
         Action::Fork(fork_args(Some(false), Some("first directive"))),
         &mut app,
@@ -953,11 +943,11 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
         .unwrap()
         .session
         .enqueue_prompt("user-typed prompt".into());
-    app.agents.get_mut(&new_id).unwrap().session.session_id = Some(sid.into());
+    app.agents.get_mut(&new_id).unwrap().session.session_id = Some("new-fork-sid".into());
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
             agent_id: new_id,
-            session_id: sid.into(),
+            session_id: "new-fork-sid".into(),
             models: None,
             code_restored: false,
             restore_summary: None,
@@ -978,8 +968,6 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
         app.agents[&new_id].pending_first_prompt.is_none(),
         "drained prompt must be cleared"
     );
-    let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd, sid);
-    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
 }
 #[test]
 fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
@@ -1314,7 +1302,6 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: old_owner,
             result: Ok("old answer".into()),
-            btw_session_id: None,
             minimal_request_id: Some(request_id),
         }),
         &mut app,

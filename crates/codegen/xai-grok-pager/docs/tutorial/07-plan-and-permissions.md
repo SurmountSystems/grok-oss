@@ -11,27 +11,21 @@ Reading is always free: file reads, searches, and safe read-only commands
 (`ls`, `git status`, `grep`, …) never prompt. Chained commands are
 checked piece by piece — `ls && rm -rf tmp` still prompts for the `rm`.
 
-Trust the session? `/always-approve` (or `Ctrl+O`) skips **tool permission**
-prompts. It does **not** auto-approve a plan: plan decisions stay on the plan
-panel CTAs.
+Trust the session? `/always-approve` (or `Ctrl+O`) skips the prompts.
 
 ## Plan mode
 
 For bigger or more ambiguous tasks, use **plan mode**: Grok explores the
-codebase read-only, designs an approach, and **presents** a plan for you to
-approve *before* any code is written. Agent tool `exit_plan_mode` means
-“plan ready for review,” not “already approved.”
+codebase read-only, designs an approach, and presents a plan you approve
+*before* any code is written.
 
 - **`Shift+Tab`** (prompt focused) cycles the mode: Normal → Plan →
   Always-approve.
 - **`/plan`** enters plan mode directly; `/plan <task>` plans that task in
   one step.
 
-When the plan is ready, use the **side panel or soft-park strip** CTAs
-(mouse primary): **Approve**, **Approve w/ comment**, **Clarify**, **Revise**,
-**Quit**. With empty prompt focus on the panel, keys `a` / `A` / `?` / `s` /
-`q` mirror those actions. Do not approve by freeform chat. After one decisive
-Approve or Quit, decision chrome stays quiet until a **new** present.
+When the plan is ready: `a` approves, `c` comments on a specific line,
+`s` requests changes — Grok iterates until you're happy, then implements.
 
 A good habit: plan mode for "how should we even do this?", normal mode for
 "just do it".

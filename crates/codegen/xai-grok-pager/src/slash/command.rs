@@ -12,6 +12,7 @@
 use crate::acp::model_state::ModelState;
 use crate::app::actions::Action;
 use crate::app::bundle::BundleState;
+use crate::slash::mode_support::ModeSupport;
 use agent_client_protocol as acp;
 
 /// Provisional scheduled task info for immediate display in the tasks pane.
@@ -108,17 +109,19 @@ pub struct AppCtx<'a> {
     pub cwd: &'a std::path::Path,
     /// Session announcements (critical or promo) exist (gates `/announcements` visibility).
     pub has_session_announcements: bool,
-    /// Whether `/usage` itself is offered (kill-switch / remote settings).
-    pub usage_command_visible: bool,
     /// Consumer billing surface (`AppView::usage_visible`). Gates `/usage` subcommands.
     pub billing_surface_visible: bool,
+    /// Whether `/usage` is offered and executable. False for external-auth
+    /// deployments with no grok.com billing session.
+    pub usage_command_visible: bool,
     pub workflows_available: bool,
     /// Effective render mode of this process (gates `/minimal` and
     /// `/fullscreen` visibility). Same source of truth as
     /// [`CommandExecCtx::screen_mode`], carried by the owning
     /// [`SlashController`](crate::slash::SlashController).
     pub(crate) screen_mode: crate::app::ScreenMode,
-    /// Current session title (if any); used by rename-related suggestions.
+    /// Current session title for `/rename` ghost-prefill (`display_name`,
+    /// else `generated_session_title`). `None` when there is no title yet.
     pub current_title: Option<&'a str>,
 }
 
@@ -133,9 +136,8 @@ pub struct CommandExecCtx<'a> {
     pub(crate) screen_mode: crate::app::ScreenMode,
     /// Consumer billing surface (`AppView::usage_visible`). Gates `/usage` subcommands.
     pub billing_surface_visible: bool,
-    /// Whether `/usage` itself is offered (kill-switch / remote settings).
-    /// Distinct from [`Self::billing_surface_visible`]: the command can be
-    /// hidden while the broader billing surface stays visible, or vice versa.
+    /// Whether `/usage` is offered and executable. False for external-auth
+    /// deployments with no grok.com billing session.
     pub usage_command_visible: bool,
     /// Snapshot of the active agent's PAGER-owned settings, built at
     /// command-build time by the dispatcher. Slash commands like
@@ -143,13 +145,6 @@ pub struct CommandExecCtx<'a> {
     /// typed `Action::SetX(new)` — the dispatcher remains the single
     /// source of truth for the actual state mutation.
     pub(crate) pager_state: crate::settings::PagerLocalSnapshot,
-}
-
-impl CommandExecCtx<'_> {
-    /// Whether `/usage` itself is offered (see field docs).
-    pub fn usage_command_visible(&self) -> bool {
-        self.usage_command_visible
-    }
 }
 
 /// Origin of a slash command. The dropdown renderer turns this into badge
@@ -291,31 +286,26 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
-    /// Whether this command functions in the scrollback-native **minimal**
-    /// mode (`grok --minimal`).
+    /// Which render modes this command functions in.
     ///
-    /// Minimal mode deletes the interactive fullscreen scrollback pane, the
-    /// in-app mouse selection path, and the agent dashboard, handing scroll /
-    /// search / selection back to the terminal (K7). Commands that drive those
-    /// deleted surfaces — `/find`, `/dashboard` — have nothing to act on, so
-    /// the central dispatch gate refuses them with a "/<x> is not available in
-    /// minimal mode" message (committed as a system block). Clipboard helpers
-    /// like `/copy` stay available: they read scrollback state and do not need
-    /// the fullscreen pane.
+    /// Minimal mode (`grok --minimal`) deletes the interactive fullscreen
+    /// scrollback pane, the in-app mouse selection path, and the agent
+    /// dashboard, handing scroll / search / selection back to the terminal
+    /// (K7); a few commands exist only there, because the full TUI solves the
+    /// same problem with a pane or a chord. Declaring the mode here is the
+    /// single source for both behaviors: the command is hidden from every
+    /// completion surface in the modes it does not support (`command_offered`),
+    /// and a fully-typed invocation is refused with an actionable hint by the
+    /// central dispatch gate instead of running against a surface that does not
+    /// exist.
     ///
-    /// Defaults to `true` — a **denylist, not an allowlist**: the many
-    /// mode-agnostic commands keep working and new commands are available in
-    /// minimal by default (the mode is converging toward parity). Override to
-    /// `false` only for genuinely fullscreen-pane-dependent commands.
-    fn available_in_minimal(&self) -> bool {
-        true
-    }
-
-    /// Which screen modes this command may run in. Defaults to both; override
-    /// for fullscreen-only or minimal-only commands. Central dispatch uses
-    /// [`crate::slash::ModeSupport::refusal`] when the command is unavailable.
-    fn mode_support(&self) -> crate::slash::ModeSupport {
-        crate::slash::ModeSupport::Both
+    /// Defaults to [`ModeSupport::Both`] — a **denylist, not an allowlist**:
+    /// the many mode-agnostic commands keep working and new commands are
+    /// available everywhere by default (minimal is converging toward parity).
+    /// Clipboard helpers like `/copy` stay `Both`: they read scrollback state
+    /// and do not need the fullscreen pane.
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::Both
     }
 
     /// Placeholder text shown in the prompt when args are empty.

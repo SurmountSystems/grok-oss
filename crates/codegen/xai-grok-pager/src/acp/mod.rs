@@ -8,15 +8,13 @@ pub mod meta;
 pub mod model_state;
 pub mod spawn;
 pub mod tracker;
-// Product path lives in orphan `headless/ext_protocol` until wired; tests cover
-// the decoder and method classifier in-crate.
-#[cfg_attr(not(test), allow(dead_code))]
 mod version_mismatch;
+
+pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_banner};
 
 /// Ext methods that carry a session-scoped update and may stamp `isReplay`.
 /// Shared by TUI/headless dispatch and the session-load ACP barrier so a new
 /// method cannot be handled in one path and classified `Unrelated` in the other.
-#[cfg_attr(not(test), allow(dead_code))] // product call sites in orphan headless/ + barrier
 pub(crate) fn is_session_update_ext_method(method: &str) -> bool {
     matches!(method, "x.ai/session_notification" | "x.ai/session/update")
 }

@@ -91,8 +91,7 @@ impl BlockContent for CreditLimitBlock {
 
     fn accent(&self, _ctx: &BlockContext) -> Option<AccentStyle> {
         let theme = Theme::current();
-        // Yellow context/limits rail: striped glyphs, not solid pink/green.
-        Some(AccentStyle::striped(theme.warning))
+        Some(AccentStyle::static_color(theme.warning))
     }
 
     fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
@@ -194,14 +193,10 @@ mod tests {
     #[test]
     fn has_warning_accent() {
         let block = CreditLimitBlock::new("heading", CreditLimitCardAction::EnablePayg, "url");
-        let accent = block.accent(&ctx()).expect("credit limit rail");
+        let accent = block.accent(&ctx());
         let theme = Theme::current();
-        assert_eq!(accent.color, theme.warning);
-        assert!(
-            accent.striped,
-            "yellow context/limits rail must use striped glyphs, not solid ┃"
-        );
-        assert!(!accent.animated);
+        assert!(accent.is_some());
+        assert_eq!(accent.unwrap().color, theme.warning);
     }
 
     #[test]

@@ -753,15 +753,13 @@ mod tests {
             usage_pct: 50.67,
             effective_usage_pct: 50.67,
             period_end_display: Some("May 29, 00:00".to_string()),
-            period_end_at: None,
             pay_as_you_go: true,
             on_demand_cap_cents: Some(10_000),
             on_demand_used_cents: Some(0),
             prepaid_balance_cents: None,
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".to_string()),
             is_unified_billing_user: None,
-            grok_build_usage_pct: None,
-            included_usage_known: true,
+            ..Default::default()
         };
         let theme = Theme::current();
         let lines = usage_limit_lines(&state, Some(&bal), &theme);

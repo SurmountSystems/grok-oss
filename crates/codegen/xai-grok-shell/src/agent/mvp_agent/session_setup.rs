@@ -470,7 +470,7 @@ impl MvpAgent {
                     client_terminal,
                     client_fs_read,
                     client_fs_write,
-                    preloaded_envrc: None,
+                    envrc: None,
                     persisted_signals: None,
                     persisted_plan_mode: None,
                     persisted_goal_mode: None,
@@ -893,7 +893,7 @@ impl MvpAgent {
                 "load_session: reconnecting to existing session, updating MCP servers"
             );
             let attach_hints = explicit_startup_hints(request_meta.as_ref());
-            if let Some(handle) = self.sessions.borrow_mut().get_mut(&session_id) {
+            self.with_resident_mut(&session_id, |handle| {
                 handle.initial_client_mcp_servers = initial_client_mcp_servers;
                 if let Some(hints) = attach_hints {
                     let _ =
@@ -910,7 +910,7 @@ impl MvpAgent {
                         mcp_servers,
                         respond_to: tx,
                     });
-            }
+            });
         }
         {
             let init_meta = self
@@ -1141,7 +1141,7 @@ impl MvpAgent {
         session_auto_mode: bool,
     ) {
         let session_id = session_id.clone();
-        if let Some(handle) = self.sessions.borrow_mut().get_mut(&session_id) {
+        self.with_resident_mut(&session_id, |handle| {
             handle.code_nav_enabled = client_code_nav_enabled;
             if session_yolo_mode && !handle.yolo_mode {
                 tracing::debug!(
@@ -1166,7 +1166,7 @@ impl MvpAgent {
                     .cmd_tx
                     .send(SessionCommand::SetAutoMode { enabled: true });
             }
-        }
+        });
     }
     /// Heal crash-orphaned subagents from both sources (replayed spawns with
     /// no finish, on-disk `running` metas), keyed by id so a double orphan

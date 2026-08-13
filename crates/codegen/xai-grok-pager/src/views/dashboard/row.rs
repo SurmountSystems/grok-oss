@@ -1595,7 +1595,6 @@ mod tests {
         RosterEntry {
             title: title.map(String::from),
             activity,
-            last_turn_summary: None,
             ..roster_entry(session_id, now_unix_ms())
         }
     }
@@ -1763,7 +1762,6 @@ mod tests {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,

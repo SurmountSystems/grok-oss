@@ -53,11 +53,7 @@ const HOLD_SLEEP_SECS: &str = "15";
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WakeCancelGesture {
     CtrlC,
-    /// Built by the Esc mirror case (same shared body).
-    #[allow(dead_code)]
     Esc,
-    /// Built by the StopClick mirror case (same shared body).
-    #[allow(dead_code)]
     StopClick,
 }
 

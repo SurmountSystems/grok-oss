@@ -14,9 +14,7 @@ the current turn and send the queued message right away.
 
 ## You are always in control
 
-- **`Esc Esc`** while a turn is running — cancel it (your draft is kept).
-  The first Esc only asks you to confirm, so closing a dialog with Esc cannot
-  also cancel by accident.
+- **`Esc`** — cancel a running turn immediately (your draft is kept).
 - **`Esc Esc`** while idle — clear the prompt; with an empty prompt, open
   the rewind picker instead. Cleared something by accident? `Ctrl+Z` undoes.
 - **`Ctrl+Q`** — quit (`Ctrl+D` in VS Code-family terminals), press twice.

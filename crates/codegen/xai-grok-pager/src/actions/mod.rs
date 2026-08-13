@@ -72,10 +72,6 @@ pub enum ActionId {
     // Agent
     NextModel,
     CancelTurn,
-    /// Pause or resume all in-process agent work (Ctrl+Shift+Space).
-    ToggleGlobalPause,
-    /// Soft stop: finish current turn then hold the queue (Ctrl+Shift+S).
-    ToggleSoftStop,
     ToggleYolo,
     ToggleMultiline,
 
@@ -965,98 +961,6 @@ mod tests {
     fn binds_ctrl_4(def: &ActionDef) -> bool {
         let ctrl_4 = key!('4', CONTROL);
         def.default_key == ctrl_4 || def.alt_keys.contains(&ctrl_4)
-    }
-    /// Named contract: Ctrl+Shift+Space is fearless global pause (all sessions).
-    /// Distinct from voice Ctrl+Space and bare Space (prompt focus).
-    #[test]
-    fn global_pause_bound_to_ctrl_shift_space_always() {
-        let registry = ActionRegistry::defaults();
-        let def = registry
-            .find(ActionId::ToggleGlobalPause)
-            .expect("ToggleGlobalPause must be registered");
-        assert_eq!(def.label, "pause all");
-        assert_eq!(def.context, When::Always);
-        assert!(!def.requires_confirmation);
-        assert_eq!(def.hint_key_display, Some("Ctrl+Shift+Space"));
-
-        let chord = KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-        assert_eq!(
-            registry.lookup(&chord, When::Always),
-            Some(ActionId::ToggleGlobalPause)
-        );
-        // Exact AgentScreen lookup misses; bubbling uses Always.
-        assert_eq!(registry.lookup(&chord, When::AgentScreen), None);
-        // Voice stays on bare Ctrl+Space (no Shift).
-        let voice = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
-        assert_eq!(
-            registry.lookup(&voice, When::Always),
-            Some(ActionId::VoiceToggle)
-        );
-    }
-
-    /// Named contract: Ctrl+Shift+S is soft stop (finish turn, hold queue).
-    /// Distinct from fearless pause Ctrl+Shift+Space.
-    #[test]
-    fn soft_stop_bound_to_ctrl_shift_s_always() {
-        let registry = ActionRegistry::defaults();
-        let def = registry
-            .find(ActionId::ToggleSoftStop)
-            .expect("ToggleSoftStop must be registered");
-        assert_eq!(def.label, "soft stop");
-        assert_eq!(def.context, When::Always);
-        assert_eq!(def.hint_key_display, Some("Ctrl+Shift+S"));
-
-        let chord = KeyEvent::new(
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-        assert_eq!(
-            registry.lookup(&chord, When::Always),
-            Some(ActionId::ToggleSoftStop)
-        );
-        // Must not steal the pause chord.
-        let pause = KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-        assert_eq!(
-            registry.lookup(&pause, When::Always),
-            Some(ActionId::ToggleGlobalPause)
-        );
-    }
-
-    /// Named contract: F9 is the free global chord for TUI self-screenshot
-    /// (`/screenshot` remains the slash surface). Not bound to other Always actions.
-    #[test]
-    fn capture_tui_screenshot_bound_to_f9_always() {
-        let registry = ActionRegistry::defaults();
-        let def = registry
-            .find(ActionId::CaptureTuiScreenshot)
-            .expect("CaptureTuiScreenshot must be registered");
-        assert_eq!(def.label, "screenshot");
-        assert_eq!(def.context, When::Always);
-        assert!(!def.requires_confirmation);
-
-        let f9 = KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE);
-        assert_eq!(
-            registry.lookup(&f9, When::Always),
-            Some(ActionId::CaptureTuiScreenshot)
-        );
-        assert_eq!(registry.lookup(&f9, When::AgentScreen), None);
-        assert_eq!(registry.lookup(&f9, When::PromptFocused), None);
-        let f8 = KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE);
-        assert_eq!(
-            registry.lookup(&f8, When::Always),
-            Some(ActionId::VoiceToggle)
-        );
-        let f2 = KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE);
-        assert_eq!(
-            registry.lookup(&f2, When::AgentScreen),
-            Some(ActionId::OpenSettings)
-        );
     }
 
     // Host-default registry: at most one of these two owns Ctrl+4.

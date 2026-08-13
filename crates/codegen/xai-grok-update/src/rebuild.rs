@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::format_build_id;
-use xai_grok_shell::active_sessions::{self, ActiveSession};
+use xai_grok_active_sessions::{self as active_sessions, ActiveSession};
 use xai_grok_shell::leader::{self, LeaderRelaunchOutcome};
 
 /// Package that produces the `grok-oss` binary.

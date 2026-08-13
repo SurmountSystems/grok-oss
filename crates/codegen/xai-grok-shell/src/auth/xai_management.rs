@@ -2395,8 +2395,9 @@ mod tests {
         );
 
         server.abort();
-        if let Some(v) = prev_disable {
-            unsafe { std::env::set_var(DISABLE_ENV, v) }
+        match prev_disable {
+            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
+            None => {}
         }
     }
 
@@ -2441,8 +2442,9 @@ mod tests {
             "bare 403 must not poison shared cooldown"
         );
         server.abort();
-        if let Some(v) = prev_disable {
-            unsafe { std::env::set_var(DISABLE_ENV, v) }
+        match prev_disable {
+            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
+            None => {}
         }
     }
 

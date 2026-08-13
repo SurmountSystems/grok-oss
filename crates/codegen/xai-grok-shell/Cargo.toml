@@ -119,6 +119,7 @@ arc-swap = { workspace = true }
 infer = "0.15"
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 moka = { workspace = true, features = ["future"] }
+dhat = { workspace = true, optional = true }
 base64 = { workspace = true }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 sha2 = { workspace = true }
@@ -147,10 +148,14 @@ xai-grok-compaction = { path = "../../common/xai-grok-compaction" }
 xai-grok-sampler = { path = "../xai-grok-sampler" }
 # Session FTS search; owns this crate's only rusqlite/bundled-SQLite use.
 xai-grok-session-search = { workspace = true }
+# Surmount token_economy + grok_oss durable store still open SQLite here.
+rusqlite = { version = "0.37", features = ["bundled"] }
+xai-sqlite-journal = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
 xai-tty-utils = { workspace = true }
+xai-workflow = { path = "../xai-workflow" }
 xai-system-power = { workspace = true }
 xai-grok-workspace = { workspace = true }
 # Backs the compatibility-only `xai_grok_shell::foreign_sessions` re-export.
@@ -215,10 +220,7 @@ windows = { workspace = true, features = ["Win32_Security_Credentials"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
-# Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
-ctor = { workspace = true }
 filetime = { workspace = true }
-pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 # `extensions::bundle` tests build archives with `bundle::test_helpers`, which
 # is `#[cfg(test)]`-only inside xai-grok-bundle without this feature.

@@ -61,11 +61,6 @@ impl FocusTracker {
         self.focused.get()
     }
 
-    /// Update the auto-recap unfocused debounce (Settings live-apply).
-    pub fn set_recap_threshold_secs(&mut self, secs: u64) {
-        self.recap_threshold = Duration::from_secs(secs);
-    }
-
     /// `true` if an automatic session recap request should be sent: unfocused
     /// past the recap threshold, no successful recap shown this away period,
     /// and not within the retry backoff after a recent attempt.

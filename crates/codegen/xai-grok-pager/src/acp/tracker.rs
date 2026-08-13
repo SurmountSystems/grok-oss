@@ -358,8 +358,6 @@ pub struct AcpUpdateTracker {
     last_stream_start_ms: Option<i64>,
     /// Monotonic count of live parent-agent updates that changed scrollback.
     agent_output_epoch: u64,
-    /// Snapshot of [`Self::agent_output_epoch`] at the last turn finish (or
-    /// explicit snapshot). Used by [`Self::output_since_last_finish`].
     epoch_at_last_finish: u64,
     /// Session project cwd for display-only redundant-`cd` stripping.
     /// Set from [`AgentSession::cwd`]; not used for execution.
@@ -479,16 +477,13 @@ impl AcpUpdateTracker {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Current boundary for visible live parent-agent output.
-    pub(crate) fn agent_output_epoch(&self) -> u64 {
-        self.agent_output_epoch
-    }
-    /// True when parent-agent output landed since the last finish/snapshot.
     pub(crate) fn output_since_last_finish(&self) -> bool {
         self.agent_output_epoch != self.epoch_at_last_finish
     }
-    /// Mark all output so far as accounted for without finishing the turn.
-    #[allow(dead_code)] // reserved for mid-turn epoch baselines (e.g. cancel reconcile)
+    /// Mark all output so far as accounted for without finishing the turn —
+    /// for terminals that must be skipped while a client command owns the
+    /// screen (a full `finish_turn` would flush mid-command state such as
+    /// `pending_compaction`).
     pub(crate) fn snapshot_output_epoch(&mut self) {
         self.epoch_at_last_finish = self.agent_output_epoch;
     }
@@ -617,23 +612,9 @@ impl AcpUpdateTracker {
     pub fn remove_pending_tool(&mut self, tool_call_id: &str) {
         self.pending_tools.remove(tool_call_id);
     }
-
-    /// True when replay left mid-turn tracker state that scrollback may not show.
-    ///
-    /// Suppressed wait tools (`get_command_or_subagent_output`, …) never create
-    /// running scrollback entries; after killall mid-wait the only live signal
-    /// is `blocking_waits` / pending tools / open thinking or agent message.
-    /// Session-load history recovery must consult this **before** `finish_turn`.
-    pub fn has_in_flight_mid_turn_activity(&self) -> bool {
-        !self.blocking_waits.is_empty()
-            || !self.pending_tools.is_empty()
-            || self.current_thinking.is_some()
-            || self.current_agent_msg.is_some()
-    }
-
     /// Get the tool_call_id of the currently running Execute tool, if any.
     ///
-    /// Used by demotion (Ctrl-G) to know which tool to background.
+    /// Used by demotion (Ctrl+B) to know which tool to background.
     /// Returns None if no Execute tool is currently pending.
     pub fn running_execute_tool_call_id(&self) -> Option<&str> {
         self.pending_tools
@@ -751,8 +732,9 @@ impl AcpUpdateTracker {
     /// Whether `block` is a successful Edit with hunks (worth a full-file HL job).
     fn edit_wants_file_hl(block: &RenderBlock) -> bool {
         matches!(
-            block, RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) if edit.error
-            .is_none() && ! edit.hunks.is_empty()
+            block,
+            RenderBlock::ToolCall(ToolCallBlock::Edit(edit))
+                if edit.error.is_none() && !edit.hunks.is_empty()
         )
     }
     /// Stash `entry_id` for live successful Edits with hunks. Skips replay
@@ -929,8 +911,10 @@ impl AcpUpdateTracker {
     ) -> bool {
         if !meta.is_replay {
             debug!(
-                target : crate ::tracing::ACP_UPDATE_TARGET, "[acp] {} | {}",
-                update_summary(& update), meta_summary(meta),
+                target: crate::tracing::ACP_UPDATE_TARGET,
+                "[acp] {} | {}",
+                update_summary(&update),
+                meta_summary(meta),
             );
         }
         if self.retry_activity.is_some() {
@@ -1039,6 +1023,7 @@ impl AcpUpdateTracker {
         self.writing_tool_names.clear();
         self.suppressed_tools.clear();
         self.blocking_waits.clear();
+        self.orphan_updates.clear();
         self.skip_next_skill_body = false;
     }
     /// Finish the current thinking block, passing elapsed time to the entry.
@@ -1049,7 +1034,7 @@ impl AcpUpdateTracker {
     fn finish_thinking(&mut self, scrollback: &mut ScrollbackState) {
         if let Some(thinking_id) = self.current_thinking.take() {
             let is_empty = scrollback.get_by_id(thinking_id).is_some_and(
-                |e| matches!(& e.block, RenderBlock::Thinking(t) if t.text().is_empty()),
+                |e| matches!(&e.block, RenderBlock::Thinking(t) if t.text().is_empty()),
             );
             if is_empty {
                 scrollback.remove_entry(thinking_id);
@@ -1109,7 +1094,7 @@ impl AcpUpdateTracker {
         }
         if self.current_agent_msg.is_none() && text.trim().is_empty() {
             tracing::warn!(
-                text = % text.escape_debug(),
+                text = %text.escape_debug(),
                 "ignoring whitespace-only agent message chunk (no prior content)"
             );
             return false;
@@ -1181,10 +1166,11 @@ impl AcpUpdateTracker {
         self.finish_thinking(scrollback);
         self.current_agent_msg = None;
         if is_todo_tool(&tc)
-            || is_goal_tool(&tc)
             || is_bg_plumbing_tool(&tc)
             || is_task_tool(&tc)
+            || is_goal_tool(&tc)
             || is_scheduler_tool(&tc)
+            || is_workflow_tool(&tc)
         {
             if is_task_tool(&tc) {
                 let is_background = tc
@@ -1307,7 +1293,6 @@ impl AcpUpdateTracker {
         );
         let tc_id = tcu.tool_call_id.0.to_string();
         if !is_completed {
-            let mut deferred_visible_change = false;
             let defer_as_bg = if let Some(pending) = self.pending_tools.get_mut(&tc_id) {
                 let bash_output = extract_bash_output_from_value(&tcu.fields.raw_output);
                 pending.base.update(tcu.fields);
@@ -1323,10 +1308,9 @@ impl AcpUpdateTracker {
                     let drop_placeholder = entry_placeholder && !has_real_command;
                     let desc = extract_raw_field(&pending.base, "description");
                     if drop_placeholder {
-                        deferred_visible_change = pending
-                            .entry_id
-                            .take()
-                            .is_some_and(|id| scrollback.remove_entry(id));
+                        if let Some(id) = pending.entry_id.take() {
+                            scrollback.remove_entry(id);
+                        }
                         Some((tc_id.clone(), desc, false))
                     } else {
                         if let Some(entry_id) = pending.entry_id {
@@ -1342,7 +1326,6 @@ impl AcpUpdateTracker {
                                 kind_changed = verb_group_kind_changed(&entry.block, &block);
                                 entry.block = block;
                                 entry.invalidate_cache();
-                                deferred_visible_change = true;
                             }
                             if kind_changed {
                                 scrollback.mark_structurally_dirty(entry_id);
@@ -1377,16 +1360,14 @@ impl AcpUpdateTracker {
             };
             if let Some((deferred_id, description, keep_in_pending)) = defer_as_bg {
                 tracing::debug!(
-                    tool_call_id = % deferred_id, keep_in_pending,
+                    tool_call_id = %deferred_id,
+                    keep_in_pending,
                     "Deferring is_background=true tool to bg_deferred_tools"
                 );
                 if !keep_in_pending {
                     self.pending_tools.remove(&deferred_id);
                 }
                 self.bg_deferred_tools.insert(deferred_id, description);
-                if deferred_visible_change && !is_replay {
-                    self.bump_agent_output_epoch();
-                }
                 return false;
             }
             unreachable!("both branches above return");
@@ -1473,6 +1454,21 @@ impl AcpUpdateTracker {
             .and_then(|m| m.get(user_message_chunk_meta::PROMPT_INDEX))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
+        if let Some(segments) = combined_display_texts_from_chunk(&chunk) {
+            let mut last_id = None;
+            for seg in &segments {
+                last_id = Some(scrollback.push_block(RenderBlock::UserPrompt(
+                    crate::scrollback::blocks::UserPromptBlock::new(seg.clone()),
+                )));
+            }
+            if let (Some(pi), Some(id)) = (prompt_index, last_id)
+                && let Some(entry) = scrollback.get_by_id_mut(id)
+                && let RenderBlock::UserPrompt(ref mut block) = entry.block
+            {
+                block.prompt_index = Some(pi);
+            }
+            return true;
+        }
         let display_override = match &chunk.content {
             acp::ContentBlock::Text(t) => t
                 .meta
@@ -1547,6 +1543,23 @@ impl AcpUpdateTracker {
         }
         true
     }
+}
+/// Per-prompt display strings from combine ([`user_prompt_meta::COMBINED_DISPLAY_TEXTS`]).
+fn combined_display_texts_from_chunk(chunk: &acp::ContentChunk) -> Option<Vec<String>> {
+    let acp::ContentBlock::Text(t) = &chunk.content else {
+        return None;
+    };
+    let arr = t
+        .meta
+        .as_ref()?
+        .get(user_prompt_meta::COMBINED_DISPLAY_TEXTS)?
+        .as_array()?;
+    let segs: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .collect();
+    (segs.len() >= 2).then_some(segs)
 }
 /// Parse `skillTokenRanges` content-block meta (`[[start, end], …]`) into
 /// byte ranges. Malformed entries are skipped; bounds/boundary validation
@@ -2268,17 +2281,13 @@ fn content_text(tc: &acp::ToolCall) -> String {
 fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
     matches!(
         tc.title.as_str(),
-        "get_command_or_subagent_output"
-            | "kill_command_or_subagent"
-            | "wait_commands_or_subagents"
-            | "get_task_output"
-            | "kill_task"
-            | "wait_tasks"
-            | "get_task_or_subagent_output"
-            | "kill_task_or_subagent"
-            | "wait_tasks_or_subagents"
-            | "AwaitShell"
-            | "Await"
+        // Current names (post-rename)
+        "get_command_or_subagent_output" | "kill_command_or_subagent" | "wait_commands_or_subagents"
+        // Old names (persisted sessions / replay)
+        | "get_task_output" | "kill_task" | "wait_tasks"
+        // Intermediate names (mid-rename sessions)
+        | "get_task_or_subagent_output" | "kill_task_or_subagent" | "wait_tasks_or_subagents"
+        | "AwaitShell" | "Await"
     ) || tc.title.starts_with("Await:")
         || tc.title.starts_with("Sleep ")
         || tc.title.starts_with("Wait tasks:")
@@ -2426,12 +2435,6 @@ fn is_todo_tool(tc: &acp::ToolCall) -> bool {
         "todo_write" | "TodoWrite" | "Updating plan"
     ) || is_todo_variant(extract_variant(tc))
 }
-/// Check if a tool call is a goal-update tool (update_goal).
-///
-/// Suppressed from scrollback because the goal dashboard provides visibility.
-fn is_goal_tool(tc: &acp::ToolCall) -> bool {
-    tc.title == "update_goal" || matches!(extract_variant(tc), Some("UpdateGoal"))
-}
 /// Check if a tool call is a task tool (subagent spawn).
 ///
 /// Suppressed from scrollback because the SubagentBlock (created from
@@ -2439,6 +2442,25 @@ fn is_goal_tool(tc: &acp::ToolCall) -> bool {
 /// `task` / `Task` / `spawn_subagent` ids and Task-family variant tags.
 fn is_task_tool(tc: &acp::ToolCall) -> bool {
     xai_grok_tools::is_task_tool_id(&tc.title) || is_task_variant(extract_variant(tc))
+}
+fn is_goal_tool(tc: &acp::ToolCall) -> bool {
+    tc.title == "update_goal"
+        || tc.title.starts_with("Goal:")
+        || matches!(extract_variant(tc), Some("UpdateGoal" | "WorkflowSignal"))
+}
+fn is_workflow_tool(tc: &acp::ToolCall) -> bool {
+    let is_workflow = tc.title == "workflow" || matches!(extract_variant(tc), Some("Workflow"));
+    if !is_workflow {
+        return false;
+    }
+    let validate_only = tc.title.starts_with("Validating workflow")
+        || tc
+            .raw_input
+            .as_ref()
+            .and_then(|v| v.get("validate_only"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    !validate_only
 }
 /// Check if a tool call is a scheduler tool (scheduler_create/delete/list).
 ///

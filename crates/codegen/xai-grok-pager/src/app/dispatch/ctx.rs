@@ -52,8 +52,7 @@ pub(super) fn open_url_or_show(app: &mut AppView, url: &str) {
     match try_open_url(url, SchemeFilter::Standard) {
         OpenUrlResult::Opened | OpenUrlResult::RejectedScheme => {}
         OpenUrlResult::BrowserUnavailable => {
-            let _ = crate::clipboard::SystemClipboard::try_set(url);
-            // No scrollback on the welcome screen — toast carries the URL.
+            let _copied = crate::clipboard::SystemClipboard::try_set(url).reported_success();
             app.show_toast(&browser_unavailable_message(url));
         }
     }
@@ -150,6 +149,16 @@ pub(super) fn reseed_tip_for_new_session(app: &mut AppView) {
 pub(super) fn show_welcome(app: &mut AppView) {
     app.active_view = ActiveView::Welcome;
     app.welcome_announcement = WelcomeAnnouncementState::default();
+    // Drop stale welcome workspace one-shot / ACK so a later create/load
+    // cannot inherit an override from a deferred or abandoned NewSession.
+    #[cfg(feature = "local-workspace")]
+    {
+        app.welcome_session_local_workspace = None;
+        app.welcome_local_workspace_ack_pending = false;
+        // Abandoning a session/restore must not leak history bypass into the
+        // next welcome LoadSession / SessionFlags.chat_mode batch.
+        app.welcome_history_load_as_build = false;
+    }
 }
 
 /// Restore the view a mid-session auth flow launched from, falling back to the
@@ -235,8 +244,7 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, cause: SwitchC
     // that forgets the deferring chokepoint gate trips this in debug/tests. The
     // deferring chokepoints (`dispatch_new_session`/`_worktree_session`/
     // `_load_session_inner`) stash+return BEFORE reaching here, so this never
-    // fires on the reachable gated paths. (`dispatch_project_selected` re-creates
-    // an already-active, post-gate agent without switching, so it is exempt.)
+    // fires on the reachable gated paths.
     // `cause` is also used for New/Fork overlay follow (and remains live for
     // the debug_assert even when that assert compiles out in release).
     debug_assert!(

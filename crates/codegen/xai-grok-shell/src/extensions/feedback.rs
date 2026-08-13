@@ -44,52 +44,27 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 
 /// Handle `x.ai/btw` -- a side question that doesn't interrupt the current turn.
-///
-/// Optional multi-turn fields: `btwSessionId` (reuse) and `priorTurns`
-/// (`[{question, answer}, …]` oldest first). Response includes `btwSessionId`.
 async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct BtwPriorTurnWire {
-        question: String,
-        answer: String,
-    }
-
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct BtwRequest {
         session_id: String,
         question: String,
-        #[serde(default)]
-        btw_session_id: Option<String>,
-        #[serde(default)]
-        prior_turns: Vec<BtwPriorTurnWire>,
     }
 
     let req: BtwRequest = parse_params(args)?;
     let sid: acp::SessionId = req.session_id.clone().into();
-    let session_handle = {
-        let sessions = agent.sessions.borrow();
-        sessions.get(&sid).cloned()
-    };
+    let session_handle = agent.resident_handle(&sid);
     let Some(session) = session_handle else {
         return Err(
             acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
         );
     };
-    let prior_turns = req
-        .prior_turns
-        .into_iter()
-        .map(|t| crate::session::helpers::side_question::BtwPriorTurn {
-            question: t.question,
-            answer: t.answer,
-        })
-        .collect();
     let (tx, rx) = oneshot::channel();
     let _ = session.cmd_tx.send(SessionCommand::SideQuestion {
         question: req.question,
-        btw_session_id: req.btw_session_id,
-        prior_turns,
+        btw_session_id: None,
+        prior_turns: Vec::new(),
         respond_to: tx,
     });
     let result = rx
@@ -142,7 +117,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                 };
 
             let session_id = acp::SessionId::new(feedback_input.session_id.clone());
-            let session_handle = agent.sessions.borrow().get(&session_id).cloned();
+            let session_handle = agent.resident_handle(&session_id);
 
             let (model_id, model_metadata) = if let Some(ref session) = session_handle {
                 let (tx1, rx1) = tokio::sync::oneshot::channel();
@@ -316,7 +291,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
             // Persist dismiss locally; flushed before storage CopyFile by the persistence actor.
             {
                 let session_id = acp::SessionId::new(dismiss_input.session_id.clone());
-                if let Some(session_handle) = agent.sessions.borrow().get(&session_id) {
+                if let Some(session_handle) = agent.resident_handle(&session_id) {
                     session_handle.persist_feedback(LocalFeedbackEntry::UserFeedback(
                         UserFeedbackEntry {
                             submitted_at: chrono::Utc::now(),

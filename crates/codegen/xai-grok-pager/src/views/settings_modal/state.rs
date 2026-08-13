@@ -159,6 +159,14 @@ pub(super) enum SettingsMode {
     },
 }
 
+/// Is the open sub-pane a [`crate::settings::is_consent_chooser`] pane?
+pub(super) fn mode_is_consent_chooser(mode: &SettingsMode) -> bool {
+    matches!(
+        mode,
+        SettingsMode::PickingEnum { key, .. } if crate::settings::is_consent_chooser(key)
+    )
+}
+
 /// Settings modal state. Boxed inside `ActiveModal::Settings` to
 /// avoid clippy `large_enum_variant`.
 pub struct SettingsModalState {
@@ -250,8 +258,8 @@ impl SettingsModalState {
         }
     }
 
-    /// Why the focused row cannot be edited (`None` = editable).
-    /// Today only `coding_data_sharing` is lockable (ZDR / team-managed).
+    /// Why a Browse row cannot be edited (`None` = editable). Consulted by
+    /// both render and input.
     pub fn row_lock(&self, key: SettingKey) -> Option<CodingDataSharingLock> {
         if key == "coding_data_sharing" {
             self.pager_snapshot.coding_data_sharing_lock
@@ -827,7 +835,7 @@ pub(super) fn setting_row_visible(
 }
 
 fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
-    let kitty_releases = crate::app::kitty_flags_pushed();
+    let kitty_releases = crate::app::kitty_releases_reported();
     let minimal = crate::app::minimal_mode_active();
     let voice_mode = crate::app::voice_mode_enabled();
     // Keys that belong to a group sub-sheet are rendered only inside that
@@ -872,7 +880,6 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
 pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
     match key {
         "compact_mode" => Some(Action::SetCompactMode(new)),
-        "hide_header" => Some(Action::SetHideHeader(new)),
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),
@@ -891,40 +898,17 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
         }
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
-        "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
-        "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
+        "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
         "auto_update" => Some(Action::SetAutoUpdate(new)),
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
-        "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
-        "economic_mode" => Some(Action::SetEconomicMode(new)),
-        "resume_canceled_turn_on_restart" => Some(Action::SetResumeCanceledTurnOnRestart(new)),
-        "token_economy.cap_implement_effort_when_economic" => Some(Action::SetTokenEconomyBool {
-            field: "cap_implement_effort_when_economic",
-            value: new,
-        }),
-        "token_economy.show_period_pacing" => Some(Action::SetTokenEconomyBool {
-            field: "show_period_pacing",
-            value: new,
-        }),
-        "token_economy.local_spend_ledger" => Some(Action::SetTokenEconomyBool {
-            field: "local_spend_ledger",
-            value: new,
-        }),
-        "token_economy.reconcile_management_usage" => Some(Action::SetTokenEconomyBool {
-            field: "reconcile_management_usage",
-            value: new,
-        }),
-        "notifications.session_recap" => Some(Action::SetNotificationsSessionRecap(new)),
-        "features.session_recap" => Some(Action::SetFeaturesSessionRecap(new)),
-        "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
         _ => None,
     }
 }
@@ -941,7 +925,6 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "permission_mode" => None,
         "coding_data_sharing" => None,
         "plan_mode" => None,
-        "plan_approval_park" => None,
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
@@ -986,10 +969,6 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             "off" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off)),
             _ => None,
         },
-        "plan_approval_park" => match choice {
-            "soft" | "modal" => Some(Action::SetPlanApprovalPark(choice.to_string())),
-            _ => None,
-        },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
@@ -1005,16 +984,6 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         }
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
-        }
-        "cancel_subagents_on_turn_cancel" => match choice {
-            "ask" | "always_stop" | "always_continue" => {
-                Some(Action::SetCancelSubagentsOnTurnCancel(choice.to_string()))
-            }
-            _ => None,
-        },
-        "auto_compact_threshold_percent" => {
-            crate::settings::parse_auto_compact_threshold_canonical(choice)
-                .map(Action::SetAutoCompactThreshold)
         }
         _ => None,
     }
@@ -1062,25 +1031,6 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "max_thoughts_width" => Some(Action::SetMaxThoughtsWidth(value)),
         "scroll_speed" => Some(Action::SetScrollSpeed(value)),
         "scroll_lines" => Some(Action::SetScrollLines(value)),
-        "notifications.session_recap_threshold_secs" => {
-            Some(Action::SetNotificationsSessionRecapThresholdSecs(value))
-        }
-        "token_economy.max_implement_effort" => Some(Action::SetTokenEconomyInt {
-            field: "max_implement_effort",
-            value,
-        }),
-        "token_economy.min_implement_effort" => Some(Action::SetTokenEconomyInt {
-            field: "min_implement_effort",
-            value,
-        }),
-        "token_economy.desired_implement_effort" => Some(Action::SetTokenEconomyInt {
-            field: "desired_implement_effort",
-            value,
-        }),
-        "token_economy.lock_implement_effort" => Some(Action::SetTokenEconomyInt {
-            field: "lock_implement_effort",
-            value,
-        }),
         _ => None,
     }
 }
@@ -1162,7 +1112,7 @@ pub(super) fn effective_enum_choices<'a>(
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-    let kitty_releases = crate::app::kitty_flags_pushed();
+    let kitty_releases = crate::app::kitty_releases_reported();
     choices
         .iter()
         .filter(|c| {

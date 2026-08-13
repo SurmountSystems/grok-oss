@@ -1084,79 +1084,6 @@ fn send_prompt_while_running_queues_without_drain() {
     assert_eq!(q[0].text, "queued");
 }
 
-/// Contract: send while busy must produce immediate visible feedback so the
-/// composer clear never feels like a void swallow. Toast "Queued" always;
-/// held_queue_count must be non-zero mid-generation (not only on sendable wait).
-#[test]
-fn send_while_busy_acks_with_queued_toast_and_held_count() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
-    // Composer draft as if the operator typed then pressed Enter.
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .prompt
-        .set_text("follow up while busy");
-
-    let _ = dispatch(Action::SendPrompt("follow up while busy".into()), &mut app);
-
-    let agent = &app.agents[&id];
-    assert!(
-        agent.prompt.text().is_empty(),
-        "composer must clear on queue"
-    );
-    let toast = agent
-        .toast
-        .as_ref()
-        .map(|(msg, _)| msg.as_str())
-        .unwrap_or("");
-    assert!(
-        toast.contains("Queued"),
-        "busy queue must toast Queued immediately, got {toast:?}"
-    );
-    assert!(
-        agent.held_queue_count() > 0,
-        "mid-generation held count must be non-zero so status can show N queued"
-    );
-    assert!(
-        agent.has_held_user_queue(),
-        "optimistic server echo must occupy the held queue"
-    );
-}
-
-/// Local (non-immediate) mid-turn enqueue path also toasts — FIFO behind an
-/// older local row still must not feel swallowed.
-#[test]
-fn send_while_running_local_path_acks_queued_toast() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.state = AgentState::TurnRunning;
-        agent.session.enqueue_prompt("two".into());
-    }
-
-    let _ = dispatch(Action::SendPrompt("three".into()), &mut app);
-
-    let agent = &app.agents[&id];
-    assert_eq!(agent.session.pending_prompts.len(), 2);
-    let toast = agent
-        .toast
-        .as_ref()
-        .map(|(msg, _)| msg.as_str())
-        .unwrap_or("");
-    assert!(
-        toast.contains("Queued"),
-        "local mid-turn queue must toast Queued, got {toast:?}"
-    );
-    assert!(
-        agent.held_queue_count() >= 2,
-        "local mid-turn rows must feed held_queue_count, got {}",
-        agent.held_queue_count()
-    );
-}
-
 /// Regression (queue reorder race): a plain prompt typed while a turn is
 /// running must NOT jump onto the server queue when an older prompt is still
 /// waiting in the local drip-feed queue — e.g. prompts queued during
@@ -2061,111 +1988,6 @@ fn prompt_response_routes_idle_title_through_frame_pipeline() {
         app.deferred_notification.as_ref().unwrap().1,
         3,
         "deferred notification must wait >75 ms (Ghostty title debounce)",
-    );
-}
-
-/// Braille spinner codepoints from TitleManager (shared with app_view title tests).
-fn title_spinner_chars_present(esc: &str) -> bool {
-    const SPINNER: &[char] = &[
-        '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
-        '\u{2827}',
-    ];
-    esc.chars().any(|c| SPINNER.contains(&c))
-}
-
-#[test]
-fn prompt_response_keeps_title_busy_while_subagents_still_run() {
-    // Named contract: parent EndTurn must not force an idle window title
-    // while live L2 subagents remain. Dogfood failure: parent finishes,
-    // title collapses to session-only, DE looks idle until (or unless)
-    // the next tick re-asserts busy — and draw can flush the idle OSC
-    // first because pending_notification_escapes skips recompute.
-    use crate::app::agent_view::test_fixtures::running_subagent_info;
-
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.display_name = Some("bg-children-session".into());
-        agent.session.state = AgentState::TurnRunning;
-        agent.turn_started_at = Some(std::time::Instant::now());
-    }
-
-    // Seed TitleManager with a parent-busy frame *without* children so the
-    // EndTurn rewrite (busy-with-subagents vs idle-only) is not dedup-silent.
-    app.update_notifications();
-    app.pending_notification_escapes = None;
-
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent
-            .subagent_sessions
-            .insert("child-a".into(), running_subagent_info("child-a"));
-        agent
-            .subagent_sessions
-            .insert("child-b".into(), running_subagent_info("child-b"));
-    }
-
-    dispatch(
-        Action::TaskComplete(TaskResult::PromptResponse {
-            agent_id: id,
-            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
-            http_status: None,
-            prompt_id: None,
-        }),
-        &mut app,
-    );
-
-    assert!(
-        app.agents[&id].session.state.is_idle(),
-        "parent turn must end"
-    );
-    assert!(
-        app.agents[&id]
-            .subagent_sessions
-            .values()
-            .any(|i| i.is_running()),
-        "fixture must keep live subagents"
-    );
-
-    // EndTurn must not clobber to session-only idle brand. TitleManager may
-    // dedup-return None when the pre-EndTurn title was already the subagent
-    // busy string — that is fine; a pure idle rewrite is the failure mode.
-    if let Some(esc) = app.pending_notification_escapes.as_deref() {
-        let looks_idle_only = esc.contains("bg-children-session")
-            && !esc.contains("Waiting")
-            && !esc.contains("subagent")
-            && !title_spinner_chars_present(esc);
-        assert!(
-            !looks_idle_only,
-            "EndTurn with live subagents must not emit idle-only title OSC, got {esc:?}"
-        );
-        let busy =
-            esc.contains("Waiting") || esc.contains("subagent") || title_spinner_chars_present(esc);
-        assert!(
-            busy,
-            "EndTurn title rewrite with live subagents must stay busy, got {esc:?}"
-        );
-    }
-
-    // Tick/draw path: force a recompose (name change) so TitleManager is not
-    // dedup-silent; still must busy the DE title while children run.
-    app.agents.get_mut(&id).unwrap().display_name = Some("bg-children-session-2".into());
-    app.pending_notification_escapes = None;
-    app.update_notifications();
-    let esc = app
-        .pending_notification_escapes
-        .as_deref()
-        .expect("title OSC while subagents still run after parent EndTurn");
-    let busy =
-        esc.contains("Waiting") || esc.contains("subagent") || title_spinner_chars_present(esc);
-    assert!(
-        busy,
-        "post-EndTurn update_notifications must keep busy title with live subagents, got {esc:?}"
-    );
-    assert!(
-        esc.contains("bg-children-session-2"),
-        "renamed session must appear in busy title, got {esc:?}"
     );
 }
 
@@ -3318,15 +3140,13 @@ fn interject_before_paste_probe_keeps_image() {
     let sent_image = effects.iter().any(|e| {
         matches!(
             e,
-            Effect::SendInterject {
-                blocks: Some(blocks),
-                ..
-            } if blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
+            Effect::SendPromptNow { blocks, .. }
+                if blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
         )
     });
     assert!(
         sent_image,
-        "the re-issued soft interject must carry the pasted image; effects = {effects:?}"
+        "the re-issued send-now must carry the pasted image; effects = {effects:?}"
     );
     assert_eq!(
         app.agents[&id].prompt.text(),
@@ -3958,9 +3778,9 @@ fn plain_send_while_streaming_does_not_arm_expectation() {
     );
 }
 
-/// Soft queue interject never arms send-now cancel (cancel is Esc/stop only).
+/// Queue-pane "Send now" of a server row arms the expectation (older-shell fallback).
 #[test]
-fn interject_contract_queue_shared_never_arms_cancel_while_running() {
+fn queue_interject_shared_arms_expectation_while_running() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     dispatch(Action::SendPrompt("first".into()), &mut app);
@@ -3978,9 +3798,10 @@ fn interject_contract_queue_shared_never_arms_cancel_while_running() {
         effects.as_slice(),
         [Effect::QueueInterject { .. }]
     ));
-    assert!(
-        app.agents[&id].expect_send_now_cancel.is_none(),
-        "server-row soft interject must not arm the cancel expectation"
+    assert_eq!(
+        app.agents[&id].expect_send_now_cancel.as_deref(),
+        Some("srv-row-1"),
+        "server-row send-now must arm the cancel expectation"
     );
     assert!(app.agents[&id].is_self_originated_prompt("srv-row-1"));
 }

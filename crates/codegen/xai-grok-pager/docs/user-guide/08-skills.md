@@ -6,7 +6,7 @@ Skills are reusable prompt packages that extend Grok with task-specific instruct
 
 ## What Are Skills?
 
-A skill is a directory that contains a `SKILL.md` file. Its markdown text tells Grok how to handle a specific type of task: step-by-step instructions, conventions, and tool-usage patterns.
+A skill is a directory that contains a `SKILL.md` file. Its markdown body tells Grok how to handle a specific type of task: step-by-step instructions, conventions, and tool-usage patterns.
 
 Use a skill for a repeatable procedure that's too specific for AGENTS.md but too long to retype. Grok activates a skill only when it applies to your current task.
 
@@ -14,40 +14,19 @@ Use a skill for a repeatable procedure that's too specific for AGENTS.md but too
 
 ## Skill Locations
 
-Skills are **multi-source**. Grok owns discovery and load order in the product;
-skill packs may live in the project, your home directory, a network-synced
-bundle cache, config paths, server inject, or plugins. Same-named skills shadow
-by **scope** first (Local beats Repo beats User beats Server beats Bundled;
-native bare names beat plugins), then by **first-seen** within a scope.
-
-### Bare-name load order (code)
-
-Higher priority first. At every project or home tier, config dir **names** are
-scanned in this order: **`.agents` → `.grok` → `.claude` (if compat) →
-`.cursor` (if compat)**. First-seen wins for the same bare name at the same
-scope, so a maintained `~/.agents/skills/<name>` pack overrides a same-named
-`~/.grok/skills/<name>` copy (important when host skill packs pin process rules
-such as agent depth L1 / L2 / L3).
+Grok discovers skills from these directories, in priority order:
 
 | Location | Scope | Priority | Notes |
 |----------|-------|----------|-------|
-| `./.agents/skills/`, `./.agents/commands/` | Local (CWD) | Highest | Maintained agent skill tree at cwd |
-| `./.grok/skills/`, `./.grok/commands/` | Local (CWD) | Highest | Grok-owned cwd skills / legacy command markdown |
-| `./.claude/skills/`, `./.claude/commands/` | Local (CWD) | Highest | Project Claude skills and legacy custom slash commands (compat) |
-| `./.cursor/skills/` | Local (CWD) | Highest | Project Cursor skills when cursor compat skills are on |
-| Intermediate dirs between cwd and repo root (same name order) | Repo | High | Walk every directory up to the git root |
-| `<repo_root>/.agents/…`, `<repo_root>/.grok/…` (+ vendor if on) | Repo | High | Shared across the repo |
-| `~/.agents/skills/`, `~/.agents/commands/` | User | Medium | Host operator skill packs (all projects) |
-| `~/.grok/skills/`, `~/.grok/commands/` | User | Medium | Personal Grok skills for all projects |
-| `~/.claude/skills/`, `~/.claude/commands/` | User | Medium | Claude Code compatibility (configurable) |
-| `~/.cursor/skills/` | User | Medium | Cursor compatibility (configurable) |
-| `[skills].paths` entries | Repo if under git root, else User | Medium | Extra dirs or direct `SKILL.md` files; stamp as config |
-| Server-injected skill dirs | Server | Lower | Managed workspace / launcher inject |
-| `~/.grok/bundled/skills/` (+ injected bundled dirs) | Bundled | Lower | Platform pack cache (network sync) |
-| Plugin skills | Plugin | Lowest bare name | Bare name loses to native; qualified `plugin:name` kept |
+| `./.grok/skills/`, `./.grok/commands/` | Local (CWD) | Highest | Current directory skills / legacy command markdown |
+| `<repo_root>/.grok/skills/`, `…/commands/` | Repo | Medium | Shared across the repo |
+| `~/.grok/skills/`, `~/.grok/commands/` | User | Lowest | Personal skills for all projects |
+| `~/.claude/skills/`, `~/.claude/commands/` | User | Lowest | Claude Code compatibility (configurable) |
+| `./.claude/skills/`, `./.claude/commands/` | Local / Repo | High | Project Claude skills and legacy custom slash commands |
+| `~/.cursor/skills/` | User | Lowest | Cursor compatibility (configurable) |
+| `./.cursor/skills/` | Local / Repo | High | Project Cursor skills (when cursor compat skills are enabled) |
 
-Grok also walks every directory between your working directory and the repo
-root, applying the same `.agents` → `.grok` → vendor name order at each level.
+Grok deduplicates skills by name -- a higher-priority location overrides a lower one. Grok also scans `.agents/skills/` (and `commands/`) at each tier (alongside `.grok/`) and walks every directory between your working directory and the repo root.
 
 Flat `*.md` files under a `commands/` directory become user-invocable slash commands (filename stem = command name), matching Claude Code's legacy custom-command layout.
 
@@ -113,7 +92,7 @@ Review staged changes and create a commit with a clear, conventional message.
 | Field | Description |
 |-------|-------------|
 | `name` | Skill identifier. Use lowercase letters, digits, and hyphens, up to 64 characters. Grok normalizes spaces and underscores to hyphens. If you omit `name`, Grok uses the skill's directory name. |
-| `description` | What the skill does and when to use it. Grok reads this to decide whether to invoke the skill. If you omit it, Grok uses the first paragraph of the skill text. |
+| `description` | What the skill does and when to use it. Grok reads this to decide whether to invoke the skill. If you omit it, Grok uses the first paragraph of the body. |
 
 Write a specific `description`. It determines when Grok invokes the skill automatically. Name the trigger phrases and use cases.
 
@@ -150,7 +129,7 @@ When you run `/create-skill`, Grok:
 
 3. **Creates the skill directory.** Grok creates the `<scope>/.grok/skills/<name>/` directory, plus `scripts/` or `references/` subdirectories when the skill needs them.
 
-4. **Writes SKILL.md.** Grok writes the frontmatter (`name` and `description`) and markdown instructions, along with any supporting files.
+4. **Writes SKILL.md.** Grok writes the frontmatter (`name` and `description`) and a markdown body of instructions, along with any supporting files.
 
 5. **Verifies and confirms.** Grok reads the file back, confirms it wrote correctly, and tells you how to run the skill.
 

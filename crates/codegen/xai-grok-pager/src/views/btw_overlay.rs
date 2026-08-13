@@ -25,234 +25,42 @@ use crate::theme::Theme;
 pub const BTW_OVERLAY_ENTRY_IDX: usize = usize::MAX;
 const BTW_OVERLAY_RANGE_ID: u16 = 0;
 
-/// One completed Q/A turn in a btw thread (oldest first).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BtwTurn {
-    pub question: String,
-    pub answer: String,
-}
-
 /// State of the /btw inline panel.
 #[derive(Debug, Clone)]
 pub enum BtwOverlayState {
     /// Waiting for the shell to respond.
-    Loading {
-        question: String,
-        /// Completed prior turns when this is a follow-up request.
-        prior_turns: Vec<BtwTurn>,
-        /// Session id reused for follow-ups (`None` on the first turn).
-        btw_session_id: Option<String>,
-    },
+    Loading { question: String },
     /// Response received — stays on screen until Esc.
     Done {
-        /// All completed turns (at least one), oldest first.
-        turns: Vec<BtwTurn>,
-        /// Stable id from the shell for this btw thread.
-        btw_session_id: Option<String>,
-        /// Rendered markdown body (latest answer, or full thread when multi-turn).
+        question: String,
+        /// Rendered markdown content (same renderer as regular agent messages).
         /// Boxed to keep the enum small (`MarkdownContent` is large).
         content: Box<MarkdownContent>,
         /// Line offset for scrolling through long responses.
         scroll_offset: usize,
-        /// In-panel follow-up composer draft.
-        follow_up_draft: String,
-        /// When true, keystrokes go to `follow_up_draft` (not scroll / copy).
-        follow_up_composing: bool,
     },
     /// Request failed (shown until user presses Esc).
-    Error {
-        question: String,
-        error: String,
-        prior_turns: Vec<BtwTurn>,
-        btw_session_id: Option<String>,
-    },
+    Error { question: String, error: String },
 }
 
 impl BtwOverlayState {
-    /// First-turn loading (no prior context).
-    pub fn loading(question: String) -> Self {
-        Self::Loading {
-            question,
-            prior_turns: Vec::new(),
-            btw_session_id: None,
-        }
-    }
-
-    /// Follow-up loading: keeps prior turns + session id for the next model call.
-    pub fn loading_follow_up(
-        question: String,
-        prior_turns: Vec<BtwTurn>,
-        btw_session_id: Option<String>,
-    ) -> Self {
-        Self::Loading {
-            question,
-            prior_turns,
-            btw_session_id,
-        }
-    }
-
-    /// Build a single-turn `Done` state (tests + first-shot response path).
-    ///
-    /// Renders `response` as markdown via the same [`MarkdownContent`] renderer
-    /// used for regular agent messages so the inline panel shows formatted
-    /// tables, headings, lists, etc.
+    /// Build a `Done` state, rendering `response` as markdown via the same
+    /// [`MarkdownContent`] renderer used for regular agent messages so the
+    /// inline panel shows formatted tables, headings, lists, etc.
     pub fn done(question: String, response: String) -> Self {
-        Self::done_with_session(question, response, None)
-    }
-
-    /// Done state with an optional shell-issued `btw_session_id`.
-    pub fn done_with_session(
-        question: String,
-        response: String,
-        btw_session_id: Option<String>,
-    ) -> Self {
-        let turns = vec![BtwTurn {
-            question,
-            answer: response.clone(),
-        }];
-        Self::from_turns(turns, btw_session_id)
-    }
-
-    /// Build Done from a full turn list (multi-turn thread body when `len > 1`).
-    pub fn from_turns(turns: Vec<BtwTurn>, btw_session_id: Option<String>) -> Self {
-        debug_assert!(!turns.is_empty(), "btw Done requires at least one turn");
-        let body = thread_display_markdown(&turns);
         Self::Done {
-            turns,
-            btw_session_id,
-            content: Box::new(MarkdownContent::new(body)),
+            question,
+            content: Box::new(MarkdownContent::new(response)),
             scroll_offset: 0,
-            follow_up_draft: String::new(),
-            follow_up_composing: false,
-        }
-    }
-
-    /// Append a successful answer to Loading and produce Done.
-    pub fn finish_loading(self, response: String, btw_session_id: Option<String>) -> Self {
-        match self {
-            Self::Loading {
-                question,
-                prior_turns,
-                btw_session_id: loading_id,
-            } => {
-                let mut turns = prior_turns;
-                turns.push(BtwTurn {
-                    question,
-                    answer: response,
-                });
-                let id = btw_session_id.or(loading_id);
-                Self::from_turns(turns, id)
-            }
-            other => other,
-        }
-    }
-
-    /// Append an error onto Loading (preserves prior turns for retry/follow-up).
-    pub fn finish_loading_error(self, error: String) -> Self {
-        match self {
-            Self::Loading {
-                question,
-                prior_turns,
-                btw_session_id,
-            } => Self::Error {
-                question,
-                error,
-                prior_turns,
-                btw_session_id,
-            },
-            other => other,
         }
     }
 
     pub fn question(&self) -> &str {
         match self {
-            Self::Loading { question, .. } | Self::Error { question, .. } => question,
-            Self::Done { turns, .. } => turns.last().map(|t| t.question.as_str()).unwrap_or(""),
+            Self::Loading { question }
+            | Self::Done { question, .. }
+            | Self::Error { question, .. } => question,
         }
-    }
-
-    /// Stable btw thread id when known (Done after first response, or Loading follow-up).
-    pub fn btw_session_id(&self) -> Option<&str> {
-        match self {
-            Self::Loading { btw_session_id, .. }
-            | Self::Done { btw_session_id, .. }
-            | Self::Error { btw_session_id, .. } => btw_session_id.as_deref(),
-        }
-    }
-
-    /// Completed turns for Done; prior turns for Loading/Error follow-up.
-    pub fn completed_turns(&self) -> &[BtwTurn] {
-        match self {
-            Self::Done { turns, .. } => turns,
-            Self::Loading { prior_turns, .. } | Self::Error { prior_turns, .. } => prior_turns,
-        }
-    }
-
-    /// Whether the in-panel follow-up composer is active.
-    pub fn follow_up_composing(&self) -> bool {
-        matches!(
-            self,
-            Self::Done {
-                follow_up_composing: true,
-                ..
-            }
-        )
-    }
-
-    /// Start or stop the in-panel follow-up composer (Done only).
-    pub fn set_follow_up_composing(&mut self, active: bool) {
-        if let Self::Done {
-            follow_up_composing,
-            follow_up_draft,
-            ..
-        } = self
-        {
-            *follow_up_composing = active;
-            if !active {
-                follow_up_draft.clear();
-            }
-        }
-    }
-
-    /// Mutable access to the follow-up draft (Done only).
-    pub fn follow_up_draft_mut(&mut self) -> Option<&mut String> {
-        match self {
-            Self::Done {
-                follow_up_draft, ..
-            } => Some(follow_up_draft),
-            _ => None,
-        }
-    }
-
-    pub fn follow_up_draft(&self) -> &str {
-        match self {
-            Self::Done {
-                follow_up_draft, ..
-            } => follow_up_draft.as_str(),
-            _ => "",
-        }
-    }
-
-    /// Take a non-empty follow-up draft and clear composing state.
-    /// Returns `(question, prior_turns, btw_session_id)` ready for SendBtw.
-    pub fn take_follow_up_send(&mut self) -> Option<(String, Vec<BtwTurn>, Option<String>)> {
-        let Self::Done {
-            turns,
-            btw_session_id,
-            follow_up_draft,
-            follow_up_composing,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        let q = follow_up_draft.trim().to_string();
-        if q.is_empty() {
-            return None;
-        }
-        follow_up_draft.clear();
-        *follow_up_composing = false;
-        Some((q, turns.clone(), btw_session_id.clone()))
     }
 
     /// Scroll the Done response up by `n` lines. No-op for other states.
@@ -323,77 +131,6 @@ impl BtwOverlayState {
         });
         model
     }
-
-    /// Full plain-text body for clipboard copy.
-    ///
-    /// Every completed turn is exported as `/btw <q>` + the answer rendered
-    /// through the same markdown→plain path (styles stripped), oldest first.
-    /// Single- and multi-turn share this representation.
-    ///
-    /// Returns `None` when there is nothing durable (Loading, or Error with
-    /// no successful prior turns). Error with prior turns is copyable so a
-    /// failed follow-up does not hide earlier answers.
-    pub fn full_copy_text(&self) -> Option<String> {
-        let turns = match self {
-            Self::Done { turns, .. } if !turns.is_empty() => turns.as_slice(),
-            Self::Error { prior_turns, .. } if !prior_turns.is_empty() => prior_turns.as_slice(),
-            Self::Done { .. } | Self::Loading { .. } | Self::Error { .. } => return None,
-        };
-        Some(turns_copy_text(turns))
-    }
-
-    /// Scrollback payload when the panel is dismissed or replaced by a new
-    /// first-shot `/btw`.
-    ///
-    /// - **Done:** full thread body (same markdown source as the panel).
-    /// - **Error with prior turns:** successful turns only (failed follow-up
-    ///   question is not flushed as an answer).
-    /// - Loading / empty Error: nothing to flush.
-    pub fn scrollback_flush_payload(&self) -> Option<(String, String)> {
-        match self {
-            Self::Done { turns, content, .. } if !turns.is_empty() => {
-                let question = turns
-                    .first()
-                    .map(|t| t.question.clone())
-                    .unwrap_or_default();
-                Some((question, content.text()))
-            }
-            Self::Error { prior_turns, .. } if !prior_turns.is_empty() => {
-                let question = prior_turns[0].question.clone();
-                Some((question, thread_display_markdown(prior_turns)))
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Markdown body shown in the Done panel.
-///
-/// Single turn: answer only (title already shows the question).
-/// Multi-turn: ordered Q/A sections so prior turns stay visible.
-fn thread_display_markdown(turns: &[BtwTurn]) -> String {
-    match turns {
-        [] => String::new(),
-        [one] => one.answer.clone(),
-        many => many
-            .iter()
-            .map(|t| format!("### /btw {}\n\n{}", t.question, t.answer))
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n"),
-    }
-}
-
-/// Clipboard export for one or more completed turns — always markdown-rendered
-/// plain text per answer so single- and multi-turn match.
-fn turns_copy_text(turns: &[BtwTurn]) -> String {
-    turns
-        .iter()
-        .map(|t| {
-            let answer = MarkdownContent::new(t.answer.clone()).rendered_plain_text();
-            format!("/btw {}\n\n{}", t.question, answer)
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 /// Show each spinner frame for this many animation ticks.
@@ -409,32 +146,56 @@ fn line_plain_text(line: &Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-/// Extra body rows reserved for the in-panel follow-up composer (Done only).
-pub const FOLLOW_UP_COMPOSER_ROWS: u16 = 1;
+/// Wrap an error message to `content_width` columns, capped at `max_lines`
+/// with an ellipsis on the last line when cut. The caller passes the rows it
+/// can actually paint, so the truncation marker lands on a visible row even
+/// when the layout hands the panel a shorter rect than it asked for.
+fn wrapped_error_lines(error: &str, content_width: usize, max_lines: usize) -> Vec<String> {
+    if content_width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = textwrap::wrap(error.trim(), content_width)
+        .into_iter()
+        .map(|l| l.into_owned())
+        .collect();
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            // Make room: a full-width last line + '…' would exceed
+            // `content_width` and the renderer would cut the ellipsis off.
+            while last.width() >= content_width {
+                last.pop();
+            }
+            last.push('\u{2026}');
+        }
+    }
+    lines
+}
 
 /// Compute the desired height of the btw inline panel.
 ///
 /// Returns 0 when there is nothing to show (state is `None`).
-/// Loading / Error = 3 rows (top border + 1 body + bottom border).
-/// Done = 2 (borders) + min(wrapped response lines, DONE_MAX_BODY_LINES)
-///        + 1 composer row.
+/// Loading = 3 rows (top border + 1 body + bottom border).
+/// Done / Error = 2 (borders) + min(wrapped lines, DONE_MAX_BODY_LINES).
 ///
-/// `content_width` is the available width for body text (panel width minus
-/// border and padding — typically `inner_width - 4`).
-pub fn btw_panel_height(state: Option<&BtwOverlayState>, content_width: u16) -> u16 {
+/// `panel_width` is the full panel width (`render_btw_panel`'s `area.width`);
+/// body text gets `panel_width - 4` (border + padding), matching the render.
+pub fn btw_panel_height(state: Option<&BtwOverlayState>, panel_width: u16) -> u16 {
+    let cw = panel_width.saturating_sub(4) as usize; // border + pad
     match state {
         None => 0,
-        Some(BtwOverlayState::Loading { .. } | BtwOverlayState::Error { .. }) => 3,
+        Some(BtwOverlayState::Loading { .. }) => 3,
+        Some(BtwOverlayState::Error { error, .. }) => {
+            2 + wrapped_error_lines(error, cw, DONE_MAX_BODY_LINES as usize).len() as u16
+        }
         Some(BtwOverlayState::Done { content, .. }) => {
-            let cw = content_width.saturating_sub(4) as usize; // border + pad
             let total = if cw > 0 {
                 content.with_wrapped_lines(cw, |w| w.lines.len())
             } else {
                 1
             };
             let body = total.clamp(1, DONE_MAX_BODY_LINES as usize) as u16;
-            // top border + body + composer + bottom border
-            2 + body + FOLLOW_UP_COMPOSER_ROWS
+            2 + body // top border + body + bottom border
         }
     }
 }
@@ -475,22 +236,12 @@ pub fn render_btw_panel(
         return;
     }
 
-    // Done reserves one body row for the follow-up composer; scroll viewport
-    // is the remaining inner height.
-    let composer_rows = match state {
-        BtwOverlayState::Done { .. } => FOLLOW_UP_COMPOSER_ROWS as usize,
-        _ => 0,
-    };
     // Only show focus (accent ring + ↑↓ hint) when there's actually something to
     // scroll; `max_scroll_offset` is 0 for non-Done states and answers that fit.
-    let max_body = area
-        .height
-        .saturating_sub(2)
-        .saturating_sub(composer_rows as u16) as usize;
+    let max_body = area.height.saturating_sub(2) as usize;
     let focus_active = focused && state.max_scroll_offset(content_width, max_body) > 0;
-    let composing = state.follow_up_composing();
 
-    let border_color = if focus_active || composing {
+    let border_color = if focus_active {
         theme.accent_user
     } else {
         theme.gray_dim
@@ -507,39 +258,34 @@ pub fn render_btw_panel(
         .style(Style::default().bg(bg))
         .render(area, buf);
 
-    // ── Hint in top border (right side): scroll + ask [a] + Copy [y] + [Esc] ──
+    // ── Hint in top border (right side): scroll position + [Esc] ──
     // Built BEFORE the title so the title can reserve room for it and truncate
     // the question, rather than the question pushing [Esc] off-screen. The close
     // affordance ([Esc]) always stays visible: its columns are reserved here
     // first, and on panels too narrow for the full Done-state hint we drop the
-    // scroll indicator (then Copy / ask) and keep a bare "[Esc]" (fallback below).
+    // scroll indicator and keep a bare "[Esc]" (fallback below).
     let hint = match state {
         BtwOverlayState::Loading { .. } | BtwOverlayState::Error { .. } => "[Esc]".to_string(),
         BtwOverlayState::Done {
             content,
             scroll_offset,
-            follow_up_composing,
             ..
         } => {
             let total = content.with_wrapped_lines(content_width, |w| w.lines.len());
-            let ask = if *follow_up_composing {
-                "[Enter] [Esc]"
-            } else {
-                "[a] [y] [Esc]"
-            };
             if total > max_body {
                 // Clamp offset to valid range in case terminal resized or
                 // content_width differs from what the input handler estimated.
                 let offset = (*scroll_offset).min(total.saturating_sub(max_body));
                 let pos = offset + 1;
                 let end = (offset + max_body).min(total);
-                if focus_active && !*follow_up_composing {
-                    format!("{pos}-{end}/{total}  \u{2191}\u{2193}  {ask}")
+                if focus_active {
+                    format!("{pos}-{end}/{total}  \u{2191}\u{2193}  [Esc]")
                 } else {
-                    format!("{pos}-{end}/{total}  {ask}")
+                    // Not focused: arrows go to the prompt, so omit the ↑↓ hint.
+                    format!("{pos}-{end}/{total}  [Esc]")
                 }
             } else {
-                ask.to_string()
+                "[Esc]".to_string()
             }
         }
     };
@@ -549,20 +295,11 @@ pub fn render_btw_panel(
     // Right-align the hint just inside the right border, without underflowing on
     // very narrow panels.
     let mut hint_x = (area.x + area.width).saturating_sub(1 + hint_w);
-    // On a narrow panel the Done-state hint (scroll + [a] [y] [Esc]) can be wide
-    // enough to leave no room for the title (hint_x < title_x). Prefer keeping
-    // ask + Copy + Esc, then bare Esc, so close always survives; at 7 columns bare
-    // "[Esc]" fits at the minimum panel width (12).
-    if hint_x < title_x {
-        hint_text = " [a] [y] [Esc] ".to_string();
-        hint_w = hint_text.width() as u16;
-        hint_x = (area.x + area.width).saturating_sub(1 + hint_w);
-    }
-    if hint_x < title_x {
-        hint_text = " [y] [Esc] ".to_string();
-        hint_w = hint_text.width() as u16;
-        hint_x = (area.x + area.width).saturating_sub(1 + hint_w);
-    }
+    // On a narrow panel the Done-state hint (scroll position + ↑↓ + [Esc]) can be
+    // wide enough to leave no room for the title (hint_x < title_x). Fall back to
+    // a bare "[Esc]" so the close affordance — and its mouse hit target — always
+    // survives; at 7 columns it fits at the minimum panel width (12), and the
+    // title regains room too.
     if hint_x < title_x {
         hint_text = " [Esc] ".to_string();
         hint_w = hint_text.width() as u16;
@@ -647,8 +384,6 @@ pub fn render_btw_panel(
         BtwOverlayState::Done {
             content,
             scroll_offset,
-            follow_up_draft,
-            follow_up_composing,
             ..
         } => {
             // One wrap pass for paint, selection, and link mapping (same as
@@ -732,68 +467,21 @@ pub fn render_btw_panel(
                     .take_while(|(screen_row, _, _)| *screen_row < max_screen_y);
                 scan_lines_for_url_overlays(visible_lines, content_x, media_paths, overlay);
             }
-
-            // Follow-up composer row (always present on Done; above bottom border).
-            let composer_y = area.y + area.height.saturating_sub(2);
-            if composer_y > body_y || max_body == 0 {
-                let draft = follow_up_draft.as_str();
-                let placeholder = if *follow_up_composing {
-                    if draft.is_empty() {
-                        "ask follow-up\u{2026}".to_string()
-                    } else {
-                        draft.to_string()
-                    }
-                } else if draft.is_empty() {
-                    "[a] ask follow-up".to_string()
-                } else {
-                    draft.to_string()
-                };
-                let style = if *follow_up_composing {
-                    Style::default().fg(theme.text_primary).bg(bg)
-                } else {
-                    Style::default().fg(theme.gray).bg(bg)
-                };
-                let prefix = if *follow_up_composing { "> " } else { "  " };
-                let mut line_text = format!("{prefix}{placeholder}");
-                // Truncate to content width.
-                if line_text.width() > content_width {
-                    let mut s = String::new();
-                    let mut w = 0;
-                    for ch in line_text.chars() {
-                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                        if w + cw + 1 > content_width {
-                            break;
-                        }
-                        s.push(ch);
-                        w += cw;
-                    }
-                    s.push('\u{2026}');
-                    line_text = s;
-                }
-                let line = Line::from(Span::styled(line_text, style));
-                buf.set_line(content_x, composer_y, &line, content_width as u16);
-            }
         }
         BtwOverlayState::Error { error, .. } => {
             let error_style = Style::default().fg(theme.accent_error).bg(bg);
-            let msg = if error.width() > content_width {
-                let mut s = String::new();
-                let mut w = 0;
-                for ch in error.chars() {
-                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if w + cw + 1 > content_width {
-                        break;
-                    }
-                    s.push(ch);
-                    w += cw;
-                }
-                s.push('\u{2026}');
-                s
-            } else {
-                error.clone()
-            };
-            let line = Line::from(Span::styled(msg, error_style));
-            buf.set_line(content_x, body_y, &line, content_width as u16);
+            // Cap at the rows this rect can paint: the minimal renderer
+            // routinely hands the panel a shorter rect than it asked for,
+            // and the ellipsis must land on a row the user can see.
+            let max_rows =
+                (area.height.saturating_sub(2) as usize).min(DONE_MAX_BODY_LINES as usize);
+            for (i, text) in wrapped_error_lines(error, content_width, max_rows)
+                .into_iter()
+                .enumerate()
+            {
+                let line = Line::from(Span::styled(text, error_style));
+                buf.set_line(content_x, body_y + i as u16, &line, content_width as u16);
+            }
         }
     }
 }
@@ -889,22 +577,6 @@ mod tests {
         state
     }
 
-    fn multi_turn_done() -> BtwOverlayState {
-        BtwOverlayState::from_turns(
-            vec![
-                BtwTurn {
-                    question: "first?".into(),
-                    answer: "answer one".into(),
-                },
-                BtwTurn {
-                    question: "second?".into(),
-                    answer: "answer two".into(),
-                },
-            ],
-            Some("btw-test-session".into()),
-        )
-    }
-
     /// `n` distinct rendered lines via CommonMark hard breaks (two trailing
     /// spaces), so each `lineNN` maps 1:1 to a rendered line.
     fn hard_break_lines(n: usize) -> String {
@@ -938,7 +610,9 @@ mod tests {
 
     #[test]
     fn loading_state_does_not_populate_selection_model() {
-        let state = BtwOverlayState::loading("q".to_string());
+        let state = BtwOverlayState::Loading {
+            question: "q".to_string(),
+        };
         let model = render_with_model(&state, 40, 4);
         assert!(model.ranges.is_empty());
         assert!(model.visible_blocks.is_empty());
@@ -949,12 +623,108 @@ mod tests {
         let state = BtwOverlayState::Error {
             question: "q".to_string(),
             error: "something went wrong".to_string(),
-            prior_turns: Vec::new(),
-            btw_session_id: None,
         };
         let model = render_with_model(&state, 40, 4);
         assert!(model.ranges.is_empty());
         assert!(model.visible_blocks.is_empty());
+    }
+
+    /// A long error wraps across body rows instead of truncating to one line
+    /// with an ellipsis (the old behavior cut off the actionable tail).
+    #[test]
+    fn error_state_wraps_long_message_across_rows() {
+        let error = "Rate limited (429) — you've hit the rate limit for your \
+                     plan. Try again later or upgrade for higher limits.";
+        let state = BtwOverlayState::Error {
+            question: "q".to_string(),
+            error: error.to_string(),
+        };
+        // width 40 → content_width 36; the message needs 4 rows.
+        let height = btw_panel_height(Some(&state), 40);
+        assert!(height > 3, "long error must grow the panel, got {height}");
+
+        let buf = render_to_buffer(&state, 40, height);
+        let body: String = (1..height - 1).map(|y| row_text(&buf, 40, y)).collect();
+        assert!(
+            body.contains("upgrade for higher limits"),
+            "tail lost: {body}"
+        );
+        assert!(!body.contains('\u{2026}'), "no ellipsis when fully shown");
+    }
+
+    /// Short errors keep the compact 3-row panel.
+    #[test]
+    fn error_panel_height_stays_compact_for_short_error() {
+        let state = BtwOverlayState::Error {
+            question: "q".to_string(),
+            error: "boom".to_string(),
+        };
+        assert_eq!(btw_panel_height(Some(&state), 40), 3);
+        let buf = render_to_buffer(&state, 40, 3);
+        assert!(row_text(&buf, 40, 1).contains("boom"));
+    }
+
+    /// Pathologically long errors cap at DONE_MAX_BODY_LINES with an ellipsis,
+    /// and every line (including the ellipsized last one) fits the width so
+    /// the renderer can't cut the ellipsis off.
+    #[test]
+    fn error_body_caps_at_max_lines_with_ellipsis() {
+        let max = DONE_MAX_BODY_LINES as usize;
+        let error = "word ".repeat(400);
+        let lines = wrapped_error_lines(&error, 36, max);
+        assert_eq!(lines.len(), max);
+        assert!(lines.last().unwrap().ends_with('\u{2026}'));
+        for line in &lines {
+            assert!(line.width() <= 36, "line exceeds width: {line:?}");
+        }
+        // A word exactly filling the last line must lose a char to the '…'.
+        let exact = vec!["x".repeat(36); max + 1].join(" ");
+        let lines = wrapped_error_lines(&exact, 36, max);
+        assert_eq!(lines.last().unwrap().width(), 36);
+        assert!(lines.last().unwrap().ends_with('\u{2026}'));
+        // Wide (2-column) chars: the pop loop must free enough columns.
+        let cjk = "字".repeat(18 * (max + 1));
+        let lines = wrapped_error_lines(&cjk, 36, max);
+        assert!(lines.last().unwrap().ends_with('\u{2026}'));
+        assert!(lines.last().unwrap().width() <= 36);
+    }
+
+    /// Paragraph breaks survive the wrap, and a token wider than the panel
+    /// (a long URL) is broken instead of overflowing.
+    #[test]
+    fn error_wrap_keeps_paragraphs_and_breaks_long_tokens() {
+        let error = "first paragraph\n\nhttps://example.com/very/long/path/that/cannot/fit/in/one/panel/row";
+        let lines = wrapped_error_lines(error, 20, DONE_MAX_BODY_LINES as usize);
+        assert!(lines.contains(&String::new()), "blank paragraph gap kept");
+        for line in &lines {
+            assert!(line.width() <= 20, "line exceeds width: {line:?}");
+        }
+        assert!(lines.len() > 3, "URL must break across rows");
+    }
+
+    /// If the layout hands the panel a shorter rect than requested (routine in
+    /// minimal mode), the body caps at the rows it got — ellipsis on the last
+    /// visible row, bottom border intact.
+    #[test]
+    fn error_render_clamps_to_short_rect() {
+        let error = "word ".repeat(100);
+        let state = BtwOverlayState::Error {
+            question: "q".to_string(),
+            error,
+        };
+        // Desired height is far taller than the 5 rows given.
+        assert!(btw_panel_height(Some(&state), 40) > 5);
+        let buf = render_to_buffer(&state, 40, 5);
+        let last_body = row_text(&buf, 40, 3);
+        assert!(last_body.contains("word"), "last body row used");
+        assert!(
+            last_body.contains('\u{2026}'),
+            "cut body must end in an ellipsis: {last_body}"
+        );
+        assert!(
+            row_text(&buf, 40, 4).contains('╰'),
+            "bottom border must survive the clamp"
+        );
     }
 
     #[test]
@@ -1014,179 +784,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(text, expected);
-    }
-
-    /// One-shot Copy must include the question and every answer line, including
-    /// lines scrolled out of the viewport (not only the visible window).
-    #[test]
-    fn full_copy_text_includes_question_and_scrolled_out_answer() {
-        let response = hard_break_lines(20);
-        let mut state = done_with_scroll(&response, 8);
-        // Force Done with a real question (done_with_scroll uses "q").
-        if let BtwOverlayState::Done { turns, .. } = &mut state {
-            turns[0].question = "why is the sky blue?".into();
-        }
-        let text = state.full_copy_text().expect("Done should be copyable");
-        assert!(
-            text.starts_with("/btw why is the sky blue?\n\n"),
-            "copy should lead with the question header, got: {text:?}"
-        );
-        assert!(
-            text.contains("line00"),
-            "scrolled-out first line must be in the copy, got: {text:?}"
-        );
-        assert!(
-            text.contains("line19"),
-            "last answer line must be in the copy, got: {text:?}"
-        );
-        // Loading / Error without prior turns are not copyable.
-        assert!(
-            BtwOverlayState::loading("q".into())
-                .full_copy_text()
-                .is_none()
-        );
-        assert!(
-            BtwOverlayState::Error {
-                question: "q".into(),
-                error: "e".into(),
-                prior_turns: Vec::new(),
-                btw_session_id: None,
-            }
-            .full_copy_text()
-            .is_none()
-        );
-    }
-
-    /// Multi-turn Copy dumps the whole conversation in order (same plain
-    /// rendering path as single-turn).
-    #[test]
-    fn full_copy_text_exports_whole_thread_when_multi_turn() {
-        let state = multi_turn_done();
-        let text = state.full_copy_text().expect("multi-turn Done is copyable");
-        assert!(text.contains("/btw first?"), "first turn missing: {text:?}");
-        assert!(
-            text.contains("answer one"),
-            "first answer missing: {text:?}"
-        );
-        assert!(
-            text.contains("/btw second?"),
-            "second turn missing: {text:?}"
-        );
-        assert!(
-            text.contains("answer two"),
-            "second answer missing: {text:?}"
-        );
-        let first_pos = text.find("/btw first?").expect("first");
-        let second_pos = text.find("/btw second?").expect("second");
-        assert!(
-            first_pos < second_pos,
-            "turns must be oldest-first: {text:?}"
-        );
-        assert_eq!(state.btw_session_id(), Some("btw-test-session"));
-        assert_eq!(state.question(), "second?");
-    }
-
-    /// Error with successful prior turns is copyable and flushes to scrollback.
-    #[test]
-    fn error_with_prior_turns_copy_and_scrollback_flush() {
-        let err = BtwOverlayState::Error {
-            question: "follow-up?".into(),
-            error: "model failed".into(),
-            prior_turns: vec![BtwTurn {
-                question: "first?".into(),
-                answer: "kept answer".into(),
-            }],
-            btw_session_id: Some("btw-x".into()),
-        };
-        let copy = err.full_copy_text().expect("prior turns must be copyable");
-        assert!(
-            copy.contains("first?") && copy.contains("kept answer"),
-            "{copy}"
-        );
-        let (q, body) = err
-            .scrollback_flush_payload()
-            .expect("prior turns flush to scrollback");
-        assert_eq!(q, "first?");
-        assert!(body.contains("kept answer"), "{body}");
-        // Empty Error still flushes nothing.
-        assert!(
-            BtwOverlayState::Error {
-                question: "q".into(),
-                error: "e".into(),
-                prior_turns: Vec::new(),
-                btw_session_id: None,
-            }
-            .scrollback_flush_payload()
-            .is_none()
-        );
-    }
-
-    /// Finish loading with prior turns grows the thread and keeps session id.
-    #[test]
-    fn finish_loading_appends_turn_with_session_id() {
-        let loading = BtwOverlayState::loading_follow_up(
-            "second?".into(),
-            vec![BtwTurn {
-                question: "first?".into(),
-                answer: "answer one".into(),
-            }],
-            Some("btw-abc".into()),
-        );
-        let done = loading.finish_loading("answer two".into(), Some("btw-abc".into()));
-        match &done {
-            BtwOverlayState::Done {
-                turns,
-                btw_session_id,
-                ..
-            } => {
-                assert_eq!(turns.len(), 2);
-                assert_eq!(turns[0].question, "first?");
-                assert_eq!(turns[1].answer, "answer two");
-                assert_eq!(btw_session_id.as_deref(), Some("btw-abc"));
-            }
-            other => panic!("expected Done, got {other:?}"),
-        }
-        let copy = done.full_copy_text().unwrap();
-        assert!(
-            copy.contains("answer one") && copy.contains("answer two"),
-            "{copy}"
-        );
-    }
-
-    /// Done chrome advertises ask (`[a]`) + Copy (`[y]`) alongside Esc.
-    #[test]
-    fn done_chrome_shows_copy_y_hint() {
-        let state = BtwOverlayState::done("q".into(), "short answer".into());
-        let width = 48;
-        let buf = render_to_buffer(&state, width, 6);
-        let top = row_text(&buf, width, 0);
-        assert!(
-            top.contains("[y]"),
-            "Done panel must show Copy key hint [y], got: {top:?}"
-        );
-        assert!(
-            top.contains("[a]"),
-            "Done panel must show follow-up ask hint [a], got: {top:?}"
-        );
-        assert!(
-            top.contains("[Esc]"),
-            "Done panel must still show [Esc], got: {top:?}"
-        );
-    }
-
-    /// Done panel paints a follow-up composer row.
-    #[test]
-    fn done_panel_shows_follow_up_composer_affordance() {
-        let state = BtwOverlayState::done("q".into(), "short".into());
-        let width = 40;
-        let height = 6;
-        let buf = render_to_buffer(&state, width, height);
-        // Composer is the row above the bottom border.
-        let composer = row_text(&buf, width, height - 2);
-        assert!(
-            composer.contains("ask follow-up") || composer.contains("[a]"),
-            "composer affordance missing: {composer:?}"
-        );
     }
 
     /// Regression for the actual bug: the Done overlay must render markdown
@@ -1347,11 +944,10 @@ mod tests {
                     == url
             })
             .expect("scrolled link should still map when visible");
-        // Body starts at row 1; Done reserves 1 row for the follow-up composer,
-        // so height=6 → max_body=3. Clamped offset 18 → visible 18..21, link at
-        // visible index 2 → screen_row = 1 + 2 = 3.
+        // Body starts at row 1; clamped offset 17 + 4 visible rows → link at
+        // visible index 3 → screen_row = 1 + 3 = 4.
         assert_eq!(
-            link.screen_row, 3,
+            link.screen_row, 4,
             "link should be on last visible body row"
         );
     }
@@ -1362,7 +958,9 @@ mod tests {
     fn long_question_truncates_title_but_keeps_esc_hint() {
         let long_q = "please also double-check the error handling and the retry \
                       logic across every single call site in the whole module";
-        let state = BtwOverlayState::loading(long_q.to_string());
+        let state = BtwOverlayState::Loading {
+            question: long_q.to_string(),
+        };
         let width = 40;
         let buf = render_to_buffer(&state, width, 4);
         let top = row_text(&buf, width, 0);
@@ -1380,7 +978,9 @@ mod tests {
     /// to the common case).
     #[test]
     fn short_question_shows_full_title_and_esc_hint() {
-        let state = BtwOverlayState::loading("hi".to_string());
+        let state = BtwOverlayState::Loading {
+            question: "hi".to_string(),
+        };
         let width = 40;
         let buf = render_to_buffer(&state, width, 4);
         let top = row_text(&buf, width, 0);
@@ -1419,7 +1019,9 @@ mod tests {
     /// is long enough to force truncation.
     #[test]
     fn long_question_still_registers_esc_hit_area() {
-        let state = BtwOverlayState::loading("x".repeat(200));
+        let state = BtwOverlayState::Loading {
+            question: "x".repeat(200),
+        };
         let area = Rect::new(0, 0, 40, 4);
         let mut buf = Buffer::empty(area);
         let mut model = ResolvedSelectionModel::default();

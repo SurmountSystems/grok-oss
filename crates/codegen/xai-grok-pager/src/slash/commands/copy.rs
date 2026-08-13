@@ -190,12 +190,4 @@ mod tests {
             other => panic!("expected Action(CopyAssistantMessage), got {other:?}"),
         }
     }
-
-    #[test]
-    fn available_in_minimal_by_default() {
-        // Clipboard copy from scrollback does not need the fullscreen pane —
-        // same path as `/export` and useful when native selection is awkward
-        // for multi-page assistant messages.
-        assert!(CopyCommand.available_in_minimal());
-    }
 }

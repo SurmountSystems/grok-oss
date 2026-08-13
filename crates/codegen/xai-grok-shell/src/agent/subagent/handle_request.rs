@@ -1,7 +1,6 @@
 use super::*;
 use crate::upload::trace::PromptMetadataParams;
 use xai_grok_sampling_types::ReasoningEffort;
-use xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer;
 use xai_grok_tools::implementations::{grok_build, opencode};
 pub(super) fn canonical_total_tokens(totals: &xai_chat_state::UsageTotals) -> u64 {
     totals.total_tokens()
@@ -56,40 +55,29 @@ pub(super) fn task_model_override_error(
     let requested = requested?;
     crate::agent::models::task_model_error_for_catalog(requested, available, is_session_auth)
 }
-
-/// Apply global `[subagents] allow_worktree` policy to resolved isolation.
-///
-/// When worktrees are banned (`allow_worktree == false`), any non-`None`
-/// isolation is forced to [`SubagentIsolationMode::None`]. When allowed, the
-/// resolved isolation is returned unchanged.
-pub(super) fn apply_allow_worktree_policy(
-    allow_worktree: bool,
-    isolation: xai_tool_types::SubagentIsolationMode,
-) -> xai_tool_types::SubagentIsolationMode {
-    if !allow_worktree && isolation != xai_tool_types::SubagentIsolationMode::None {
-        xai_tool_types::SubagentIsolationMode::None
-    } else {
-        isolation
-    }
-}
 /// Runtime adapter for one shell child. Shared lifecycle state is owned by the
 /// `xai-grok-tools` coordinator actor and reached only through `reporter`.
 #[tracing::instrument(
     name = "subagent.handle_request",
     skip_all,
     fields(
-        subagent_id = %request.id,
+        subagent_id = %run.request.id,
         parent_session_id = %ctx.parent_session_id,
-        subagent_type = %request.subagent_type,
+        subagent_type = %run.request.subagent_type,
     )
 )]
 pub(crate) async fn run_shell_child(
-    mut request: SubagentRequest,
+    run: grok_build::task::coordinator::ChildRunRequest<ShellChildRuntime>,
     mut ctx: SubagentSpawnContext,
-    cancel_token: CancellationToken,
-    reporter: ChildReporter<ShellChildRuntime>,
     gateway: &GatewaySender,
 ) -> ChildRunOutput<ShellCompletionData> {
+    let grok_build::task::coordinator::ChildRunRequest {
+        mut request,
+        cancellation: cancel_token,
+        reporter,
+        queued_for,
+        session_running,
+    } = run;
     let start = std::time::Instant::now();
     let mut completion_data = ShellCompletionData::from_context(&ctx);
     if request.owner.is_workflow() && cancel_token.is_cancelled() {
@@ -148,16 +136,6 @@ pub(crate) async fn run_shell_child(
         cwd,
         &definition,
     );
-    // Global policy: `[subagents] allow_worktree = false` forces shared workspace.
-    let isolation_before = effective_runtime.isolation;
-    effective_runtime.isolation =
-        apply_allow_worktree_policy(ctx.subagent_allow_worktree, isolation_before);
-    if effective_runtime.isolation != isolation_before {
-        tracing::info!(
-            subagent_id = %request.id,
-            "Forcing isolation=none: [subagents] allow_worktree = false"
-        );
-    }
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {
         tracing::error!(
@@ -409,8 +387,7 @@ pub(crate) async fn run_shell_child(
         .spawn_depth
         .unwrap_or(ctx.parent_depth + 1);
     let tools_before_policy = definition.tool_config.tools.len();
-    let allow_nested_subagents =
-        child_depth < xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+    let allow_nested_subagents = child_depth < ctx.subagents_max_depth;
     xai_grok_subagent_resolution::apply_child_tool_policy(
         &mut definition,
         effective_runtime.capability_mode,
@@ -529,10 +506,6 @@ pub(crate) async fn run_shell_child(
         cwd: ctx.parent_cwd.to_string_lossy().to_string(),
     });
     let subagent_meta_dir = parent_session_dir.join("subagents").join(&subagent_id);
-    // Work join key: preserve across resume_from; mint only when absent.
-    let work_ulid =
-        super::resolve_subagent_work_ulid(request.resume_from.as_deref(), &parent_session_dir);
-    super::persist_subagent_work_ulid(&subagent_meta_dir, &child_session_dir, &work_ulid);
     let InitialContext {
         source: context_source,
         copy_error: fork_copy_error,
@@ -721,15 +694,9 @@ pub(crate) async fn run_shell_child(
         }
     };
     let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
-    let cwd_outside_parent = match (
-        dunce::canonicalize(&child_cwd),
-        dunce::canonicalize(&ctx.parent_cwd),
-    ) {
-        (Ok(child), Ok(parent)) => !child.starts_with(&parent),
-        _ => child_cwd != ctx.parent_cwd,
-    };
+    let covered_by_parent = xai_fsnotify::watch_root_covers(&ctx.parent_cwd, &child_cwd);
     let subagent_fs_watch = FsWatchCapabilities {
-        hunk_tracking: ctx.hunk_tracking_enabled && cwd_outside_parent,
+        hunk_tracking: ctx.hunk_tracking_enabled && !covered_by_parent,
         ..FsWatchCapabilities::none()
     };
     let child_cwd_abs = xai_grok_paths::AbsPathBuf::new(child_cwd).unwrap_or_else(|_| {
@@ -756,6 +723,7 @@ pub(crate) async fn run_shell_child(
     tool_ctx.monitor_event_buffer = Some(MonitorEventBuffer::default());
     tool_ctx.subagent_depth = child_depth;
     tool_ctx.lsp = ctx.lsp.clone();
+    tool_ctx.process_scope = ctx.process_scope.clone();
     let parent_traceparent = xai_file_utils::trace_context::current_traceparent();
     let tracker_child_cwd = child_session_info.cwd.clone();
     let tracker_model_id = effective_model_id.0.to_string();
@@ -768,10 +736,10 @@ pub(crate) async fn run_shell_child(
     let inherited_auth_type = subagent_auth_type(model_entry, &ctx.auth_method_id);
     let credentials = xai_chat_state::Credentials {
         api_key: effective_sampling_config.api_key.clone(),
-        failover_api_keys: effective_sampling_config.failover_api_keys.clone(),
         auth_type: inherited_auth_type,
         alpha_test_key: ctx.alpha_test_key.clone(),
         client_version: effective_sampling_config.client_version.clone(),
+        failover_api_keys: effective_sampling_config.failover_api_keys.clone(),
         failover_base_url: effective_sampling_config.failover_base_url.clone(),
         session_base_url: effective_sampling_config.session_base_url.clone(),
         session_identity_key: effective_sampling_config.session_identity_key.clone(),
@@ -874,7 +842,11 @@ pub(crate) async fn run_shell_child(
             let hooks_val = hooks_config.as_value();
             let (specs, errors) = xai_grok_hooks::config::parse_hooks_from_value_with_dir(
                 &hooks_val,
-                &format!("agent:{}", definition.name),
+                &format!(
+                    "{}{}",
+                    xai_grok_hooks::config::AGENT_HOOK_PREFIX,
+                    definition.name
+                ),
                 &ctx.parent_cwd,
             );
             for e in &errors {
@@ -1007,14 +979,10 @@ pub(crate) async fn run_shell_child(
         subagent_id: request.id.clone(),
         parent_session_id: request.parent_session_id.clone(),
         subagent_type: request.subagent_type.clone(),
-        owner: if request.owner.is_workflow() {
-            xai_grok_telemetry::events::SubagentOwnerKind::Workflow
-        } else {
-            xai_grok_telemetry::events::SubagentOwnerKind::Task
-        },
+        owner: telemetry_owner_kind(&request),
         workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
-        queued_ms: None,
-        session_running: 0,
+        queued_ms: queued_for.map(|queued| u64::try_from(queued.as_millis()).unwrap_or(u64::MAX)),
+        session_running: u32::try_from(session_running).unwrap_or(u32::MAX),
         persona: request.runtime_overrides.persona.clone(),
         fork_context: matches!(context_source, InitialContextSource::Forked),
         resume_from: request.resume_from.clone(),
@@ -1057,10 +1025,9 @@ pub(crate) async fn run_shell_child(
         crate::session::StartupHints {
             inherited_prefix_len: Some(inherited_prefix_len),
             is_subagent: true,
+            non_interactive: ctx.parent_non_interactive,
             parent_session_id: Some(ctx.parent_session_id.clone()),
             subagent_type: Some(request.subagent_type.clone()),
-            // Join key for usage.jsonl / cleared_todos (stable across resume).
-            work_ulid: Some(work_ulid.clone()),
             preserve_inherited_system: verbatim_mirror_fork,
             ..Default::default()
         },
@@ -1141,9 +1108,8 @@ pub(crate) async fn run_shell_child(
         ctx.goal_enabled,
         ctx.background_workflows_enabled,
         true,
-        // Subagents: inherit parent max depth / workflow concurrent from defaults.
-        xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,
-        crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
+        ctx.subagents_max_depth,
+        ctx.workflow_max_concurrent_agents,
         ctx.ask_user_question_enabled,
         ctx.client_hooks.clone(),
         None,
@@ -1253,9 +1219,7 @@ pub(crate) async fn run_shell_child(
             .send(SessionCommand::SetToolOverrides { overrides });
     }
     let (prompt_tx, prompt_rx) = oneshot::channel();
-    // T5: when the parent hands a pure structured JSON blob as the child task
-    // prompt, densify under the shared TOON policy (free text unchanged).
-    let prompt_text = xai_grok_tools::densify_structured_text(&task_prompt_text);
+    let prompt_text = task_prompt_text;
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     let _ = child_handle.cmd_tx.send(SessionCommand::Prompt {
@@ -1765,11 +1729,7 @@ pub(crate) async fn run_shell_child(
     xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SubagentCompleted {
         subagent_id: request.id.clone(),
         parent_session_id: request.parent_session_id.clone(),
-        owner: if request.owner.is_workflow() {
-            xai_grok_telemetry::events::SubagentOwnerKind::Workflow
-        } else {
-            xai_grok_telemetry::events::SubagentOwnerKind::Task
-        },
+        owner: telemetry_owner_kind(&request),
         workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
         outcome,
         duration_ms: result.duration_ms,
@@ -1826,7 +1786,7 @@ pub(crate) async fn run_shell_child(
         (None, None) => {}
     }
     let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown(
-        crate::session::commands::ShutdownKind::Graceful,
+        crate::session::ShutdownKind::Graceful,
     ));
     ctx.workspace_ops
         .end_local_session(child_session_id.0.as_ref());

@@ -125,7 +125,7 @@ fn stashed_model_switch_prefers_explicit_stash() {
     let models = models_with_current(true);
     let other = acp::ModelId::new(Arc::from("other-model"));
     let out = take_deferred_model_switch(
-        Some(stash(other.clone(), Some(ReasoningEffort::Low))),
+        Some(switch(other.clone(), Some(ReasoningEffort::Low))),
         &models,
         Some("high"),
     );
@@ -142,7 +142,8 @@ fn stashed_model_switch_prefers_explicit_stash() {
 fn stashed_model_re_resolves_remap_when_effort_missing() {
     let models = models_with_current(true);
     let current = models.current.clone().unwrap();
-    let out = take_deferred_model_switch(Some(stash(current.clone(), None)), &models, Some("deep"));
+    let out =
+        take_deferred_model_switch(Some(switch(current.clone(), None)), &models, Some("deep"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
@@ -157,7 +158,7 @@ fn stashed_model_keeps_model_when_token_unresolvable() {
     let models = models_with_current(true);
     let current = models.current.clone().unwrap();
     let out =
-        take_deferred_model_switch(Some(stash(current.clone(), None)), &models, Some("bogus"));
+        take_deferred_model_switch(Some(switch(current.clone(), None)), &models, Some("bogus"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
@@ -177,7 +178,7 @@ fn stashed_model_keeps_model_when_unsupported() {
     let mut models = models_with_current(true);
     let (plain, plain_info) = model_with_support("plain-model", false);
     models.available.insert(plain.clone(), plain_info);
-    let out = take_deferred_model_switch(Some(stash(plain.clone(), None)), &models, Some("high"));
+    let out = take_deferred_model_switch(Some(switch(plain.clone(), None)), &models, Some("high"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
@@ -215,17 +216,9 @@ fn effort_only_errors_without_active_model() {
     );
 }
 
-/// Outcome payload for [`DeferredSwitchOutcome::switch`].
+/// Stash/outcome with no rollback target (prev threading is covered by the
+/// router/lifecycle tests).
 fn switch(model_id: acp::ModelId, effort: Option<ReasoningEffort>) -> DeferredModelSwitch {
-    DeferredModelSwitch {
-        model_id,
-        effort,
-        prev_model_id: None,
-    }
-}
-
-/// Stashed deferred switch (input to [`take_deferred_model_switch`]).
-fn stash(model_id: acp::ModelId, effort: Option<ReasoningEffort>) -> DeferredModelSwitch {
     DeferredModelSwitch {
         model_id,
         effort,

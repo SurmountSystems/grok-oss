@@ -21,7 +21,7 @@ fn add_cli_chat_proxy_headers_blocking(
     url: &str,
 ) -> reqwest::blocking::RequestBuilder {
     let mut builder = builder
-        .header("Authorization", format!("Bearer {}", auth.key))
+        .header("Authorization", format!("Bearer {}", &auth.key))
         .header("X-XAI-Token-Auth", GrokComConfig::default().token_header)
         .header("x-userid", &auth.user_id)
         .header("x-grok-client-version", xai_grok_version::VERSION);
@@ -782,7 +782,7 @@ pub(crate) fn fetch_models_blocking(
                 BackendError::Auth("No auth credentials for cli-chat-proxy".into())
             })?;
             request = request
-                .header("Authorization", format!("Bearer {}", auth.key))
+                .header("Authorization", format!("Bearer {}", &auth.key))
                 .header("X-XAI-Token-Auth", "xai-grok-cli")
                 .header("x-userid", &auth.user_id)
                 .header("x-grok-client-version", xai_grok_version::VERSION)

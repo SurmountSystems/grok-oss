@@ -474,6 +474,22 @@ pub(super) async fn run_session(
                     };
 
                     match cmd {
+                        SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent,
+                            auto_compact_threshold_tokens,
+                        } => {
+                            session.apply_auto_compact_threshold(
+                                auto_compact_threshold_percent,
+                                auto_compact_threshold_tokens,
+                            );
+                        }
+                        SessionCommand::RestoreTodoBoard { plan_state } => {
+                            session.restore_todo_board(plan_state).await;
+                        }
+                        SessionCommand::ClearCompletedTodos { respond_to } => {
+                            let n = session.clear_completed_todos().await;
+                            let _ = respond_to.send(n);
+                        }
                         SessionCommand::Initialize { system_prompt } => {
                             session.initialize(system_prompt).await;
                             let s = session.clone();
@@ -502,22 +518,6 @@ pub(super) async fn run_session(
                             tokio::task::spawn_local(async move {
                                 s.resume_plan_approval(completion_tx).await;
                             });
-                        }
-                        SessionCommand::SetAutoCompactThreshold {
-                            auto_compact_threshold_percent,
-                            auto_compact_threshold_tokens,
-                        } => {
-                            session.apply_auto_compact_threshold(
-                                auto_compact_threshold_percent,
-                                auto_compact_threshold_tokens,
-                            );
-                        }
-                        SessionCommand::RestoreTodoBoard { plan_state } => {
-                            session.restore_todo_board(plan_state).await;
-                        }
-                        SessionCommand::ClearCompletedTodos { respond_to } => {
-                            let n = session.clear_completed_todos().await;
-                            let _ = respond_to.send(n);
                         }
                         SessionCommand::GetToolOverrides { respond_to } => {
                             let _ = respond_to.send(session.effective_tool_overrides());
@@ -663,13 +663,13 @@ pub(super) async fn run_session(
                                 if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str(), existing.api_key.as_deref()) {
                                     session.chat_state_handle.update_credentials(xai_chat_state::Credentials {
                                         api_key: r.api_key,
-                                        failover_api_keys: existing.failover_api_keys.clone(),
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
-                                        failover_base_url: existing.failover_base_url.clone(),
-                                        session_base_url: existing.session_base_url.clone(),
-                                        session_identity_key: existing.session_identity_key.clone(),
+                                        failover_api_keys: Vec::new(),
+                                        failover_base_url: None,
+                                        session_base_url: None,
+                                        session_identity_key: None,
                                     });
                                 }
                                 // Credentials changed under a possibly-unchanged model id.
@@ -1839,22 +1839,20 @@ pub(super) async fn run_session(
                             let agent_type = session.active_agent_type.lock().clone();
                             let _ = responds_to.send(agent_type);
                         }
-                        SessionCommand::SideQuestion {
-                            question,
-                            btw_session_id,
-                            prior_turns,
-                            respond_to,
-                        } => {
+                        SessionCommand::SideQuestion { question, btw_session_id, prior_turns: _, respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s
-                                    .handle_side_question(
-                                        &question,
-                                        btw_session_id,
-                                        prior_turns,
-                                    )
-                                    .await;
-                                let _ = respond_to.send(result);
+                                let result = s.handle_side_question(&question).await;
+                                let mapped = match result {
+                                    Ok(answer) => Ok(crate::session::helpers::side_question::SideQuestionResult {
+                                        answer,
+                                        btw_session_id: crate::session::helpers::side_question::resolve_btw_session_id(
+                                            btw_session_id.as_deref(),
+                                        ),
+                                    }),
+                                    Err(e) => Err(e.to_string()),
+                                };
+                                let _ = respond_to.send(mapped);
                             });
                         }
                         SessionCommand::Recap { auto } => {

@@ -244,9 +244,6 @@ impl SessionActor {
         self.maybe_reconcile_active_goal_without_plan().await;
         let (_, workflows) = self.named_workflow_snapshot();
         let commands = slash_commands::available_commands(&skills, availability, &workflows);
-        if commands.is_empty() {
-            return;
-        }
         let meta = Some(slash_commands::build_tools_meta(&tool_names));
         tracing::info!(
             session_id = %self.session_info.id.0,
@@ -473,28 +470,13 @@ impl SessionActor {
         if current_config.context_window != new_context_window
             && self.compaction.context_window_override.is_none()
         {
-            // Catalog size from remote refresh; effective size may still be
-            // economic-capped.
-            self.compaction
-                .model_context_window
-                .set(new_context_window.get());
-            let effective =
-                std::num::NonZeroU64::new(crate::util::config::apply_economic_context_cap(
-                    new_context_window.get(),
-                    self.compaction.economic_mode.get(),
-                ))
-                .unwrap_or(new_context_window);
-            if current_config.context_window != effective {
-                tracing::info!(
-                    old_context_window = current_config.context_window.get(),
-                    catalog_context_window = new_context_window.get(),
-                    new_context_window = effective.get(),
-                    economic_mode = self.compaction.economic_mode.get(),
-                    "Context window updated on session resume"
-                );
-                updated_config.context_window = effective;
-                config_changed = true;
-            }
+            tracing::info!(
+                old_context_window = current_config.context_window.get(),
+                new_context_window = new_context_window.get(),
+                "Context window updated on session resume"
+            );
+            updated_config.context_window = new_context_window;
+            config_changed = true;
         }
         if let Some(new_mct) = new_max_completion_tokens
             && current_config.max_completion_tokens != Some(new_mct)
@@ -528,62 +510,23 @@ impl SessionActor {
         let mut new_context_window = current_config.context_window;
         let mut new_max_completion_tokens = current_config.max_completion_tokens;
         if let Some(new_cw) = metadata.context_window.and_then(std::num::NonZeroU64::new)
+            && current_config.context_window != new_cw
             && self.compaction.context_window_override.is_none()
         {
-            // Track catalog size (pre-economic cap) for later restore.
-            if new_cw.get() > self.compaction.model_context_window.get() {
-                self.compaction.model_context_window.set(new_cw.get());
-            }
-            let catalog = self.compaction.model_context_window.get().max(new_cw.get());
-            let effective =
-                std::num::NonZeroU64::new(crate::util::config::apply_economic_context_cap(
-                    catalog,
-                    self.compaction.economic_mode.get(),
-                ))
-                .unwrap_or(new_cw);
-
-            if effective.get() > current_config.context_window.get() {
-                tracing::info!(
-                    old_context_window = current_config.context_window.get(),
-                    catalog_context_window = catalog,
-                    new_context_window = effective.get(),
-                    economic_mode = self.compaction.economic_mode.get(),
-                    "Model context_window upgraded via response header"
-                );
-                new_context_window = effective;
-                config_changed = true;
-            } else if new_cw.get() < current_config.context_window.get()
-                && !self.compaction.economic_mode.get()
-            {
-                // Preserve the historical "no header downgrade" rule when
-                // economic mode is off (effective == catalog).
+            if new_cw < current_config.context_window {
                 tracing::warn!(
                     current_context_window = current_config.context_window.get(),
                     header_context_window = new_cw.get(),
                     "Ignoring context_window downgrade from response header"
                 );
-            } else if self.compaction.economic_mode.get()
-                && effective.get() < current_config.context_window.get()
-            {
-                // Economic mode may pull effective below a previously uncapped
-                // window after a mid-session enable (handled by slash path too).
+            } else {
                 tracing::info!(
                     old_context_window = current_config.context_window.get(),
-                    catalog_context_window = catalog,
-                    new_context_window = effective.get(),
-                    "economic mode: clamping context_window to pricing cap"
+                    new_context_window = new_cw.get(),
+                    "Model context_window upgraded via response header"
                 );
-                new_context_window = effective;
+                new_context_window = new_cw;
                 config_changed = true;
-            } else if self.compaction.economic_mode.get()
-                && new_cw.get() > current_config.context_window.get()
-                && effective.get() == current_config.context_window.get()
-            {
-                tracing::debug!(
-                    catalog_context_window = new_cw.get(),
-                    effective_context_window = effective.get(),
-                    "economic mode: ignoring catalog upgrade past pricing cap"
-                );
             }
         }
         if let Some(new_mct) = metadata.max_completion_tokens

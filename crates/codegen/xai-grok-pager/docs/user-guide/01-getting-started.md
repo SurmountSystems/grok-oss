@@ -1,13 +1,6 @@
 # Getting Started
 
-> **Grok OSS note:** This guide is largely shared with upstream Grok Build docs.
-> On this fork the CLI binary is **`grok-oss`** (not `grok`). Config still lives
-> under `~/.grok`. See the repository [README](../../../../../README.md) and
-> [FORK.md](../../../../../FORK.md).
-
-Grok OSS is a terminal-based AI coding assistant (open-source fork of SpaceXAI’s
-Grok Build). It runs as a TUI that understands your codebase, executes shell
-commands, edits files, searches the web, and manages tasks.
+Grok Build is a terminal-based AI coding assistant from SpaceXAI. It runs as a TUI (Terminal User Interface) that understands your codebase, executes shell commands, edits files, searches the web, and manages tasks.
 
 You can use it interactively as a full-screen TUI, run it headlessly for scripting and CI/CD, or integrate it into editors via the Agent Client Protocol (ACP).
 
@@ -15,53 +8,43 @@ You can use it interactively as a full-screen TUI, run it headlessly for scripti
 
 ## Installation
 
-### Grok OSS (this fork)
-
-```bash
-# From a clone of SurmountSystems/grok-oss
-just install
-# or: cargo install --path crates/codegen/xai-grok-pager-bin --locked --force
-grok-oss --version
-```
-
-Arch users: see `packaging/aur/` for AUR PKGBUILDs (`grok-oss-git`).
-
-### Official upstream (SpaceXAI)
-
-Installs the official **`grok`** binary, not Grok OSS:
+Install the latest stable release (macOS, Linux, or Windows via Git Bash):
 
 ```bash
 curl -fsSL https://x.ai/cli/install.sh | bash
 ```
 
-On **Windows (PowerShell)**:
+Install a specific version:
+
+```bash
+curl -fsSL https://x.ai/cli/install.sh | bash -s 0.1.42
+```
+
+On **Windows (PowerShell)**, use the native PowerShell installer:
 
 ```powershell
 irm https://x.ai/cli/install.ps1 | iex
 ```
 
-Verify Grok OSS:
+Install a specific version:
 
-```bash
-grok-oss --version
+```powershell
+$env:GROK_VERSION="0.1.42"; irm https://x.ai/cli/install.ps1 | iex
 ```
 
-Keep Grok OSS current from a local checkout:
+The PowerShell installer automatically adds `%USERPROFILE%\.grok\bin` to your User PATH. Alternatively, install via [Git for Windows](https://gitforwindows.org/) (Git Bash) or MSYS2 using the bash script above. WSL users get the Linux binary automatically.
+
+Verify the installation:
 
 ```bash
-# In the TUI (rebuild + soft-relaunch live leaders + re-exec this session)
-/rebuild
-
-# Or CLI (same install + leader signal; no self re-exec)
-grok-oss rebuild
-
-# Freshness only (no install): compare this build to Surmount main
-grok-oss update --check
+grok --version
 ```
 
-Grok OSS does **not** auto-download SpaceXAI binaries. Prefer `/rebuild` or
-`just install` over `curl https://x.ai/cli/install.sh` (that installs upstream
-**`grok`**).
+Update to the latest version at any time:
+
+```bash
+grok update
+```
 
 ---
 
@@ -116,7 +99,7 @@ The `@` operator opens a fuzzy file picker. By default it respects `.gitignore` 
 
 ### Permissions
 
-By default, Grok asks for permission before executing shell commands or editing files. You can approve individually or toggle always-approve mode (skips **tool permission** prompts only — not plan panel Approve; see [Plan mode](19-plan-mode.md#present-is-not-approval)):
+By default, Grok asks for permission before executing shell commands or editing files. You can approve individually or toggle always-approve mode:
 
 - Press `Ctrl+O` to toggle always-approve mode
 - Use the `--yolo` flag at launch: `grok --yolo`

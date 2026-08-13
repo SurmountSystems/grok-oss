@@ -11,38 +11,6 @@ pub async fn set_compact_mode(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.compact_mode = value).await
 }
 
-/// Persist `[ui].hide_header` via `update_config`.
-pub async fn set_hide_header(value: bool) -> Result<()> {
-    update_config(|cfg| cfg.ui.hide_header = value).await
-}
-
-/// Persist `[ui].plan_approval_park` (`soft` | `modal`) via `update_config`.
-pub async fn set_plan_approval_park(value: String) -> Result<()> {
-    let canonical = match value.trim() {
-        "modal" => "modal",
-        _ => "soft",
-    };
-    update_config(|cfg| cfg.ui.plan_approval_park = Some(canonical.to_owned())).await
-}
-
-/// Persist `[ui.notifications].session_recap` (auto return-from-away recap).
-/// Does not gate manual `/recap` (that is `[features] session_recap`).
-pub async fn set_notifications_session_recap(value: bool) -> Result<()> {
-    update_config(|cfg| cfg.ui.notifications.session_recap = Some(value)).await
-}
-
-/// Persist `[ui.notifications].session_recap_threshold_secs` (debounce).
-/// Clamped to a sane range at the shell boundary.
-pub async fn set_notifications_session_recap_threshold_secs(value: i64) -> Result<()> {
-    let clamped = value.clamp(5, 3600) as u64;
-    update_config(|cfg| cfg.ui.notifications.session_recap_threshold_secs = Some(clamped)).await
-}
-
-/// Persist `[features].session_recap` (master kill for `/recap` + auto).
-pub async fn set_features_session_recap(value: bool) -> Result<()> {
-    super::persist::update_features_session_recap(value).await
-}
-
 /// Persist `[ui].show_timestamps` via `update_config`. `UiConfig::show_timestamps`
 /// is `Option<bool>` — pager-side `None` means "use default" — so we wrap.
 pub async fn set_show_timestamps(value: bool) -> Result<()> {

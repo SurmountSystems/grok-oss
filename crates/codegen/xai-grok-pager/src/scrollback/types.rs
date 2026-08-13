@@ -23,16 +23,11 @@ pub enum WrapMode {
 /// Accent/bullet color style for a block.
 ///
 /// Used by both `accent()` and `bullet()` trait methods.
-/// When `animated` is true, the renderer uses a wave animation effect
-/// (unless [`Self::striped`] is set — then the rail cycles the DOGE
-/// striped-down glyph marquee in `color`).
+/// When `animated` is true, the renderer uses a wave animation effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccentStyle {
     pub color: Color,
     pub animated: bool,
-    /// Prefer dashed/striped vertical glyphs over solid `┃`.
-    /// Used for Yellow context/time/meta rails under DOGE.
-    pub striped: bool,
 }
 
 impl AccentStyle {
@@ -41,7 +36,6 @@ impl AccentStyle {
         Self {
             color,
             animated: false,
-            striped: false,
         }
     }
 
@@ -50,28 +44,6 @@ impl AccentStyle {
         Self {
             color,
             animated: true,
-            striped: false,
-        }
-    }
-
-    /// Static rail using striped (dashed) vertical glyphs in `color`.
-    ///
-    /// Context/time/meta (Yellow role): solid yellow `┃` is wrong; the rail
-    /// should read as yellow stripes.
-    pub const fn striped(color: Color) -> Self {
-        Self {
-            color,
-            animated: false,
-            striped: true,
-        }
-    }
-
-    /// Animated striped rail: cycles the DOGE striped-down marquee in `color`.
-    pub const fn striped_animated(color: Color) -> Self {
-        Self {
-            color,
-            animated: true,
-            striped: true,
         }
     }
 }

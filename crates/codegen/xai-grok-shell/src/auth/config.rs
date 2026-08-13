@@ -708,10 +708,8 @@ mod tests {
 
     #[test]
     fn auto_use_included_limits_does_not_block_automatic_oidc() {
-        let mut cfg = GrokComConfig {
-            auto_use_included_limits: true,
-            ..GrokComConfig::default()
-        };
+        let mut cfg = GrokComConfig::default();
+        cfg.auto_use_included_limits = true;
         assert!(!cfg.blocks_automatic_oidc());
         cfg.preferred_method = Some(PreferredAuthMethod::ApiKey);
         assert!(cfg.blocks_automatic_oidc());

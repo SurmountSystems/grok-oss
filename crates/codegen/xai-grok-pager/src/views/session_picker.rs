@@ -100,7 +100,6 @@ pub struct PendingDelete {
 }
 
 /// Outcome of routing a key through an armed [`PendingDelete`] confirm.
-#[allow(dead_code)] // session-picker delete confirm path
 pub(crate) enum PendingDeleteKey {
     /// `y`: caller should delete this session.
     Confirm(PendingDelete),
@@ -114,7 +113,6 @@ pub(crate) enum PendingDeleteKey {
 
 /// Arm a [`PendingDelete`] from the selected row, or `None` if it can't be
 /// deleted (foreign source or non-selectable position).
-#[allow(dead_code)] // session-picker delete confirm path
 pub(crate) fn pending_delete_from_selection(
     selected: usize,
     entry_map: &[Option<PickerItem>],
@@ -144,7 +142,6 @@ pub(crate) fn pending_delete_from_selection(
 
 /// Route a key through an armed [`PendingDelete`]: `y` confirms, `n`
 /// cancels, any other unmodified key disarms and falls through.
-#[allow(dead_code)] // session-picker delete confirm path
 pub(crate) fn handle_pending_delete_key(
     pending: &mut Option<PendingDelete>,
     ev: &crossterm::event::Event,

@@ -276,12 +276,9 @@ impl SessionActor {
             trigger,
             user_initiated,
         } = options;
-        // Ctrl+C is the hard stop: drop queued task wakes and arm the barrier
-        // so background completions do not auto-resume the model. Esc / mouse /
-        // dashboard / unlabeled cancel only abort the running turn and keep
-        // queued wakes (and do not arm suppression).
-        let suppress_task_wakes =
-            matches!(trigger.as_ref(), Some(crate::session::CancelTrigger::CtrlC));
+        let suppress_task_wakes = trigger
+            .as_ref()
+            .is_some_and(crate::session::CancelTrigger::is_stop_gesture);
         // Abort in-flight `/compact` or auto-compact generation (stream select +
         // pre-replace guard). Safe when no compact is running.
         self.compaction.cancel.request_cancel();

@@ -19,21 +19,13 @@ use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 impl AgentView {
-    /// Update the last-turn summary and bump its generation.
+    /// Live mutation of the turn-summary display field. Always bumps
+    /// [`Self::last_turn_summary_gen`] so a concurrent disk hydrate that
+    /// captured an older generation cannot overwrite this write.
     pub(crate) fn set_last_turn_summary(&mut self, summary: Option<String>) {
         self.last_turn_summary = summary;
         self.last_turn_summary_gen = self.last_turn_summary_gen.wrapping_add(1);
     }
-
-    /// Conversation-entry sessions are chat; everything else is build.
-    pub(crate) fn rename_kind(&self) -> xai_grok_shell::session::unified_list::SessionKind {
-        if self.conversation_entry {
-            xai_grok_shell::session::unified_list::SessionKind::Chat
-        } else {
-            xai_grok_shell::session::unified_list::SessionKind::Build
-        }
-    }
-
     /// Bind this view to a root session id, resetting the per-session
     /// reconnect cursor and both dedup highwaters (ACP + xAI) when the id
     /// actually changes — all three are meaningless against another session's
@@ -49,70 +41,7 @@ impl AgentView {
             self.clear_minimal_btw_lifecycle();
         }
         self.session.session_id = Some(session_id);
-        // Resume/attach: restore durable unsent draft when the composer is empty.
-        self.maybe_restore_unsent_prompt_draft();
     }
-
-    /// Persist the live composer text as a session-scoped unsent draft.
-    ///
-    /// Fail-open: disk errors are logged and ignored. Empty text clears the file.
-    pub(crate) fn persist_unsent_prompt_draft(&self) {
-        let Some(sid) = self.session.session_id.as_ref() else {
-            return;
-        };
-        let cwd = self.session.cwd.to_string_lossy();
-        let text = self.prompt.text();
-        if let Err(e) = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
-            cwd.as_ref(),
-            sid.0.as_ref(),
-            text,
-        ) {
-            tracing::warn!(?e, "failed to persist unsent prompt draft");
-        }
-    }
-
-    /// Clear durable unsent draft after a successful submit (or explicit discard).
-    pub(crate) fn clear_unsent_prompt_draft(&self) {
-        let Some(sid) = self.session.session_id.as_ref() else {
-            return;
-        };
-        let cwd = self.session.cwd.to_string_lossy();
-        if let Err(e) = xai_grok_shell::session::unsent_prompt_draft::clear_unsent_prompt_draft(
-            cwd.as_ref(),
-            sid.0.as_ref(),
-        ) {
-            tracing::warn!(?e, "failed to clear unsent prompt draft");
-        }
-    }
-
-    /// Load durable draft into an empty composer for the bound session.
-    pub(crate) fn maybe_restore_unsent_prompt_draft(&mut self) {
-        let Some(sid) = self.session.session_id.as_ref() else {
-            return;
-        };
-        let cwd = self.session.cwd.to_string_lossy();
-        let draft = match xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(
-            cwd.as_ref(),
-            sid.0.as_ref(),
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(?e, "failed to load unsent prompt draft");
-                return;
-            }
-        };
-        let Some(text) = draft else {
-            return;
-        };
-        if xai_grok_shell::session::unsent_prompt_draft::should_restore_draft_into_composer(
-            self.prompt.text(),
-            &text,
-        ) {
-            self.prompt.set_text(&text);
-            self.prompt.set_cursor(text.len());
-        }
-    }
-
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
         if self.session.session_id.take().is_some() {
@@ -179,12 +108,8 @@ impl AgentView {
             late_replay_until: None,
             replayed_terminal_prompts: HashSet::new(),
             failed_wake_marker_for: None,
-            finished_wake_prompts: HashSet::new(),
             running_wake_turn: None,
-            last_turn_summary: None,
-            last_turn_summary_gen: 0,
-            last_primary_user_turn_completed_in_replay: false,
-            last_primary_user_turn_failed_in_replay: false,
+            finished_wake_prompts: HashSet::new(),
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
@@ -203,11 +128,12 @@ impl AgentView {
             chat_kind: false,
             conversation_entry: false,
             app_chat_mode: false,
+            #[cfg(feature = "local-workspace")]
+            workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
+            #[cfg(feature = "local-workspace")]
+            workspace_mode_cli_locked: false,
             credit_balance: None,
             auto_topup: None,
-            openrouter_credit_balance: None,
-            console_team_prepaid_cents: None,
-            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
             goal_state: None,
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
@@ -215,7 +141,6 @@ impl AgentView {
             cleared_workflow_runs: std::collections::HashSet::new(),
             show_workflows: false,
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
-            parked_wait_marker_for: None,
             pending_stop_hooks: None,
             last_cleared_goal_id: None,
             show_goal_detail: false,
@@ -224,6 +149,7 @@ impl AgentView {
             turn_started_at: None,
             first_activity_logged_for: None,
             turn_paused_duration: std::time::Duration::ZERO,
+            turn_paused_wall: std::time::Duration::ZERO,
             self_interjection_ids: std::collections::HashSet::new(),
             last_active_at: Some(Instant::now()),
             current_branch: None,
@@ -254,7 +180,7 @@ impl AgentView {
             scrollback_visible_link_count: 0,
             highlighted_link_idx: None,
             hovered_link_idx: None,
-            last_pointer_cursor: false,
+            last_pointer_on_link: false,
             last_btw_selection_model: ResolvedSelectionModel::default(),
             last_btw_area: Rect::default(),
             pending_scrollback_click: None,
@@ -272,7 +198,6 @@ impl AgentView {
             hit_context: Default::default(),
             hit_credits: Default::default(),
             hit_todo_close: Default::default(),
-            hit_todo_clear_done: Default::default(),
             hit_bg_close: Default::default(),
             hit_subagent_close: Default::default(),
             hit_catalog_close: Default::default(),
@@ -285,13 +210,11 @@ impl AgentView {
             hit_queue_badge: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
-            hit_soft_park_ctas: Default::default(),
             hit_follow_indicator: Default::default(),
+            hit_response_top_indicator: Default::default(),
             hit_cwd: Default::default(),
             hit_cancel_button: Default::default(),
-            hit_pause_button: Default::default(),
             hit_watching_cue: Default::default(),
-            global_work_paused: false,
             watching_cue_toast_shown: false,
             hit_announcement_hide: Default::default(),
             hit_announcement_cta: Default::default(),
@@ -332,7 +255,6 @@ impl AgentView {
             btw_focused: false,
             hit_btw_close: Default::default(),
             toast: None,
-            rebuild_progress: None,
             ephemeral_tip: Default::default(),
             word_select_tip_prompt_snapshot: None,
             last_word_select_probe: None,
@@ -344,8 +266,6 @@ impl AgentView {
             scrollback_search: None,
             hit_sb_copy: Default::default(),
             hit_sb_view: Default::default(),
-            bubble_copy_hits: Vec::new(),
-            hovered_bubble_copy: None,
             question_view: None,
             hit_question_scrollbar: Default::default(),
             hovered_question_item: None,
@@ -357,11 +277,10 @@ impl AgentView {
             question_scroll_region: None,
             plan_mode_active: false,
             plan_mode_pending: None,
-            plan_decision_resolved: false,
-            plan_feedback_in_flight: None,
             deferred_session_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
+            overlay_can_cycle: false,
             mcp_init_progress: None,
             acp_synced_generation: 0,
             hovered_permission_item: None,
@@ -373,8 +292,6 @@ impl AgentView {
             permission_pattern_edit: None,
             plan_approval_view: None,
             latest_inline_plan_content: None,
-            plan_card_committed_id: None,
-            plan_card_entry_id: None,
             plan_comments: Vec::new(),
             plan_next_comment_id: 0,
             casual_commenting_range: None,
@@ -399,7 +316,12 @@ impl AgentView {
             is_subagent_view: false,
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
+            scheduler_background_loops: None,
             billing_surface_visible: false,
+            usage_command_visible: true,
+            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::default(),
+            console_team_prepaid_cents: None,
+            rebuild_progress: None,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
             rewind_suppress_deadline: None,
@@ -410,14 +332,15 @@ impl AgentView {
             display_name: None,
             generated_session_title: None,
             title_unpin_committed: false,
-            front_message_committed: true,
-            scheduler_background_loops: None,
+            last_turn_summary: None,
+            last_turn_summary_gen: 0,
             pending_effects: Vec::new(),
             paste_probe_in_flight: 0,
             deferred_send: None,
             pending_turn_end_reconcile: None,
             pending_cancel_resend: None,
             expect_send_now_cancel: None,
+            front_message_committed: true,
             optimistic_queue_ids: std::collections::HashSet::new(),
             send_now_awaiting_confirm: None,
             send_now_painted_blocks: std::collections::HashMap::new(),
@@ -454,55 +377,62 @@ impl AgentView {
         child_view.mark_as_subagent_view();
         self.subagent_views.insert(child_sid, child_view);
     }
-    /// Clear `turn_started_at` and stamp `last_active_at` to "now".
+    /// Clear the turn-timing fields and stamp `last_active_at` to "now".
     ///
     /// Call this from every site that ends a turn (success, failure,
-    /// cancellation, reconnect cleanup). Centralised so the two
-    /// fields cannot drift apart at the ~10 termination call sites
-    /// across `dispatch.rs` and `event_loop.rs`.
+    /// cancellation, reconnect cleanup). Centralised so the fields cannot
+    /// drift apart at the ~10 termination call sites across `dispatch.rs`
+    /// and `event_loop.rs`. The wall anchor is cleared so a later turn that
+    /// reuses a prompt id (stash-and-resubmit after `/login`) can never
+    /// wall-max against a previous attempt's anchor in
+    /// [`honest_turn_elapsed`].
     pub fn mark_turn_finished(&mut self) {
         self.turn_started_at = None;
         self.turn_paused_duration = std::time::Duration::ZERO;
+        self.turn_paused_wall = std::time::Duration::ZERO;
+        self.turn_start_ms = None;
+        self.turn_start_ms_prompt = None;
         self.last_active_at = Some(Instant::now());
     }
-    /// Invalidate and clear a minimal `/btw` lifecycle at a session boundary.
-    /// Accumulate wall/time paused while a question card was open so turn
-    /// duration stats exclude human decision time.
+    /// Absorb a closing/replaced question view's open span into the turn's
+    /// pause totals, on both clocks — a close site that updated only the
+    /// `Instant` pause would resurface suspend time as worked time in
+    /// [`honest_turn_elapsed`].
     pub(crate) fn record_question_pause(
         &mut self,
         qv: &crate::views::question_view::QuestionViewState,
     ) {
         self.turn_paused_duration += qv.opened_at.elapsed();
+        self.turn_paused_wall +=
+            wall_since_ms(qv.opened_at_wall_ms, chrono::Utc::now().timestamp_millis());
     }
-
+    /// Invalidate and clear a minimal `/btw` lifecycle at a session boundary.
     pub(crate) fn clear_minimal_btw_lifecycle(&mut self) {
         crate::minimal_api::clear_minimal_btw(self);
+    }
+    /// Accept leftover `isReplay` after `loading_replay` clears. Long enough
+    /// for FIFO drain of a foreign ACP head after the Unrelated firehose timeout.
+    pub(crate) const LATE_REPLAY_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+    pub(crate) fn arm_late_replay_grace(&mut self) {
+        self.late_replay_until = Some(std::time::Instant::now() + Self::LATE_REPLAY_GRACE);
     }
     /// Enter a `session/load` replay window: flip `loading_replay` on and reset
     /// every field coupled to that transition together, so no site can drift
     /// (e.g. reset one coupled field but miss another). Called at every
     /// replay-window entry: the fresh/restore load ctor paths and the
     /// reconnect/fork reuse paths.
-    /// Accept leftover `isReplay` after `loading_replay` clears. Long enough
-    /// for FIFO drain of a foreign ACP head after the Unrelated firehose timeout.
-    #[allow(dead_code)] // armed from load-barrier / finish_session_reload paths
-    pub(crate) const LATE_REPLAY_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
-
-    #[allow(dead_code)] // armed from load-barrier / finish_session_reload paths
-    pub(crate) fn arm_late_replay_grace(&mut self) {
-        self.late_replay_until = Some(std::time::Instant::now() + Self::LATE_REPLAY_GRACE);
-    }
-
     pub(crate) fn begin_replay_window(&mut self) {
         self.clear_minimal_btw_lifecycle();
         self.session.loading_replay = true;
         self.replayed_terminal_prompts.clear();
-        self.last_primary_user_turn_completed_in_replay = false;
-        self.last_primary_user_turn_failed_in_replay = false;
         self.unexpected_replay_drops = 0;
         self.late_replay_until = None;
+        self.running_wake_turn = None;
+        self.finished_wake_prompts.clear();
+        self.pending_cancel_resend = None;
         self.pending_stop_hooks = None;
         self.clear_send_now_expectation();
+        self.front_message_committed = true;
         self.optimistic_queue_ids.clear();
         self.send_now_awaiting_confirm = None;
         self.send_now_painted_blocks.clear();
@@ -590,6 +520,8 @@ impl AgentView {
         {
             self.expect_send_now_cancel = None;
         }
+        self.front_message_committed = false;
+        self.pending_cancel_resend = None;
         self.session.start_turn(&mut self.scrollback);
     }
     /// Adopt the in-flight turn another client is driving, conveyed by the
@@ -599,6 +531,7 @@ impl AgentView {
     pub(crate) fn adopt_running_prompt(&mut self, prompt_id: String) {
         self.start_turn_boundary(Some(&prompt_id));
         self.session.tracker.clear_user_echo_skip();
+        self.front_message_committed = true;
         self.session.current_prompt_id = Some(prompt_id.clone());
         self.turn_started_at = Some(Instant::now());
         self.scrollback.enable_follow_with_preserve();
@@ -656,12 +589,10 @@ impl AgentView {
             && !self.replayed_terminal_prompts.contains(prompt_id)
             && !self.is_rewound_prompt(prompt_id)
     }
-
     /// Wake turn in flight (streaming or cancelling) while the pane is idle.
     pub(crate) fn wake_turn_active(&self) -> bool {
         self.session.state.is_idle() && self.running_wake_turn.is_some()
     }
-
     /// Wake cancel sent and still waiting on its terminal. Pane stays idle.
     pub(crate) fn wake_turn_cancelling(&self) -> bool {
         self.session.state.is_idle()
@@ -670,7 +601,6 @@ impl AgentView {
                 .as_ref()
                 .is_some_and(|wake| wake.cancel_sent)
     }
-
     /// Single setter for [`RunningWakeTurn`]. No-op unless the pane is idle
     /// and not replaying; keeps an in-flight cancel marker for the same id.
     pub(crate) fn note_streaming_wake_turn(&mut self, prompt_id: &str) {
@@ -692,42 +622,32 @@ impl AgentView {
             cancel_sent: false,
         });
     }
-
     /// Local turn, running `/compact`, or streaming wake not yet asked to stop.
-    #[allow(dead_code)] // dashboard overlay stop; wired via arm_dashboard_stop
     pub(crate) fn stoppable_activity_running(&self) -> bool {
         self.session.state.is_turn_running()
             || self.session.state.is_compact_running()
             || (self.wake_turn_active() && !self.wake_turn_cancelling())
     }
-
     /// Local or wake cancel still in flight.
     pub(crate) fn any_cancel_pending(&self) -> bool {
         self.session.state.is_cancelling() || self.wake_turn_cancelling()
     }
-
     /// Mark the wake cancel sent. No-op without a wake turn.
     pub(crate) fn mark_wake_cancel_sent(&mut self) {
         if let Some(wake) = self.running_wake_turn.as_mut() {
             wake.cancel_sent = true;
         }
     }
-
     /// Overlay stop: stamp the dashboard trigger if something stoppable is running.
-    #[allow(dead_code)] // dashboard overlay stop path
     pub(crate) fn arm_dashboard_stop(&mut self) -> bool {
         if self.stoppable_activity_running() {
-            // Dashboard overlay stop uses the same wire path as the on-screen
-            // cancel button (mouse trigger).
-            self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Mouse);
+            self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::DashboardStop);
             true
         } else {
             false
         }
     }
-
     /// Status-row chrome for a wake turn, or `None` when a local turn owns it.
-    #[allow(dead_code)] // status-row chrome for streaming wake turns
     pub(crate) fn wake_display_state(&self) -> Option<&'static crate::app::agent::AgentState> {
         if !self.session.state.is_idle() {
             return None;
@@ -834,6 +754,11 @@ impl AgentView {
             dropped_heavy = true;
         }
         self.session.loading_replay = false;
+        if success {
+            self.arm_late_replay_grace();
+        } else {
+            self.late_replay_until = None;
+        }
         self.session.prompt_history_loading = false;
         self.session.tracker.clear_user_echo_skip();
         self.session.finish_turn(&mut self.scrollback);
@@ -847,18 +772,26 @@ impl AgentView {
         self.reset_follow_ups_for_reload();
         dropped_heavy
     }
-    /// Effective turn elapsed time, excluding time spent in question views.
-    ///
-    /// Subtracts both the accumulated `turn_paused_duration` (from previously
-    /// closed question views) and the time elapsed since the current question
-    /// view opened (if one is active).
+    /// Effective turn elapsed time, excluding time spent in question views
+    /// (accumulated pauses plus the currently open one, on both clocks).
     pub fn turn_elapsed(&self) -> Option<std::time::Duration> {
-        let raw = self.turn_started_at?.elapsed();
-        let mut paused = self.turn_paused_duration;
+        let instant_elapsed = self.turn_started_at?.elapsed();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut instant_paused = self.turn_paused_duration;
+        let mut wall_paused = self.turn_paused_wall;
         if let Some(qv) = &self.question_view {
-            paused += qv.opened_at.elapsed();
+            instant_paused += qv.opened_at.elapsed();
+            wall_paused += wall_since_ms(qv.opened_at_wall_ms, now_ms);
         }
-        Some(raw.saturating_sub(paused))
+        Some(honest_turn_elapsed(TurnElapsedParams {
+            instant_elapsed,
+            instant_paused,
+            wall_anchor_ms: self.turn_start_ms,
+            wall_paused,
+            anchor_prompt: self.turn_start_ms_prompt.as_deref(),
+            current_prompt: self.session.current_prompt_id.as_deref(),
+            now_ms,
+        }))
     }
     /// Turn activity for the status spinner, with the implicit "no activity"
     /// gap during a running inference turn resolved into an explicit
@@ -1117,39 +1050,18 @@ impl AgentView {
     }
     /// Apply Build coding-credit balance only for non-chat agents.
     /// Gateway/chat-kind sessions keep credits unset so bars/warnings stay off.
-    ///
-    /// `openrouter` is the app-level OR account balance (copied onto the agent
-    /// so the prompt footer can render without reading `AppView`).
     pub fn apply_credit_balance(
         &mut self,
         balance: Option<crate::views::credit_bar::CreditBalance>,
         auto_topup: Option<crate::views::credit_bar::AutoTopupInfo>,
-        openrouter: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
     ) {
         if self.chat_kind {
             self.credit_balance = None;
             self.auto_topup = None;
-            self.openrouter_credit_balance = None;
-            self.console_team_prepaid_cents = None;
             return;
         }
         self.credit_balance = balance;
         self.auto_topup = auto_topup;
-        self.openrouter_credit_balance = openrouter;
-    }
-
-    /// Copy console team prepaid cents onto the agent (Management API meter).
-    ///
-    /// Separate from [`Self::apply_credit_balance`] so SuperGrok/OpenRouter
-    /// call sites stay unchanged. Chat-kind agents stay clear.
-    pub fn apply_console_team_prepaid_cents(&mut self, cents: Option<i64>) {
-        if self.chat_kind {
-            self.console_team_prepaid_cents = None;
-            return;
-        }
-        if let Some(c) = cents {
-            self.console_team_prepaid_cents = Some(c);
-        }
     }
     /// Record a key event to the input flight recorder.
     ///
@@ -1217,6 +1129,12 @@ impl AgentView {
             .slash_controller
             .set_billing_surface_visible(visible);
     }
+    pub fn set_usage_command_visible(&mut self, visible: bool) {
+        self.usage_command_visible = visible;
+        self.prompt
+            .slash_controller
+            .set_usage_command_visible(visible);
+    }
     /// Replace the restricted slash-command deny list in this agent's
     /// registry (e.g. `/usage` denied on the free / X Basic tiers). Deny
     /// wins over every `set_*_visible` gate.
@@ -1244,6 +1162,7 @@ impl AgentView {
         &mut self,
         sharing_enabled: bool,
         billing_surface_visible: bool,
+        usage_command_visible: bool,
         chat_mode: bool,
         screen_mode: crate::app::ScreenMode,
         announcements: &[xai_grok_announcements::RemoteAnnouncement],
@@ -1251,6 +1170,7 @@ impl AgentView {
     ) {
         self.set_sharing_enabled(sharing_enabled);
         self.set_billing_surface_visible(billing_surface_visible);
+        self.set_usage_command_visible(usage_command_visible);
         self.app_chat_mode = chat_mode;
         self.prompt.set_screen_mode(screen_mode);
         self.set_dashboard_visible(crate::views::dashboard::dashboard_enabled());
@@ -1258,6 +1178,14 @@ impl AgentView {
             announcements,
         ));
         self.set_restricted_commands(restricted_commands);
+    }
+    /// ACP `kind` for `x.ai/session/rename`: the lane this session opened on.
+    pub(crate) fn rename_kind(&self) -> xai_grok_shell::session::unified_list::SessionKind {
+        if self.conversation_entry {
+            xai_grok_shell::session::unified_list::SessionKind::Chat
+        } else {
+            xai_grok_shell::session::unified_list::SessionKind::Build
+        }
     }
     /// Show or hide the `/recap` slash command in this agent's registry.
     pub fn set_session_recap_available(&mut self, available: bool) {
@@ -2126,8 +2054,26 @@ mod status_window_tests {
     #[test]
     fn start_turn_boundary_enters_turn_running() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.pending_cancel_resend = Some(crate::app::agent_view::PendingCancelResend {
+            prompt_id: Some("old".into()),
+            sent_at: std::time::Instant::now(),
+            attempts: 1,
+            confirmed: false,
+            cancel_subagents: true,
+            trigger: crate::app::actions::CancelTrigger::Esc,
+        });
         agent.start_turn_boundary(None);
         assert!(agent.session.state.is_turn_running());
+        assert!(agent.pending_cancel_resend.is_none());
+    }
+    #[test]
+    fn adopt_running_prompt_marks_front_committed() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.start_turn_boundary(Some("p-local"));
+        assert!(!agent.front_message_committed);
+        agent.adopt_running_prompt("p-run".into());
+        assert!(agent.front_message_committed);
+        assert!(agent.expects_send_now_cancel());
     }
     #[test]
     fn session_rebind_and_replay_invalidate_minimal_btw() {
@@ -2139,8 +2085,7 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             old_request,
-            Ok("old answer".into()),
-            None,
+            Ok("old answer".into())
         ));
         assert!(agent.btw_state.is_none());
         let replay_request =
@@ -2151,8 +2096,7 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             replay_request,
-            Ok("pre-replay answer".into()),
-            None,
+            Ok("pre-replay answer".into())
         ));
         assert!(agent.btw_state.is_none());
     }
@@ -2315,82 +2259,5 @@ mod reconnect_workflow_maps_tests {
                 .map(|r| r.status.as_str()),
             Some("complete")
         );
-    }
-}
-
-/// Durable unsent draft: agent_view wire-up (persist / restore / clear).
-#[cfg(test)]
-mod unsent_prompt_draft_wire_tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn unsent_draft_survives_restart_simulation() {
-        let tmp = TempDir::new().unwrap();
-        let cwd = tmp.path().join("proj");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let sid = format!("draft-wire-{}", uuid::Uuid::new_v4());
-        let mut agent = test_agent_view(Some(&sid), cwd.clone());
-        let draft = "recover me after kill";
-        agent.prompt.set_text(draft);
-        agent.persist_unsent_prompt_draft();
-        // Simulate process death: empty composer, same session bind.
-        agent.prompt.set_text("");
-        agent.maybe_restore_unsent_prompt_draft();
-        assert_eq!(agent.prompt.text(), draft);
-        // Cleanup so we do not leave files under GROK_HOME.
-        agent.clear_unsent_prompt_draft();
-    }
-
-    #[test]
-    fn submit_clear_removes_durable_draft() {
-        let tmp = TempDir::new().unwrap();
-        let cwd = tmp.path().join("proj");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let sid = format!("draft-clear-{}", uuid::Uuid::new_v4());
-        let mut agent = test_agent_view(Some(&sid), cwd.clone());
-        agent.prompt.set_text("will send");
-        agent.persist_unsent_prompt_draft();
-        agent.clear_unsent_prompt_draft();
-        agent.prompt.set_text("");
-        agent.maybe_restore_unsent_prompt_draft();
-        assert!(
-            agent.prompt.text().is_empty(),
-            "after submit clear, restore must not resurrect the sent text"
-        );
-    }
-
-    #[test]
-    fn restore_does_not_clobber_nonempty_composer() {
-        let tmp = TempDir::new().unwrap();
-        let cwd = tmp.path().join("proj");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let sid = format!("draft-noclobber-{}", uuid::Uuid::new_v4());
-        let mut agent = test_agent_view(Some(&sid), cwd.clone());
-        agent.prompt.set_text("old disk draft");
-        agent.persist_unsent_prompt_draft();
-        agent.prompt.set_text("live typing now");
-        agent.maybe_restore_unsent_prompt_draft();
-        assert_eq!(agent.prompt.text(), "live typing now");
-        agent.clear_unsent_prompt_draft();
-    }
-
-    #[test]
-    fn wrong_session_id_does_not_cross_restore() {
-        let tmp = TempDir::new().unwrap();
-        let cwd = tmp.path().join("proj");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let sid_a = format!("draft-a-{}", uuid::Uuid::new_v4());
-        let sid_b = format!("draft-b-{}", uuid::Uuid::new_v4());
-        let mut agent_a = test_agent_view(Some(&sid_a), cwd.clone());
-        agent_a.prompt.set_text("only for A");
-        agent_a.persist_unsent_prompt_draft();
-        let mut agent_b = test_agent_view(Some(&sid_b), cwd.clone());
-        agent_b.maybe_restore_unsent_prompt_draft();
-        assert!(
-            agent_b.prompt.text().is_empty(),
-            "session B must not load session A draft"
-        );
-        agent_a.clear_unsent_prompt_draft();
     }
 }

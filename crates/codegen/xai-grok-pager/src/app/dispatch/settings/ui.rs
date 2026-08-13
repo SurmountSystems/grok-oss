@@ -1,21 +1,16 @@
 //! Settings UI: command palette, settings modal, toggles, resets, and rollback.
 
 use super::setters::{
-    pr13_effective_default, set_always_expand_thinking_inner,
-    set_ask_user_question_timeout_enabled_inner, set_auto_compact_threshold_percent_inner,
-    set_auto_compact_threshold_tokens_inner, set_auto_dark_theme_inner, set_auto_light_theme_inner,
-    set_auto_run_implement_inner, set_auto_update_inner, set_bubble_copy_buttons_inner,
-    set_collapsed_edit_blocks_inner, set_combine_queued_prompts_inner, set_compact_mode,
-    set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
+    pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
+    set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
+    set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
+    set_confirm_before_rewind_inner, set_contextual_hint_inner, set_default_model_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
-    set_economic_mode_inner, set_features_session_recap_inner, set_fork_secondary_model_inner,
-    set_group_tool_verbs_inner, set_hide_header_inner, set_hunk_tracker_mode_inner,
+    set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
-    set_multiline_mode, set_notifications_session_recap_inner,
-    set_notifications_session_recap_threshold_secs_inner, set_page_flip_on_send_inner,
-    set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
-    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
-    set_scroll_mode_inner, set_scroll_speed_inner, set_scrub_ascii_punct_inner,
+    set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
+    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
     set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
     set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
@@ -55,19 +50,11 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
-    let auto_compact_from_app = app.auto_compact_threshold_percent;
-    let auto_compact_tokens_from_app = app.auto_compact_threshold_tokens;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
-    let notifications_session_recap_from_app = app.notification_service.config().session_recap;
-    let notifications_session_recap_threshold_from_app = app
-        .notification_service
-        .config()
-        .session_recap_threshold_secs;
-    let features_session_recap_from_app = app.features_session_recap;
-    let bubble_copy_buttons_from_app = app.appearance.scrollback.display.bubble_copy_buttons;
+    let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -100,20 +87,15 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
                 show_tips: show_tips_from_app,
                 auto_update: auto_update_from_app,
-                auto_compact_threshold_percent: auto_compact_from_app,
-                auto_compact_threshold_tokens: auto_compact_tokens_from_app,
                 vim_mode: crate::appearance::cache::load_vim_mode(),
                 scroll_speed: crate::appearance::cache::load_scroll_speed(),
                 respect_manual_folds: respect_manual_folds_from_app,
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
-                notifications_session_recap: notifications_session_recap_from_app,
-                notifications_session_recap_threshold_secs:
-                    notifications_session_recap_threshold_from_app,
-                features_session_recap: features_session_recap_from_app,
-                bubble_copy_buttons: bubble_copy_buttons_from_app,
-                scheduler_background_loops: agent.scheduler_background_loops.unwrap_or(true),
+                scheduler_background_loops: agent
+                    .scheduler_background_loops
+                    .unwrap_or(scheduler_background_loops_seed),
             };
         }
     }
@@ -140,7 +122,7 @@ pub(in crate::app::dispatch) fn dispatch_open_command_palette(app: &mut AppView)
     agent.active_modal = Some(ActiveModal::CommandPalette {
         entries: crate::views::modal::default_palette_entries(
             agent.sharing_enabled,
-            agent.prompt.slash_controller.screen_mode(),
+            &agent.prompt.slash_controller,
         ),
         // Type-to-find: open in input mode (matches Ctrl+P).
         state: crate::views::picker::PickerState::input_active(),
@@ -209,19 +191,11 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
-    let auto_compact_from_app = app.auto_compact_threshold_percent;
-    let auto_compact_tokens_from_app = app.auto_compact_threshold_tokens;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
-    let notifications_session_recap_from_app = app.notification_service.config().session_recap;
-    let notifications_session_recap_threshold_from_app = app
-        .notification_service
-        .config()
-        .session_recap_threshold_secs;
-    let features_session_recap_from_app = app.features_session_recap;
-    let bubble_copy_buttons_from_app = app.appearance.scrollback.display.bubble_copy_buttons;
+    let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -263,19 +237,15 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
         show_tips: show_tips_from_app,
         auto_update: auto_update_from_app,
-        auto_compact_threshold_percent: auto_compact_from_app,
-        auto_compact_threshold_tokens: auto_compact_tokens_from_app,
         vim_mode: crate::appearance::cache::load_vim_mode(),
         scroll_speed: crate::appearance::cache::load_scroll_speed(),
         respect_manual_folds: respect_manual_folds_from_app,
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
-        notifications_session_recap: notifications_session_recap_from_app,
-        notifications_session_recap_threshold_secs: notifications_session_recap_threshold_from_app,
-        features_session_recap: features_session_recap_from_app,
-        bubble_copy_buttons: bubble_copy_buttons_from_app,
-        scheduler_background_loops: agent.scheduler_background_loops.unwrap_or(true),
+        scheduler_background_loops: agent
+            .scheduler_background_loops
+            .unwrap_or(scheduler_background_loops_seed),
     };
     let mut state = Box::new(SettingsModalState::new(
         registry,
@@ -690,6 +660,20 @@ fn agent_auto_mode(app: &AppView) -> bool {
     false
 }
 
+/// Effective `scheduler_background_loops` for the active agent: the value the
+/// shell pinned for that session, falling back to the startup seed while the
+/// session response is still in flight (or with no agent at all). See
+/// [`agent_multiline_mode`] for the no-agent fallback rationale.
+fn agent_scheduler_background_loops(app: &AppView) -> bool {
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get(&id)
+        && let Some(value) = agent.scheduler_background_loops
+    {
+        return value;
+    }
+    app.scheduler_background_loops_seed
+}
+
 /// Effective `plan_mode` for the active agent
 /// (`pending.unwrap_or(active)`).
 fn agent_plan_mode(app: &AppView) -> bool {
@@ -750,25 +734,13 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         plan_mode_active: agent_plan_mode(app),
         show_tips: app.show_tips,
         auto_update: app.auto_update,
-        auto_compact_threshold_percent: app.auto_compact_threshold_percent,
-        auto_compact_threshold_tokens: app.auto_compact_threshold_tokens,
         vim_mode: crate::appearance::cache::load_vim_mode(),
         scroll_speed: crate::appearance::cache::load_scroll_speed(),
         respect_manual_folds: app.appearance.scrollback.scroll.respect_manual_folds,
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
-        notifications_session_recap: app.notification_service.config().session_recap,
-        notifications_session_recap_threshold_secs: app
-            .notification_service
-            .config()
-            .session_recap_threshold_secs,
-        features_session_recap: app.features_session_recap,
-        bubble_copy_buttons: app.appearance.scrollback.display.bubble_copy_buttons,
-        scheduler_background_loops: app
-            .active_agent()
-            .and_then(|a| a.scheduler_background_loops)
-            .unwrap_or(true),
+        scheduler_background_loops: agent_scheduler_background_loops(app),
     }
 }
 
@@ -783,13 +755,11 @@ pub(in crate::app::dispatch) fn action_for_reset(
     use crate::settings::SettingValue;
     match (key, value) {
         ("compact_mode", SettingValue::Bool(b)) => Some(Action::SetCompactMode(*b)),
-        ("hide_header", SettingValue::Bool(b)) => Some(Action::SetHideHeader(*b)),
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
         ("page_flip_on_send", SettingValue::Bool(b)) => Some(Action::SetPageFlipOnSend(*b)),
-        ("scrub_ascii_punct", SettingValue::Bool(b)) => Some(Action::SetScrubAsciiPunct(*b)),
-        ("plan_approval_park", SettingValue::Enum(s)) => {
-            Some(Action::SetPlanApprovalPark((*s).to_owned()))
+        ("confirm_before_rewind", SettingValue::Bool(b)) => {
+            Some(Action::SetConfirmBeforeRewind(*b))
         }
         ("combine_queued_prompts", SettingValue::Bool(b)) => {
             Some(Action::SetCombineQueuedPrompts(*b))
@@ -835,81 +805,12 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("invert_scroll", SettingValue::Bool(b)) => Some(Action::SetInvertScroll(*b)),
         ("scroll_lines", SettingValue::Int(v)) => Some(Action::SetScrollLines(*v)),
         ("show_thinking_blocks", SettingValue::Bool(b)) => Some(Action::SetShowThinkingBlocks(*b)),
-        ("always_expand_thinking", SettingValue::Bool(b)) => {
-            Some(Action::SetAlwaysExpandThinking(*b))
-        }
         ("group_tool_verbs", SettingValue::Bool(b)) => Some(Action::SetGroupToolVerbs(*b)),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
             Some(Action::SetCollapsedEditBlocks(*b))
         }
         ("prompt_suggestions", SettingValue::Bool(b)) => Some(Action::SetPromptSuggestions(*b)),
-        ("auto_run_implement", SettingValue::Bool(b)) => Some(Action::SetAutoRunImplement(*b)),
-        ("economic_mode", SettingValue::Bool(b)) => Some(Action::SetEconomicMode(*b)),
-        ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
-            Some(Action::SetResumeCanceledTurnOnRestart(*b))
-        }
-        ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(b)) => {
-            Some(Action::SetTokenEconomyBool {
-                field: "cap_implement_effort_when_economic",
-                value: *b,
-            })
-        }
-        ("token_economy.show_period_pacing", SettingValue::Bool(b)) => {
-            Some(Action::SetTokenEconomyBool {
-                field: "show_period_pacing",
-                value: *b,
-            })
-        }
-        ("token_economy.local_spend_ledger", SettingValue::Bool(b)) => {
-            Some(Action::SetTokenEconomyBool {
-                field: "local_spend_ledger",
-                value: *b,
-            })
-        }
-        ("token_economy.reconcile_management_usage", SettingValue::Bool(b)) => {
-            Some(Action::SetTokenEconomyBool {
-                field: "reconcile_management_usage",
-                value: *b,
-            })
-        }
-        ("token_economy.max_implement_effort", SettingValue::Int(i)) => {
-            Some(Action::SetTokenEconomyInt {
-                field: "max_implement_effort",
-                value: *i,
-            })
-        }
-        ("token_economy.min_implement_effort", SettingValue::Int(i)) => {
-            Some(Action::SetTokenEconomyInt {
-                field: "min_implement_effort",
-                value: *i,
-            })
-        }
-        ("token_economy.desired_implement_effort", SettingValue::Int(i)) => {
-            Some(Action::SetTokenEconomyInt {
-                field: "desired_implement_effort",
-                value: *i,
-            })
-        }
-        ("token_economy.lock_implement_effort", SettingValue::Int(i)) => {
-            Some(Action::SetTokenEconomyInt {
-                field: "lock_implement_effort",
-                value: *i,
-            })
-        }
         ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
-        ("bubble_copy_buttons", SettingValue::Bool(b)) => Some(Action::SetBubbleCopyButtons(*b)),
-        ("cancel_subagents_on_turn_cancel", SettingValue::Enum(s)) => {
-            Some(Action::SetCancelSubagentsOnTurnCancel((*s).to_owned()))
-        }
-        ("notifications.session_recap", SettingValue::Bool(b)) => {
-            Some(Action::SetNotificationsSessionRecap(*b))
-        }
-        ("notifications.session_recap_threshold_secs", SettingValue::Int(i)) => {
-            Some(Action::SetNotificationsSessionRecapThresholdSecs(*i))
-        }
-        ("features.session_recap", SettingValue::Bool(b)) => {
-            Some(Action::SetFeaturesSessionRecap(*b))
-        }
         ("default_selected_permission", SettingValue::Enum(s)) => {
             Some(Action::SetDefaultSelectedPermission((*s).to_owned()))
         }
@@ -996,10 +897,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         // show_tips / auto_update / display_refresh_auto_cadence: direct bool.
         ("show_tips", SettingValue::Bool(b)) => Some(Action::SetShowTips(*b)),
         ("auto_update", SettingValue::Bool(b)) => Some(Action::SetAutoUpdate(*b)),
-        ("auto_compact_threshold_percent", SettingValue::Enum(s)) => {
-            crate::settings::parse_auto_compact_threshold_canonical(s)
-                .map(Action::SetAutoCompactThreshold)
-        }
         ("display_refresh_auto_cadence", SettingValue::Bool(b)) => {
             Some(Action::SetDisplayRefreshAutoCadence(*b))
         }
@@ -1057,13 +954,11 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     let mut companion_effects: Vec<Effect> = Vec::new();
     match (key, rollback_value) {
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
-        ("hide_header", SettingValue::Bool(b)) => set_hide_header_inner(app, *b),
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),
         ("page_flip_on_send", SettingValue::Bool(b)) => set_page_flip_on_send_inner(app, *b),
-        ("scrub_ascii_punct", SettingValue::Bool(b)) => set_scrub_ascii_punct_inner(app, *b),
-        ("plan_approval_park", SettingValue::Enum(s)) => {
-            app.current_ui.plan_approval_park = Some((*s).to_owned());
+        ("confirm_before_rewind", SettingValue::Bool(b)) => {
+            set_confirm_before_rewind_inner(app, *b)
         }
         ("combine_queued_prompts", SettingValue::Bool(b)) => {
             set_combine_queued_prompts_inner(app, *b)
@@ -1091,16 +986,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             set_contextual_hint_inner(app, |h, v| h.ssh_wrap = v, *b)
         }
         ("respect_manual_folds", SettingValue::Bool(b)) => set_respect_manual_folds_inner(app, *b),
-        ("bubble_copy_buttons", SettingValue::Bool(b)) => set_bubble_copy_buttons_inner(app, *b),
-        ("notifications.session_recap", SettingValue::Bool(b)) => {
-            set_notifications_session_recap_inner(app, *b)
-        }
-        ("notifications.session_recap_threshold_secs", SettingValue::Int(i)) => {
-            set_notifications_session_recap_threshold_secs_inner(app, (*i).clamp(5, 3600) as u64)
-        }
-        ("features.session_recap", SettingValue::Bool(b)) => {
-            set_features_session_recap_inner(app, *b)
-        }
         ("theme", SettingValue::Enum(s)) => set_theme_inner(app, s),
         ("default_selected_permission", SettingValue::Enum(s)) => {
             set_default_selected_permission_inner(
@@ -1262,53 +1147,11 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             }
         }
         ("show_thinking_blocks", SettingValue::Bool(b)) => set_show_thinking_blocks_inner(app, *b),
-        ("always_expand_thinking", SettingValue::Bool(b)) => {
-            set_always_expand_thinking_inner(app, *b)
-        }
         ("group_tool_verbs", SettingValue::Bool(b)) => set_group_tool_verbs_inner(app, *b),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
             set_collapsed_edit_blocks_inner(app, *b)
         }
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
-        ("auto_run_implement", SettingValue::Bool(b)) => set_auto_run_implement_inner(app, *b),
-        ("economic_mode", SettingValue::Bool(b)) => set_economic_mode_inner(app, *b),
-        ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
-            super::setters::set_resume_canceled_turn_on_restart_inner(app, *b)
-        }
-        // Token Economy: restore process live cache (optimistic mirror).
-        ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(b)) => {
-            xai_grok_shell::token_economy::set_token_economy_live_bool(
-                "cap_implement_effort_when_economic",
-                *b,
-            );
-        }
-        ("token_economy.show_period_pacing", SettingValue::Bool(b)) => {
-            xai_grok_shell::token_economy::set_token_economy_live_bool("show_period_pacing", *b);
-        }
-        ("token_economy.local_spend_ledger", SettingValue::Bool(b)) => {
-            xai_grok_shell::token_economy::set_token_economy_live_bool("local_spend_ledger", *b);
-        }
-        ("token_economy.reconcile_management_usage", SettingValue::Bool(b)) => {
-            xai_grok_shell::token_economy::set_token_economy_live_bool(
-                "reconcile_management_usage",
-                *b,
-            );
-        }
-        ("token_economy.max_implement_effort", SettingValue::Int(i)) => {
-            xai_grok_shell::token_economy::set_token_economy_live_int("max_implement_effort", *i);
-        }
-        ("token_economy.min_implement_effort", SettingValue::Int(i)) => {
-            xai_grok_shell::token_economy::set_token_economy_live_int("min_implement_effort", *i);
-        }
-        ("token_economy.desired_implement_effort", SettingValue::Int(i)) => {
-            xai_grok_shell::token_economy::set_token_economy_live_int(
-                "desired_implement_effort",
-                *i,
-            );
-        }
-        ("token_economy.lock_implement_effort", SettingValue::Int(i)) => {
-            xai_grok_shell::token_economy::set_token_economy_live_int("lock_implement_effort", *i);
-        }
         // keep_text_selection: restore the cache mirror to the canonical value.
         ("keep_text_selection", SettingValue::Enum(s)) => {
             if let Some(kind) = crate::appearance::TextSelection::from_canonical(s) {
@@ -1357,29 +1200,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 app.auto_update = None;
             } else {
                 set_auto_update_inner(app, *b);
-            }
-        }
-        ("auto_compact_threshold_percent", SettingValue::Enum(s)) => {
-            use crate::settings::AutoCompactThresholdChoice;
-            let default_canon = crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL;
-            match crate::settings::parse_auto_compact_threshold_canonical(s) {
-                Some(AutoCompactThresholdChoice::Percent(pct))
-                    if *s == default_canon
-                        || pct
-                            == xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT =>
-                {
-                    // Keep AppView in sync with disk after a failed first-commit of default:
-                    // disk is still None/None.
-                    app.auto_compact_threshold_percent = None;
-                    app.auto_compact_threshold_tokens = None;
-                }
-                Some(AutoCompactThresholdChoice::Percent(pct)) => {
-                    set_auto_compact_threshold_percent_inner(app, pct);
-                }
-                Some(AutoCompactThresholdChoice::Tokens(t)) => {
-                    set_auto_compact_threshold_tokens_inner(app, t);
-                }
-                None => {}
             }
         }
         // fork_secondary_model: empty rollback restores baseline default.

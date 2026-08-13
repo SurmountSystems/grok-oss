@@ -147,14 +147,9 @@ mod tests {
         acp::McpServer::Http(acp::McpServerHttp::new(name, url.to_string()).headers(vec![]))
     }
 
-    fn inputs<'a>(
-        cwd: &'a std::path::Path,
-        managed: &'a [crate::session::managed_mcp::ManagedMcpConfig],
-        compat: &'a CompatConfig,
-    ) -> McpDiscoveryInputs<'a> {
+    fn inputs<'a>(cwd: &'a std::path::Path, compat: &'a CompatConfig) -> McpDiscoveryInputs<'a> {
         McpDiscoveryInputs {
             cwd,
-            managed_configs: managed,
             plugin_registry: None,
             compat,
         }
@@ -250,7 +245,7 @@ mod tests {
         let (_home, _hg, _gg) = isolated_home();
         let cwd = tempfile::tempdir().unwrap();
         let compat = CompatConfig::default();
-        let index = McpDefinitionIndex::build(&inputs(cwd.path(), &[], &compat));
+        let index = McpDefinitionIndex::build(&inputs(cwd.path(), &compat));
         assert!(!index.contains("grok_com_slack"));
         let disabled = HashSet::from(["grok_com_slack".into(), "totally_orphan_xyz".into()]);
         let stubs = index.reenableable_for_list(&disabled, &HashSet::new(), &unrestricted());
@@ -270,7 +265,7 @@ enabled = false
 "#,
         );
         let compat = CompatConfig::default();
-        let index = McpDefinitionIndex::build(&inputs(repo.path(), &[], &compat));
+        let index = McpDefinitionIndex::build(&inputs(repo.path(), &compat));
         assert!(
             index.contains("reenable_disabled_local"),
             "enabled=false TOML definition must still be discoverable"
@@ -297,24 +292,13 @@ command = "echo"
 args = ["ok"]
 "#,
         );
-        let managed = [crate::session::managed_mcp::ManagedMcpConfig {
-            name: "DriftSlack".into(),
-            endpoint: "https://example.com/mcp".into(),
-            headers: HashMap::from([("Authorization".into(), "Bearer x".into())]),
-            token_expires_at: None,
-            scope: None,
-            scope_id: None,
-            scope_name: None,
-        }];
         let mut compat = CompatConfig::default();
         compat.claude.mcps = false;
         compat.cursor.mcps = false;
-        let discovered =
-            discover_mcp_definitions_ignoring_disable(&inputs(repo.path(), &managed, &compat));
+        let discovered = discover_mcp_definitions_ignoring_disable(&inputs(repo.path(), &compat));
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
             vec![],
             repo.path(),
-            &managed,
             None,
             &compat,
         );
@@ -347,12 +331,10 @@ url = "https://dup.example.com/mcp"
         let mut compat = CompatConfig::default();
         compat.claude.mcps = false;
         compat.cursor.mcps = false;
-        let discovered =
-            discover_mcp_definitions_ignoring_disable(&inputs(repo.path(), &[], &compat));
+        let discovered = discover_mcp_definitions_ignoring_disable(&inputs(repo.path(), &compat));
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
             vec![],
             repo.path(),
-            &[],
             None,
             &compat,
         );

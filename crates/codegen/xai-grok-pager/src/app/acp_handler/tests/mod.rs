@@ -45,7 +45,6 @@ pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
         bg_tool_call_to_task: std::collections::HashMap::new(),
         scheduled_tasks: std::collections::HashMap::new(),
         in_flight_prompt: None,
-        cancel_resume_prompt_text: None,
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
@@ -182,6 +181,7 @@ pub(super) fn last_session_event(sb: &ScrollbackState) -> Option<SessionEvent> {
 pub(super) fn make_app_with_agent(session_id: &str) -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+    app.leader_mode = true;
     let id = AgentId(0);
     let agent = make_agent(Some(session_id));
     app.agents.insert(id, agent);
@@ -241,26 +241,7 @@ pub(super) fn insert_running_task(agent: &mut AgentView, task_id: &str, command:
             },
         );
 }
-/// Marker texts of all parked blocks in scrollback, in order — one per
-/// park episode (re-pushed only after new parent output, i.e. a re-park).
-pub(super) fn parked_marker_messages(agent: &AgentView) -> Vec<String> {
-    (0..agent.scrollback.len())
-        .filter_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) if b.parked => Some(b.event.message()),
-            _ => None,
-        })
-        .collect()
-}
-pub(super) fn parked_marker_ids(agent: &AgentView) -> Vec<EntryId> {
-    (0..agent.scrollback.len())
-        .filter_map(|i| {
-            let entry = agent.scrollback.get(i)?;
-            matches!(&entry.block, RenderBlock::SessionEvent(b) if b.parked)
-                .then_some(entry.id)
-        })
-        .collect()
-}
-pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) -> EntryId {
+pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) {
     use crate::app::agent_view::test_fixtures::simulate_wait_all;
     agent.session.state = AgentState::TurnRunning;
     agent.session.current_prompt_id = Some("p1".into());
@@ -268,9 +249,7 @@ pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) -> En
         agent.subagent_sessions.insert(child_id.into(), make_subagent_info(child_id));
     }
     simulate_wait_all(agent);
-    agent.maybe_push_parked_marker();
     assert!(agent.renders_parked());
-    parked_marker_ids(agent)[0]
 }
 pub(super) fn follow_ups_ext(
     response_id: &str,
@@ -1005,6 +984,33 @@ pub(super) fn xai_turn_completed_notif(
             usage: None,
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
+    };
+    acp::ExtNotification::new(
+        "x.ai/session/update",
+        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+    )
+}
+/// Live `TurnCompleted` stamped with `_meta.cancelTrigger` (send-now / ctrl_c).
+pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
+    session_id: &str,
+    prompt_id: &str,
+    stop_reason: &str,
+    cancel_trigger: &str,
+) -> acp::ExtNotification {
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: XaiSessionUpdate::TurnCompleted {
+            prompt_id: prompt_id.into(),
+            stop_reason: stop_reason.into(),
+            agent_result: None,
+            usage: None,
+        },
+        meta: Some(
+            serde_json::json!({
+                "isReplay": false,
+                "cancelTrigger": cancel_trigger,
+            }),
+        ),
     };
     acp::ExtNotification::new(
         "x.ai/session/update",
@@ -1840,7 +1846,6 @@ pub(super) fn task_completed_notif(
                 output: String::new(),
                 output_file: "/tmp/out.log".into(),
                 truncated: false,
-                output_total_bytes: 0,
                 exit_code,
                 signal: signal.map(|s| s.to_string()),
                 completed: true,
@@ -1851,6 +1856,7 @@ pub(super) fn task_completed_notif(
                 owner_session_id: None,
                 description: None,
                 is_backgrounded: false,
+                output_total_bytes: 0,
             },
             will_wake,
         },
@@ -2146,3 +2152,4 @@ mod background_tasks;
 mod models;
 mod mcp;
 mod git_head;
+mod version_mismatch;

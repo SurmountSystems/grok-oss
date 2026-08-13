@@ -129,10 +129,11 @@ pub(super) fn finish_wake_turn(
     };
     let already_failed = agent.failed_wake_marker_for.as_deref() == Some(prompt_id);
     let event = match stop_reason {
-        // Silent wake terminals stay markerless: this signal lacks driver-side
-        // cancel/failure UX, and "Worked for" would lie about an errored wake.
-        // Already-pushed failure markers also stay unique.
-        "error" | "rate_limit" if already_failed || !had_output => None,
+        "error" | "rate_limit"
+            if already_failed || (stop_reason == "rate_limit" && !had_output) =>
+        {
+            None
+        }
         "error" | "rate_limit" => {
             agent.failed_wake_marker_for = Some(prompt_id.to_string());
             // A dedicated banner (re-auth, overflow, disk-full, formatted

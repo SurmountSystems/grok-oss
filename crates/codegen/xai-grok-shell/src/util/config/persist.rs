@@ -301,6 +301,47 @@ pub async fn update_features_session_recap(value: bool) -> Result<()> {
     Ok(())
 }
 
+/// Synchronously load just the management_api_key from the config file.
+///
+/// This is the Management API key (billing / prepaid), not the inference
+/// `XAI_API_KEY`. Prefer the secret-store path when interactive.
+pub fn load_management_api_key_sync() -> Option<String> {
+    let root: toml::Value = crate::config::load_effective_config().ok()?;
+    if let toml::Value::Table(table) = root
+        && let Some(toml::Value::Table(endpoints)) = table.get("endpoints")
+    {
+        endpoints
+            .get("management_api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    } else {
+        None
+    }
+}
+
+/// Synchronously load `[endpoints] management_team_id` from config.
+///
+/// Explicit Management API team id for prepaid balance. Not SuperGrok OIDC
+/// `team_id`. Operator must set this (Console team id) for console team
+/// Business Usage meters.
+pub fn load_management_team_id_sync() -> Option<String> {
+    let root: toml::Value = crate::config::load_effective_config().ok()?;
+    if let toml::Value::Table(table) = root
+        && let Some(toml::Value::Table(endpoints)) = table.get("endpoints")
+    {
+        endpoints
+            .get("management_team_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 #[path = "persist_tests.rs"]
 mod tests;

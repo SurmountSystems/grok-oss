@@ -94,6 +94,11 @@ pub(crate) fn test_app() -> AppView {
         active_view: ActiveView::Welcome,
         auth_return_view: None,
         agents: indexmap::IndexMap::new(),
+        global_work_pause: crate::app::global_work_pause::GlobalWorkPause::default(),
+        soft_stop: crate::app::soft_stop::SoftStop::default(),
+        rebuild_relaunch: None,
+        pending_tui_screenshot: false,
+        console_team_prepaid_cents: None,
         next_agent_id: 0,
         models: ModelState::default(),
         registry: ActionRegistry::defaults(),
@@ -346,6 +351,7 @@ pub(crate) fn test_app_with_agent() -> AppView {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         ScrollbackState::new(),
     );
@@ -539,6 +545,7 @@ fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
+        session_notes: crate::app::agent::SessionNotes::default(),
     };
     Box::new(AgentView::new(session, ScrollbackState::new()))
 }
@@ -1252,6 +1259,7 @@ fn needs_animation_gates_todo_badge_flash() {
             priority: Default::default(),
             status: xai_grok_shell::tools::TodoStatus::InProgress,
             meta: None,
+            size: None,
         }]);
     assert!(
         app.agents[&id].todo.badge_needs_tick(),

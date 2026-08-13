@@ -120,7 +120,10 @@ mod tests {
 
     #[test]
     fn available_in_minimal_by_default() {
-        assert!(NoteCommand.available_in_minimal());
+        assert_eq!(
+            NoteCommand.mode_support(),
+            crate::slash::mode_support::ModeSupport::Both
+        );
     }
 
     #[test]

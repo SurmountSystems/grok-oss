@@ -3462,9 +3462,6 @@ mod tests {
     fn execute_header_display_matches_overlay_body() {
         // The execute tool-call header and the overlay body share one
         // renderer; text and styles must match row for row at every width.
-        // Hold the pin across both renders so a concurrent test cannot flip
-        // the process-global theme (and syntax palette) mid-comparison.
-        let _theme = crate::theme::cache::pin_theme();
         let script = dump_script_twin();
         for width in [12usize, 40, 400] {
             assert_eq!(

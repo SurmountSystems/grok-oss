@@ -14,8 +14,10 @@ use crate::actions::ActionRegistry;
 use crate::app::actions::Action;
 use crate::app::agent::AgentId;
 use crate::app::app_view::InputOutcome;
+use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::key;
 use crate::views::prompt_widget::PromptWidget;
+use xai_grok_shell::session::persistence::MAX_TITLE_SCALARS as MAX_RENAME_SCALARS;
 
 const PROMPT_MULTI_CLICK_MS: u128 = 300;
 
@@ -56,7 +58,7 @@ impl DashboardRowId {
 pub(crate) struct PeekViewportLease {
     pub row: DashboardRowId,
     pub snapshot: crate::scrollback::state::ViewportSnapshot,
-    pub page_flip_entry: Option<usize>,
+    pub page_flip_entry: Option<crate::scrollback::EntryId>,
 }
 
 pub(crate) fn scrollback_mut_for_row<'a>(
@@ -180,11 +182,10 @@ impl PersistedRowId {
     }
 }
 
-/// Window within which a second `Ctrl+X` press confirms closing the
-/// selected agent. Shared by the dispatcher (which gates the actual
-/// close) and the footer (which only paints the "press again" hint
-/// while the window is live).
-pub const STOP_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+/// Window within which a second confirming gesture (`Ctrl+X`, a `[✗]`
+/// click, or `y`) deletes the armed row. Also reused by the
+/// dashboard-overlay stop for its double-press close confirm.
+pub const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Coarse state used for the dashboard grouping.
 ///
@@ -214,6 +215,17 @@ pub enum RowState {
 }
 
 impl RowState {
+    /// The one predicate for "may be deleted", shared by the renderer's
+    /// `[✗]` and the dispatcher: only settled rows qualify. `Working` /
+    /// `NeedsInput` are excluded so an in-flight turn is never wiped —
+    /// `Ctrl+X` cancels those instead.
+    pub fn allows_delete(self) -> bool {
+        matches!(
+            self,
+            Self::Idle | Self::Inactive | Self::Completed | Self::Failed
+        )
+    }
+
     /// Sort priority used inside a state group: higher = floats up.
     /// Pinned rows always float to the absolute top regardless of state.
     pub fn group_priority(self) -> u8 {
@@ -474,9 +486,9 @@ pub struct DashboardState {
     pub peek_reply_rect: Option<Rect>,
     /// Directory the reply's `@` file-search daemon is currently rooted
     /// at. Tracked so [`Self::ensure_peek_reply_cwd`] can skip a
-    /// `retarget` (which rebuilds the daemon thread) when the peeked
-    /// agent's cwd hasn't actually changed. `None` = the construction
-    /// default (`.`); set to the launch cwd at dashboard open.
+    /// `retarget` (which drops the daemon so the next @-use rebuilds it)
+    /// when the peeked agent's cwd hasn't actually changed. `None` = the
+    /// construction default (`.`); set to the launch cwd at dashboard open.
     peek_reply_cwd: Option<PathBuf>,
     /// Cwd of the currently-peeked agent, recorded by the render pass
     /// (which has the agents map). Applied lazily to the reply's `@`
@@ -492,11 +504,10 @@ pub struct DashboardState {
     /// exists"). Rendered verbatim by `paint_dispatch_feedback_badge`;
     /// error messages are built via [`Self::set_error_toast`].
     pub error_toast: Option<String>,
-    /// Pending stop confirmation. `Some((row, set_at))` after the first
-    /// `Ctrl+X` press on a top-level row. The second press within
-    /// [`STOP_CONFIRM_WINDOW`] closes the agent. Mirrors the session-close
-    /// close-confirm pattern.
-    pub stop_confirm: Option<(DashboardRowId, Instant)>,
+    /// Row armed for delete, and when. A second gesture on the same row
+    /// within [`CONFIRM_WINDOW`] deletes it (see [`Self::armed_delete_row`]);
+    /// otherwise it lapses. Cleared on any focus change.
+    pub delete_confirm: Option<(DashboardRowId, Instant)>,
     /// Tick counter for spinner animation. The
     /// counter is bumped by [`crate::app::app_view::AppView::tick`]
     /// (NOT the renderer, which is read-only).
@@ -507,6 +518,15 @@ pub struct DashboardState {
     /// mouse handling to map (col, row) → row id without scanning the
     /// row list a second time.
     pub row_rects: Vec<(DashboardRowId, Rect)>,
+    /// Per-row `[✗]` hit areas, rebuilt each render; maps a click onto the
+    /// delete gesture instead of a row select.
+    pub row_delete_rects: Vec<(DashboardRowId, Rect)>,
+    /// Row whose `[✗]` the mouse is over, so the renderer can tint it.
+    pub hovered_delete: Option<DashboardRowId>,
+    /// Roster session ids whose origin is a chat `conversation` — those
+    /// can't be deleted from the dashboard yet, so they get no `[✗]` and
+    /// don't arm. Rebuilt each render from the roster.
+    pub conversation_row_ids: std::collections::HashSet<String>,
     /// Last frame's section-header hit areas keyed by [`SectionKey`].
     /// Used by mouse handling to map (col, row) → section for
     /// click-to-toggle and hover. Rebuilt every render.
@@ -766,7 +786,49 @@ pub struct ShortcutsModalState {
 #[derive(Debug, Clone)]
 pub struct RenameDraft {
     pub row: DashboardRowId,
-    pub draft: String,
+    editor: LineEditor,
+}
+
+impl RenameDraft {
+    pub fn new(row: DashboardRowId, text: impl Into<String>) -> Self {
+        let mut draft = Self {
+            row,
+            editor: LineEditor::default(),
+        };
+        draft.set_text(text);
+        draft
+    }
+
+    pub fn text(&self) -> &str {
+        self.editor.text()
+    }
+
+    pub fn cursor_byte(&self) -> usize {
+        self.editor.cursor_byte()
+    }
+
+    pub(crate) fn viewport(&self, width: usize) -> xai_ratatui_textarea::SingleLineViewport {
+        self.editor.viewport(width)
+    }
+
+    pub(crate) fn set_text(&mut self, text: impl Into<String>) {
+        let text = text
+            .into()
+            .chars()
+            .filter(|character| rename_wire_character_allowed(*character))
+            .take(MAX_RENAME_SCALARS)
+            .collect::<String>();
+        self.editor.set_text(text);
+    }
+}
+
+fn rename_character_allowed(character: char) -> bool {
+    !crate::render::line_utils::is_unsafe_display_char(character)
+}
+
+fn rename_wire_character_allowed(character: char) -> bool {
+    // Preserve an existing emoji ZWJ sequence; interactive inserts still reject format chars.
+    character == '\u{200d}' || rename_character_allowed(character)
 }
 
 /// One selectable directory in the location picker (see
@@ -844,10 +906,7 @@ impl LocationPickerState {
         base_cwd: PathBuf,
         worktrees: std::collections::HashMap<PathBuf, String>,
     ) -> Self {
-        let picker = crate::views::picker::PickerState {
-            search_active: true,
-            ..crate::views::picker::PickerState::default()
-        };
+        let picker = crate::views::picker::PickerState::input_active();
         Self {
             picker,
             window: crate::views::modal_window::ModalWindowState::new(),
@@ -880,7 +939,7 @@ impl LocationPickerState {
     /// Whether the current query should be treated as a filesystem path
     /// (directory completion) rather than a fuzzy filter over recents.
     pub fn query_is_path(&self) -> bool {
-        let q = &self.picker.query;
+        let q = self.picker.query();
         q.starts_with('/')
             || q.starts_with('~')
             || q.contains('/')
@@ -896,7 +955,7 @@ impl LocationPickerState {
     /// home; relative parents join [`Self::base_cwd`]. The separator is `/`
     /// on all hosts and additionally `\` on Windows.
     fn path_query_parts(&self) -> (PathBuf, String) {
-        let q = self.picker.query.as_str();
+        let q = self.picker.query();
         // Last path separator: `/` always; `\` additionally on Windows.
         let sep = match (q.rfind('/'), cfg!(windows).then(|| q.rfind('\\')).flatten()) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -963,7 +1022,7 @@ impl LocationPickerState {
                 .cloned()
                 .collect()
         } else {
-            let q = self.picker.query.trim().to_lowercase();
+            let q = self.picker.query().trim().to_lowercase();
             self.recents
                 .iter()
                 .filter(|c| {
@@ -986,7 +1045,7 @@ impl LocationPickerState {
         if let Some(c) = visible.get(self.picker.selected) {
             return Some(c.path.to_string_lossy().into_owned());
         }
-        let q = self.picker.query.trim();
+        let q = self.picker.query().trim();
         if !q.is_empty() {
             return Some(q.to_string());
         }
@@ -1070,7 +1129,7 @@ fn read_subdirs(
             };
             out.push(LocationCandidate {
                 label: name,
-                detail: crate::project_picker::sources::display_path(&path),
+                detail: crate::recent_dirs::display_path(&path),
                 path,
                 worktree,
             });
@@ -1309,9 +1368,12 @@ impl DashboardState {
             peek_reply_target_cwd: None,
             rename: None,
             error_toast: None,
-            stop_confirm: None,
+            delete_confirm: None,
             spinner_tick: 0,
             row_rects: Vec::new(),
+            row_delete_rects: Vec::new(),
+            hovered_delete: None,
+            conversation_row_ids: std::collections::HashSet::new(),
             section_rects: Vec::new(),
             idle_overflow_rect: None,
             last_area: Rect::default(),
@@ -1432,6 +1494,7 @@ impl DashboardState {
         self.selected = None;
         self.selected_section = None;
         self.selected_idle_overflow = false;
+        self.delete_confirm = None;
     }
 
     /// Focus the row identified by `id`. Clears the
@@ -1441,10 +1504,27 @@ impl DashboardState {
     /// risk — the invariant only holds when both fields are
     /// written through here.
     pub fn focus_row(&mut self, id: DashboardRowId) {
+        if self
+            .delete_confirm
+            .as_ref()
+            .is_some_and(|(armed, _)| armed != &id)
+        {
+            self.delete_confirm = None;
+        }
         self.selected = Some(id);
         self.new_agent_button_focused = false;
         self.selected_section = None;
         self.selected_idle_overflow = false;
+    }
+
+    /// Follow session overlay attach from `previous` to `new_id` when
+    /// attach already names `previous`. No-op otherwise so overlay chrome
+    /// is never invented. Keeps row focus aligned with attach.
+    pub fn repoint_attach_if_on(&mut self, previous: AgentId, new_id: AgentId) {
+        if self.attached_agent == Some(previous) {
+            self.attached_agent = Some(new_id);
+            self.focus_row(DashboardRowId::TopLevel(new_id));
+        }
     }
 
     /// Focus the section header identified by `key` — the third cursor
@@ -1455,6 +1535,7 @@ impl DashboardState {
         self.selected = None;
         self.new_agent_button_focused = false;
         self.selected_idle_overflow = false;
+        self.delete_confirm = None;
     }
 
     /// Focus the Idle group's "N more" overflow toggle —
@@ -1465,6 +1546,62 @@ impl DashboardState {
         self.selected = None;
         self.selected_section = None;
         self.new_agent_button_focused = false;
+        self.delete_confirm = None;
+    }
+
+    fn set_list_focused(&mut self, focused: bool) {
+        self.list_focused = focused;
+        if !focused {
+            self.delete_confirm = None;
+        }
+    }
+
+    /// The armed row while its [`CONFIRM_WINDOW`] is still live, clearing
+    /// an expired arm as a side effect. The accessor the dispatcher and
+    /// mouse handler share so "armed on screen" and "armed for delete"
+    /// never diverge.
+    pub fn armed_delete_row(&mut self) -> Option<DashboardRowId> {
+        match &self.delete_confirm {
+            Some((id, at)) if at.elapsed() < CONFIRM_WINDOW => Some(id.clone()),
+            Some(_) => {
+                self.delete_confirm = None;
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Read-only counterpart of [`Self::armed_delete_row`] for the
+    /// renderer (does not clear an expired arm).
+    pub fn armed_delete_row_ref(&self) -> Option<&DashboardRowId> {
+        self.delete_confirm
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < CONFIRM_WINDOW)
+            .map(|(id, _)| id)
+    }
+
+    pub fn arm_delete(&mut self, id: DashboardRowId) {
+        self.delete_confirm = Some((id, Instant::now()));
+    }
+
+    /// Whether `id` is a chat-conversation roster row, which the dashboard
+    /// can't delete yet (see [`Self::conversation_row_ids`]).
+    pub fn row_is_conversation(&self, id: &DashboardRowId) -> bool {
+        matches!(id, DashboardRowId::Roster { session_id }
+            if self.conversation_row_ids.contains(session_id))
+    }
+
+    /// Enforce the invariant that a delete arm belongs to the selected
+    /// row. Selection changes routed through the focus helpers already
+    /// disarm, but `reanchor_selection` / `gc_stale_refs` can drop or move
+    /// `selected` directly — without this a stale arm would let a later
+    /// `y` delete a row that is no longer selected.
+    fn sync_delete_confirm_to_selection(&mut self) {
+        if let Some((armed, _)) = self.delete_confirm.as_ref()
+            && self.selected.as_ref() != Some(armed)
+        {
+            self.delete_confirm = None;
+        }
     }
 
     /// Toggle whether the Idle group shows every agent (`true`) or caps
@@ -1641,6 +1778,7 @@ impl DashboardState {
             // holds at every close site, not just here.
             self.close_popup();
         }
+        self.sync_delete_confirm_to_selection();
     }
 
     /// Switch grouping (`Ctrl+G`).
@@ -1790,7 +1928,9 @@ impl DashboardState {
         let w = lease.snapshot.last_width;
         let h = lease.snapshot.viewport_height;
         sb.restore_viewport_snapshot(lease.snapshot);
-        if let Some(idx) = page_flip {
+        if let Some(entry_id) = page_flip
+            && let Some(idx) = sb.index_of_id(entry_id)
+        {
             if w > 0 && h > 0 {
                 sb.prepare_layout(w, h);
             }
@@ -1826,32 +1966,11 @@ impl DashboardState {
         });
     }
 
-    pub fn note_page_flip_for_lease(
+    pub(crate) fn note_page_flip_for_lease(
         &mut self,
         agent_id: AgentId,
-        agents: &mut indexmap::IndexMap<AgentId, crate::app::agent_view::AgentView>,
-    ) {
-        let Some(row) = self
-            .peek_viewport
-            .as_ref()
-            .filter(|lease| lease.row.matches_top_level_agent(agent_id))
-            .map(|lease| lease.row.clone())
-        else {
-            return;
-        };
-        let Some(sb) = scrollback_mut_for_row(&row, agents) else {
-            return;
-        };
-        let selected = sb.selected();
-        let current_turn = sb.current_turn();
-        self.note_page_flip_from_scroll(agent_id, selected, current_turn);
-    }
-
-    pub(crate) fn note_page_flip_from_scroll(
-        &mut self,
-        agent_id: AgentId,
-        selected: Option<usize>,
-        current_turn: Option<usize>,
+        entry_id: crate::scrollback::EntryId,
+        agents: &indexmap::IndexMap<AgentId, crate::app::agent_view::AgentView>,
     ) {
         let Some(lease) = self.peek_viewport.as_mut() else {
             return;
@@ -1859,11 +1978,16 @@ impl DashboardState {
         if !lease.row.matches_top_level_agent(agent_id) {
             return;
         }
-        lease.page_flip_entry = selected;
-        lease.snapshot.follow_mode = true;
-        lease.snapshot.follow_preserve_scroll = true;
-        lease.snapshot.selected = selected;
-        lease.snapshot.current_turn = current_turn;
+        let Some(sb) = agents.get(&agent_id).map(|agent| &agent.scrollback) else {
+            return;
+        };
+        if sb.index_of_id(entry_id).is_none() {
+            return;
+        }
+        if !sb.is_follow_preserve_scroll() {
+            return;
+        }
+        lease.page_flip_entry = Some(entry_id);
     }
 
     /// Clear the peek reply draft AND its undo history.
@@ -1891,12 +2015,12 @@ impl DashboardState {
     /// Lazily root the reply's `@` file-search daemon at the peeked
     /// agent's cwd (recorded in [`Self::peek_reply_target_cwd`]).
     ///
-    /// Applied only when it differs from the daemon's current root and
-    /// only at the moment the user composes into the reply — never on a
-    /// bare cursor move — because `retarget` rebuilds the matcher daemon
-    /// thread. So navigating past a dozen agents in other directories
-    /// costs nothing; the (single) retarget happens on the first
-    /// keystroke/paste into the reply, deduped by cwd.
+    /// Applied only when it differs from the daemon's current root, and only
+    /// when the user composes into the reply (never on a bare cursor move),
+    /// because `retarget` throws away the built matcher daemon and the next
+    /// @-use rebuilds it. So navigating past a dozen agents in other
+    /// directories costs nothing; the single retarget happens on the first
+    /// keystroke or paste into the reply, deduped by cwd.
     fn ensure_peek_reply_cwd(&mut self) {
         if let Some(target) = self.peek_reply_target_cwd.clone()
             && self.peek_reply_cwd.as_deref() != Some(target.as_path())
@@ -2001,12 +2125,14 @@ impl DashboardState {
             return self.handle_worktree_dialog_input(ev);
         }
 
-        // Rename mode owns the keyboard until Enter / Esc.
+        // Rename mode owns input until committed or cancelled.
         if let Some(ref mut rn) = self.rename {
-            if let Event::Key(key) = ev
-                && key.kind != KeyEventKind::Release
-            {
-                return handle_rename_key(rn, key);
+            match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    return handle_rename_key(rn, key);
+                }
+                Event::Paste(text) => return handle_rename_paste(rn, text),
+                _ => {}
             }
             return InputOutcome::Unchanged;
         }
@@ -2971,8 +3097,37 @@ impl DashboardState {
         InputOutcome::Action(Action::DashboardDispatch { text, attach })
     }
 
+    /// List-focused `y`/`n` confirm for an already-armed delete (arming is
+    /// via `Ctrl+X` / `[✗]`, not `d`). When the list isn't focused,
+    /// disarming is left to the caller so a second `Ctrl+X` reaches the
+    /// dispatcher.
+    fn handle_delete_confirm_key(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
+        if key.kind == KeyEventKind::Release {
+            return None;
+        }
+        if !self.list_focused {
+            return None;
+        }
+        self.armed_delete_row()?;
+        if !key.modifiers.is_empty() {
+            self.delete_confirm = None;
+            return None;
+        }
+        match key.code {
+            KeyCode::Char('y') => Some(InputOutcome::Action(Action::DashboardDelete)),
+            KeyCode::Char('n') => {
+                self.delete_confirm = None;
+                Some(InputOutcome::Changed)
+            }
+            _ => {
+                self.delete_confirm = None;
+                None
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: &KeyEvent, registry: &ActionRegistry) -> InputOutcome {
-        // Resolve the registry binding up-front — the toast / stop-confirm
+        // Resolve the registry binding up-front — the toast / delete-confirm
         // clear below needs to know whether this key IS the stop key, and
         // it must run before the peek intercept (the lookup itself is a
         // pure read; the action is honoured further down).
@@ -2987,37 +3142,26 @@ impl DashboardState {
         let from_registry =
             registry.lookup_with_mode(key, crate::actions::When::DashboardFocused, vim_mode);
 
-        // Clear `error_toast` at the TOP of the
-        // handler so any subsequent keypress dismisses the toast,
-        // regardless of which branch handles the key (including keys
-        // the peek panel consumes — peek is open by default for a
-        // selected row, so nav keys route through it).
-        //
-        // When the toast is cleared, the linked
-        // `stop_confirm` armed state is also cleared. The two state
-        // bits are semantically linked: the user saw "Press Ctrl+X
-        // again", that hint is now gone, so re-arm rather than let a
-        // stale confirm window silently close the wrong session.
-        //
-        // The clear is SKIPPED when the resolved
-        // action is `DashboardStop`. Without this skip, the second
-        // Ctrl+X press would wipe the just-armed `stop_confirm`
-        // before `dispatch_dashboard_stop` could observe it, and the
-        // session would never close (the dispatcher kept re-arming a
-        // fresh confirm on every press). The Ctrl+X path owns
-        // `stop_confirm` and `error_toast` end-to-end: the first
-        // press arms both, the second press observes them and closes.
-        let preserve_stop_state =
-            matches!(from_registry, Some(crate::actions::ActionId::DashboardStop));
-        if !preserve_stop_state {
+        // Clear `error_toast` on any keypress so it never lingers; kept for
+        // `Ctrl+X` so the arm path's own messaging survives its first press.
+        let is_stop_key = matches!(from_registry, Some(crate::actions::ActionId::DashboardStop));
+        if !is_stop_key {
             self.error_toast = None;
-            // The disarm is NOT gated on `error_toast` being set (the
-            // Ctrl+X arm path deliberately plants no toast): a pending
-            // stop confirmation is bound to the row that was selected
-            // when Ctrl+X was pressed, so any other key — nav included —
-            // must disarm it. Otherwise the footer's "press again to
-            // close" hint lingers while the cursor moves to other agents.
-            self.stop_confirm = None;
+        }
+
+        // Disarm delete-confirm on any non-confirming key. Two gestures are
+        // preserved: `Ctrl+X` (its second press is the confirm, read by the
+        // dispatcher) and a list-focused bare `y`/`n` (handled just below).
+        let confirm_via_yn = self.list_focused
+            && self.armed_delete_row().is_some()
+            && key.modifiers.is_empty()
+            && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('n'));
+        if !is_stop_key && !confirm_via_yn {
+            self.delete_confirm = None;
+        }
+
+        if !is_stop_key && let Some(outcome) = self.handle_delete_confirm_key(key) {
+            return outcome;
         }
 
         // Free-tier override: Ctrl+O opens the pinned upgrade CTA (when one is
@@ -3375,6 +3519,13 @@ impl DashboardState {
                 }
                 _ => true,
             };
+            // Never let an auto-repeat (held key) drive the destructive
+            // Ctrl+X arm→confirm — holding the key would arm and immediately
+            // confirm a delete. Require discrete presses, like the picker's
+            // `y` confirm. Non-destructive actions may still repeat.
+            if id == crate::actions::ActionId::DashboardStop && key.kind == KeyEventKind::Repeat {
+                return InputOutcome::Unchanged;
+            }
             if honor && let Some(outcome) = dashboard_action_for_id(id, &mut self.error_toast) {
                 return outcome;
             }
@@ -3453,7 +3604,7 @@ impl DashboardState {
         // slash / `@` dropdowns are open the intercepts above already
         // consumed Tab (accept completion), so this only fires otherwise.
         if matches!(key.code, KeyCode::Tab) && key.modifiers.is_empty() {
-            self.list_focused = !self.list_focused;
+            self.set_list_focused(!self.list_focused);
             // Re-engage selection-follow so the viewport tracks the
             // cursor once the list takes focus.
             self.clear_manual_scroll();
@@ -3472,12 +3623,12 @@ impl DashboardState {
             {
                 if vim_mode {
                     if key.code == KeyCode::Char('i') && key.modifiers.is_empty() {
-                        self.list_focused = false;
+                        self.set_list_focused(false);
                         return InputOutcome::Changed;
                     }
                     return InputOutcome::Unchanged;
                 }
-                self.list_focused = false;
+                self.set_list_focused(false);
                 // fall through to the widget so the char is typed.
             } else {
                 // Non-printable (Backspace/Home/…) while the overview is
@@ -3490,7 +3641,7 @@ impl DashboardState {
 
         // Forward to the prompt widget (single-line).
         let old = self.dispatch.text().to_string();
-        let _ = self.dispatch.handle_key(key);
+        let event = self.dispatch.handle_key(key);
         let new = self.dispatch.text().to_string();
         if old != new {
             // Live-update the filter as the user types ONLY in search
@@ -3522,6 +3673,8 @@ impl DashboardState {
                 // the viewport tracks selection again.
                 self.manual_scroll_active = false;
             }
+            InputOutcome::Changed
+        } else if event == crate::views::prompt_widget::PromptEvent::Edited {
             InputOutcome::Changed
         } else {
             InputOutcome::Unchanged
@@ -3602,6 +3755,20 @@ impl DashboardState {
                 .map(|(id, _)| id.clone());
             if new_hover != self.hovered_row {
                 self.hovered_row = new_hover;
+                changed = true;
+            }
+            let new_hover_delete = self
+                .row_delete_rects
+                .iter()
+                .find(|(_, r)| {
+                    mouse.column >= r.x
+                        && mouse.column < r.x + r.width
+                        && mouse.row >= r.y
+                        && mouse.row < r.y + r.height
+                })
+                .map(|(id, _)| id.clone());
+            if new_hover_delete != self.hovered_delete {
+                self.hovered_delete = new_hover_delete;
                 changed = true;
             }
             // Section-header hover → the renderer brightens its text.
@@ -3741,7 +3908,7 @@ impl DashboardState {
                         self.dispatch.accept_slash_completion(&self.models);
                     }
                 }
-                self.list_focused = false;
+                self.set_list_focused(false);
                 return InputOutcome::Changed;
             }
 
@@ -3789,7 +3956,29 @@ impl DashboardState {
                         }
                     }
                 }
-                self.list_focused = false;
+                self.set_list_focused(false);
+                return InputOutcome::Changed;
+            }
+
+            if let Some(id) = self
+                .row_delete_rects
+                .iter()
+                .find(|(_, r)| {
+                    mouse.column >= r.x
+                        && mouse.column < r.x + r.width
+                        && mouse.row >= r.y
+                        && mouse.row < r.y + r.height
+                })
+                .map(|(id, _)| id.clone())
+            {
+                self.manual_scroll_active = false;
+                // Second `[✗]` click within the window confirms; else re-arm.
+                if self.armed_delete_row().as_ref() == Some(&id) {
+                    return InputOutcome::Action(Action::DashboardDelete);
+                }
+                self.focus_row(id.clone());
+                self.set_list_focused(true);
+                self.arm_delete(id);
                 return InputOutcome::Changed;
             }
 
@@ -3902,7 +4091,7 @@ impl DashboardState {
                 && mouse.row >= rect.y
                 && mouse.row < rect.y + rect.height
             {
-                self.list_focused = false;
+                self.set_list_focused(false);
                 // Forward the click so the caret lands where the user
                 // clicked. Skipped in search mode, where the prompt
                 // renders its own single-line cursor with a `Search:`
@@ -3966,12 +4155,11 @@ impl DashboardState {
             let Some(c) = visible.get(lp.picker.selected) else {
                 return InputOutcome::Unchanged;
             };
-            let mut filled = crate::project_picker::sources::display_path(&c.path);
+            let mut filled = crate::recent_dirs::display_path(&c.path);
             if !filled.ends_with('/') {
                 filled.push('/');
             }
-            lp.picker.query = filled;
-            lp.picker.query_cursor = lp.picker.query.len();
+            lp.picker.set_query(filled);
             lp.picker.selected = 0;
             lp.picker.scroll_offset = None;
             // The path changed — drop any stale "Not a directory" error.
@@ -3982,23 +4170,22 @@ impl DashboardState {
 
         let entry_count = lp.visible_candidates().len();
         let config = location_picker_config();
-        let query_before = lp.picker.query.clone();
         let outcome =
             crate::views::picker::handle_picker_input(ev, &mut lp.picker, entry_count, &config);
         // When the user edits the path, drop the stale validation error so a
         // corrected (possibly valid) path isn't shown next to a red
         // "Not a directory" left over from the previous failed attempt.
-        if lp.picker.query != query_before {
+        if matches!(&outcome, crate::views::picker::PickerOutcome::QueryChanged) {
             lp.error = None;
+            // Re-list only when the edited path changes; cursor motion is redraw-only.
+            lp.refresh_suggestions();
         }
-        // The query may have changed (typing / backspace / Ctrl+U) — re-list
-        // the parent directory if its path-mode parent moved.
-        lp.refresh_suggestions();
         match outcome {
             crate::views::picker::PickerOutcome::Closed => {
                 InputOutcome::Action(Action::DashboardCloseLocationPicker)
             }
-            crate::views::picker::PickerOutcome::Changed => InputOutcome::Changed,
+            crate::views::picker::PickerOutcome::Changed
+            | crate::views::picker::PickerOutcome::QueryChanged => InputOutcome::Changed,
             _ => InputOutcome::Unchanged,
         }
     }
@@ -4090,14 +4277,12 @@ impl DashboardState {
         let Some(dialog) = self.worktree_dialog.as_mut() else {
             return InputOutcome::Unchanged;
         };
-        let Event::Key(key) = ev else {
-            // Consume mouse / resize while the dialog is modal.
-            return InputOutcome::Unchanged;
+        let outcome = match ev {
+            Event::Key(key) if key.kind != KeyEventKind::Release => dialog.handle_key(key),
+            Event::Paste(text) => dialog.insert_paste(text),
+            _ => return InputOutcome::Unchanged,
         };
-        if key.kind == KeyEventKind::Release {
-            return InputOutcome::Unchanged;
-        }
-        match dialog.handle_key(key) {
+        match outcome {
             NewWorktreeDialogOutcome::Submitted(label) => {
                 self.worktree_dialog = None;
                 InputOutcome::Action(Action::DashboardConfirmWorktree { label })
@@ -4133,7 +4318,7 @@ impl DashboardState {
     /// chrome + picker pipeline via `handle_modal_key`.
     fn handle_shortcuts_modal_input(&mut self, ev: &Event) -> InputOutcome {
         use crate::views::shortcuts_help::{
-            ModalKeyOutcome, ShortcutsHelpOutcome, handle_modal_key, handle_mouse,
+            ModalKeyOutcome, ShortcutsHelpOutcome, handle_modal_key, handle_mouse, handle_paste,
             toggle_membership,
         };
 
@@ -4225,6 +4410,10 @@ impl DashboardState {
                     ShortcutsHelpOutcome::Unchanged => InputOutcome::Unchanged,
                 }
             }
+            Event::Paste(text) => match handle_paste(text, &mut modal.state, &modal.mode) {
+                ShortcutsHelpOutcome::Changed => InputOutcome::Changed,
+                _ => InputOutcome::Unchanged,
+            },
             _ => InputOutcome::Unchanged,
         }
     }
@@ -4302,6 +4491,7 @@ impl DashboardState {
             rows.iter().filter(|r| !r.is_more_placeholder).collect();
         if selectable.is_empty() {
             self.selected = None;
+            self.delete_confirm = None;
             return;
         }
         if let Some(sel) = self.selected.as_ref()
@@ -4312,6 +4502,7 @@ impl DashboardState {
             // the user's job.
             self.selected = None;
         }
+        self.sync_delete_confirm_to_selection();
     }
 }
 
@@ -4409,7 +4600,6 @@ fn dashboard_action_for_id(
         | ActionId::ToggleMouseCapture
         | ActionId::NextModel
         | ActionId::CancelTurn
-        | ActionId::ToggleGlobalPause
         | ActionId::ToggleYolo
         | ActionId::ToggleMultiline
         | ActionId::FocusPrompt
@@ -4420,8 +4610,8 @@ fn dashboard_action_for_id(
         | ActionId::OpenNextLink
         | ActionId::OpenPrevLink
         | ActionId::ToggleTodos
-        | ActionId::ClearCompletedTodos
         | ActionId::ToggleTasks
+        | ActionId::EditPromptExternal
         | ActionId::ToggleQueue
         | ActionId::OpenSessions
         | ActionId::OpenExtensions
@@ -4439,7 +4629,6 @@ fn dashboard_action_for_id(
         | ActionId::ModelPicker
         | ActionId::ShortcutsHelp
         | ActionId::OpenSettings
-        | ActionId::CaptureTuiScreenshot
         | ActionId::OpenDashboard
         | ActionId::EnableVoiceMode
         | ActionId::VoiceToggle
@@ -4449,47 +4638,49 @@ fn dashboard_action_for_id(
         | ActionId::DashboardOverlayExit
         | ActionId::DashboardOverlayPrev
         | ActionId::DashboardOverlayNext
-        | ActionId::DashboardOverlayStop
-        | ActionId::ToggleSoftStop => None,
+        | ActionId::DashboardOverlayStop => None,
     }
 }
 
 fn handle_rename_key(draft: &mut RenameDraft, key: &KeyEvent) -> InputOutcome {
     use crate::input::key::is_altgr;
-    // Reject Ctrl/Alt-modified character keys so
-    // Ctrl+R / Ctrl+A / Ctrl+V don't smuggle a bare letter into the
-    // draft. Ctrl+C is explicitly mapped to cancel.
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && !is_altgr(key.modifiers)
-        && let KeyCode::Char(c) = key.code
-    {
-        if c == 'c' {
+    match key.code {
+        KeyCode::Esc => return InputOutcome::Action(Action::DashboardCancelRename),
+        KeyCode::Enter if key.modifiers.is_empty() => {
+            return InputOutcome::Action(Action::DashboardCommitRename);
+        }
+        KeyCode::Char('c')
+            if key.modifiers.contains(KeyModifiers::CONTROL) && !is_altgr(key.modifiers) =>
+        {
             return InputOutcome::Action(Action::DashboardCancelRename);
         }
-        return InputOutcome::Unchanged;
+        _ => {}
     }
-    if key.modifiers.contains(KeyModifiers::ALT) && !is_altgr(key.modifiers) {
-        return InputOutcome::Unchanged;
-    }
-    match key.code {
-        KeyCode::Esc => InputOutcome::Action(Action::DashboardCancelRename),
-        KeyCode::Enter => InputOutcome::Action(Action::DashboardCommitRename),
-        KeyCode::Backspace => {
-            draft.draft.pop();
-            InputOutcome::Action(Action::DashboardRenameInput(draft.draft.clone()))
-        }
-        KeyCode::Char(c) => {
-            // Reject control characters and zero-width chars.
-            if c.is_control() {
-                return InputOutcome::Unchanged;
-            }
-            // Cap at 100 chars to match the worktree dialog input.
-            if draft.draft.chars().count() < 100 {
-                draft.draft.push(c);
-            }
-            InputOutcome::Action(Action::DashboardRenameInput(draft.draft.clone()))
-        }
-        _ => InputOutcome::Unchanged,
+
+    let can_insert = draft.text().chars().count() < MAX_RENAME_SCALARS;
+    let outcome = draft
+        .editor
+        .handle_key_with_insert_policy(key, |character| {
+            can_insert && rename_character_allowed(character)
+        });
+    rename_edit_outcome(outcome)
+}
+
+fn handle_rename_paste(draft: &mut RenameDraft, text: &str) -> InputOutcome {
+    let remaining = MAX_RENAME_SCALARS.saturating_sub(draft.text().chars().count());
+    let outcome =
+        draft
+            .editor
+            .insert_paste_with_policy(text, rename_wire_character_allowed, remaining);
+    rename_edit_outcome(outcome)
+}
+
+fn rename_edit_outcome(outcome: LineEditOutcome) -> InputOutcome {
+    match outcome {
+        LineEditOutcome::TextChanged
+        | LineEditOutcome::HandledNoChange
+        | LineEditOutcome::CursorChanged => InputOutcome::Changed,
+        LineEditOutcome::Unhandled => InputOutcome::Unchanged,
     }
 }
 

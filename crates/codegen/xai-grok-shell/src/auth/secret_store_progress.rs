@@ -39,11 +39,11 @@ pub fn format_secret_store_progress(elapsed: Duration, budget: Duration) -> Stri
     // Cap the displayed elapsed at budget so the bar never overflows the label.
     let elapsed_secs = elapsed.as_secs().min(budget_secs);
     let width: u64 = 8;
-    let filled = elapsed_secs
-        .saturating_mul(width)
-        .checked_div(budget_secs)
-        .unwrap_or(width)
-        .min(width);
+    let filled = if budget_secs == 0 {
+        width
+    } else {
+        (elapsed_secs.saturating_mul(width) / budget_secs).min(width)
+    };
     let empty = width.saturating_sub(filled);
     let bar: String = std::iter::repeat_n('=', filled as usize)
         .chain(std::iter::repeat_n('-', empty as usize))

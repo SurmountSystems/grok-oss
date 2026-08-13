@@ -111,8 +111,10 @@ fn main() -> io::Result<()> {
                     modifiers: KeyModifiers::CONTROL,
                     ..
                 }) => break,
-                Event::Key(key) if handle_key(&mut app, key) => {
-                    break;
+                Event::Key(key) => {
+                    if handle_key(&mut app, key) {
+                        break;
+                    }
                 }
                 _ => {}
             }

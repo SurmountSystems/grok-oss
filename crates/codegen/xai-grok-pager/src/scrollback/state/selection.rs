@@ -507,27 +507,25 @@ impl ScrollbackState {
 
     /// Toggle expand/collapse for all thinking blocks only.
     ///
-    /// If ANY thinking block is not fully expanded (`Collapsed` one-liner or
-    /// `Truncated` streaming/last-N view), expand all thinking blocks.
+    /// If ANY thinking block is collapsed, expand all thinking blocks.
     /// Otherwise collapse all thinking blocks.
     ///
-    /// Running thoughts collapse back to `Truncated` (their live default);
-    /// finished ones collapse to `Collapsed`. Sticky `thinking_display_mode`
-    /// is still Expanded/Collapsed so future finishes adopt the chosen mode.
+    /// Also sets `thinking_display_mode` so that future thinking blocks
+    /// adopt the chosen mode when they finish running.
     pub fn expand_all_thinking(&mut self) {
-        let any_not_expanded = self.entries.values().any(|entry| {
+        let any_collapsed = self.entries.values().any(|entry| {
             matches!(entry.block, RenderBlock::Thinking(_))
                 && entry.block.is_foldable()
-                && entry.display_mode != DisplayMode::Expanded
+                && entry.display_mode == DisplayMode::Collapsed
         });
 
-        let expanding = any_not_expanded;
-        // Sticky finish mode is only Expanded vs Collapsed (not Truncated).
-        self.thinking_display_mode = if expanding {
+        let target_mode = if any_collapsed {
             DisplayMode::Expanded
         } else {
             DisplayMode::Collapsed
         };
+
+        self.thinking_display_mode = target_mode;
 
         let mut changed_ids = Vec::new();
         for (id, entry) in &mut self.entries {
@@ -535,15 +533,7 @@ impl ScrollbackState {
             // collapsed as one-liners. Group truncation is handled
             // separately below (all hidden entries become visible).
             if matches!(entry.block, RenderBlock::Thinking(_)) && entry.block.is_foldable() {
-                let mode = if expanding {
-                    DisplayMode::Expanded
-                } else if entry.is_running {
-                    // Match per-entry fold: running Expanded ↔ Truncated.
-                    DisplayMode::Truncated
-                } else {
-                    DisplayMode::Collapsed
-                };
-                entry.display_mode = mode;
+                entry.display_mode = target_mode;
                 entry.display_mode_pinned = false;
                 entry.invalidate_cache();
                 changed_ids.push(*id);
@@ -554,7 +544,7 @@ impl ScrollbackState {
         }
         // When expanding: also expand all truncated groups so everything
         // is visible. When collapsing: clear expansions so groups re-truncate.
-        if expanding {
+        if target_mode == DisplayMode::Expanded {
             // Opened thoughts go transparent, so a keyed thought-anchored
             // run re-anchors on its first tool; migrate the keys.
             for id in &changed_ids {
@@ -614,40 +604,17 @@ impl ScrollbackState {
         }
     }
 
-    /// Apply the always-expand-thinking preference to sticky finish mode and,
-    /// when enabling, open every existing thinking block now.
-    ///
-    /// Turning off only resets sticky finish mode to Collapsed; existing
-    /// blocks keep their current open/closed state until the user folds them.
-    pub fn apply_always_expand_thinking(&mut self, always: bool) {
-        if always {
-            self.thinking_display_mode = DisplayMode::Expanded;
-            let any_not_expanded = self.entries.values().any(|entry| {
-                matches!(entry.block, RenderBlock::Thinking(_))
-                    && entry.block.is_foldable()
-                    && entry.display_mode != DisplayMode::Expanded
-            });
-            // expand_all_thinking toggles; only call when something needs open.
-            if any_not_expanded {
-                self.expand_all_thinking();
-            }
-        } else {
-            self.thinking_display_mode = DisplayMode::Collapsed;
-        }
-    }
-
     /// Returns "expand thinking" or "collapse thinking" based on current state.
     ///
     /// Uses the same logic as `expand_all_thinking`: if ANY thinking block is
-    /// not fully expanded the next toggle will expand, so the label is
-    /// "expand thinking".
+    /// collapsed the next toggle will expand, so the label is "expand thinking".
     pub fn thinking_fold_label(&self) -> &'static str {
-        let any_not_expanded = self.entries.values().any(|entry| {
+        let any_collapsed = self.entries.values().any(|entry| {
             matches!(entry.block, RenderBlock::Thinking(_))
                 && entry.block.is_foldable()
-                && entry.display_mode != DisplayMode::Expanded
+                && entry.display_mode == DisplayMode::Collapsed
         });
-        if any_not_expanded {
+        if any_collapsed {
             "expand thinking"
         } else {
             "collapse thinking"

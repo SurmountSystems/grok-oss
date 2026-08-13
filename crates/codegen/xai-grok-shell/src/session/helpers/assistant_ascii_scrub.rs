@@ -661,7 +661,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // ENV_LOCK serializes scrub state across awaits
     async fn request_without_approval_no_op_via_option_path() {
         let _g = lock_and_reset();
         assert!(scrub_active());
@@ -672,7 +671,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // ENV_LOCK serializes scrub state across awaits
     async fn reject_option_keeps_scrub_on_via_product_option_path() {
         let _g = lock_and_reset();
         let result =
@@ -683,7 +681,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // ENV_LOCK serializes scrub state across awaits
     async fn allow_once_option_disables_session_only() {
         let _g = lock_and_reset();
         let raw = "em\u{2014}dash";
@@ -697,7 +694,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // ENV_LOCK serializes scrub state across awaits
     async fn allow_always_with_persist_callback_runs_disk_hook() {
         let _g = lock_and_reset();
         let persisted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -723,7 +719,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // ENV_LOCK serializes scrub state across awaits
     async fn reject_does_not_invoke_persist_callback() {
         let _g = lock_and_reset();
         let persisted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -747,7 +742,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // ENV_LOCK serializes scrub state across awaits
     async fn allow_once_does_not_invoke_persist_callback() {
         let _g = lock_and_reset();
         let persisted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

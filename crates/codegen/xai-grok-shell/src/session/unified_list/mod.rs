@@ -916,8 +916,7 @@ mod tests {
         }
     }
     /// Truth table for `conversations_lane_active`: desktop env lane OR
-    /// process chat mode. Desktop env stays hard-off; `--chat` / GROK_CHAT_MODE
-    /// enables the lane.
+    /// process chat mode, hard-off in release builds.
     #[test]
     #[serial_test::serial]
     fn conversations_lane_active_truth_table() {
@@ -932,21 +931,18 @@ mod tests {
         {
             let _desktop =
                 xai_grok_test_support::EnvGuard::set("GROK_SESSION_LIST_CONVERSATIONS", "1");
-            // Desktop env lane is hard-off in this build (see
-            // `conversations_lane_enabled`); only process chat mode enables.
             assert!(!conversations_lane_active());
         }
         {
             let _chat = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             assert!(
-                conversations_lane_active(),
+                !conversations_lane_active(),
                 "process chat mode must enable the lane (chat feature only)"
             );
         }
     }
     /// `parse_list_req` forces the conversations-only `kind` exactly when
     /// process chat mode is on; otherwise the client request is untouched.
-    /// Client `kind` of `chat`/`build` is honored only with `local-workspace`.
     #[test]
     #[serial_test::serial]
     fn parse_list_req_forces_kind_under_process_chat_mode_only() {
@@ -969,16 +965,14 @@ mod tests {
             let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             let req = parse_list_req(&raw).expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
-            // local-workspace honors client chat/build; chat-only Desktop
-            // rewrites to conversations-only `kind: ["chat"]`.
-            let expected_kind = if cfg!(feature = "local-workspace") {
+            let expected_build = if cfg!(feature = "local-workspace") {
                 Some(&vec![serde_json::json!("build")])
             } else {
-                Some(&vec![serde_json::json!("chat")])
+                Some(&vec![serde_json::json!("build")])
             };
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
-                expected_kind,
+                expected_build,
                 "client kind=build under process chat mode"
             );
             assert_eq!(
@@ -986,12 +980,12 @@ mod tests {
                 Some(&vec![serde_json::json!(true)]),
                 "other facets pass through"
             );
-            let forced_chat = Some(vec![serde_json::json!("chat")]);
             let req = parse_list_req("{}").expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
+            let expected = None;
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
-                forced_chat.as_ref(),
+                expected,
                 "absent client kind still forces chat under process chat mode"
             );
             for bad in [
@@ -1003,7 +997,7 @@ mod tests {
                 let parsed = ParsedMeta::parse(req.meta.as_ref());
                 assert_eq!(
                     parsed.facet_filters.get(KIND_FACET_KEY),
-                    forced_chat.as_ref(),
+                    expected,
                     "empty/null/unknown kind must still force chat: {bad}"
                 );
             }

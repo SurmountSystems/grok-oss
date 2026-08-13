@@ -61,9 +61,6 @@ const MAX_BODY_ROWS: usize = 4;
 /// a shorter banner beats a tidy right edge.
 const PREFERRED_BODY_ROWS: usize = 3;
 
-/// Legal/privacy policy URL for the privacy banner link.
-pub const PRIVACY_BANNER_LEGAL_URL: &str = "https://x.ai/legal";
-
 pub(crate) struct PrivacyBannerRects {
     pub opt_in: Rect,
     pub opt_out: Rect,

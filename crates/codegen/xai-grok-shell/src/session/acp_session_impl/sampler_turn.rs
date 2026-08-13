@@ -106,7 +106,7 @@ where
         xai_grok_telemetry::unified_log::warn(
             "auth recovery: tool 401, refresh failed",
             None,
-            Some(serde_json::json!({ "tool" : tool_name })),
+            Some(serde_json::json!({ "tool": tool_name })),
         );
         result
     }
@@ -114,7 +114,7 @@ where
 impl SessionActor {
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
         let mcp_wait_start = std::time::Instant::now();
-        match self.mcp_strategy {
+        match self.mcp_strategy.get() {
             McpInitStrategy::Blocking => {
                 if !self.mcp_state.lock().await.is_initialized() {
                     tracing::info!(
@@ -140,13 +140,76 @@ impl SessionActor {
     /// (`prepare_tool_definitions_*`); this applies only the `web_search` drop
     /// under backend search and the `ToolSpec::from` mapping.
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
-        let use_backend_search =
-            self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get();
+        let backend_search_active = self.backend_search_active();
         defs.iter()
-            .filter(|td| !use_backend_search || td.function.name != "web_search")
+            .filter(|td| !backend_search_active || td.function.name != "web_search")
             .cloned()
             .map(ToolSpec::from)
             .collect()
+    }
+    /// Hosted tools with overrides applied, plus the applied overrides to echo, in one pass.
+    fn resolve_hosted(
+        &self,
+    ) -> (
+        Vec<xai_grok_sampling_types::HostedTool>,
+        xai_grok_sampling_types::ToolOverrides,
+    ) {
+        let mut tools = self.agent.borrow().hosted_tools().to_vec();
+        let applied = xai_grok_sampling_types::apply_tool_overrides(
+            &mut tools,
+            self.tool_overrides.borrow().as_ref(),
+        );
+        (tools, applied)
+    }
+    /// Ungated. Prefer [`Self::hosted_tools_for_turn`], which folds in the backend-search gate.
+    pub(crate) fn effective_hosted_tools(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
+        self.resolve_hosted().0
+    }
+    pub(crate) fn hosted_tools_for_turn(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
+        if self.backend_search_active() {
+            self.effective_hosted_tools()
+        } else {
+            Vec::new()
+        }
+    }
+    /// The applied overrides to echo, or `None` when backend search is off.
+    pub(crate) fn effective_tool_overrides(
+        &self,
+    ) -> Option<xai_grok_sampling_types::ToolOverrides> {
+        if !self.backend_search_active() {
+            return None;
+        }
+        let applied = self.resolve_hosted().1;
+        (!applied.is_empty()).then_some(applied)
+    }
+    pub(crate) fn backend_search_active(&self) -> bool {
+        self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get()
+    }
+    /// Set the per-turn override and emit it before any turn runs, so a subagent spawned this turn
+    /// inherits it.
+    pub(crate) fn set_tool_overrides(&self, overrides: xai_grok_sampling_types::ToolOverrides) {
+        *self.tool_overrides.borrow_mut() = Some(overrides);
+        self.emit_resolved_tool_overrides();
+    }
+    /// Fold a per-turn update at promotion: an object sets, `null` clears to the seed, absent leaves.
+    pub(crate) fn apply_tool_overrides_update(
+        &self,
+        update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
+    ) {
+        let Some(update) = update else { return };
+        {
+            let mut slot = self.tool_overrides.borrow_mut();
+            *slot = update.apply(slot.take());
+        }
+        self.emit_resolved_tool_overrides();
+    }
+    /// Store this session's cutoff in the cell a subagent spawn reads. Not gated on backend search,
+    /// so a bounded parent bounds a searching child even if it isn't searching.
+    pub(crate) fn emit_resolved_tool_overrides(&self) {
+        let seed = self.agent.borrow().definition().tool_overrides.clone();
+        let effective = resolve_configured_cutoff(seed, self.tool_overrides.borrow().as_ref());
+        self.resolved_tool_overrides
+            .store((!effective.is_empty()).then(|| std::sync::Arc::new(effective)));
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -220,24 +283,29 @@ impl SessionActor {
         match provider.ensure_fresh_token(current_key).await {
             crate::auth::ProviderRefreshOutcome::Rotated(new_key) => {
                 tracing::info!(
-                    model = % model_id, provider = % provider.name, cold = current_key
-                    .is_none(), "auth provider token rotated pre-turn"
+                    model = %model_id,
+                    provider = %provider.name,
+                    cold = current_key.is_none(),
+                    "auth provider token rotated pre-turn"
                 );
                 self.set_chat_api_key(new_key).await;
             }
             crate::auth::ProviderRefreshOutcome::Unchanged => {}
             crate::auth::ProviderRefreshOutcome::MintFailed => {
                 tracing::warn!(
-                    session_id = % self.session_info.id.0, provider = % provider.name,
-                    model = % model_id, "auth provider pre-turn refresh failed"
+                    session_id = %self.session_info.id.0,
+                    provider = %provider.name,
+                    model = %model_id,
+                    "auth provider pre-turn refresh failed"
                 );
                 xai_grok_telemetry::unified_log::warn(
                     "auth provider pre-turn refresh failed",
                     Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!(
-                        { "provider" : provider.name, "model" : model_id, "cold" :
-                        current_key.is_none(), }
-                    )),
+                    Some(serde_json::json!({
+                        "provider": provider.name,
+                        "model": model_id,
+                        "cold": current_key.is_none(),
+                    })),
                 );
             }
             crate::auth::ProviderRefreshOutcome::Unusable => {}
@@ -256,18 +324,20 @@ impl SessionActor {
         };
         let Some(new_key) = recovered else {
             tracing::warn!(
-                session_id = % self.session_info.id.0, provider = % provider.name,
+                session_id = %self.session_info.id.0,
+                provider = %provider.name,
                 "auth recovery: sampler 401, provider re-mint declined or failed"
             );
             xai_grok_telemetry::unified_log::warn(
                 "auth recovery: sampler 401, provider re-mint declined or failed",
                 Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({ "provider" : provider.name })),
+                Some(serde_json::json!({ "provider": provider.name })),
             );
             return false;
         };
         tracing::info!(
-            session_id = % self.session_info.id.0, provider = % provider.name,
+            session_id = %self.session_info.id.0,
+            provider = %provider.name,
             "auth recovery: sampler 401, auth provider re-mint, retrying"
         );
         xai_grok_telemetry::unified_log::info(
@@ -302,12 +372,14 @@ impl SessionActor {
             return;
         }
         let refresh_active = gate.active();
-        let ctx = serde_json::json!(
-            { "site" : site, "model_byok" : gate.model_byok.as_str(), "is_session_based"
-            : gate.is_session_based, "endpoint_is_first_party" : gate
-            .endpoint_is_first_party, "refresh_active" : refresh_active, "base_url" :
-            base_url, }
-        );
+        let ctx = serde_json::json!({
+            "site": site,
+            "model_byok": gate.model_byok.as_str(),
+            "is_session_based": gate.is_session_based,
+            "endpoint_is_first_party": gate.endpoint_is_first_party,
+            "refresh_active": refresh_active,
+            "base_url": base_url,
+        });
         let sid = Some(self.session_info.id.0.as_ref());
         if refresh_active {
             xai_grok_telemetry::unified_log::info(
@@ -340,18 +412,6 @@ impl SessionActor {
                 }
             }
         }
-        #[allow(clippy::items_after_statements)]
-        struct AuthManagerBearerResolver(std::sync::Arc<crate::auth::AuthManager>);
-        impl std::fmt::Debug for AuthManagerBearerResolver {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("AuthManagerBearerResolver").finish()
-            }
-        }
-        impl xai_grok_sampler::BearerResolver for AuthManagerBearerResolver {
-            fn current_bearer(&self) -> Option<String> {
-                self.0.current_or_expired().map(|a| a.key)
-            }
-        }
         let cfg = self
             .chat_state_handle
             .get_sampling_config()
@@ -364,6 +424,8 @@ impl SessionActor {
                 top_p: None,
                 api_backend: Default::default(),
                 extra_headers: Default::default(),
+                query_params: Default::default(),
+                env_http_headers: Default::default(),
                 context_window: std::num::NonZeroU64::new(256_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
@@ -376,27 +438,7 @@ impl SessionActor {
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
-            // Included SuperGrok period dual-identity rank must drive SessionToken
-            // bearer. Without this, sticky AuthManager Team base keeps sampling
-            // business JWT while rank preferred personal included SuperGrok period.
-            if am.grok_com_config().auto_use_included_limits {
-                let _ = am.align_to_ranked_free_period_primary();
-            }
             let _ = am.auth().await;
-            // Path-trace every SessionToken reconstruct: principal_type + team_id
-            // prove which SuperGrok identity is wire-active (User/personal vs
-            // Team/business) without dumping the JWT.
-            if let Some(trace) = am.session_wire_bearer_trace() {
-                tracing::info!(
-                    ?trace,
-                    "auth: SessionToken wire bearer for included SuperGrok period path"
-                );
-                xai_grok_telemetry::unified_log::info(
-                    "auth: SessionToken wire bearer for included SuperGrok period path",
-                    None,
-                    Some(trace),
-                );
-            }
         }
         let api_key = if use_bearer_resolver {
             self.auth_manager
@@ -442,8 +484,7 @@ impl SessionActor {
             &cfg.base_url,
         );
         SamplingConfig {
-            api_key: creds.api_key,
-            failover_api_keys: creds.failover_api_keys,
+            api_key,
             base_url: cfg.base_url,
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
@@ -475,11 +516,9 @@ impl SessionActor {
             origin_client: self.origin_client.clone(),
             attribution_callback: self.attribution_callback.clone(),
             bearer_resolver: if use_bearer_resolver {
-                self.auth_manager
-                    .as_ref()
-                    .map(|am| -> xai_grok_sampler::SharedBearerResolver {
-                        std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
-                    })
+                self.auth_manager.as_ref().map(|am| {
+                    crate::auth::credential_provider::WireValidBearerResolver::shared(am.clone())
+                })
             } else {
                 None
             },
@@ -488,6 +527,12 @@ impl SessionActor {
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+            failover_api_keys: creds.failover_api_keys.clone(),
+            failover_base_url: creds.failover_base_url.clone(),
+            session_base_url: creds.session_base_url.clone(),
+            session_identity_key: creds.session_identity_key.clone(),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
         }
     }
     /// Install auto-mode permission classifier with a live LLM side-query
@@ -523,13 +568,15 @@ impl SessionActor {
         );
         let (prompt_type, classifier_reasoning_effort) =
             crate::util::config::auto_mode_classifier_defaults(&auto_cfg, effective_supports_re);
+        let classify_timeout = crate::util::config::auto_mode_classify_timeout(&auto_cfg);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
             Vec<xai_grok_workspace::permission::ClassifierMessage>,
-            tokio::sync::oneshot::Sender<Result<String, String>>,
+            tokio::sync::oneshot::Sender<
+                Result<String, xai_grok_workspace::permission::ClassifierFailure>,
+            >,
         )>();
         let session = Arc::clone(self);
         tokio::task::spawn_local(async move {
-            const TIMEOUT_MS: u64 = 15_000;
             while let Some((messages, respond_to)) = rx.recv().await {
                 let result = async {
                     let (sampling_client, model, context_window) = match &aux_classifier_sampler {
@@ -583,21 +630,31 @@ impl SessionActor {
                             xai_grok_workspace::permission::classifier_output_json_schema(),
                         ),
                         reasoning_effort: classifier_reasoning_effort,
-                        x_grok_conv_id: Some(format!("perm-classifier-{}", uuid::Uuid::new_v4())),
-                        x_grok_req_id: Some(format!("xai-perm-auto-{}", uuid::Uuid::new_v4())),
+                        x_grok_conv_id: Some(
+                            format!("perm-classifier-{}", uuid::Uuid::new_v4()),
+                        ),
+                        x_grok_req_id: Some(
+                            format!("xai-perm-auto-{}", uuid::Uuid::new_v4()),
+                        ),
                         x_grok_session_id: Some(session_id),
                         x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
                         ..ConversationRequest::default()
                     };
                     let fut = sampling_client.conversation_collect(request);
-                    let response =
-                        tokio::time::timeout(std::time::Duration::from_millis(TIMEOUT_MS), fut)
-                            .await
-                            .map_err(|_| "permission auto classifier timed out".to_string())?
-                            .map_err(|e| e.to_string())?;
+                    let response = tokio::time::timeout(classify_timeout, fut)
+                        .await
+                        .map_err(|_| {
+                            xai_grok_workspace::permission::ClassifierFailure::Timeout
+                        })?
+                        .map_err(|e| xai_grok_workspace::permission::ClassifierFailure::TransportError(
+                            e.to_string(),
+                        ))?;
                     Ok(response.assistant_text())
                 }
-                .await;
+                    .await;
+                if let Err(error) = &result {
+                    tracing::warn!(%error, "permission auto classifier side-query failed");
+                }
                 let _ = respond_to.send(result);
             }
         });
@@ -609,7 +666,7 @@ impl SessionActor {
         );
         self.permissions.set_classifier_with_side_query(clf, true);
         tracing::info!(
-            session_id = % self.session_info.id,
+            session_id = %self.session_info.id,
             "Wired live LLM permission auto-mode classifier (session sampling channel)"
         );
     }
@@ -665,10 +722,7 @@ impl SessionActor {
         let context_window = cfg.context_window;
         let client = xai_grok_sampler::SamplingClient::new(cfg)
             .map_err(|e| {
-                tracing::warn!(
-                    error = % e,
-                    "auto classifier aux sampler build failed; using session model"
-                )
+                tracing::warn!(error = %e, "auto classifier aux sampler build failed; using session model")
             })
             .ok()?;
         Some((client, model, context_window))
@@ -711,6 +765,58 @@ impl SessionActor {
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
         self.sampler_handle.update_config(sampler_config);
     }
+    /// Fold an auth remedy into a turn failure: its advice becomes the tail of
+    /// the message, and its `turn_error_type` the classification the client
+    /// keys its re-auth prompt off.
+    fn apply_auth_remedy(
+        &self,
+        remedy: &crate::auth::AuthRemedy,
+        message: String,
+        status_code: Option<u16>,
+    ) -> (&'static str, String) {
+        xai_grok_telemetry::unified_log::info(
+            "auth: turn failure classified",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "status_code": status_code,
+                "remedy": format!("{remedy:?}"),
+            })),
+        );
+        let message = match remedy.advice() {
+            Some(advice) => format!("{message}\n\n{advice}"),
+            None => message,
+        };
+        (remedy.turn_error_type(), message)
+    }
+    /// Terminal failure for a turn the auth-retry budget gave up on — the one
+    /// terminal path that lives outside [`Self::handle_sampling_failure`].
+    ///
+    /// Every terminal path owes the client one `RetryState::Failed`: it is
+    /// what raises the pager's re-auth prompt and its turn-failed block. This
+    /// arm used to return its `acp::Error` without one, so a turn that died on
+    /// repeated 401s ended in silence.
+    pub(crate) async fn fail_turn_auth_budget_exhausted(&self, message: String) -> acp::Error {
+        const STATUS: Option<u16> = Some(401);
+        let (error_type, message) = match self.auth_manager.as_ref() {
+            Some(auth_manager) => self.apply_auth_remedy(
+                &auth_manager.auth_remedy().after_retries_exhausted(),
+                message,
+                STATUS,
+            ),
+            None => ("auth", message),
+        };
+        self.log_terminal_failure(error_type, STATUS, &message);
+        self.send_xai_notification(XaiSessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Failed {
+                error_type: error_type.to_owned(),
+                message: message.clone(),
+            },
+        ))
+        .await;
+        acp::Error::internal_error().data(crate::sampling::error::error_data_with_status(
+            message, STATUS,
+        ))
+    }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
         let auth = self
             .auth_manager
@@ -720,14 +826,17 @@ impl SessionActor {
         xai_grok_telemetry::unified_log::warn(
             "turn.terminal_failure",
             Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!(
-                { "error_type" : error_type, "status_code" : status_code,
-                "reauthable" : reauthable, "auth_mode" : auth.as_ref().map(| a |
-                format!("{:?}", a.auth_mode)), "key_prefix" : auth.as_ref().map(| a |
-                crate ::auth::token_suffix(& a.key).to_owned()), "expires_at" : auth
-                .as_ref().and_then(| a | a.expires_at.map(| e | e.to_rfc3339())),
-                "message" : crate ::util::truncate(message, 300), }
-            )),
+            Some(serde_json::json!({
+                "error_type": error_type,
+                "status_code": status_code,
+                "reauthable": reauthable,
+                "auth_mode": auth.as_ref().map(|a| format!("{:?}", a.auth_mode)),
+                "key_prefix": auth.as_ref().map(|a| xai_grok_auth::bearer_suffix(&a.key).to_owned()),
+                "expires_at": auth
+                    .as_ref()
+                    .and_then(|a| a.expires_at.map(|e| e.to_rfc3339())),
+                "message": crate::util::truncate(message, 300),
+            })),
         );
     }
     pub(crate) async fn handle_sampling_failure(
@@ -773,14 +882,7 @@ impl SessionActor {
                     && let Some(new_cw) = std::num::NonZeroU64::new(cw)
                     && self.compaction.context_window_override.is_none()
                 {
-                    if new_cw.get() > self.compaction.model_context_window.get() {
-                        self.compaction.model_context_window.set(new_cw.get());
-                    }
-                    let effective = crate::util::config::apply_economic_context_cap(
-                        self.compaction.model_context_window.get().max(new_cw.get()),
-                        self.compaction.economic_mode.get(),
-                    );
-                    cfg.context_window = std::num::NonZeroU64::new(effective).unwrap_or(new_cw);
+                    cfg.context_window = new_cw;
                     self.chat_state_handle.update_sampling_config(cfg);
                 }
                 let trigger_info = compaction::AutoCompactTriggerInfo {
@@ -788,33 +890,16 @@ impl SessionActor {
                     context_window: cw,
                     percentage,
                 };
-                self.run_compact_only(trigger_info).await?;
+                if let Err(e) = self.run_compact_only(trigger_info).await {
+                    if Self::is_auth_compact_error(&e) {
+                        return Err(self.surface_compact_auth_failure(e).await);
+                    }
+                    return Err(e);
+                }
                 return Ok(SamplerFailureRecovery::CompactAndResubmit);
             }
         }
-        // Edge / gateway outages: plain English for RetryFailed + ACP data,
-        // not raw "API error (status 521 <unknown status code>)" Internal JSON.
-        // Team credit / monthly spending limit 403: same plain-English path
-        // (not Internal error JSON envelope).
-        let detailed_message = match error.status_code {
-            Some(code)
-                if xai_grok_sampling_types::is_edge_outage_status(code)
-                    || matches!(code, 502..=504) =>
-            {
-                let status =
-                    reqwest::StatusCode::from_u16(code).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
-                xai_grok_sampling_types::outage_exhausted_user_message(status, 1)
-            }
-            Some(code)
-                if matches!(code, 402 | 403 | 429 | 400)
-                    && xai_grok_sampling_types::is_credit_exhausted_message(&error.message) =>
-            {
-                xai_grok_sampling_types::credit_exhausted_user_message(&error.message)
-            }
-            _ => error.message.clone(),
-        };
-        let credit_exhausted_terminal = matches!(error.status_code, Some(402 | 403 | 429 | 400))
-            && xai_grok_sampling_types::is_credit_exhausted_message(&error.message);
+        let detailed_message = error.message.clone();
         if matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
             && error.message.contains("encrypted_content")
@@ -869,20 +954,22 @@ impl SessionActor {
             self.log_auth_gate_unknown("handle_sampling_failure", gate, &failed_base_url);
             if !eligible && auth_provider.is_none() {
                 tracing::warn!(
-                    session_id = % self.session_info.id.0, is_session_based = gate
-                    .is_session_based, model_byok = gate.model_byok.as_str(),
+                    session_id = %self.session_info.id.0,
+                    is_session_based = gate.is_session_based,
+                    model_byok = gate.model_byok.as_str(),
                     endpoint_is_first_party = gate.endpoint_is_first_party,
                     "auth recovery: sampler 401 not refreshable (api-key auth) — surfacing 401",
                 );
                 xai_grok_telemetry::unified_log::warn(
                     "auth recovery: sampler 401 not eligible (api-key auth)",
                     Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!(
-                        { "kind" : error.kind.as_str(), "status_code" : error
-                        .status_code, "is_session_based" : gate.is_session_based,
-                        "model_byok" : gate.model_byok.as_str(),
-                        "endpoint_is_first_party" : gate.endpoint_is_first_party, }
-                    )),
+                    Some(serde_json::json!({
+                        "kind": error.kind.as_str(),
+                        "status_code": error.status_code,
+                        "is_session_based": gate.is_session_based,
+                        "model_byok": gate.model_byok.as_str(),
+                        "endpoint_is_first_party": gate.endpoint_is_first_party,
+                    })),
                 );
             }
             eligible
@@ -898,59 +985,30 @@ impl SessionActor {
             xai_grok_telemetry::unified_log::warn(
                 "auth recovery: sampler 401 not eligible (non-auth error kind)",
                 Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!(
-                    { "kind" : error.kind.as_str(), "status_code" : error
-                    .status_code, }
-                )),
+                Some(serde_json::json!({
+                    "kind": error.kind.as_str(),
+                    "status_code": error.status_code,
+                })),
             );
-        }
-        if auth_recovery_eligible
-            && crate::auth::devbox_login::is_devbox_environment()
-            && let Some(ref am) = self.auth_manager
-        {
-            match am.try_devbox_recovery().await {
-                Ok(auth) => {
-                    tracing::info!(
-                        session_id = % self.session_info.id.0, user_id = % auth.user_id,
-                        "auth recovery: sampler 401, devbox re-mint, retrying"
-                    );
-                    self.prepare_sampler_for_turn().await;
-                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = % self.session_info.id.0, error = % e,
-                        "auth recovery: sampler 401, devbox re-mint failed"
-                    );
-                    xai_grok_telemetry::unified_log::warn(
-                        "auth recovery: sampler 401, devbox re-mint failed",
-                        Some(self.session_info.id.0.as_ref()),
-                        Some(serde_json::json!({ "error" : format!("{e}") })),
-                    );
-                }
-            }
         }
         if auth_recovery_eligible && let Some(ref am) = self.auth_manager {
             if am
                 .try_recover_unauthorized(crate::auth::recovery::RecoverySource::Turn)
                 .await
             {
-                tracing::info!(
-                    session_id = % self.session_info.id.0,
-                    "auth recovery: sampler 401, recovered, retrying"
-                );
+                tracing::info!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, recovered, retrying");
                 xai_grok_telemetry::unified_log::info(
                     "auth recovery: sampler 401, recovered, retrying",
                     Some(self.session_info.id.0.as_ref()),
                     None,
                 );
                 self.prepare_sampler_for_turn().await;
-                return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+                return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                    credential: error.credential,
+                    store: RecoveredStore::SessionToken,
+                });
             }
-            tracing::warn!(
-                session_id = % self.session_info.id.0,
-                "auth recovery: sampler 401, refresh failed"
-            );
+            tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
             xai_grok_telemetry::unified_log::warn(
                 "auth recovery: sampler 401, refresh failed",
                 Some(self.session_info.id.0.as_ref()),
@@ -961,7 +1019,10 @@ impl SessionActor {
             && self.try_provider_401_recovery(provider).await
         {
             self.prepare_sampler_for_turn().await;
-            return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+            return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                credential: error.credential,
+                store: RecoveredStore::AuthProvider,
+            });
         }
         if matches!(error.kind, SamplingErrorKind::IdleTimeout) {
             self.signals_handle().record_idle_timeout();
@@ -969,15 +1030,18 @@ impl SessionActor {
         if matches!(error.kind, SamplingErrorKind::EmptyResponse) {
             if let Some(ref ctx) = error.empty_response_context {
                 tracing::warn!(
-                    empty_response = true, empty_reason = ctx.reason.as_str(),
-                    had_reasoning = ctx.had_reasoning, content_len = ctx.content_len,
-                    tool_call_count = ctx.tool_call_count, completion_tokens = ctx
-                    .completion_tokens.unwrap_or(0), reasoning_tokens = ctx
-                    .reasoning_tokens.unwrap_or(0), finish_reason = ctx
-                    .finish_reason_str(), first_choice_seen = ctx.first_choice_seen,
-                    model = % ctx.model,
-                    "empty response after retries exhausted: {reason}", reason = ctx
-                    .reason,
+                    empty_response = true,
+                    empty_reason = ctx.reason.as_str(),
+                    had_reasoning = ctx.had_reasoning,
+                    content_len = ctx.content_len,
+                    tool_call_count = ctx.tool_call_count,
+                    completion_tokens = ctx.completion_tokens.unwrap_or(0),
+                    reasoning_tokens = ctx.reasoning_tokens.unwrap_or(0),
+                    finish_reason = ctx.finish_reason_str(),
+                    first_choice_seen = ctx.first_choice_seen,
+                    model = %ctx.model,
+                    "empty response after retries exhausted: {reason}",
+                    reason = ctx.reason,
                 );
                 {
                     let mut cap = self.streaming_turn_capture.lock();
@@ -992,7 +1056,7 @@ impl SessionActor {
         let auth_mode = self
             .auth_manager
             .as_ref()
-            .and_then(|am| am.current())
+            .and_then(|am| am.current_or_expired())
             .map(|a| a.auth_mode)
             .unwrap_or(crate::auth::AuthMode::ApiKey);
         let auth_mode_str = format!("{auth_mode:?}");
@@ -1002,7 +1066,7 @@ impl SessionActor {
                 "{detailed_message}\n\n\
                  You are using a deprecated authentication method (WebLogin).\n\
                  This auth method is no longer supported and will cause errors.\n\n\
-                 To fix: run `grok logout` then `grok login` to re-authenticate with OAuth2.\n\n\
+                 To fix: run `grok update`, then `grok logout`, then `grok login` to re-authenticate with OAuth2.\n\n\
                  Version: {client_version}"
             );
             self.log_terminal_failure("legacy_auth", error.status_code, &msg);
@@ -1038,9 +1102,9 @@ impl SessionActor {
             if let Some(ref provider) = auth_provider {
                 msg.push_str(
                     &format!(
-                        "\n  Provider:  [auth_provider.{}] (check the provider command and the debug log)",
-                        provider.name
-                    ),
+                    "\n  Provider:  [auth_provider.{}] (check the provider command and the debug log)",
+                    provider.name
+                ),
                 );
             }
             msg.push_str(&format!("\n  Version:   {client_version}"));
@@ -1065,6 +1129,14 @@ impl SessionActor {
         } else {
             error.kind.as_str()
         };
+        let (error_type, detailed_message) = match self.auth_manager.as_ref() {
+            Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
+                &auth_manager.auth_remedy(),
+                detailed_message,
+                error.status_code,
+            ),
+            _ => (error_type, detailed_message),
+        };
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
@@ -1073,11 +1145,6 @@ impl SessionActor {
             },
         ))
         .await;
-        // Credit-exhausted team 403: plain string data (operator-readable), not
-        // `{"message":"API error (status …)","http_status":403}` envelope only.
-        if credit_exhausted_terminal {
-            return Err(acp::Error::internal_error().data(detailed_message));
-        }
         Err(
             acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
                 detailed_message,
@@ -1102,35 +1169,6 @@ impl SessionActor {
         self: &Arc<Self>,
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
-        // Free SuperGrok period debit unproven (flat poll): default **allows**
-        // turns (dogfood). Opt-in hard block via
-        // [auth] allow_spend_when_free_period_debit_unproven = false.
-        // Honesty: warn when unproven with headroom even when not blocking.
-        let unproven_guard = crate::auth::evaluate_free_period_unproven_spend_guard();
-        if unproven_guard.honesty_unproven_allowed() {
-            tracing::warn!(
-                target: "auth.free_period_unproven_guard",
-                allow = unproven_guard.allow_spend_when_unproven,
-                unproven = unproven_guard.flat_poll_unproven,
-                headroom = unproven_guard.free_period_has_headroom,
-                "free SuperGrok period limits not debiting (flat poll); turns allowed by default; team settlement can still move"
-            );
-        }
-        if let Some(msg) = unproven_guard.block_message() {
-            tracing::warn!(
-                target: "auth.free_period_unproven_guard",
-                allow = unproven_guard.allow_spend_when_unproven,
-                unproven = unproven_guard.flat_poll_unproven,
-                headroom = unproven_guard.free_period_has_headroom,
-                "blocking sampler turn (opt-in hard block): free SuperGrok period debit unproven"
-            );
-            // Product message as primary ACP message so the UI does not show
-            // "Internal error: …" for this intentional operator gate.
-            return Err(acp::Error::new(
-                i32::from(acp::Error::internal_error().code),
-                msg,
-            ));
-        }
         self.prepare_sampler_for_turn().await;
         let stream_drained_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1175,8 +1213,8 @@ impl SessionActor {
                     SamplerFailureRecovery::CompactAndResubmit => {
                         Ok(SamplerTurnOutcome::CompactAndResubmit)
                     }
-                    SamplerFailureRecovery::RefreshAuthAndResubmit => {
-                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)
+                    SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
+                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
                     }
                 }
             }
@@ -1191,7 +1229,7 @@ impl SessionActor {
     /// opaque tokens (External/OIDC) on the wire and guaranteed a 401.
     /// Soft failures with a still-usable access token still return here
     /// (grace / optimistic send); 401 recovery remains the safety net.
-    pub(super) async fn refresh_token_if_expired(&self) {
+    pub(crate) async fn refresh_token_if_expired(&self) {
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
             let (model_id, base_url) = self
@@ -1208,21 +1246,30 @@ impl SessionActor {
                             creds.api_key = Some(key);
                             self.chat_state_handle.update_credentials(creds);
                         }
+                        self.clear_auth_compact_suppression();
                         return;
                     }
                     Err(e) => {
                         let hard_expired = !am.has_usable_token();
+                        if hard_expired && creds.api_key.is_some() {
+                            let mut cleared = creds;
+                            cleared.api_key = None;
+                            self.chat_state_handle.update_credentials(cleared);
+                        }
                         tracing::warn!(
-                            error = % e, hard_expired, model = % model_id,
+                            error = %e,
+                            hard_expired,
+                            model = %model_id,
                             "auth: preflight get_valid_token failed"
                         );
                         xai_grok_telemetry::unified_log::warn(
                             "auth.preflight.refresh_failed",
                             Some(self.session_info.id.0.as_ref()),
-                            Some(serde_json::json!(
-                                { "error" : format!("{e}"), "hard_expired" : hard_expired,
-                                "model" : model_id, }
-                            )),
+                            Some(serde_json::json!({
+                                "error": format!("{e}"),
+                                "hard_expired": hard_expired,
+                                "model": model_id,
+                            })),
                         );
                         return;
                     }
@@ -1259,12 +1306,14 @@ impl SessionActor {
             if let Some(exp) = parse_jwt_expiration(key) {
                 let remaining_secs = (exp - chrono::Utc::now()).num_seconds();
                 tracing::debug!(
-                    model = % current_model_id, remaining_secs,
+                    model = %current_model_id,
+                    remaining_secs,
                     "JWT token valid, no refresh needed"
                 );
             } else {
                 tracing::debug!(
-                    model = % current_model_id, key_len = key.len(),
+                    model = %current_model_id,
+                    key_len = key.len(),
                     "Token is not a JWT, expiry-based refresh not applicable"
                 );
             }
@@ -1273,7 +1322,8 @@ impl SessionActor {
         let remaining_secs =
             parse_jwt_expiration(key).map_or(0, |exp| (exp - chrono::Utc::now()).num_seconds());
         tracing::info!(
-            model = % current_model_id, remaining_secs,
+            model = %current_model_id,
+            remaining_secs,
             "JWT near expiry, refreshing from config.toml"
         );
         let Some(new_key) = self.reload_api_key_from_config(&current_model_id) else {
@@ -1281,7 +1331,7 @@ impl SessionActor {
         };
         if key == &new_key {
             tracing::warn!(
-                model = % current_model_id,
+                model = %current_model_id,
                 "Config.toml returned same token (not yet rotated by external process?)"
             );
             return;
@@ -1289,7 +1339,9 @@ impl SessionActor {
         let new_remaining_secs = parse_jwt_expiration(&new_key)
             .map_or(0, |exp| (exp - chrono::Utc::now()).num_seconds());
         tracing::info!(
-            model = % current_model_id, new_remaining_secs, key_len = new_key.len(),
+            model = %current_model_id,
+            new_remaining_secs,
+            key_len = new_key.len(),
             "Refreshed API token from config.toml"
         );
         let mut creds = self.chat_state_handle.get_credentials().await;
@@ -1298,10 +1350,10 @@ impl SessionActor {
     }
     fn reload_api_key_from_config(&self, current_model_id: &str) -> Option<String> {
         let raw_config = crate::config::load_effective_config()
-            .map_err(|e| tracing::warn!(error = % e, "Failed to reload config"))
+            .map_err(|e| tracing::warn!(error = %e, "Failed to reload config"))
             .ok()?;
         let config = crate::agent::config::Config::new_from_toml_cfg(&raw_config)
-            .map_err(|e| tracing::warn!(error = % e, "Failed to parse reloaded config.toml"))
+            .map_err(|e| tracing::warn!(error = %e, "Failed to parse reloaded config.toml"))
             .ok()?;
         let config_model = config
             .config_models
@@ -1310,8 +1362,9 @@ impl SessionActor {
             .map(|(_, v)| v);
         let Some(model) = config_model else {
             tracing::warn!(
-                model = % current_model_id, available = ? config.config_models.keys()
-                .collect::< Vec < _ >> (), "Model not found in config.toml [model.*]"
+                model = %current_model_id,
+                available = ?config.config_models.keys().collect::<Vec<_>>(),
+                "Model not found in config.toml [model.*]"
             );
             return None;
         };
@@ -1321,7 +1374,8 @@ impl SessionActor {
         );
         if key.is_none() {
             tracing::warn!(
-                model = % current_model_id, env_key = ? model.env_key,
+                model = %current_model_id,
+                env_key = ?model.env_key,
                 "No api_key or env_key resolved for model"
             );
         }
@@ -1373,9 +1427,7 @@ impl SessionActor {
     pub(super) async fn record_assistant_response(&self, assistant_item: ConversationItem) {
         self.signals_handle().record_assistant_message();
         if let ConversationItem::Assistant(ref a) = assistant_item {
-            tracing::info!(
-                model_id = ? a.model_id, "DEBUG record_assistant_response model_id"
-            );
+            tracing::info!(model_id = ?a.model_id, "DEBUG record_assistant_response model_id");
         }
         if let ConversationItem::Assistant(ref a) = assistant_item
             && let Some(first_call) = a.tool_calls.first()

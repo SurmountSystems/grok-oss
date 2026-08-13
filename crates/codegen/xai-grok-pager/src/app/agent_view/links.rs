@@ -685,6 +685,7 @@ mod link_click_tests {
             },
             &bundle,
             false,
+            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
@@ -907,39 +908,6 @@ mod link_click_tests {
             "click where stop used to be must not cancel the turn under a dropdown"
         );
     }
-    /// Work B: status-row `[pause]` is ToggleGlobalPause, never CancelTurn.
-    #[test]
-    fn pause_button_click_dispatches_global_pause_not_cancel() {
-        let reg = ActionRegistry::defaults();
-        let mut agent = make_agent();
-        agent.last_terminal_size = (80, 30);
-        agent.session.state = AgentState::TurnRunning;
-        draw_banner_frame(&mut agent, &reg, &[], 0);
-        let pause = agent
-            .hit_pause_button
-            .rect
-            .expect("running turn must arm the pause rect");
-        let stop = agent
-            .hit_cancel_button
-            .rect
-            .expect("running turn must arm the stop rect");
-        assert_ne!(pause, stop, "pause and stop must be distinct hit targets");
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(pause.x, pause.y)), &reg);
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::ToggleGlobalPause)),
-            "pause click must dispatch ToggleGlobalPause, got {outcome:?}"
-        );
-        assert!(
-            !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-            "pause must never dispatch CancelTurn"
-        );
-        let outcome = agent.handle_input(&Event::Mouse(mouse_down(stop.x, stop.y)), &reg);
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-            "stop click must still dispatch CancelTurn, got {outcome:?}"
-        );
-    }
-
     /// Clicking the still-running watcher cue toggles the tasks pane like
     /// Ctrl+G; only the first click that reveals the pane shows the one-time
     /// shortcut toast.
@@ -2132,7 +2100,7 @@ mod link_click_tests {
             }
         }
         agent.scrollback.prepare_layout(80, 40);
-        let _ = agent.handle_scrollback_click(std::time::Instant::now(), 0, false); // select only
+        let _ = agent.handle_scrollback_click(std::time::Instant::now(), 0, false);
         assert!(agent.scrollback.is_selected_group_header());
         assert!(
             agent.toast.is_none(),
@@ -2329,9 +2297,9 @@ mod link_click_tests {
     #[test]
     fn router_slash_blocked_while_btw_panel_open() {
         let (mut agent, reg) = make_search_agent();
-        agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::loading(
-            "q".into(),
-        ));
+        agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
+            question: "q".into(),
+        });
         route_slash(&mut agent, &reg);
         assert!(agent.scrollback_search.is_none());
     }
@@ -2544,6 +2512,7 @@ mod link_click_tests {
             crate::app::agent_view::BannerSlotParams::none(),
             &bundle,
             false,
+            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
@@ -2608,7 +2577,7 @@ mod link_click_tests {
     /// (wrongly or historically) handed to `draw` at the same time. The
     /// session tip's bold `Tip: ` prefix used to underpaint the row and —
     /// because `Cell::set_style` merges modifiers — leak BOLD into the first
-    /// five cells of the ephemeral tip ("**Queue**d · Enter to interject").
+    /// five cells of the ephemeral tip ("**Queue**d · Enter to send now").
     #[test]
     fn ephemeral_tip_not_bolded_by_session_tip_underpaint() {
         use ratatui::style::Modifier;
@@ -2644,6 +2613,7 @@ mod link_click_tests {
                 ..crate::app::agent_view::BannerSlotParams::none()
             },
             &bundle,
+            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2722,6 +2692,7 @@ mod link_click_tests {
                 tip: Some(long_tip.as_str()),
             },
             &bundle,
+            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),

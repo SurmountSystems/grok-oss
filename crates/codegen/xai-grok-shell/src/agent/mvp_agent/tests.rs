@@ -4231,7 +4231,7 @@ fn disconnect_unloads_idle_session_without_finalize() {
             .expect("fake actor channel must stay open");
         assert!(
             matches!(shutdown, TestSessionCommand::Shutdown(_)),
-            "idle-unload must send SessionCommand::Shutdown(crate::session::commands::ShutdownKind::Graceful)"
+            "idle-unload must send SessionCommand::Shutdown"
         );
         assert!(
             agent.finalize_spy.borrow().is_empty(),

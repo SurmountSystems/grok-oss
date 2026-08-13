@@ -11,14 +11,12 @@ use agent_client_protocol as acp;
 pub struct UsageCommand;
 
 /// Detect external-auth installs once at pager startup.
-#[allow(dead_code)] // startup gate for AppCtx::usage_command_visible
 pub(crate) fn detect_external_auth_provider(auth_methods: &[acp::AuthMethod]) -> bool {
     auth_methods.iter().any(auth_method_is_external_provider)
         || auth_provider_env_set()
         || auth_provider_config_set()
 }
 
-#[allow(dead_code)] // helper for detect_external_auth_provider
 fn auth_method_is_external_provider(method: &acp::AuthMethod) -> bool {
     method
         .meta()
@@ -28,14 +26,12 @@ fn auth_method_is_external_provider(method: &acp::AuthMethod) -> bool {
         .unwrap_or(false)
 }
 
-#[allow(dead_code)] // helper for detect_external_auth_provider
 fn auth_provider_env_set() -> bool {
     std::env::var("GROK_AUTH_PROVIDER_COMMAND")
         .ok()
         .is_some_and(|s| !s.trim().is_empty())
 }
 
-#[allow(dead_code)] // helper for detect_external_auth_provider
 fn auth_provider_config_set() -> bool {
     let Ok(raw) = xai_grok_shell::config::load_effective_config() else {
         return false;
@@ -100,7 +96,7 @@ impl SlashCommand for UsageCommand {
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        if !ctx.usage_command_visible() {
+        if !ctx.usage_command_visible {
             return CommandResult::Error("/usage is not available.".into());
         }
         let arg = args.trim();

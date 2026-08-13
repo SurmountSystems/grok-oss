@@ -350,6 +350,25 @@ pub fn sampling_identity_after_allowance_sync(
     None
 }
 
+impl Default for CreditBalance {
+    fn default() -> Self {
+        Self {
+            usage_pct: 0.0,
+            effective_usage_pct: 0.0,
+            period_end_display: None,
+            period_end_at: None,
+            pay_as_you_go: false,
+            on_demand_cap_cents: None,
+            on_demand_used_cents: None,
+            prepaid_balance_cents: None,
+            period_type: None,
+            is_unified_billing_user: None,
+            grok_build_usage_pct: None,
+            included_usage_known: false,
+        }
+    }
+}
+
 impl CreditBalance {
     /// Label for the percentage allowance, chosen from the period type:
     /// "Weekly limit" / "Monthly limit", falling back to "Usage" when unknown.

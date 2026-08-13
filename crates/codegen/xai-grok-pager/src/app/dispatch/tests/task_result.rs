@@ -1032,10 +1032,9 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
     // PersistPreferredModel effect emitted.
     assert_eq!(effects.len(), 1);
     assert!(matches!(
-            &effects[0],
-            Effect::PersistPreferredModel { model_id: mid, .. }
-    if *mid == model_id.clone()
-        ));
+        &effects[0],
+        Effect::PersistPreferredModel { model_id: mid, .. } if *mid == model_id.clone()
+    ));
 }
 
 #[test]
@@ -1749,7 +1748,11 @@ fn delete_session_complete_removes_only_matching_source_and_id() {
         .active_modal
         .as_mut()
     {
-        *pending_delete = Some(("local".into(), "s1".into(), "/r".into()));
+        *pending_delete = Some(crate::views::session_picker::PendingDelete {
+            source: "local".into(),
+            session_id: "s1".into(),
+            cwd: "/r".into(),
+        });
     }
 
     let _ = dispatch_task_result(
@@ -2996,73 +2999,5 @@ fn session_list_nonempty_partial_modal_toasts_in_chat_mode_only() {
     assert!(
         app.agents[&AgentId(0)].toast.is_none(),
         "Build-mode modal non-empty degraded list stays silent"
-    );
-}
-
-/// Mid-`/rebuild` progress updates toast only (stable height). Must not push
-/// scrollback system blocks (would fight footer layout and flood transcript).
-/// Paired with `xai-grok-update` capture contracts: raw cargo never hits the TTY.
-#[test]
-fn rebuild_progress_updates_bar_and_toast_not_scrollback() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let before_len = app.agents[&id].scrollback.len();
-    let msg = "Compiling xai-grok-pager (12 packages)".to_string();
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::RebuildProgress {
-            agent_id: id,
-            message: msg.clone(),
-            fraction: 0.42,
-        }),
-        &mut app,
-    );
-    let agent = &app.agents[&id];
-    assert_eq!(
-        agent.scrollback.len(),
-        before_len,
-        "RebuildProgress must not push scrollback blocks"
-    );
-    let progress = agent
-        .rebuild_progress
-        .as_ref()
-        .expect("rebuild_progress strip must be set");
-    assert!(
-        (progress.fraction - 0.42).abs() < 1e-5,
-        "fraction stored: {}",
-        progress.fraction
-    );
-    assert_eq!(progress.detail, msg);
-    let toast = agent.toast.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
-    assert!(
-        toast.contains("42%") && toast.contains("Compiling"),
-        "expected toast to carry percent + stage, got {toast:?}"
-    );
-    assert!(
-        xai_grok_update::is_stable_height_progress_line(&msg),
-        "stage payload must be stable-height: {msg:?}"
-    );
-}
-
-/// Contract: out-of-range fractions are clamped when applied to agent state.
-#[test]
-fn rebuild_progress_clamps_fraction_on_dispatch() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::RebuildProgress {
-            agent_id: id,
-            message: "overflow".into(),
-            fraction: 2.5,
-        }),
-        &mut app,
-    );
-    let progress = app.agents[&id]
-        .rebuild_progress
-        .as_ref()
-        .expect("progress set");
-    assert!(
-        (progress.fraction - 1.0).abs() < 1e-5,
-        "must clamp to 1.0, got {}",
-        progress.fraction
     );
 }

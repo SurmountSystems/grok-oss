@@ -1,5 +1,5 @@
-pub(crate) mod api_key_probe;
 pub mod allowance_exhaust_from_billing;
+pub(crate) mod api_key_probe;
 pub(crate) mod attribution;
 mod auth_provider;
 mod config;
@@ -111,11 +111,6 @@ pub use model::{
     supergrok_identity_id_from_auth, upsert_supergrok_session,
 };
 pub(crate) use model::{TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired};
-pub(crate) use refresh::DiagnosticUploader;
-pub use harness_secrets::{
-    DISABLE_SHARED_HARNESS_ENV, GROK_ZED_CONFIG_DIR_ENV, SharedKeySource,
-    probe_shared_openrouter_key, probe_shared_openrouter_key_default,
-};
 pub use openrouter::{
     OPENROUTER_API_KEY_ENV, OPENROUTER_API_KEYS_ENV, OPENROUTER_API_URL,
     OPENROUTER_GROK_45_CATALOG_ID, OpenRouterAuthError, OpenRouterCreditsData,
@@ -125,6 +120,7 @@ pub use openrouter::{
     openrouter_balance_usd_from_credits, run_openrouter_login, run_openrouter_logout,
     store_openrouter_api_key, usd_to_cents,
 };
+pub(crate) use refresh::DiagnosticUploader;
 pub use secret_entry::{
     API_KEY_STDIN_SENTINEL, CliApiKeyError, is_argv_api_key_secret, materialize_cli_api_key,
     materialize_cli_api_key_with, prompt_api_key_no_echo, read_api_key_from_stdin,

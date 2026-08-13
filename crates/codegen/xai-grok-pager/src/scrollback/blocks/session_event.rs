@@ -56,14 +56,8 @@ pub enum SessionEvent {
     },
     /// Auto-compaction started (context window threshold reached).
     CompactionStarted {
-        /// Usage percentage of context window at fire time (e.g., 81).
-        /// This is **not** the configured threshold — see `threshold_percent`.
+        /// Percentage of context window used (e.g., 85).
         percentage: u8,
-        /// Configured auto-compact threshold percent (live session).
-        /// `None` when the shell did not send it (older payloads).
-        threshold_percent: Option<u8>,
-        /// Configured absolute-token threshold when in tokens mode.
-        threshold_tokens: Option<u64>,
     },
     /// Auto-compaction completed successfully.
     CompactionCompleted {
@@ -190,26 +184,9 @@ impl SessionEvent {
             } => {
                 format!("Turn failed: {error}")
             }
-            SessionEvent::CompactionStarted {
-                percentage,
-                threshold_percent,
-                threshold_tokens,
-            } => match (threshold_tokens, threshold_percent) {
-                (Some(t), _) => {
-                    let label = if *t >= 1000 {
-                        format!("{}k", t / 1000)
-                    } else {
-                        t.to_string()
-                    };
-                    format!(
-                        "Context {percentage}% full (auto-compact at {label} tokens). Compacting…"
-                    )
-                }
-                (None, Some(threshold)) => format!(
-                    "Context {percentage}% full (auto-compact at {threshold}%). Compacting…"
-                ),
-                (None, None) => format!("Context {percentage}% full. Compacting…"),
-            },
+            SessionEvent::CompactionStarted { percentage } => {
+                format!("Context {percentage}% full. Compacting…")
+            }
             SessionEvent::CompactionCompleted {
                 tokens_before,
                 tokens_after,
@@ -375,12 +352,6 @@ pub struct SessionEventBlock {
     /// The prompt turn a terminal marker belongs to, when known. Gates
     /// which stop-hook batches may merge into it.
     pub prompt_id: Option<String>,
-    /// The marker was pushed at park time (user-interruptible blocking
-    /// wait): the turn is still running shell-side, so it must never accept
-    /// stop hooks. Rendering is unchanged — a parked wait reads as stopped.
-    /// Cleared when the completion folds into the uncommitted tail marker;
-    /// a committed tail (minimal print-once) gets a fresh row instead.
-    pub parked: bool,
 }
 
 impl SessionEventBlock {
@@ -390,7 +361,6 @@ impl SessionEventBlock {
             event,
             stop_hooks: Vec::new(),
             prompt_id: None,
-            parked: false,
         }
     }
 
@@ -405,15 +375,7 @@ impl SessionEventBlock {
             event,
             stop_hooks,
             prompt_id,
-            parked: false,
         }
-    }
-
-    /// Whether this marker may carry/accept stop-hook runs: a turn-terminal
-    /// event that is not a parked line (which renders while the turn is
-    /// still running shell-side, before any Stop hook fires).
-    pub fn accepts_stop_hooks(&self) -> bool {
-        self.event.is_turn_terminal() && !self.parked
     }
 
     /// Whether any attached stop hook actually ran (non-skipped). Gates the
@@ -716,46 +678,6 @@ impl BlockContent for SessionEventBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn compaction_started_banner_includes_threshold() {
-        let with_threshold = SessionEvent::CompactionStarted {
-            percentage: 81,
-            threshold_percent: Some(80),
-            threshold_tokens: None,
-        };
-        assert_eq!(
-            with_threshold.message(),
-            "Context 81% full (auto-compact at 80%). Compacting…"
-        );
-
-        let at_product_default = SessionEvent::CompactionStarted {
-            percentage: 95,
-            threshold_percent: Some(95),
-            threshold_tokens: None,
-        };
-        assert_eq!(
-            at_product_default.message(),
-            "Context 95% full (auto-compact at 95%). Compacting…"
-        );
-
-        let tokens_mode = SessionEvent::CompactionStarted {
-            percentage: 80,
-            threshold_percent: None,
-            threshold_tokens: Some(200_000),
-        };
-        assert_eq!(
-            tokens_mode.message(),
-            "Context 80% full (auto-compact at 200k tokens). Compacting…"
-        );
-
-        let legacy = SessionEvent::CompactionStarted {
-            percentage: 81,
-            threshold_percent: None,
-            threshold_tokens: None,
-        };
-        assert_eq!(legacy.message(), "Context 81% full. Compacting…");
-    }
 
     #[test]
     fn turn_completed_message() {

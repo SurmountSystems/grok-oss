@@ -12,8 +12,8 @@ use super::state::*;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind, SettingMeta,
-    SettingOwner, SettingValue, SettingsRegistry, StringValidator,
+    CodingDataSharingLock, EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey,
+    SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry, StringValidator,
 };
 use crate::theme::Theme;
 use xai_grok_shell::agent::config::UiConfig;
@@ -40,10 +40,9 @@ fn contextual_hints_group_sub_sheet_flow() {
         .expect("group row present");
     assert!(
         !s.rows.iter().any(|r| matches!(
-                    r,
-                    RowEntry::Setting { key, .. }
-        if key.starts_with("contextual_hints.")
-                )),
+            r,
+            RowEntry::Setting { key, .. } if key.starts_with("contextual_hints.")
+        )),
         "child rows must be hidden from the top-level list",
     );
 
@@ -543,6 +542,7 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
         &theme,
         false, // is_expanded
         false, // is_hovered
+        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -565,10 +565,9 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
 /// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
 /// `multiline_mode`, the Agent entries `permission_mode` and
 /// `plan_mode`, the Privacy entry `coding_data_sharing`, the
-/// Models entry `default_model`, the Session entry
-/// `auto_compact_threshold_percent`, and the Advanced entries
-/// `show_tips` and `auto_update`. `default_reasoning_effort` is
-/// not exposed in the modal.
+/// Models entry `default_model`, and the Advanced entries
+/// `show_tips` and `auto_update`. `default_reasoning_effort` and
+/// `auto_compact_threshold_percent` are not exposed in the modal.
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
     let prev_voice = crate::app::voice_mode_enabled();
@@ -594,7 +593,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Agent,
             &SettingCategory::Privacy,
             &SettingCategory::Models,
-            &SettingCategory::Session,
+            // The Session category has no registered settings, so its
+            // header is not emitted.
             // Advanced category (first entries:
             // `show_tips`, `auto_update`).
             &SettingCategory::Advanced,
@@ -617,15 +617,11 @@ fn rows_contain_categories_and_settings_through_pr_14() {
         vec![
             // Booleans.
             "compact_mode",
-            // SHARED hide_header (Appearance; default off).
-            "hide_header",
             "screen_mode",
             "show_timestamps",
             "show_timeline",
             // PAGER-owned page_flip_on_send (Appearance).
             "page_flip_on_send",
-            // SHARED scrub_ascii_punct (Appearance; default ON).
-            "scrub_ascii_punct",
             "simple_mode",
             // PAGER-owned vim_mode (Appearance,
             // paired with simple_mode).
@@ -641,16 +637,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "max_thoughts_width",
             // SHELL-owned show_thinking_blocks (Appearance; live cache).
             "show_thinking_blocks",
-            // SHELL-owned always_expand_thinking (Appearance; live cache;
-            // default OFF — keep thinking fully expanded, hide Ctrl+E).
-            "always_expand_thinking",
             // PAGER-owned respect_manual_folds (Appearance,
             // persisted to pager.toml).
             "respect_manual_folds",
-            // PAGER-owned bubble_copy_buttons (Appearance; always-on ⧉
-            // on user/assistant bubbles; default ON; pager.toml
-            // `[scrollback.display].bubble_copy_buttons`).
-            "bubble_copy_buttons",
             // SHELL-owned group_tool_verbs (Appearance; live cache).
             "group_tool_verbs",
             // SHELL-owned collapsed_edit_blocks (Appearance; live cache,
@@ -669,6 +658,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // both the pager drain and the shell promote. Registered before
             // multiline_mode, so it renders first).
             "combine_queued_prompts",
+            "confirm_before_rewind",
             // PAGER-owned multiline (Editor category).
             "multiline_mode",
             // SHELL-owned prompt_suggestions (Editor; tab autocomplete
@@ -689,25 +679,6 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // PAGER-owned plan_mode (Agent category).
             "plan_mode",
-            // SHARED plan_approval_park (Agent; after plan_mode — soft toast
-            // vs force modal on exit_plan_mode park).
-            "plan_approval_park",
-            // SHARED cancel_subagents_on_turn_cancel (Agent; sticky cancel
-            // picker: ask / always_stop / always_continue).
-            "cancel_subagents_on_turn_cancel",
-            // SHELL-owned auto_run_implement (Agent category; after plan_mode).
-            "auto_run_implement",
-            // SHELL-owned economic_mode (Agent; after auto_run_implement).
-            "economic_mode",
-            // Token Economy ([token_economy]) — implement-effort policy + pacing.
-            "token_economy.cap_implement_effort_when_economic",
-            "token_economy.max_implement_effort",
-            "token_economy.min_implement_effort",
-            "token_economy.desired_implement_effort",
-            "token_economy.lock_implement_effort",
-            "token_economy.show_period_pacing",
-            "token_economy.local_spend_ledger",
-            "token_economy.reconcile_management_usage",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
@@ -716,15 +687,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
-            // Session category — resume canceled turn, then recap knobs.
-            "resume_canceled_turn_on_restart",
-            // SHELL notifications.session_recap (auto return-from-away).
-            "notifications.session_recap",
-            // SHELL notifications.session_recap_threshold_secs (debounce).
-            "notifications.session_recap_threshold_secs",
-            // SHELL features.session_recap (master gate; restart-required).
-            "features.session_recap",
-            "auto_compact_threshold_percent",
+            // `auto_compact_threshold_percent` (Session category) is
+            // not exposed in the modal.
             // Advanced category.
             "show_tips",
             // Per-tip contextual-hints GROUP row, repositioned right after
@@ -1014,6 +978,7 @@ fn selected_browse_row_label_is_bold() {
         &theme,
         false,
         false,
+        None,
     );
 
     assert!(
@@ -1027,46 +992,12 @@ fn selected_browse_row_label_is_bold() {
 
 #[test]
 fn settings_list_row_bg_terminal_native_elevates_selection() {
-    // ANSI DarkGray elevate is for non-DOGE terminal-native chrome.
-    let _pin = crate::theme::cache::pin_theme();
-    crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
-
     let theme = Theme::terminal_default();
     assert!(matches!(theme.bg_visual, Color::Reset));
     assert_eq!(settings_list_row_bg(&theme, true, false), Color::DarkGray);
     assert_eq!(settings_list_row_bg(&theme, false, true), Color::DarkGray);
     assert_eq!(settings_list_row_bg(&theme, false, false), Color::Reset);
     assert_eq!(settings_list_row_bg(&theme, true, true), Color::DarkGray);
-}
-
-/// DOGE pure 8-colour: settings rows must never paint ANSI Gray / DarkGray.
-#[test]
-fn settings_list_row_bg_doge_never_uses_ansi_gray() {
-    let _pin = crate::theme::cache::pin_theme();
-    crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-
-    let theme = Theme::doge();
-    for (sel, hov) in [(false, false), (true, false), (false, true), (true, true)] {
-        let bg = settings_list_row_bg(&theme, sel, hov);
-        assert!(
-            !matches!(bg, Color::Gray | Color::DarkGray),
-            "DOGE settings row bg must stay on pure palette, got {bg:?} (sel={sel} hov={hov})"
-        );
-        // Surfaces are pure black on DOGE.
-        assert_eq!(bg, Color::Rgb(0, 0, 0));
-    }
-
-    // Even with a terminal-native-looking theme struct (Reset surfaces), live
-    // DOGE kind must not fall through to ANSI DarkGray elevate.
-    let native_looking = Theme::terminal_default();
-    assert!(matches!(native_looking.bg_visual, Color::Reset));
-    for (sel, hov) in [(true, false), (false, true), (true, true)] {
-        let bg = settings_list_row_bg(&native_looking, sel, hov);
-        assert!(
-            !matches!(bg, Color::Gray | Color::DarkGray),
-            "DOGE kind + Reset surfaces must not invent DarkGray, got {bg:?}"
-        );
-    }
 }
 
 /// `MouseEventKind::Moved` over a setting row's hit-rect sets
@@ -1187,9 +1118,9 @@ fn mouse_moved_over_header_does_not_set_hover() {
 
 /// `state.hover_row = Some(idx)` paints the hovered row's bg
 /// with the theme's `bg_hover` color. (Mirrors the existing
-/// `picker_highlights_current_choice` test's pattern: the
-/// `assert_eq` against `theme.bg_hover` survives both colored
-/// and quantize-to-Reset color levels.)
+/// `picker_separates_focus_highlight_from_committed_marker` test's
+/// pattern: the `assert_eq` against `theme.bg_hover` survives both
+/// colored and quantize-to-Reset color levels.)
 #[test]
 fn hover_row_renders_with_hover_style() {
     let mut s = make_state();
@@ -1505,6 +1436,7 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &theme,
         true,  // is_expanded — gate on
         false, // is_hovered
+        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1529,6 +1461,7 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &theme,
         false, // is_expanded — off
         false, // is_hovered
+        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1577,6 +1510,7 @@ fn render_setting_row_hides_restart_pill_when_at_default_and_collapsed() {
         &theme,
         false, // is_expanded
         false, // is_hovered
+        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -2358,8 +2292,8 @@ fn int_editing_value_click_on_value_text_is_noop() {
 #[test]
 fn picking_enum_esc_dispatches_preview_revert_for_each_key() {
     let cases: &[(&str, &str)] = &[
-        ("theme", "doge"),
-        ("auto_dark_theme", "doge"),
+        ("theme", "groknight"),
+        ("auto_dark_theme", "groknight"),
         ("auto_light_theme", "grokday"),
     ];
     for &(key, original) in cases {
@@ -2397,16 +2331,16 @@ fn picking_enum_esc_dispatches_preview_revert_for_each_key() {
 #[test]
 fn picking_enum_esc_returns_to_browse() {
     let mut s = make_state();
-    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("doge"), true);
+    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("groknight"), true);
     let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(
-                name, "doge",
+                name, "groknight",
                 "Esc revert must dispatch the original canonical"
             );
         }
-        other => panic!("expected Action::PreviewTheme(\"doge\") on Esc, got {other:?}"),
+        other => panic!("expected Action::PreviewTheme(\"groknight\") on Esc, got {other:?}"),
     }
     assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
@@ -2628,6 +2562,123 @@ fn picker_esc_returns_to_browse_after_preview_nav() {
     );
 }
 
+/// `/privacy` deep-link: focus + enter picker with `close_on_picker_exit`,
+/// then Esc closes the modal entirely (not Browse).
+#[test]
+fn deep_link_picker_esc_closes_modal() {
+    let mut s = make_state();
+    assert!(s.focus_key("coding_data_sharing"));
+    assert!(s.try_enter_picking_enum());
+    s.close_on_picker_exit = true;
+    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Close),
+        "deep-link Esc must Close, got {outcome:?}"
+    );
+    assert!(
+        !s.close_on_picker_exit,
+        "flag must clear after Esc even when closing"
+    );
+}
+
+/// Settings → Privacy row → Enter into chooser: Esc returns to Browse.
+#[test]
+fn browse_enter_picker_esc_returns_to_browse() {
+    let mut s = make_state();
+    assert!(s.focus_key("coding_data_sharing"));
+    assert!(s.try_enter_picking_enum());
+    assert!(!s.close_on_picker_exit);
+    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "browse-path Esc must stay open (Changed), got {outcome:?}"
+    );
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "browse-path Esc must return to Browse, got {:?}",
+        s.mode()
+    );
+}
+
+/// Deep-link Enter commits the choice and closes the modal (not Browse).
+#[test]
+fn deep_link_commit_closes_modal() {
+    let mut s = make_state();
+    assert!(s.focus_key("coding_data_sharing"));
+    assert!(s.try_enter_picking_enum());
+    s.close_on_picker_exit = true;
+
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match outcome {
+        SettingsKeyOutcome::ActionThenClose(Action::SetCodingDataSharing { opted_in }) => {
+            assert!(!opted_in, "default snapshot is opt-out");
+        }
+        other => panic!("expected ActionThenClose(SetCodingDataSharing), got {other:?}"),
+    }
+    assert!(!s.close_on_picker_exit);
+}
+
+/// Browse-path Enter commits and returns to Browse (not Close).
+#[test]
+fn browse_path_enter_commit_returns_to_browse() {
+    let mut s = make_state();
+    assert!(s.focus_key("coding_data_sharing"));
+    assert!(s.try_enter_picking_enum());
+    assert!(!s.close_on_picker_exit);
+
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetCodingDataSharing { opted_in }) => {
+            assert!(!opted_in, "default snapshot is opt-out");
+        }
+        other => panic!("expected Action(SetCodingDataSharing), got {other:?}"),
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "browse-path Enter must return to Browse, got {:?}",
+        s.mode()
+    );
+    assert!(!s.close_on_picker_exit);
+}
+
+/// Deep-link Enter on a preview enum commits via Set* and closes.
+#[test]
+fn deep_link_theme_commit_closes_with_set() {
+    let mut s = make_state();
+    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("groknight"), true);
+    s.close_on_picker_exit = true;
+
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match outcome {
+        SettingsKeyOutcome::ActionThenClose(Action::SetTheme(name)) => {
+            assert_eq!(name, "auto");
+        }
+        other => panic!("expected ActionThenClose(SetTheme), got {other:?}"),
+    }
+    assert!(!s.close_on_picker_exit);
+}
+
+/// Deep-link Esc on a preview enum reverts the live preview and closes.
+#[test]
+fn deep_link_picker_esc_reverts_preview_and_closes() {
+    let mut s = make_state();
+    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("groknight"), true);
+    s.close_on_picker_exit = true;
+
+    let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    match outcome {
+        SettingsKeyOutcome::ActionThenClose(Action::PreviewTheme(name)) => {
+            assert_eq!(name, "groknight");
+        }
+        other => panic!("expected ActionThenClose(PreviewTheme), got {other:?}"),
+    }
+    assert!(!s.close_on_picker_exit);
+}
+
 /// The picker renders every choice in declaration order, top to
 /// bottom. Asserts each choice's `display` string and description
 /// appears on the expected row with the documented spacing.
@@ -2694,18 +2745,12 @@ fn picker_renders_choices_in_order() {
     );
 }
 
-/// The currently-focused choice renders with the filled-disc
-/// marker `●`, `accent_user` marker color, `bg_visual` row bg,
-/// AND **BOLD** display text — three independent focus cues for
-/// low-contrast theme compatibility (parity with `cancel_turn_panel`).
+/// Focus (BG + bold) tracks `choices_idx`; the filled-disc marker
+/// tracks the committed `original_value` until Enter.
 #[test]
-fn picker_highlights_current_choice() {
-    // Pin theme so process-global Theme::current / terminal-native lock from
-    // concurrent tests cannot flip row-bg tokens mid-assert (bg_visual vs
-    // DarkGray elevate path).
-    let _pin = crate::theme::cache::pin_theme();
+fn picker_separates_focus_highlight_from_committed_marker() {
     let mut s = picker_test_state();
-    // Focus the second choice (index 1).
+    // Focus the second choice while committed value remains "first".
     s.transition_to_picking_enum("test_enum", 1, SettingValue::Enum("first"), true);
     let area = Rect {
         x: 0,
@@ -2725,32 +2770,57 @@ fn picker_highlights_current_choice() {
             .map(|c| c.symbol().to_string())
             .unwrap_or_default()
     };
-    // Layout: rows 3..6 are choices (with subtitle on row 1).
-    assert_eq!(marker_at(3), "\u{25CB}", "row 3 (unfocused) should be ○");
-    assert_eq!(marker_at(4), "\u{25CF}", "row 4 (focused) should be ●");
-    assert_eq!(marker_at(5), "\u{25CB}", "row 5 (unfocused) should be ○");
+    let marker_fg = |buf: &Buffer, y: u16| -> Option<ratatui::style::Color> {
+        buf.cell((area.x + 1, y)).and_then(|c| c.style().fg)
+    };
+    // Layout: rows 3..5 are choices (with subtitle on row 1).
+    // Row 3 = committed "first" (unfocused), row 4 = focused "second".
+    assert_eq!(
+        marker_at(3),
+        "\u{25CF}",
+        "row 3 (committed, unfocused) should be ●"
+    );
+    assert_eq!(
+        marker_at(4),
+        "\u{25CB}",
+        "row 4 (focused, not committed) should be ○"
+    );
+    assert_eq!(marker_at(5), "\u{25CB}", "row 5 (neither) should be ○");
+
+    // Marker accent follows committed state, not focus.
+    if theme.accent_user != theme.gray {
+        assert_eq!(
+            marker_fg(&buf, 3),
+            Some(theme.accent_user),
+            "committed marker must use accent_user"
+        );
+        assert_eq!(
+            marker_fg(&buf, 4),
+            Some(theme.gray),
+            "focused-but-uncommitted marker must use gray"
+        );
+    }
 
     // Cell at the LAST column of each row carries the row bg
-    // independent of prefix-width tweaks.
+    // independent of prefix-width tweaks. Compare via
+    // `settings_list_row_bg` so terminal-native themes (Reset
+    // tokens elevated to DarkGray) pass too.
     let bg_at = |y: u16| -> Option<ratatui::style::Color> {
         buf.cell((area.x + area.width - 1, y))
             .and_then(|c| c.style().bg)
     };
     assert_eq!(
         bg_at(4),
-        Some(theme.bg_visual),
-        "focused row must have bg_visual background"
+        Some(settings_list_row_bg(&theme, true, false)),
+        "focused row must use selection background"
     );
     assert_eq!(
         bg_at(3),
-        Some(theme.bg_base),
-        "unfocused row must have bg_base background"
+        Some(settings_list_row_bg(&theme, false, false)),
+        "committed-but-unfocused row must use base background"
     );
 
-    // Display text on focused row carries BOLD modifier
-    // (three focus cues). Display "Second
-    // Option" starts at col `PICKER_PREFIX_W` (= 4). The 'S' at
-    // col 4 should be bold.
+    // Display text on focused row carries BOLD; committed alone does not.
     let focused_modifier = buf
         .cell((area.x + PICKER_PREFIX_W, 4))
         .map(|c| c.style().add_modifier)
@@ -2759,13 +2829,156 @@ fn picker_highlights_current_choice() {
         focused_modifier.contains(Modifier::BOLD),
         "focused row's display must be BOLD, got modifiers {focused_modifier:?}"
     );
-    let unfocused_modifier = buf
+    let committed_unfocused_modifier = buf
         .cell((area.x + PICKER_PREFIX_W, 3))
         .map(|c| c.style().add_modifier)
         .unwrap_or_default();
     assert!(
+        !committed_unfocused_modifier.contains(Modifier::BOLD),
+        "committed-but-unfocused row must NOT be BOLD, got modifiers {committed_unfocused_modifier:?}"
+    );
+
+    // Committed + focused: filled dot and selection bg/bold together.
+    s.transition_to_picking_enum("test_enum", 0, SettingValue::Enum("first"), true);
+    let mut buf2 = Buffer::empty(area);
+    render_picking_enum(&mut buf2, area, &s, &theme);
+    let marker_at2 = |y: u16| -> String {
+        buf2.cell((area.x + 1, y))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        marker_at2(3),
+        "\u{25CF}",
+        "committed+focused row should be ●"
+    );
+    assert_eq!(
+        marker_at2(4),
+        "\u{25CB}",
+        "uncommitted unfocused row should be ○"
+    );
+    let bg_at2 = |y: u16| -> Option<ratatui::style::Color> {
+        buf2.cell((area.x + area.width - 1, y))
+            .and_then(|c| c.style().bg)
+    };
+    assert_eq!(
+        bg_at2(3),
+        Some(settings_list_row_bg(&theme, true, false)),
+        "committed+focused row must use selection background"
+    );
+    assert_eq!(
+        bg_at2(4),
+        Some(settings_list_row_bg(&theme, false, false)),
+        "uncommitted unfocused row must use base background"
+    );
+    let both_modifier = buf2
+        .cell((area.x + PICKER_PREFIX_W, 3))
+        .map(|c| c.style().add_modifier)
+        .unwrap_or_default();
+    assert!(
+        both_modifier.contains(Modifier::BOLD),
+        "committed+focused row must be BOLD, got modifiers {both_modifier:?}"
+    );
+    let unfocused_modifier = buf2
+        .cell((area.x + PICKER_PREFIX_W, 4))
+        .map(|c| c.style().add_modifier)
+        .unwrap_or_default();
+    assert!(
         !unfocused_modifier.contains(Modifier::BOLD),
-        "unfocused row's display must NOT be BOLD, got modifiers {unfocused_modifier:?}"
+        "uncommitted unfocused row must NOT be BOLD, got modifiers {unfocused_modifier:?}"
+    );
+}
+
+/// DynamicEnum commits use `SettingValue::String`; the marker must
+/// resolve that arm the same way as static `Enum`, including the
+/// empty-canonical clear sentinel (`""` / "(no override)").
+#[test]
+fn picker_string_original_value_fills_committed_marker() {
+    let mut s = picker_test_state();
+    s.transition_to_picking_enum("test_enum", 1, SettingValue::String("first".into()), true);
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 12,
+    };
+    let mut buf = Buffer::empty(area);
+    let theme = Theme::current();
+    render_picking_enum(&mut buf, area, &s, &theme);
+
+    let marker_at = |y: u16| -> String {
+        buf.cell((area.x + 1, y))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        marker_at(3),
+        "\u{25CF}",
+        "String original_value \"first\" must fill row 3"
+    );
+    assert_eq!(
+        marker_at(4),
+        "\u{25CB}",
+        "focused non-committed row must stay hollow"
+    );
+
+    // Empty-canonical clear sentinel (DynamicEnum "(no override)" shape):
+    // empty String must fill the "" choice, not be skipped as "no value".
+    const CLEAR_SENTINEL_CHOICES: &[EnumChoice] = &[
+        EnumChoice {
+            canonical: "",
+            display: "(no override)",
+            description: "Clear override.",
+        },
+        EnumChoice {
+            canonical: "model-a",
+            display: "Model A",
+            description: "A model.",
+        },
+    ];
+    let entries = vec![SettingMeta {
+        key: "test_dynamic_like",
+        category: SettingCategory::Appearance,
+        owner: SettingOwner::Shared,
+        label: "Test clear sentinel",
+        description: "Catalog with empty-canonical choice.",
+        keywords: &[],
+        kind: SettingKind::Enum {
+            default: "",
+            choices: CLEAR_SENTINEL_CHOICES,
+            supports_preview: false,
+        },
+        restart_required: false,
+        hidden_in_minimal: false,
+    }];
+    let mut s2 = SettingsModalState::new(
+        Arc::new(SettingsRegistry::from_entries(entries)),
+        UiConfig::default(),
+        PagerLocalSnapshot::default(),
+    );
+    // Commit empty; focus the non-empty choice so marker ≠ focus.
+    s2.transition_to_picking_enum(
+        "test_dynamic_like",
+        1,
+        SettingValue::String(String::new()),
+        false,
+    );
+    let mut buf2 = Buffer::empty(area);
+    render_picking_enum(&mut buf2, area, &s2, &theme);
+    let marker_at2 = |y: u16| -> String {
+        buf2.cell((area.x + 1, y))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        marker_at2(3),
+        "\u{25CF}",
+        "empty String must fill empty-canonical clear row"
+    );
+    assert_eq!(
+        marker_at2(4),
+        "\u{25CB}",
+        "focused non-empty choice must stay hollow while clear is committed"
     );
 }
 
@@ -2890,6 +3103,63 @@ fn try_enter_picking_enum_returns_false_for_non_enum_row() {
         matches!(s.mode(), SettingsModalMode::Browse),
         "mode must not change on non-Enum row"
     );
+}
+
+/// A persisted `fork_secondary_model` slug renders as the catalog display
+/// name and seeds the picker on that model's row — not the stale-value
+/// fallback (index 1). The catalog carries two models so a fallback seed
+/// and a genuine match land on different indices.
+#[test]
+fn fork_secondary_model_picker_opens_on_persisted_model() {
+    use agent_client_protocol as acp;
+    // Must differ from the baseline slug or the empty-fold arm hides the lookup.
+    let slug = "grok-4.5-fast";
+    assert_ne!(slug, xai_grok_shell::models::default_model());
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![
+            ("Grok 3".to_string(), acp::ModelId::new(Arc::from("grok-3"))),
+            (
+                "Grok 4.5 Fast".to_string(),
+                acp::ModelId::new(Arc::from(slug)),
+            ),
+        ],
+        ..PagerLocalSnapshot::default()
+    };
+    let ui = UiConfig {
+        fork_secondary_model: slug.to_string(),
+        ..UiConfig::default()
+    };
+    let mut s = SettingsModalState::new(Arc::new(SettingsRegistry::defaults()), ui, snapshot);
+
+    // Row value shows the display name, matching the default_model row.
+    assert_eq!(
+        s.value_for("fork_secondary_model"),
+        Some(SettingValue::String("Grok 4.5 Fast".to_string())),
+    );
+
+    assert!(s.focus_key("fork_secondary_model"));
+    assert!(s.try_enter_picking_enum());
+    match s.mode() {
+        SettingsModalMode::PickingEnum {
+            key,
+            choices_idx,
+            ref original_value,
+            ..
+        } => {
+            assert_eq!(key, "fork_secondary_model");
+            // Choices: [(no override), Grok 3, Grok 4.5 Fast] → idx 2.
+            assert_eq!(
+                choices_idx, 2,
+                "picker must open on the persisted model, not the stale fallback",
+            );
+            assert_eq!(
+                original_value,
+                &SettingValue::String("Grok 4.5 Fast".to_string()),
+                "original_value must carry the display name so Esc-revert round-trips",
+            );
+        }
+        ref other => panic!("expected PickingEnum mode, got {other:?}"),
+    }
 }
 
 // -- render_picking_enum narrow-terminal coverage --
@@ -4225,14 +4495,11 @@ fn advance_next_recovers_when_selection_is_hidden() {
 #[test]
 fn advance_prev_recovers_when_selection_is_hidden() {
     let mut s = make_state();
-    // Apply a filter matching only show_timestamps and simple_mode.
-    // "mode" matches both: compact_mode label, simple_mode label
-    // AND show_timestamps via... actually let's pick a more reliable
-    // filter — use individual keywords. "simple" matches simple_mode
-    // only. Let's use that and corrupt selected to compact_mode
-    // (hidden). Up should land on the LAST visible setting which
-    // is simple_mode.
-    s.set_query("simple");
+    // The filter must match exactly one setting, so the "LAST visible"
+    // target is unambiguous. `ascii` is a simple_mode keyword and hits
+    // nothing else (settings_e2e pins that). Corrupt `selected` to the
+    // now-hidden compact_mode; Up must land on simple_mode.
+    s.set_query("ascii");
     let compact_idx = s
         .rows
         .iter()
@@ -4323,15 +4590,14 @@ fn find_text_col(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
 #[test]
 fn section_headers_have_blank_line_above_except_first() {
     let mut s = make_state();
-    // Generous viewport so every category + blank gap fits. Token Economy
-    // and Session knobs grew the default registry past the old 60-line
-    // budget (blank lines above headers are skipped when the cursor is
-    // one row from the bottom of the list area).
+    // Allocate a generous viewport so every category fits — the
+    // default registry contains 6 categories with 16 settings;
+    // the blank lines push us to ~23 lines, fits in 60.
     let area = Rect {
         x: 0,
         y: 0,
         width: 80,
-        height: 120,
+        height: 60,
     };
     let mut buf = Buffer::empty(area);
     let theme = Theme::current();
@@ -4343,7 +4609,8 @@ fn section_headers_have_blank_line_above_except_first() {
     // searching for its label as the row content.
     let mut header_ys: Vec<(u16, &'static str)> = Vec::new();
     for cat in SettingCategory::ALL {
-        // Skip categories the default registry doesn't populate.
+        // Skip categories the default registry doesn't populate
+        // (e.g. Session — no settings registered).
         let has_setting = s
             .rows
             .iter()
@@ -4564,6 +4831,7 @@ fn narrow_terminal_drops_value_to_second_line() {
         &theme,
         false,
         false, // is_hovered
+        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4627,6 +4895,7 @@ fn wide_terminal_keeps_value_on_first_line() {
         &theme,
         false,
         false, // is_hovered
+        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4668,6 +4937,7 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
         &theme,
         false,
         false, // is_hovered
+        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4684,8 +4954,8 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
 /// Two-line rows expand `state.row_rects` to span BOTH lines so
 /// mouse clicks on either line trigger the same default action.
 ///
-/// `coding_data_sharing`: label 19 + value "Opt out" 7 + chevron
-/// 2 + chrome 4 = 32 cells one-line. We render at width=28 so
+/// `coding_data_sharing`'s label plus the value "Opt out", the chevron,
+/// and the row chrome are far wider than the width=28 we render at, so
 /// the row drops to two lines.
 #[test]
 fn two_line_row_hit_rect_spans_both_lines() {
@@ -4753,7 +5023,7 @@ fn two_line_row_hit_rect_spans_both_lines() {
 #[test]
 fn two_line_row_with_expansion_renders_three_segments() {
     let mut s = make_state();
-    // Coding data sharing's label + value (with chevron) won't
+    // The coding-data row's label + value (with chevron) won't
     // fit on a 28-col line, forcing two-line layout.
     let row_idx = s
         .rows
@@ -4779,11 +5049,22 @@ fn two_line_row_with_expansion_renders_three_segments() {
         "expanded two-line row must allocate ≥2 lines for the row itself, got height={}",
         rect.height
     );
-    // The row label is on line 1.
+    // The row label is on line 1. A 28-col row truncates a long label, so
+    // match the head of the live copy rather than the whole string.
     let label_line = buf_row_text(&buf, rect.y, area.x, area.width);
+    let label = s
+        .registry
+        .find("coding_data_sharing")
+        .expect("registered")
+        .label;
+    let head: String = label
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        label_line.contains("Coding data sharing"),
-        "line 1 must contain the row label: {label_line:?}"
+        label_line.contains(&head),
+        "line 1 must contain the row label (head {head:?}): {label_line:?}"
     );
     // The value (display: "Opt out" or similar) is on line 2.
     let value_line = buf_row_text(&buf, rect.y + 1, area.x, area.width);
@@ -5416,6 +5697,7 @@ fn bool_off_value_renders_in_dim_color() {
         &theme,
         false,
         false,
+        None,
     );
     // Use `find_text_col` so the
     // column index is the actual buffer position, not a byte
@@ -5448,6 +5730,7 @@ fn bool_off_value_renders_in_dim_color() {
         &theme,
         false,
         false,
+        None,
     );
     let on_col = find_text_col(&buf_on, 0, "on").expect("must find `on` substring");
     let on_cell = buf_on.cell((on_col, 0)).expect("on cell");
@@ -5519,6 +5802,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        None,
     );
 
     // Enum row — chevron column contains the `›` glyph.
@@ -5533,6 +5817,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        None,
     );
 
     // The chevron column is a 2-cell block at
@@ -5604,6 +5889,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        None,
     );
     let _ = render_setting_row(
         &mut buf_multi,
@@ -5615,6 +5901,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        None,
     );
     // Bool row's `off` ends at column N; Enum row's `›` glyph
     // lands at column M. The contract: N == M's column
@@ -5671,6 +5958,7 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &theme,
         false,
         false,
+        None,
     );
     let area_one = Rect {
         x: 0,
@@ -5689,6 +5977,7 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &theme,
         false,
         false,
+        None,
     );
     // The column offset from the area's right edge is constant:
     // `area.right - ROW_RIGHT_PAD_W - 1` is the `›` glyph
@@ -6127,17 +6416,17 @@ fn click_settings_breadcrumb_collapses_picker_to_browse() {
     // For preview-supporting enums (theme), the breadcrumb-
     // click revert dispatches `Action::PreviewTheme(original)`.
     // The original canonical for the default theme is
-    // `"doge"`. Tightened from the previous `Action(_) |
+    // `"groknight"`. Tightened from the previous `Action(_) |
     // Changed` to lock in the revert contract.
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(orig)) => {
             assert_eq!(
-                orig, "doge",
+                orig, "groknight",
                 "breadcrumb-click revert must carry the original canonical",
             );
         }
         other => panic!(
-            "expected Action(PreviewTheme(\"doge\")) — the keyboard \
+            "expected Action(PreviewTheme(\"groknight\")) — the keyboard \
              Esc-equivalent revert — got {other:?}",
         ),
     }
@@ -6146,6 +6435,51 @@ fn click_settings_breadcrumb_collapses_picker_to_browse() {
         "after the breadcrumb click the mode must be Browse, got {:?}",
         s.mode(),
     );
+}
+
+/// Breadcrumb is hierarchical up: even with deep-link `close_on_picker_exit`,
+/// click returns to Browse (never Close / ActionThenClose).
+#[test]
+fn click_settings_breadcrumb_ignores_close_on_picker_exit() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 30,
+    };
+    let mut s = enter_picker_for("theme");
+    s.close_on_picker_exit = true;
+    let mut buf = Buffer::empty(area);
+    render_settings_modal(&mut buf, area, &mut s, false, None);
+    let rect = s
+        .settings_breadcrumb_rect
+        .expect("PickingEnum must populate breadcrumb rect");
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        rect.x + rect.width / 2,
+        rect.y,
+    );
+    assert!(
+        !matches!(
+            outcome,
+            SettingsKeyOutcome::Close | SettingsKeyOutcome::ActionThenClose(_)
+        ),
+        "breadcrumb must not dismiss the modal, got {outcome:?}"
+    );
+    match outcome {
+        SettingsKeyOutcome::Action(Action::PreviewTheme(orig)) => {
+            assert_eq!(orig, "groknight");
+        }
+        other => panic!("expected preview revert Action, got {other:?}"),
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "breadcrumb must return to Browse, got {:?}",
+        s.mode()
+    );
+    assert!(!s.close_on_picker_exit);
 }
 
 /// Sibling of `click_settings_breadcrumb_collapses_picker_to_browse`
@@ -6181,9 +6515,9 @@ fn click_settings_breadcrumb_after_nav_reverts_to_original() {
         }
         other => panic!("expected PickingEnum, got {other:?}"),
     };
-    // Pick a different index. The default theme is `doge`
-    // (last concrete choice in the registry); advance away from
-    // the current index to ensure we're navigating to a different value.
+    // Pick a different index. The default theme is `groknight`
+    // (index 1 per the registry); advance to index 0 to ensure
+    // we're navigating to a different value.
     let target_idx = if advanced_idx == 0 { 1 } else { 0 };
     match s.mode() {
         SettingsModalMode::PickingEnum {
@@ -6241,11 +6575,11 @@ fn d_key_in_picking_enum_dispatches_open_reset_confirm() {
                 key, "theme",
                 "OpenResetConfirm key must be the active picker setting",
             );
-            // Default theme is `doge`; entering the picker
-            // captures `original_value = current value = doge`,
+            // Default theme is `groknight`; entering the picker
+            // captures `original_value = current value = groknight`,
             // so the revert dispatches with that canonical.
             assert_eq!(
-                orig, "doge",
+                orig, "groknight",
                 "PreviewTheme revert must carry the original canonical",
             );
         }
@@ -6448,6 +6782,66 @@ fn hover_breadcrumb_flips_state_and_returns_changed() {
     assert!(
         !s.breadcrumb_hovered,
         "moving outside must clear breadcrumb_hovered",
+    );
+}
+
+/// `d` must be inert on a consent chooser, not merely hidden from the
+/// footer.
+#[test]
+fn consent_chooser_drops_tip_and_reset() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 40,
+    };
+    let screen = |s: &mut SettingsModalState| {
+        let mut buf = Buffer::empty(area);
+        render_settings_modal(&mut buf, area, s, false, None);
+        (0..area.height)
+            .map(|y| buf_row_text(&buf, y, area.x, area.width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut consent = enter_picker_for("coding_data_sharing");
+    let text = screen(&mut consent);
+    assert!(
+        !text.contains("Ask Grok"),
+        "consent chooser must not render the docs tip:\n{text}"
+    );
+    assert!(
+        !text.contains("d reset"),
+        "consent chooser must not offer reset:\n{text}"
+    );
+    assert!(
+        text.contains("Enter select"),
+        "the other footer hints must survive:\n{text}"
+    );
+
+    let outcome = handle_settings_key(
+        &mut consent,
+        &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Unchanged),
+        "`d` must be inert on a consent chooser, got {outcome:?}"
+    );
+    assert!(
+        matches!(consent.mode(), SettingsModalMode::PickingEnum { .. }),
+        "`d` must leave the chooser open, got {:?}",
+        consent.mode()
+    );
+
+    let mut ordinary = enter_picker_for("theme");
+    let text = screen(&mut ordinary);
+    assert!(
+        text.contains("d reset") && text.contains("Ask Grok"),
+        "ordinary pickers keep the tip and the reset hint:\n{text}"
+    );
+    assert!(
+        text.contains("Enter select") && !text.contains("Enter commit"),
+        "every chooser selects an answer rather than committing a value:\n{text}"
     );
 }
 
@@ -6713,11 +7107,6 @@ fn max_thoughts_width_preview_content_is_italic() {
 /// now matches that contract.
 #[test]
 fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
-    // Hermetic: ambient ~/.grok theme may be monochrome (DOGE has
-    // bg_visual == bg_highlight == black). Pin GrokNight so the two-tone
-    // preview contract is exercised against a palette that has distinct
-    // tokens. DOGE relies on UNDERLINED (asserted below) instead of bg.
-    let _theme = crate::theme::cache::pin_theme();
     let area = Rect {
         x: 0,
         y: 0,
@@ -7550,5 +7939,273 @@ fn preview_remains_clamped_when_pending_exceeds_widened_width() {
     assert!(
         find_text_row(&buf, area, "note: clamped").is_some(),
         "clamped note must render when pending > interior, even after widening",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Locked coding_data_sharing row (ZDR / team non-admin)
+// ---------------------------------------------------------------------------
+
+fn make_locked_state(lock: CodingDataSharingLock) -> SettingsModalState {
+    SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        PagerLocalSnapshot {
+            coding_data_sharing_lock: Some(lock),
+            ..PagerLocalSnapshot::default()
+        },
+    )
+}
+
+fn coding_data_sharing_row_idx(s: &SettingsModalState) -> usize {
+    s.rows
+        .iter()
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
+        .expect("coding_data_sharing must be registered")
+}
+
+/// A locked `coding_data_sharing` row must NOT open the enum picker —
+/// neither via `try_enter_picking_enum` directly (the shared entry point
+/// for Enter, mouse value clicks, and the `focus_key` auto-open path) nor
+/// via the Browse Enter key. With no lock, the same row opens the picker.
+#[test]
+fn locked_coding_data_sharing_row_does_not_open_picker() {
+    for lock in [
+        CodingDataSharingLock::Zdr,
+        CodingDataSharingLock::TeamManaged,
+    ] {
+        let mut s = make_locked_state(lock);
+        s.selected = coding_data_sharing_row_idx(&s);
+        assert!(
+            !s.try_enter_picking_enum(),
+            "try_enter_picking_enum must return false for a locked row ({lock:?})"
+        );
+        assert!(
+            matches!(s.mode(), SettingsModalMode::Browse),
+            "mode must stay Browse for a locked row ({lock:?}), got {:?}",
+            s.mode()
+        );
+        let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(out, SettingsKeyOutcome::Unchanged),
+            "Enter on a locked row must be a no-op ({lock:?}), got {out:?}"
+        );
+        assert!(matches!(s.mode(), SettingsModalMode::Browse));
+    }
+
+    // Control arm: no lock → the picker opens (existing behavior).
+    let mut s = make_state();
+    s.selected = coding_data_sharing_row_idx(&s);
+    assert!(s.try_enter_picking_enum());
+    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+}
+
+/// `d` on a locked row must not open the confirm dialog: the dispatch-time
+/// guard would refuse the reset anyway, but only after walking the user
+/// through a confirmation for a change that cannot happen.
+#[test]
+fn locked_coding_data_sharing_row_refuses_reset() {
+    for lock in [
+        CodingDataSharingLock::Zdr,
+        CodingDataSharingLock::TeamManaged,
+    ] {
+        let mut s = make_locked_state(lock);
+        s.selected = coding_data_sharing_row_idx(&s);
+        let out = handle_settings_key(
+            &mut s,
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(out, SettingsKeyOutcome::Unchanged),
+            "`d` on a locked row must be a no-op ({lock:?}), got {out:?}"
+        );
+    }
+
+    // Control arm: no lock → `d` still opens the confirm dialog.
+    let mut s = make_state();
+    s.selected = coding_data_sharing_row_idx(&s);
+    let out = handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(
+            out,
+            SettingsKeyOutcome::Action(Action::OpenResetConfirm {
+                key: "coding_data_sharing"
+            })
+        ),
+        "`d` on an unlocked row must still offer reset, got {out:?}"
+    );
+}
+
+/// `→ expand` stays on a locked row — that is how the lock reason is read.
+#[test]
+fn locked_row_footer_drops_the_keys_it_refuses() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 40,
+    };
+    let screen = |s: &mut SettingsModalState| {
+        let mut buf = Buffer::empty(area);
+        render_settings_modal(&mut buf, area, s, false, None);
+        (0..area.height)
+            .map(|y| buf_row_text(&buf, y, area.x, area.width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut locked = make_locked_state(CodingDataSharingLock::Zdr);
+    locked.selected = coding_data_sharing_row_idx(&locked);
+    let text = screen(&mut locked);
+    for hint in ["d reset", "Enter edit", "Space toggle"] {
+        assert!(
+            !text.contains(hint),
+            "a locked row must not advertise `{hint}`:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("expand"),
+        "`→ expand` reads the lock reason and must survive:\n{text}"
+    );
+
+    let mut unlocked = make_state();
+    unlocked.selected = coding_data_sharing_row_idx(&unlocked);
+    let text = screen(&mut unlocked);
+    assert!(
+        text.contains("d reset") && text.contains("Enter edit"),
+        "an unlocked row keeps the full footer:\n{text}"
+    );
+}
+
+/// Locked rows drop the `›` enter-affordance and render a per-variant
+/// value: ZDR replaces opt-in/out with "ZDR"; team-managed keeps the
+/// value with an " · Admin Managed" suffix. Unlocked rows keep the plain
+/// value + chevron.
+#[test]
+fn locked_coding_data_sharing_row_renders_locked_value_without_chevron() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 60,
+    };
+    let theme = Theme::current();
+    let chevron = crate::glyphs::chevron();
+
+    let mut s = make_locked_state(CodingDataSharingLock::Zdr);
+    let idx = coding_data_sharing_row_idx(&s);
+    s.selected = idx;
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let rect = s.row_rects[idx];
+    let line = buf_row_text(&buf, rect.y, area.x, area.width);
+    assert!(
+        line.contains("ZDR") && !line.contains("Opt"),
+        "ZDR lock must replace the opt-in/out value with `ZDR`: {line:?}"
+    );
+    assert!(
+        !line.contains(chevron),
+        "locked row must not render the `{chevron}` enter affordance: {line:?}"
+    );
+
+    let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
+    s.selected = idx;
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let rect = s.row_rects[idx];
+    let line = buf_row_text(&buf, rect.y, area.x, area.width);
+    assert!(
+        line.contains("Opt out \u{00B7} Admin Managed"),
+        "team-managed lock must append ` · Admin Managed`: {line:?}"
+    );
+    assert!(
+        !line.contains(chevron),
+        "locked row must not render the `{chevron}` enter affordance: {line:?}"
+    );
+
+    // Control arm: unlocked row shows the plain value + chevron.
+    let mut s = make_state();
+    s.selected = idx;
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let rect = s.row_rects[idx];
+    let line = buf_row_text(&buf, rect.y, area.x, area.width);
+    assert!(
+        line.contains("Opt out") && !line.contains("locked"),
+        "unlocked row must show the plain value: {line:?}"
+    );
+    assert!(
+        line.contains(chevron),
+        "unlocked row must keep the `{chevron}` enter affordance: {line:?}"
+    );
+}
+
+/// Expanding a locked row replaces the registry description with the lock
+/// reason; the unlocked expansion shows the description.
+#[test]
+fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 60,
+    };
+    let theme = Theme::current();
+    // Word-wrap may split the reason across lines; normalize the whole
+    // buffer to a single whitespace-collapsed string before matching.
+    let flatten = |buf: &Buffer| -> String {
+        (0..area.height)
+            .map(|y| buf_row_text(buf, y, area.x, area.width))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
+    let idx = coding_data_sharing_row_idx(&s);
+    s.selected = idx;
+    s.expanded_keys.insert("coding_data_sharing");
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let text = flatten(&buf);
+    assert!(
+        text.contains("Managed by your team admin."),
+        "expanded locked row must show the lock reason: {text:?}"
+    );
+    // Token from the live description so this survives copy edits.
+    let desc = s
+        .registry
+        .find("coding_data_sharing")
+        .expect("registered")
+        .description;
+    let desc_head: String = desc
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !text.contains(&desc_head),
+        "locked expansion must replace the description, not append to it: {text:?}"
+    );
+
+    // Control arm: unlocked expansion shows the description only.
+    let mut s = make_state();
+    s.selected = idx;
+    s.expanded_keys.insert("coding_data_sharing");
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let text = flatten(&buf);
+    assert!(
+        text.contains(&desc_head),
+        "expanded row must render the registry description: {text:?}"
+    );
+    assert!(
+        !text.contains("Managed by your team admin."),
+        "unlocked expansion must not mention the team-admin lock: {text:?}"
     );
 }

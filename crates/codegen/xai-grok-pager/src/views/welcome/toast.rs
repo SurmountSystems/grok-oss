@@ -63,9 +63,8 @@ mod tests {
         let area = Rect::new(0, 0, 40, 6);
         let prompt = Rect::new(0, 4, 40, 2);
         let mut buf = Buffer::empty(area);
-        let long = crate::app::link_opener::browser_unavailable_line(
+        let long = crate::app::link_opener::browser_unavailable_message(
             "https://x.ai/legal/terms-of-service",
-            false,
         );
 
         paint_welcome_toast(&mut buf, area, &long, Some(prompt));
