@@ -444,6 +444,14 @@ pub(super) fn handle_billing_fetched(
             ));
         }
     }
+    // Keep open /limits modal meters in sync after silent or loud billing fetch.
+    if let Some(snap) = super::status::rebuild_limits_snapshot_for_agent(app, agent_id)
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+        && let Some(crate::views::modal::ActiveModal::Limits { state }) =
+            agent.active_modal.as_mut()
+    {
+        state.apply_snapshot(snap);
+    }
     vec![]
 }
 

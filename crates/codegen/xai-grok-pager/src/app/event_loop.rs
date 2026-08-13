@@ -2108,6 +2108,16 @@ pub(crate) async fn run(
                     last_draw_at = Instant::now();
                     draw_scheduled_at = None;
                 }
+                // Tick may queue effects (e.g. /limits countdown hit zero →
+                // silent billing refresh). Drain them here so they fire without
+                // waiting for the next keystroke.
+                if !app.pending_effects.is_empty() {
+                    let effs = std::mem::take(&mut app.pending_effects);
+                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request(false);
+                }
                 // Keep ticking as long as there are running animations
                 // or pending actions waiting to expire.
                 schedule_tick(&mut animation_tick_at, &app, tick_interval);

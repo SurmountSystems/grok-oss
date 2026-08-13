@@ -186,6 +186,12 @@ if disjoint). Host: § *Hard stop* default loop.
   **never kill**, cancel, or re-prompt healthy in-flight subagents on the prior
   goal unless the operator explicitly stops/supersedes. Full pin:
   `~/.grok/AGENTS.md` § *Additive asks*.
+- **Multi-track (prose is not enough):** every parent tool turn inventories live
+  subagent `task_id`s + board owners before spawn/demote/complete. Never demote
+  `in_progress` work that still has a live subagent (abandonment = kill class).
+  First track stays `in_progress` until join; closeout still required. Product
+  binding (todo ↔ agent id, block demote while live) is open residual, not
+  shipped. Host: § *Multi-track: prose is not enough*.
 
 ## Never assume without checking
 
@@ -294,6 +300,21 @@ Session-board layers only (todos / joins). **Do not confuse** with agent depth
 | **L0** durable residual | `RESIDUAL.md` (D0 open) / campaign docs |
 | **L1** session todos | Namespaced `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` `ask:*` `feat:*` `bug:*` — **never casual wipe**; merge upsert only; product keep-unless-mentioned on `merge: false`. **Fib leaves:** size **1 or 2** only; larger work → split children; **progress = Σ leaf sizes** (phases/containers unsized). Prefer `meta.kind` + `parentId`. See [`doc/dev/research/todo-progress-fib-2026-07-26.md`](doc/dev/research/todo-progress-fib-2026-07-26.md). |
 | **L2** child joins | Short on-disk notes |
+
+### Session board: track well and close out (pinned 2026-08-01)
+
+Full law: host `~/.grok/AGENTS.md` § *Session board: track well and close out*.
+Essence for recon survival:
+
+- **Track well:** short actionable outcome owed, not a verbatim user-message
+  dump; namespaced ids; quote only when a precise contract needs it.
+- **Close out:** complete the item same turn the ask/fix/feature is finished
+  (join or parent status); cancel only with a real reason recorded.
+- **No wipe theater:** never `merge: false` mass-clear or mass-cancel to tidy;
+  after a wave, audit open items (still real / complete / cancel+why).
+- **Substance first:** complete only when handled; partial work stays open with
+  updated remaining content. Parent completes from join notes + operator
+  messages without re-research.
 
 Prefer no worktrees (`allow_worktree = false` default). Campaign + joins:
 `doc/dev/campaigns/operator-orchestration-2026-07.md`,

@@ -147,6 +147,26 @@ pub fn list_console_api_key_fingerprints(store: &CredentialsStore) -> Vec<String
         .collect()
 }
 
+/// True when an **inference** console / Business API key is available
+/// (`XAI_API_KEY` env or secret store under `api.x.ai`).
+///
+/// This is **not** the Management API key used for team prepaid balance.
+/// Surfaces that say "console path" must use this so a stored console key is
+/// never shown as "not live / missing" when only the management key is absent.
+pub fn console_inference_key_present(store: &CredentialsStore) -> bool {
+    if crate::agent::auth_method::has_xai_api_key_env() {
+        return true;
+    }
+    load_stored_console_api_keys(store)
+        .map(|keys| !keys.is_empty())
+        .unwrap_or(false)
+}
+
+/// Process-default store + env for [`console_inference_key_present`].
+pub fn console_inference_key_present_default() -> bool {
+    console_inference_key_present(&CredentialsStore::default_store())
+}
+
 /// Clear the stored console API key (does not unset env).
 pub fn clear_console_api_key(store: &CredentialsStore) -> Result<(), CredentialsStoreError> {
     store.delete(&credential_url(None))
@@ -271,6 +291,31 @@ mod tests {
         let fp = fingerprint_console_key("super-secret-console-key");
         assert!(!fp.contains("super-secret"));
         assert!(!fp.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn console_inference_key_present_sees_store_and_env() {
+        let dir = TempDir::new().unwrap();
+        let store = CredentialsStore::at_path(dir.path().join("creds.json"));
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        assert!(
+            !console_inference_key_present(&store),
+            "empty store + no env → not present"
+        );
+        store_console_api_key(&store, "console-key-present-test").unwrap();
+        assert!(
+            console_inference_key_present(&store),
+            "stored console key must count as present"
+        );
+        clear_console_api_key(&store).unwrap();
+        assert!(!console_inference_key_present(&store));
+        let _key = EnvGuard::set("XAI_API_KEY", "env-console-key");
+        assert!(
+            console_inference_key_present(&store),
+            "env console key must count as present even with empty store"
+        );
     }
 
     /// B2: multi-add append order is the store half of dual-auth console order

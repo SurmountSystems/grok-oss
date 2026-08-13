@@ -4461,6 +4461,98 @@ fn split_primary_failover(keys: Vec<String>) -> (Option<String>, Vec<String>) {
 /// OpenRouter base URLs never fall through to xAI session / `XAI_API_KEY`
 /// (would send the wrong credential to a third-party host).
 pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
+    resolve_credentials_preferring(model, session_key, None)
+}
+
+/// Resolve credentials with optional dual-auth primary pin.
+///
+/// Priority: model api_key/env_key/secret-store > cached auth-provider token >
+/// then dual-auth merge of session + first-party console keys, else whichever
+/// single identity is present.
+///
+/// When both an OAuth/session token and console API key(s) are available on a
+/// **first-party xAI** host:
+/// - `preferred = None` or `Some(Oidc)` → session primary, console keys failover
+/// - `preferred = Some(ApiKey)` → first console key primary, remaining keys then
+///   session JWT as failover (exclusive pin still refuses session-only when no
+///   console key exists)
+/// - `auto_use_included_limits = true` (and not api_key pin) → prefer included
+///   SuperGrok limits; rank multi-identity by headroom (sooner reset heuristic);
+///   omit console keys from primary/failover while any SuperGrok still has
+///   included remaining (limits-before-credits); after ExhaustedAll, console leads
+///
+/// OpenRouter never receives an xAI session. Enterprise
+/// [`enforce_disable_api_key_auth`] clears console-key failover.
+pub fn resolve_credentials_preferring(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+) -> ResolvedCredentials {
+    resolve_credentials_preferring_with_rank(model, session_key, preferred, false)
+}
+
+/// Like [`resolve_credentials_preferring`] with explicit SuperGrok multi-identity
+/// ranking (`[auth] auto_use_included_limits`).
+pub fn resolve_credentials_preferring_with_rank(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
+) -> ResolvedCredentials {
+    // auto_use_included_limits + multi SuperGrok: rank included headroom before console.
+    if crate::auth::preferred_uses_supergrok_auto_rank(auto_use_included_limits, preferred) {
+        let home = crate::util::grok_home::grok_home();
+        let mut candidates = crate::auth::load_supergrok_session_candidates(&home);
+        // Fall back to the live session key when auth.json has no OIDC rows yet
+        // (tests pass session_key without writing auth.json).
+        if candidates.is_empty()
+            && let Some(sess) = session_key.map(str::trim).filter(|s| !s.is_empty())
+        {
+            candidates.push(crate::auth::SupergrokSessionCandidate {
+                headroom: crate::auth::SupergrokIdentityHeadroom {
+                    identity_id: "session".into(),
+                    role: crate::auth::SupergrokAccountRole::Personal,
+                    included_remaining: if xai_grok_sampler::is_credential_exhausted(sess) {
+                        0
+                    } else {
+                        1
+                    },
+                    reset_at: None,
+                },
+                access_token: sess.to_owned(),
+            });
+        }
+        if !candidates.is_empty() {
+            return resolve_credentials_preferring_with_supergrok_sessions(
+                model,
+                &candidates,
+                preferred,
+                auto_use_included_limits,
+            );
+        }
+    }
+    resolve_credentials_preferring_inner(model, session_key, preferred)
+}
+
+/// Dual SuperGrok + console under `auto_use_included_limits` (or fixture sessions).
+///
+/// Uses pure ranking: SuperGrok with included headroom first (sooner reset
+/// heuristic among included pools). While any SuperGrok still has included
+/// headroom, console keys are **omitted** from the sampling chain (limits
+/// before credits). When all SuperGrok included pools are exhausted, console
+/// leads. When ranking is off, falls through to
+/// [`resolve_credentials_preferring_inner`] with the first candidate token.
+pub fn resolve_credentials_preferring_with_supergrok_sessions(
+    model: &ModelEntry,
+    sessions: &[crate::auth::SupergrokSessionCandidate],
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
+) -> ResolvedCredentials {
+    if !crate::auth::preferred_uses_supergrok_auto_rank(auto_use_included_limits, preferred) {
+        let first = sessions.first().map(|s| s.access_token.as_str()).or(None);
+        return resolve_credentials_preferring_inner(model, first, preferred);
+    }
+
     let info = model.info();
     let is_openrouter = crate::auth::openrouter::is_openrouter_base_url(&info.base_url);
     let own = collect_own_credentials(

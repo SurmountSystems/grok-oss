@@ -10,8 +10,9 @@
 //! - Pending/active/completed, waiters, deadlines, and cancellation are actor-owned.
 //! - Child sessions share the parent's hunk tracker, filesystem, terminal, and env
 //!   so that edits, bash commands, and file reads go through the same backends.
-use crate::agent::config::{resolve_credentials, sampling_config_for_model};
-use crate::agent::models::resolve_catalog_key;
+use crate::agent::config::{
+    resolve_credentials, resolve_credentials_preferring_with_rank, sampling_config_for_model,
+};
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::{
     self, SessionCommand, SessionHandle, SessionThread,
@@ -922,7 +923,21 @@ fn resolve_model_override_to_config(
     };
     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
     let has_session_key = session_key.is_some();
-    let mut credentials = resolve_credentials(&entry, session_key);
+    // Same dual-auth rank as main sampling: preferred_method + auto_use_included_limits
+    // so a model override cannot re-introduce console keys while SuperGrok
+    // included weekly still has headroom (limits-before-credits).
+    let mut credentials = match crate::config::load_effective_config()
+        .ok()
+        .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
+    {
+        Some(cfg) => resolve_credentials_preferring_with_rank(
+            &entry,
+            session_key,
+            cfg.grok_com_config.preferred_method,
+            cfg.grok_com_config.auto_use_included_limits,
+        ),
+        None => resolve_credentials(&entry, session_key),
+    };
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;
     let mut config = sampling_config_for_model(

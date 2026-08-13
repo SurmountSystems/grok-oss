@@ -1365,11 +1365,29 @@ pub(super) fn apply_retry_state(
                 reason: reason.clone(),
             }));
         }
-        // Live stream after a retry: drop sticky Retrying chrome immediately.
-        // Without this, attempt N freezes for the whole next TTFB/stream window.
-        RetryState::StreamResumed => {
-            session.set_retry_activity(None);
-        }
+        // Live stream after a retry: soft-reconnect chrome, not a hard clear.
+        // Hard clear made the footer fall through to zombie "Waiting for
+        // response…" for the entire headers/TTFB window (up to ~120s) when the
+        // network was still bad after a timeout retry. Keep the retry family
+        // with reason "reconnecting" until real stream content arrives
+        // (`handle_update` clears `retry_activity`) or the next Retrying/
+        // Exhausted/Failed. First stream (no prior Retrying) stays clear.
+        RetryState::StreamResumed => match session.tracker.activity() {
+            Some(TurnActivity::Retrying {
+                attempt,
+                max_retries,
+                ..
+            }) => {
+                session.set_retry_activity(Some(TurnActivity::Retrying {
+                    attempt,
+                    max_retries,
+                    reason: "reconnecting".into(),
+                }));
+            }
+            _ => {
+                session.set_retry_activity(None);
+            }
+        },
         RetryState::Exhausted {
             attempts,
             reason,

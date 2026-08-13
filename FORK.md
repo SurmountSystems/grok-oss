@@ -78,7 +78,7 @@ list when you ship fork work.
 - [x] **OpenRouter** — separate model option (`openrouter-grok-4.5`); login/logout; secret store; optional Zed credential probe (read-only)
 - [x] **Multi-key OpenRouter** — comma lists / failover keys for credit + rate-limit rotation
 - [x] **SuperGrok OAuth ↔ console API key dual-auth** — first-party resolve merge (session primary + console failover by default; `preferred_method=api_key` reverses); identity switch on **credit / SuperGrok Heavy usage-limit** and **plain 429** (session→key clears bearer; key→session via JWT in failover list); also switches API host (SuperGrok proxy ↔ `api.x.ai`); credit/allowance exhausted-fingerprint memo (process cache + durable `$GROK_HOME/exhausted_credits/`, 1h TTL; **console-key success clears**, **session success does not** — extras-paid SuperGrok 200s must not put SuperGrok back) + status/toast (“out of allowance” vs “rate limited”; labels only); when billing included `usage_pct ≥ 100%` + dual-auth, mark SuperGrok used up and prefer console key before the next request (no 402; clear on period reset); rate-limit switch uses temporary shared `grok-rate-limit` cooldown (not credit memo); kill-switch clears key failover + host metadata; console keys in keyring/`provider_credentials.json` + env/auth.json; **live re-bind without prior stash** (`session_bearer_resolver`); **multi-add** `grok login --api-key` + `--list-api-keys` (fingerprints only). **Also:** `[auth] auto_use_included_limits` rank+hop (prefer included before SuperGrok $ extras; sooner `reset_at` + headroom; ExhaustedAll→console; oauth/api_key pins fail-closed); sticky-console meter honesty (no SuperGrok $ extras sell while console is the live principal). **Multi SuperGrok OAuth:** two principals; second login does not wipe the first; doctor / list show both (role labels + fingerprints only); dual `/limits` rows; sibling billing poll for the non-active SuperGrok on the same included-safe path. **SuperGrok Heavy multi-slot load:** when base JWT is live/fresher and multi-slot is stale/exhausted, ranking + doctor prefer the **live base** (not blind multi-slot); enrichment upsert keeps multi-slot in lockstep with base. Plans: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md), [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md), [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md).
-- [x] **Billing meters (two halves; core shipped)** — meters stay distinct: personal SuperGrok **included weekly** ≠ SuperGrok **dollar extras** ≠ **console team prepaid** (Business Usage class) ≠ second SuperGrok OAuth principal. **Honesty:** multi-pool / “paying double” is xAI product billing structure (docs + surfaces), **not** a missing code merge of pools on this branch. **Half A shipped:** dual SuperGrok `/limits`, sibling poll, footer honesty for included weekly + SuperGrok $ extras. **Half B core prepaid shipped:** management key (keyring URL `https://management-api.x.ai`) + `[endpoints] management_team_id` + hermetic `GET …/billing/teams/{team_id}/prepaid/balance`; footer `Console key · team prepaid: $N` when console live; `/limits` balance line; honest **distinct** gaps (`no management key` | `no management team id` | `loading team prepaid...` | `team prepaid unavailable` — not a forever mushy “no $ meter”). `/usage` when console-live names console team prepaid, not SuperGrok session spend. **Still open (not shipped):** token/spend **series charts** UI; live dogfood with real management key + team id. See `RESIDUAL.md` §4. Operator how-tos: user-guide `02-authentication` (two SuperGrok logins + honesty), `04-slash-commands` `/limits` (status-bar meter click); joins `/tmp/grok-join-limits-dogfood-howto.md`, `/tmp/grok-join-second-supergrok-oidc-howto.md`.
+- [x] **Billing meters (two halves; core shipped)** — meters stay distinct: personal SuperGrok **included weekly** ≠ SuperGrok **dollar extras** ≠ **console team prepaid** (Business Usage class) ≠ second SuperGrok OAuth principal. **Honesty:** multi-pool / “paying double” is xAI product billing structure (docs + surfaces), **not** a missing code merge of pools on this branch. **Half A shipped:** dual SuperGrok `/limits`, sibling poll, footer honesty for included weekly + SuperGrok $ extras. **Half B core prepaid shipped:** management key (keyring URL `https://management-api.x.ai`) + `[endpoints] management_team_id` + hermetic `GET …/billing/teams/{team_id}/prepaid/balance`; footer `Console key · team prepaid: $N` when console live; `/limits` balance line; honest **distinct** gaps (`no management key` | `no management team id` | `loading team prepaid...` | `team prepaid unavailable` — not a forever mushy “no $ meter”). `/usage` when console-live names console team prepaid, not SuperGrok session spend. **Still open (not shipped):** token/spend **series charts** UI. Live prepaid dogfood (2026-08-02): `total.val` → **$340** is correct; console dashboard ~$1317 is defaultCredits/composite, not prepaid wallet (keep meters distinct). See `RESIDUAL.md` §4. Operator how-tos: user-guide `02-authentication` (two SuperGrok logins + honesty), `04-slash-commands` `/limits` (status-bar meter click); joins `/tmp/grok-join-limits-dogfood-howto.md`, `/tmp/grok-join-second-supergrok-oidc-howto.md`.
 - [x] **Keyring login time-box + fail-loud + secure fallback + TTY progress** — OS keyring get/set/delete wall-clock budget (`KEYRING_OP_TIMEOUT`); interactive `grok login --api-key` / OpenRouter login require a **secure** backend (primary platform store, then on Linux automatic **keyutils** fallback when Secret Service times out/errors). TTY stderr progress counts seconds up to **2× timeout (~6s)** during store RMW+write (suppressed non-TTY / env short-circuit). Only if **all** secure backends fail → clear error, **no** silent `provider_credentials.json` secret dump. File mirror only after successful secure write. `GROK_CREDENTIALS_FORCE_FILE` = tests/CI only (not user recovery).
 - [x] **Economic mode** — soft-cap effective context at the Grok 4.5 long-context price cliff (~200k); `/economic-mode`; settings default on
 - [x] **Auto-compact default 95% + live-apply** — stock Grok 4.5 catalog omits a per-model undercut (was 80); remote `models_cache` undercuts on stock models are dropped so the product default applies; user session/env still win; banner shows usage **and** configured threshold. Settings commit live-applies to open sessions (`restart_required: false`): disk persist → ACP `x.ai/auto_compact_threshold_changed` → `SessionCommand::SetAutoCompactThreshold` → CompactionConfig Cells (same write path as model switch). Live-apply pushes the **committed Settings value** (race-safe vs disk); env `GROK_AUTO_COMPACT_THRESHOLD_*` wins again on the next full resolve (spawn / model switch). Detail: `docs/dev/research/rca-auto-compact-early-fire.md`
@@ -207,13 +207,15 @@ list when you ship fork work.
   Soft open: optional rename of token ids still named `gray*` (values already pure).
   **Do not invent** unnamed glyph colours from screenshots (e.g. “little guy”);
   caret residue ≠ lower-left throbber ≠ Clear finished.
-- [x] **Stuck Retrying cleared on stream resume** — sticky yellow Retrying chrome
-  clears when the next stream starts (`RetryState::StreamResumed`). Stream
-  response-headers / first-byte timeout default **120s**
+- [x] **Stuck Retrying / network-switch graceful retry** — sticky yellow Retrying
+  chrome soft-reconnects on stream start (`RetryState::StreamResumed` → reason
+  `reconnecting`, keeps attempt N; not zombie "Waiting for response…" for the
+  headers/TTFB window). Real stream content still clears via `handle_update`.
+  Stream response-headers / first-byte timeout default **120s**
   (`GROK_STREAM_HEADERS_TIMEOUT_SECS`; not connect 10s, not post-headers idle).
   Cancel-aware shared cooldown wait; short transport footer labels
-  (`connection interrupted`, headers-timeout wording; not opaque
-  `Transport error: error`).
+  (`timed out` / `connection interrupted` + `· next try in Ns` backoff; not
+  opaque `Transport error: error`).
 - [x] **Clear finished todos** — pane chrome compact **`[−]`** icon (U+2212;
   not empty-set, not a long "Clear finished" string). Paints in the todo
   header next to close when the todo board is **open** and finished rows
@@ -236,9 +238,11 @@ list when you ship fork work.
   prompt turn**; mid-park epoch ticks and re-parks **refresh elapsed in place**
   (no append-per-tick scrollback flood). Still-running counts stay on the
   status cue, not stacked “Worked for” rows. User-guide `20-background-tasks`.
-- [x] **Status-bar limits meter** — compact SuperGrok `Credits used: N%` or
-  console prepaid/gap always on when billing surface is visible; click opens
-  `/limits` (same data path as slash; not a second billing system).
+- [x] **Status-bar limits meter** — compact SuperGrok `N%` (or cold `...%`) /
+  console prepaid/gap on the top status row for Build sessions
+  (including team dual-auth when consumer slash surface is off); gateway chat
+  still hides it. Click opens `/limits` (same data path as slash; not a second
+  billing system).
 - [x] **Always-on bubble copy + one-click copy** — selection-box / plan top-bar /
   prompt draft / per-bubble `⧉` (`bubble_copy_buttons` default on) reuse the
   clipboard stack; Policy A keeps selection ⧉ off bubble-owned blocks only.
@@ -375,14 +379,14 @@ Operator cheat sheet (post-import / post-onto tip):
 cargo test -p xai-grok-shared --lib -- hide_header stale_hide_title
 cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config doge_accent_user_is_pure_green doge_accent_system_is_pure_cyan
 cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_prefix_matches recap_accent
-cargo test -p xai-grok-pager --lib -- hide_header window_title titles_on_session default_title_items shell_collision retry_chrome_clears
+cargo test -p xai-grok-pager --lib -- hide_header window_title titles_on_session default_title_items shell_collision retry_chrome_soft_reconnect
 cargo test -p xai-grok-pager --test settings_e2e -- hide_header
 # Plan soft-park three surfaces + Clear / click-open / Worked-for / caret / throbber
 cargo test -p xai-grok-pager --lib -- exit_plan_mode_soft soft_park_draw clear_finished click_tasks_model_timer \
   parked_marker_not_stacked paint_composer_box_cursor_uses_human caret_move_clears \
   doge_idle_subagent_still_running doge_tool_running_spinner
 cargo test -p xai-grok-shell --lib -- stream_started_emits_retry_state_stream_resumed
-cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason stream_headers_timeout_defaults
+cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason retry_footer_backoff stream_headers_timeout_defaults
 cargo test -p xai-grok-sampler --test stream_headers_timeout
 
 # Dual-auth / multi SuperGrok / Heavy fresher-slot load / console prepaid

@@ -180,10 +180,11 @@ pub struct PromptStyle {
     /// Show the accent line (`┃`) on the left edge of the chrome.
     /// When false the line is hidden and its column reclaimed for content.
     pub show_accent_line: bool,
-    /// Draw the prompt's border box (top `╭─╮` divider, side `│` borders, and
-    /// bottom info divider). Only consulted when `chrome` is true. Defaults to
-    /// `true` (the full-TUI boxed prompt); minimal mode sets it `false` for a
-    /// cleaner, border-less input that still keeps the chrome padding.
+    /// Draw the prompt's border box outline (top `╭─╮`, side `│`, bottom `╰─╯`).
+    /// Only consulted when `chrome` is true. Defaults to `true` (the full-TUI
+    /// boxed prompt). Inline/chromeless embeds and minimal-style surfaces may
+    /// set it `false`; the model · flags info caption still paints when info
+    /// is provided. Plan mode / soft-park / plan panel keep borders **on**.
     pub show_borders: bool,
     /// Session title inlined in the top border (right-aligned, 2-cell inset),
     /// styled like the bottom info line's model name.
@@ -3409,26 +3410,30 @@ impl PromptWidget {
             }
         }
 
-        // Bottom divider: ╰──────────grok-3 · flags──╯
+        // Bottom divider: ╰──────────grok-3 · flags──╯ when outlined.
+        // Plan view / minimal chrome keep the model · flags caption without
+        // the box outline (show_borders false) so status chrome is not lost.
         // Guard on actual allocated height, not requested `info_block`: during
         // resize the layout may squeeze the info block to 0 rows, leaving
         // chunks[2].y past the buffer boundary.
-        if info_block > 0 && style.chrome && style.show_borders && chunks[2].height > 0 {
+        if info_block > 0 && style.chrome && chunks[2].height > 0 {
             let div_y = chunks[2].y;
-            let div_style = Style::default().fg(border_color).bg(bg);
-            let left_x = area.x;
-            let right_x = area.x + area.width.saturating_sub(1);
-            for x in area.x..area.x + area.width {
-                if let Some(cell) = buf.cell_mut((x, div_y)) {
-                    let ch = if x == left_x {
-                        '\u{2570}' // ╰
-                    } else if x == right_x {
-                        '\u{256f}' // ╯
-                    } else {
-                        '\u{2500}' // ─
-                    };
-                    cell.set_char(ch);
-                    cell.set_style(div_style);
+            if style.show_borders {
+                let div_style = Style::default().fg(border_color).bg(bg);
+                let left_x = area.x;
+                let right_x = area.x + area.width.saturating_sub(1);
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell_mut((x, div_y)) {
+                        let ch = if x == left_x {
+                            '\u{2570}' // ╰
+                        } else if x == right_x {
+                            '\u{256f}' // ╯
+                        } else {
+                            '\u{2500}' // ─
+                        };
+                        cell.set_char(ch);
+                        cell.set_style(div_style);
+                    }
                 }
             }
             // A blank info line still writes its padding spaces, which would punch holes in the divider it sits on.

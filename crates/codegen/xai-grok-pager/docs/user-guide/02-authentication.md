@@ -72,6 +72,12 @@ session(s) with role labels when multi-principal, console key store count +
 fingerprints, whether `XAI_API_KEY` env wins, preferred method, and whether
 session+console failover is ready. Never prints raw keys or tokens.
 
+Agents and scripts can also query **live sampling principal + spend meters**
+without the TUI: `grok limits` (human) or `grok limits --json` (machine-readable,
+no secrets). Same meter distinctions as in-session `/limits` — SuperGrok
+included weekly %, SuperGrok dollar extras, console team prepaid when
+Management is configured.
+
 Prefer `XAI_API_KEY` for CI/automation (env wins; the store is not written when
 env is set). Advanced: `grok login --api-key -` reads one line from **non-TTY**
 process stdin only (not argv; a TTY stdin is refused — use bare `--api-key` for
@@ -136,13 +142,20 @@ Optional: set `[auth] auto_use_included_limits = true` to prefer **included**
 SuperGrok limits (personal and/or Business) before SuperGrok dollar extras /
 console API $. When more than one SuperGrok login identity is available, both
 pools' headroom are considered and ranked among included pools (sooner reset is
-a ranking heuristic). Exhausted included pool fails over to another with
-included headroom, then console. For a single principal, if the active base
-session was refreshed but a multi-slot copy is still stale or marked out of
-allowance, ranking uses the **live** SuperGrok JWT (including SuperGrok Heavy
-tier sessions) rather than silently staying on the console API key. This is
-**not** a `preferred_method` value (`preferred_method` stays `api_key` /
-`oauth` / `oidc` only, matching ordinary grok).
+a ranking heuristic). While **any** live SuperGrok principal still has included
+remaining, console keys are **omitted** from the sampling chain entirely (not
+primary and not silent failover) so a mid-turn rate-limit or credit hop cannot
+burn console Grok Build $ while included weekly still has room. Exhausted
+included pool fails over to another SuperGrok with included headroom; only when
+**all** SuperGrok included pools are exhausted does console become primary.
+For a single principal, if the active base session was refreshed but a
+multi-slot copy is still stale or marked out of allowance, ranking uses the
+**live** SuperGrok JWT (including SuperGrok Heavy tier sessions) rather than
+silently staying on the console API key. This is **not** a `preferred_method`
+value (`preferred_method` stays `api_key` / `oauth` / `oidc` only, matching
+ordinary grok). Hard pin: `[auth] preferred_method = "api_key"` stays
+console-primary even when SuperGrok included still has headroom (operator chose
+console).
 
 When SuperGrok **included** weekly/monthly usage is marked used up and at least
 one console key is bound, sampling **prefers the first live console key** (and
@@ -164,46 +177,90 @@ See [Custom Models → Identity failover](11-custom-models.md#credit-failover-mu
 
 ### Console team prepaid (Management API)
 
-**Console team prepaid / Business Usage** is a separate meter from SuperGrok
-included weekly, SuperGrok dollar extras, and the inference console API key
-(`XAI_API_KEY`). It is **not** the same as a Business SuperGrok OIDC login.
+**Console team prepaid** is a separate meter from SuperGrok included weekly,
+SuperGrok dollar extras (~$ extras on grok.com), and the inference console API
+key (`XAI_API_KEY`). Product reads the **Management prepaid ledger** for your
+console team via
+[Management API](https://docs.x.ai/developers/rest-api-reference/management/billing)
+(`GET …/billing/teams/{team_id}/prepaid/balance`) with a **Management key**
+(different host: `management-api.x.ai`). An inference key alone cannot return
+this balance. It is **not** SuperGrok $ extras and **not** a Business SuperGrok
+OIDC login.
 
-To let Grok read team prepaid balance from the [Management API](https://docs.x.ai/developers/rest-api-reference/management/billing)
-(`GET …/billing/teams/{team_id}/prepaid/balance`):
+The browser dashboard on [console.x.ai](https://console.x.ai) uses a **web
+session**. Grok cannot scrape that. The dashboard **Credits remaining** figure
+may fold in other credit types (promo, default grants, or other ledger lines)
+or lag the prepaid total. Product `console.teamPrepaidUsd` / footer **team
+prepaid** is **only** `abs(total.val) / 100` from the prepaid balance endpoint
+for the resolved team id — the **prepaid ledger**, not a claim that it always
+matches every Credits remaining composite on the dashboard.
+
+#### Setup
 
 1. Create a **management key** in Console → Settings → **Management Keys**
    (permission: Management Keys Read). This is **not** an inference API key.
-2. Note the console **team id** used on Management API paths (team UUID from
-   the console). Do **not** assume SuperGrok OIDC `team_id` is the same value.
-3. Put both in config (or store the key in the OS secret store):
+2. Store it securely (preferred):
+
+```bash
+grok login --management-key
+# no-echo prompt; or non-TTY: printf '%s\n' "$KEY" | grok login --management-key -
+```
+
+   Prefer env for CI/headless: `export XAI_MANAGEMENT_API_KEY=...` (never put
+   secrets on argv).
+
+3. **Team id** (path param on Management routes):
+   - **Auto-discovered** from `GET /auth/management-keys/validation` only when
+     the stored secret is a **valid Management key** (login prints the id).
+   - If login says the API **rejected** the key (HTTP 401), you pasted an
+     **inference API key** or a revoked secret — create a Management key under
+     Console → Settings → **Management Keys** and re-run login. That is not a
+     missing team-id problem.
+   - Always safe to **pin** the console team UUID (team settings / console URL):
 
 ```toml
 # ~/.grok/config.toml
 [endpoints]
-# Management API Bearer (billing). Prefer secret store for interactive hosts.
-management_api_key = "xai-..."   # optional if stored via keyring
+# Optional if key is in secret store or XAI_MANAGEMENT_API_KEY.
+# management_api_key = "xai-..."
 management_team_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 ```
+
+```bash
+export XAI_MANAGEMENT_TEAM_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+Do **not** assume SuperGrok OIDC `team_id` equals the console Management team
+id.
 
 Management key secret store uses keyring service `grok-build` under the URL
 key `https://management-api.x.ai` — distinct from the inference console slot
 (`https://api.x.ai/v1`). Never pass management keys as command-line arguments.
 
-When both are set, billing refresh (session start, turn end, `/usage`) fetches
-`GET …/billing/teams/{team_id}/prepaid/balance` and fills:
+#### Surfaces
+
+When the Management key is available (and team id is pinned or discovered),
+billing refresh (session start, turn end, `/usage`, `grok limits`) fetches
+the prepaid ledger and fills:
 
 - Footer when console is live: `Console key · team prepaid: $N`
-- `/limits` Console section: `Balance (console team prepaid): $N`
+- `/limits` / `grok limits`: `Balance: $N` under **Console API** (console team
+  **prepaid ledger** — never labeled SuperGrok dollar extras; may differ from
+  dashboard Credits remaining when the UI includes more than prepaid)
+- `grok limits --json`: `console.teamPrepaidUsd` (or `console.teamPrepaidGap`)
 
 Honest gap copy is **distinct** by what is missing (no invented balance):
 
 | State | Footer / `/limits` Balance line |
 |-------|----------------------------------|
 | No management key | **no management key** |
-| Key set, no `management_team_id` | **no management team id** |
-| Both set, fetch in flight / cold | **loading team prepaid...** |
-| Both set, fetch done but no balance | **team prepaid unavailable** |
-| Balance known | **team prepaid: $N** / **Balance (console team prepaid): $N** |
+| Key set; team id still unknown after fetch | **no management team id** |
+| Key set; fetch in flight / cold | **loading team prepaid...** |
+| Key + team known; fetch done but no balance | **team prepaid unavailable** |
+| Balance known | **team prepaid: $N** / **Balance: $N** |
+
+`grok limits` also prints a short **Notes** hint when the management key or
+team id is missing (how to configure). SuperGrok $ extras stay SuperGrok-only.
 
 Token / spend **series** charts are not wired yet (POST usage analytics;
 dogfood later). Enterprise `GROK_DEPLOYMENT_KEY` is a different surface (managed

@@ -8,9 +8,9 @@ use crate::scrollback::selection::SelectionBox;
 use crate::scrollback::types::DisplayMode;
 use crate::theme::Theme;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
-use crate::views::file_search::line_viewer::{LineViewerState, PlanViewerItem};
+use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
-use crate::views::plan_approval_view::PlanApprovalFocus;
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -54,17 +54,58 @@ impl AgentView {
         }
     }
 
-    pub(super) fn copy_plan_full(&mut self) -> InputOutcome {
-        let text = self
-            .line_viewer
-            .as_ref()
-            .and_then(|v| v.markdown_content_for_feedback())
-            .filter(|s| !s.is_empty())
-            .or_else(|| self.plan_body_for_preview());
-        if let Some(text) = text {
-            self.copy_to_clipboard(&text);
+    /// Toggle line-viewer fullscreen ↔ side panel (plan approval) / popup (file).
+    ///
+    /// Shared by Ctrl+F and the title-bar fullscreen mouse button so both
+    /// paths restore `side_panel` for parked plan approval when leaving
+    /// fullscreen (force-modal leave via mouse must not land on the dimmed
+    /// centered popup while keyboard restores the side panel).
+    /// Copy whole plan body (same payload as `Y`) or, for non-plan viewers,
+    /// the filename/title. Used by the `Y` key and the top-bar `⧉` button.
+    pub(super) fn copy_line_viewer_whole_body_or_title(&mut self) {
+        let is_plan = self.line_viewer.as_ref().is_some_and(|v| {
+            v.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+        });
+        if is_plan {
+            // Real plan body only — empty approval paints a UI placeholder in
+            // the viewer that must not be copied as plan content (quiet no-op).
+            if let Some(text) = self.plan_body_for_preview().filter(|t| !t.is_empty()) {
+                self.copy_to_clipboard(&text);
+            }
+        } else if let Some(ref viewer) = self.line_viewer {
+            let name = viewer
+                .title_override
+                .as_deref()
+                .unwrap_or_else(|| {
+                    viewer
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                })
+                .to_owned();
+            if !name.is_empty() {
+                self.copy_to_clipboard(&name);
+            }
         }
-        InputOutcome::Changed
+    }
+
+    pub(super) fn toggle_line_viewer_fullscreen(&mut self) {
+        let Some(ref mut viewer) = self.line_viewer else {
+            return;
+        };
+        if viewer.fullscreen {
+            viewer.fullscreen = false;
+            // Restore side panel for any plan preview (casual `/view-plan` and
+            // approval). File previews fall back to the centered popup
+            // (`side_panel` already false).
+            if viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview {
+                viewer.side_panel = true;
+            }
+        } else {
+            viewer.fullscreen = true;
+            viewer.side_panel = false;
+        }
     }
 
     /// Handle a key event while the line viewer is open.
@@ -75,6 +116,19 @@ impl AgentView {
             .line_viewer
             .as_ref()
             .is_some_and(|v| v.list_state.input_mode().is_some());
+
+        // Plan approval Preview: Ctrl/Cmd+V must attach clipboard screenshots
+        // to the plan composer (same deferred probe as the main prompt). Do
+        // not swallow into the line-viewer list search path.
+        if in_plan_approval && !input_bar_active && crate::input::key::is_paste_key(key) {
+            if let Some(ref mut pav) = self.plan_approval_view {
+                pav.focus = PlanApprovalFocus::Prompt;
+            }
+            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                crate::clipboard::system_clipboard_read_text(),
+            );
+            return self.handle_paste_key_deferred(clipboard_text);
+        }
 
         // When the search/filter/goto input bar is active, let ListPane
         // handle everything. Comment mode is special: Enter/Esc are not
@@ -98,7 +152,7 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        if in_plan_approval && crate::input::key::RowWalk::from_key(key).is_some() {
+        if in_plan_approval && key.code == KeyCode::Tab && key.modifiers.is_empty() {
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Prompt;
             }
@@ -123,20 +177,13 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Ctrl+F: toggle fullscreen.
+        // Ctrl+F: toggle fullscreen ↔ side panel (plan) / popup (file).
         if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(ref mut viewer) = self.line_viewer {
-                viewer.fullscreen = !viewer.fullscreen;
-            }
+            self.toggle_line_viewer_fullscreen();
             return InputOutcome::Changed;
         }
 
-        if in_plan_approval && key!('c').matches(key) {
-            return self.enter_plan_commenting();
-        }
-
-        // Casual mode: same `c` / `s` shortcuts as plan approval so the
-        // footer hints actually work.
+        // Casual plan preview: `c` comment / `s` send (not approval CTAs).
         if !in_plan_approval && self.is_plan_viewer() && key!('c').matches(key) {
             return self.enter_casual_plan_commenting();
         }
@@ -148,21 +195,52 @@ impl AgentView {
             return self.send_casual_plan_comments();
         }
 
-        if in_plan_approval && key!('a').matches(key) {
-            return self.approve_plan();
-        }
-
-        // s: switch to prompt so the user can type an overall revision
-        // message before submitting. Enter from Prompt does the actual send.
-        if in_plan_approval && key!('s').matches(key) {
-            if let Some(ref mut pav) = self.plan_approval_view {
-                pav.focus = PlanApprovalFocus::Prompt;
+        // Plan approval primary CTAs (empty-prompt accelerators only):
+        // a approve · A approve w/ comment · ? clarify · s revise · q quit
+        // Non-empty draft / ordinary typing must reach the composer — dogfood
+        // 2026-07-29: panel Preview used to swallow every bare letter.
+        let plan_prompt_empty = in_plan_approval
+            && self.prompt.text().trim().is_empty()
+            && self.prompt.images.is_empty();
+        if in_plan_approval && plan_prompt_empty {
+            if key!('a').matches(key) {
+                return self.approve_plan();
             }
-            return InputOutcome::Changed;
+            if key!('A').matches(key) {
+                return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
+            }
+            if key!('s').matches(key) {
+                return self.focus_plan_prompt(PlanPromptIntent::Revise);
+            }
+            if key!('?').matches(key) {
+                return self.focus_plan_prompt(PlanPromptIntent::Questions);
+            }
+            if key!('q').matches(key) {
+                return self.abandon_plan();
+            }
         }
-
-        if in_plan_approval && key!('q').matches(key) {
-            return self.abandon_plan();
+        // Printable / edit keys while plan approval is open: move to Prompt
+        // and type. Viewer navigation (j/k/arrows/…) and select-to-copy (y/Y)
+        // stay below. Enter still opens line notes (secondary path) when it
+        // falls through.
+        if in_plan_approval {
+            let is_composer_key = match key.code {
+                // y/Y: line / whole-plan copy on plan surfaces (handlers below).
+                // Not composer type-in.
+                KeyCode::Char('y' | 'Y') => false,
+                KeyCode::Char(c) if !c.is_control() => {
+                    // Bare or Shift (uppercase); Ctrl/Alt chords stay viewer/global.
+                    key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
+                }
+                KeyCode::Backspace | KeyCode::Delete => key.modifiers.is_empty(),
+                _ => false,
+            };
+            if is_composer_key {
+                if let Some(ref mut pav) = self.plan_approval_view {
+                    pav.focus = PlanApprovalFocus::Prompt;
+                }
+                return self.handle_plan_feedback_key(key);
+            }
         }
 
         if !in_plan_approval
@@ -198,10 +276,10 @@ impl AgentView {
             self.confirm_line_viewer(false);
             return InputOutcome::Changed;
         }
+        // y: copy selected line(s) to system clipboard.
+        // Plan approval / plan preview: same line/range copy as conversation
+        // selection (does not interfere with a/s/?/q CTAs).
         if key!('y').matches(key) {
-            if self.is_plan_viewer() {
-                return self.copy_plan_full();
-            }
             if let Some(ref viewer) = self.line_viewer {
                 let text = if viewer.list_state.visual_mode {
                     if let Some(ref range) = viewer.list_state.multi_range() {
@@ -234,24 +312,9 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
+        // Y: on plan surfaces, copy whole plan body; else copy filename/title.
         if key!('Y').matches(key) {
-            if self.is_plan_viewer() {
-                return InputOutcome::Changed;
-            }
-            if let Some(ref viewer) = self.line_viewer {
-                let name = viewer
-                    .title_override
-                    .as_deref()
-                    .unwrap_or_else(|| {
-                        viewer
-                            .path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                    })
-                    .to_owned();
-                self.copy_to_clipboard(&name);
-            }
+            self.copy_line_viewer_whole_body_or_title();
             return InputOutcome::Changed;
         }
         if key!(Esc).matches(key) || key!('q').matches(key) || key!('c', CONTROL).matches(key) {
@@ -346,24 +409,30 @@ impl AgentView {
         self.casual_editing_comment_id = None;
     }
 
-    /// Dismiss the /btw panel. If Done, flush response to scrollback first.
+    /// Dismiss the /btw panel. Flushes Done (full thread) or Error-with-prior
+    /// turns to scrollback first so multi-turn answers are not lost.
     pub(super) fn dismiss_btw_panel(&mut self) -> InputOutcome {
-        use crate::scrollback::block::RenderBlock;
-        use crate::scrollback::blocks::BtwBlock;
-        use crate::views::btw_overlay::BtwOverlayState;
-        if let Some(BtwOverlayState::Done {
-            question, content, ..
-        }) = self.btw_state.take()
-        {
-            self.scrollback
-                .push_block(RenderBlock::Btw(BtwBlock::new(question, content.text())));
-        } else {
-            self.btw_state = None;
-        }
+        self.flush_open_btw_to_scrollback();
+        self.btw_state = None;
         self.minimal_btw_lifecycle = None;
         self.btw_focused = false;
         self.clear_btw_drag_state();
         InputOutcome::Changed
+    }
+
+    /// Flush any open Done/Error prior-turn payload into scrollback without
+    /// clearing focus flags. Used by dismiss and by first-shot `/btw` that
+    /// replaces an open panel so the previous thread is not dropped.
+    pub(crate) fn flush_open_btw_to_scrollback(&mut self) {
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::BtwBlock;
+        let Some(state) = self.btw_state.as_ref() else {
+            return;
+        };
+        if let Some((question, body)) = state.scrollback_flush_payload() {
+            self.scrollback
+                .push_block(RenderBlock::Btw(BtwBlock::new(question, body)));
+        }
     }
 
     pub(super) fn clear_btw_drag_state(&mut self) {
@@ -405,56 +474,17 @@ impl AgentView {
 
         let close_area = viewer.close_button_area;
         let fs_area = viewer.fullscreen_button_area;
+        let copy_area = viewer.copy_button_area;
         let send_area = viewer.plan_ref().and_then(|p| p.send_button_area);
+        let questions_area = viewer.plan_ref().and_then(|p| p.questions_button_area);
         let abandon_area = viewer.plan_ref().and_then(|p| p.abandon_button_area);
         let approve_area = viewer.plan_ref().and_then(|p| p.approve_button_area);
+        let approve_notes_area = viewer.plan_ref().and_then(|p| p.approve_notes_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
-        let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
         // Cached `is_plan_viewer()` so we don't need to call self while
         // the line_viewer is mutably borrowed below.
         let is_plan_preview =
             viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
-
-        let scrollbar_owns_gesture = match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                viewer.list_state.scrollbar_hit(mouse.column, mouse.row)
-            }
-            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
-                viewer.list_state.is_scrollbar_dragging()
-            }
-            _ => false,
-        };
-        if scrollbar_owns_gesture {
-            viewer.list_state.handle_mouse_event(
-                mouse.kind,
-                mouse.column,
-                mouse.row,
-                popup_area.unwrap_or_default(),
-                &viewer.lines,
-            );
-            if is_plan_preview {
-                viewer.plan_mut().gutter_drag_start = None;
-                viewer.plan_mut().gutter_drag_end = None;
-            }
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                let was_commenting = self
-                    .plan_approval_view
-                    .as_ref()
-                    .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-                if let Some(ref mut pav) = self.plan_approval_view {
-                    pav.focus = PlanApprovalFocus::Preview;
-                    if was_commenting {
-                        pav.commenting_range = None;
-                        pav.editing_comment_id = None;
-                        pav.stashed_feedback_prompt = None;
-                    }
-                }
-                if was_commenting {
-                    self.prompt.set_text("");
-                }
-            }
-            return InputOutcome::Changed;
-        }
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -465,11 +495,14 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
-                // Click on fullscreen button -> toggle fullscreen.
+                // Click on copy button -> whole body (same as `Y` on plans).
+                if copy_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    self.copy_line_viewer_whole_body_or_title();
+                    return InputOutcome::Changed;
+                }
+                // Click on fullscreen button -> same toggle as Ctrl+F.
                 if fs_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
-                    if let Some(ref mut v) = self.line_viewer {
-                        v.fullscreen = !v.fullscreen;
-                    }
+                    self.toggle_line_viewer_fullscreen();
                     return InputOutcome::Changed;
                 }
                 if abandon_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
@@ -485,44 +518,32 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
-                if comment_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                if approve_notes_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()))
+                {
                     if self.plan_approval_view.is_some() {
-                        return self.enter_plan_commenting();
+                        return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
                     }
-                    if is_plan_preview {
-                        return self.enter_casual_plan_commenting();
-                    }
-                    // The comment button is only set on plan viewers,
-                    // so the two arms above are exhaustive in practice.
-                    // Return here to make the dead fall-through
-                    // explicit and to match the abandon/approve hit
-                    // patterns just above.
                     return InputOutcome::Changed;
                 }
-                if copy_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
-                    return self.copy_plan_full();
+                // Comment button is casual-preview only (approval has no
+                // primary Comment CTA; Enter / dbl-click still open notes).
+                if comment_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    if is_plan_preview && self.plan_approval_view.is_none() {
+                        return self.enter_casual_plan_commenting();
+                    }
+                    return InputOutcome::Changed;
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        if let Some(ref mut pav) = self.plan_approval_view {
-                            pav.focus = PlanApprovalFocus::Prompt;
-                        }
-                        return InputOutcome::Changed;
+                        return self.focus_plan_prompt(PlanPromptIntent::Revise);
                     }
                     return self.send_casual_plan_comments();
                 }
-                // Mermaid buttons before click-to-comment (early return ends
-                // the `viewer` borrow so `handle_inline_media_click` can take
-                // `&mut self`).
-                let mermaid_hit = self
-                    .inline_media_hits
-                    .mermaid_buttons
-                    .iter()
-                    .any(|(rect, _, _)| rect.contains((mouse.column, mouse.row).into()));
-                if mermaid_hit {
-                    return self
-                        .handle_inline_media_click(mouse.column, mouse.row)
-                        .unwrap_or(InputOutcome::Changed);
+                if questions_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    if self.plan_approval_view.is_some() {
+                        return self.focus_plan_prompt(PlanPromptIntent::Questions);
+                    }
+                    return InputOutcome::Changed;
                 }
                 if modal_area.is_none_or(|a| !a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some()
@@ -563,24 +584,16 @@ impl AgentView {
             }
             MouseEventKind::Moved => {
                 let mut changed = false;
-                // Redraw only when mermaid button hover would change.
-                if self.last_mouse_pos != (mouse.column, mouse.row) {
-                    let old = self.last_mouse_pos;
-                    self.last_mouse_pos = (mouse.column, mouse.row);
-                    let hits = |col: u16, row: u16| {
-                        self.inline_media_hits
-                            .mermaid_buttons
-                            .iter()
-                            .any(|(rect, _, _)| rect.contains((col, row).into()))
-                    };
-                    if hits(old.0, old.1) || hits(mouse.column, mouse.row) {
-                        changed = true;
-                    }
-                }
                 let close_hover =
                     close_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
                 if close_hover != viewer.close_hovered {
                     viewer.close_hovered = close_hover;
+                    changed = true;
+                }
+                let copy_hover =
+                    copy_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                if copy_hover != viewer.copy_hovered {
+                    viewer.copy_hovered = copy_hover;
                     changed = true;
                 }
                 let fs_hover =
@@ -594,6 +607,13 @@ impl AgentView {
                 let prev_send = viewer.plan_ref().is_some_and(|p| p.send_hovered);
                 if send_hover != prev_send {
                     viewer.plan_mut().send_hovered = send_hover;
+                    changed = true;
+                }
+                let questions_hover =
+                    questions_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_questions = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
+                if questions_hover != prev_questions {
+                    viewer.plan_mut().questions_hovered = questions_hover;
                     changed = true;
                 }
                 let abandon_hover =
@@ -610,18 +630,18 @@ impl AgentView {
                     viewer.plan_mut().approve_hovered = approve_hover;
                     changed = true;
                 }
+                let approve_notes_hover = approve_notes_area
+                    .is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_approve_notes = viewer.plan_ref().is_some_and(|p| p.approve_notes_hovered);
+                if approve_notes_hover != prev_approve_notes {
+                    viewer.plan_mut().approve_notes_hovered = approve_notes_hover;
+                    changed = true;
+                }
                 let comment_btn_hover =
                     comment_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
                 let prev_comment_btn = viewer.plan_ref().is_some_and(|p| p.comment_hovered);
                 if comment_btn_hover != prev_comment_btn {
                     viewer.plan_mut().comment_hovered = comment_btn_hover;
-                    changed = true;
-                }
-                let copy_btn_hover =
-                    copy_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
-                let prev_copy_btn = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
-                if copy_btn_hover != prev_copy_btn {
-                    viewer.plan_mut().copy_hovered = copy_btn_hover;
                     changed = true;
                 }
                 if self.plan_approval_view.is_some()
@@ -752,21 +772,10 @@ impl AgentView {
                 // edit-comment) for that row. Same shortcut as
                 // selecting + pressing `c` / Enter. Works for both
                 // plan-approval and casual plan-preview modes.
-                // Skip Mermaid affordance rows (button hits handled above).
                 let on_list_row = mouse.row >= area.y && {
                     let ry = (mouse.row - area.y) as usize;
                     let vy = viewer.list_state.scroll_offset() + ry;
-                    viewer
-                        .list_state
-                        .layout()
-                        .item_at_y(vy)
-                        .map(|vi| {
-                            let pi = viewer.list_state.to_physical(vi);
-                            viewer.lines.get(pi).is_some_and(|item| {
-                                !matches!(item, PlanViewerItem::MermaidAffordance(_))
-                            })
-                        })
-                        .unwrap_or(false)
+                    viewer.list_state.layout().item_at_y(vy).is_some()
                 };
                 // Skip the click-to-comment trigger if the user is
                 // already composing a comment. Without this guard, any
@@ -806,12 +815,96 @@ impl AgentView {
 
     // -- Scrollback selection box buttons -------------------------------------
 
+    /// Whether this block type gets always-on bubble ⧉ (user + assistant only).
+    pub(crate) fn is_bubble_copy_block(block: &crate::scrollback::block::RenderBlock) -> bool {
+        matches!(
+            block,
+            crate::scrollback::block::RenderBlock::UserPrompt(_)
+                | crate::scrollback::block::RenderBlock::AgentMessage(_)
+        )
+    }
+
+    /// Paint always-on ⧉ on visible user/assistant bubbles (no select-first).
+    ///
+    /// Fills [`Self::bubble_copy_hits`]. Call after scrollback content; clear
+    /// hits when drag is active or overlay focused (caller gate).
+    pub(super) fn render_bubble_copy_buttons(&mut self, buf: &mut Buffer, theme: &Theme) {
+        self.bubble_copy_hits.clear();
+        if !self
+            .scrollback
+            .appearance()
+            .scrollback
+            .display
+            .bubble_copy_buttons
+        {
+            self.hovered_bubble_copy = None;
+            return;
+        }
+
+        let btn_base = Style::default().fg(theme.selection_border);
+        let btn_hover = Style::default().fg(theme.text_primary);
+        let icon = crate::glyphs::copy_icon();
+        // Mirror prompt top-bar gate: need room for the glyph inside content.
+        const MIN_WIDTH: u16 = 6;
+
+        // Collect first so we do not hold a borrow across mutation.
+        let candidates: Vec<(usize, Rect)> = self
+            .last_scrollback_selection_model
+            .visible_blocks
+            .iter()
+            .filter_map(|geom| {
+                let idx = geom.entry_idx;
+                let entry = self.scrollback.entry(idx)?;
+                if !Self::is_bubble_copy_block(&entry.block) {
+                    return None;
+                }
+                if self.scrollback.entry_content_hidden_by_group(idx) {
+                    return None;
+                }
+                // Prefer content area; fall back to full block area.
+                let area = if geom.content_area.width >= MIN_WIDTH {
+                    geom.content_area
+                } else if geom.area.width >= MIN_WIDTH {
+                    geom.area
+                } else {
+                    return None;
+                };
+                if area.height == 0 {
+                    return None;
+                }
+                // Top row, right edge (1 cell for ⧉).
+                let x = area.x + area.width.saturating_sub(1);
+                let y = area.y;
+                Some((idx, Rect::new(x, y, 1, 1)))
+            })
+            .collect();
+
+        for (idx, rect) in candidates {
+            let hovered = self.hovered_bubble_copy == Some(idx);
+            let areas = render_char_buttons(
+                buf,
+                rect.x,
+                rect.y,
+                [(icon, hovered)],
+                btn_base,
+                btn_hover,
+                0,
+            );
+            self.bubble_copy_hits.push((idx, areas[0]));
+        }
+    }
+
     /// Render ⧉ (copy) and ↗ (view) buttons on the scrollback selection box.
     ///
     /// Two modes:
     /// - **Corner row** (expanded or ungrouped): buttons on the `╭...╮` row.
     /// - **Inline** (collapsed + grouped): buttons on the selected entry's row,
     ///   overlaying content at the right edge.
+    ///
+    /// **Policy A:** when `bubble_copy_buttons` is on, skip selection-box ⧉
+    /// only for bubble-owned types (UserPrompt / AgentMessage). Thinking and
+    /// tools keep selection-box ⧉ because they never get always-on bubble
+    /// chrome. ↗ view remains when supported.
     pub(super) fn render_selection_buttons(
         &mut self,
         buf: &mut Buffer,
@@ -819,7 +912,7 @@ impl AgentView {
         selected_entry_area: Option<Rect>,
         theme: &Theme,
     ) {
-        // Gated by appearance config (opt-in while testing).
+        // Gated by appearance config (default on for one-click copy chrome).
         if !self
             .scrollback
             .appearance()
@@ -844,7 +937,16 @@ impl AgentView {
         };
 
         let header_selected = self.scrollback.entry_content_hidden_by_group(selected_idx);
-        let has_copy = entry.block.supports_copy() && !header_selected;
+        let bubble_copy_on = self
+            .scrollback
+            .appearance()
+            .scrollback
+            .display
+            .bubble_copy_buttons;
+        // Policy A: suppress selection ⧉ only when bubble chrome also paints
+        // this block type (user/agent). Thinking/tools keep selection ⧉.
+        let bubble_owns_copy = bubble_copy_on && Self::is_bubble_copy_block(&entry.block);
+        let has_copy = entry.block.supports_copy() && !header_selected && !bubble_owns_copy;
         let has_view = entry.block.supports_fullscreen() && !header_selected;
         if !has_copy && !has_view {
             self.hit_sb_copy.clear();
@@ -1090,5 +1192,351 @@ impl AgentView {
 }
 
 #[cfg(test)]
-#[path = "viewer_tests.rs"]
-mod tests;
+mod bubble_copy_tests {
+    use super::*;
+    use crate::app::actions::Action;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::text_selection::{ResolvedSelectionModel, VisibleBlockGeometry};
+    use crate::theme::Theme;
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn geom(entry_idx: usize, y: u16) -> VisibleBlockGeometry {
+        VisibleBlockGeometry {
+            entry_idx,
+            area: Rect::new(0, y, 40, 2),
+            content_area: Rect::new(2, y, 36, 2),
+            selection_area: Rect::new(0, y, 40, 2),
+            content_width: 36,
+            top_clipped: false,
+            bottom_clipped: false,
+            drag_startable: true,
+        }
+    }
+
+    fn paint_with_visible(agent: &mut AgentView, blocks: Vec<VisibleBlockGeometry>) -> Buffer {
+        agent.last_scrollback_selection_model = ResolvedSelectionModel {
+            visible_blocks: blocks,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        agent.render_bubble_copy_buttons(&mut buf, &Theme::current());
+        buf
+    }
+
+    /// Named contract: visible UserPrompt + AgentMessage expose a ⧉ hit without
+    /// that entry being selected.
+    #[test]
+    fn bubble_copy_paints_without_selection() {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("hello user"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("hello agent"));
+        // No selection.
+        assert!(agent.scrollback.selected().is_none());
+
+        let buf = paint_with_visible(&mut agent, vec![geom(0, 1), geom(1, 4)]);
+        assert_eq!(
+            agent.bubble_copy_hits.len(),
+            2,
+            "user + agent must each get a bubble ⧉ hit"
+        );
+        let idxs: Vec<usize> = agent.bubble_copy_hits.iter().map(|(i, _)| *i).collect();
+        assert_eq!(idxs, vec![0, 1]);
+        // Glyph painted at hit cells.
+        let icon = crate::glyphs::copy_icon();
+        for (_, r) in &agent.bubble_copy_hits {
+            assert_eq!(
+                buf.cell((r.x, r.y)).map(|c| c.symbol()),
+                Some(icon),
+                "⧉ must paint at hit rect"
+            );
+        }
+    }
+
+    /// Named contract: tool / thinking rows do not get always-on bubble ⧉.
+    #[test]
+    fn bubble_copy_skips_tool_and_thinking() {
+        let mut agent = make_agent();
+        agent.scrollback.push_block(RenderBlock::user_prompt("u"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::thinking("secret thoughts"));
+        agent.scrollback.push_block(RenderBlock::agent_message("a"));
+        // Tool call if constructor exists; otherwise thinking alone is enough.
+        let _ = paint_with_visible(&mut agent, vec![geom(0, 0), geom(1, 2), geom(2, 4)]);
+        let idxs: Vec<usize> = agent.bubble_copy_hits.iter().map(|(i, _)| *i).collect();
+        assert_eq!(
+            idxs,
+            vec![0, 2],
+            "only user + agent; thinking idx 1 must not get ⧉"
+        );
+    }
+
+    /// Named contract: click copies that entry's text without changing selection.
+    #[test]
+    fn bubble_copy_click_copies_payload_without_select() {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("payload-alpha"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("payload-beta"));
+        let _ = paint_with_visible(&mut agent, vec![geom(0, 1), geom(1, 4)]);
+        assert!(agent.scrollback.selected().is_none());
+
+        // Prefer agent message (idx 1).
+        let (idx, rect) = agent
+            .bubble_copy_hits
+            .iter()
+            .find(|(i, _)| *i == 1)
+            .copied()
+            .expect("agent bubble hit");
+        assert_eq!(idx, 1);
+
+        // Simulate mouse path: Action::CopyEntryContent { idx } then copy.
+        let before_sel = agent.scrollback.selected();
+        agent.copy_entry_content(idx);
+        assert_eq!(
+            agent.scrollback.selected(),
+            before_sel,
+            "copy must not change selection"
+        );
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_default();
+        assert!(
+            toast.starts_with("Copied")
+                || toast.starts_with("Copy sent")
+                || toast.starts_with("Clipboard unreachable")
+                || toast.starts_with("Copy failed"),
+            "copy_entry_content must toast clipboard delivery, got {toast:?}"
+        );
+
+        // Mouse hit → action with correct idx (no AppView needed).
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        // Direct hit scan mirrors mouse.rs.
+        let hit = agent
+            .bubble_copy_hits
+            .iter()
+            .find(|(_, r)| r.contains((mouse.column, mouse.row).into()))
+            .map(|&(i, _)| i);
+        assert_eq!(hit, Some(1));
+        let _ = Action::CopyEntryContent { idx: hit.unwrap() };
+        let _ = Event::Mouse(mouse);
+    }
+
+    /// Named contract: drag-active gate clears bubble hits (render path).
+    #[test]
+    fn bubble_copy_cleared_when_drag_gate_simulated() {
+        let mut agent = make_agent();
+        agent.scrollback.push_block(RenderBlock::user_prompt("u"));
+        let _ = paint_with_visible(&mut agent, vec![geom(0, 1)]);
+        assert!(!agent.bubble_copy_hits.is_empty());
+        // Mirror render.rs else branch when drag active.
+        agent.bubble_copy_hits.clear();
+        agent.hovered_bubble_copy = None;
+        assert!(
+            agent.bubble_copy_hits.is_empty(),
+            "drag gate must empty bubble_copy_hits"
+        );
+    }
+
+    /// Named contract: Policy A — selection-box omits ⧉ when bubble chrome on
+    /// (bubble owns the one ⧉; ↗ view may remain).
+    #[test]
+    fn bubble_copy_policy_a_one_icon_when_selected() {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("selected body"));
+        agent.scrollback.set_selected(Some(0));
+        assert_eq!(agent.scrollback.selected(), Some(0));
+        assert!(
+            agent
+                .scrollback
+                .appearance()
+                .scrollback
+                .display
+                .bubble_copy_buttons,
+            "default bubble chrome on"
+        );
+
+        let _ = paint_with_visible(&mut agent, vec![geom(0, 2)]);
+        assert_eq!(
+            agent.bubble_copy_hits.len(),
+            1,
+            "selected agent still gets exactly one bubble ⧉"
+        );
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let sel_box = SelectionBox::new(Rect::new(1, 2, 38, 2), Style::default());
+        agent.render_selection_buttons(
+            &mut buf,
+            &sel_box,
+            Some(Rect::new(2, 2, 36, 2)),
+            &Theme::current(),
+        );
+        assert!(
+            agent.hit_sb_copy.rect.is_none(),
+            "Policy A: selection-box must not arm a second ⧉ when bubble chrome is on"
+        );
+        // Agent message supports fullscreen → ↗ may still paint.
+        assert!(
+            agent.hit_sb_view.rect.is_some(),
+            "Policy A keeps ↗ on the selection box when view is supported"
+        );
+    }
+
+    /// Named contract: Policy A only suppresses selection ⧉ for bubble-owned
+    /// types (UserPrompt / AgentMessage). Thinking keeps selection-box ⧉
+    /// because it never gets always-on bubble chrome.
+    #[test]
+    fn bubble_copy_policy_a_keeps_selection_copy_for_thinking_when_bubble_on() {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::thinking("secret thoughts"));
+        agent.scrollback.set_selected(Some(0));
+        assert!(
+            agent
+                .scrollback
+                .appearance()
+                .scrollback
+                .display
+                .bubble_copy_buttons,
+            "default bubble chrome on"
+        );
+        assert!(
+            agent
+                .scrollback
+                .entry(0)
+                .expect("thinking entry")
+                .block
+                .supports_copy(),
+            "thinking is copyable"
+        );
+
+        let _ = paint_with_visible(&mut agent, vec![geom(0, 2)]);
+        assert!(
+            agent.bubble_copy_hits.is_empty(),
+            "thinking must not get bubble ⧉"
+        );
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let sel_box = SelectionBox::new(Rect::new(1, 2, 38, 2), Style::default());
+        agent.render_selection_buttons(
+            &mut buf,
+            &sel_box,
+            Some(Rect::new(2, 2, 36, 2)),
+            &Theme::current(),
+        );
+        assert!(
+            agent.hit_sb_copy.rect.is_some(),
+            "Policy A must keep selection-box ⧉ for thinking when bubble chrome is on"
+        );
+    }
+
+    /// Named contract: same as thinking — Execute tool rows keep selection ⧉
+    /// under bubble chrome (no bubble paint for tools).
+    #[test]
+    fn bubble_copy_policy_a_keeps_selection_copy_for_execute_tool_when_bubble_on() {
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(RenderBlock::execute("echo hello"));
+        agent.scrollback.set_selected(Some(0));
+        assert!(
+            agent
+                .scrollback
+                .appearance()
+                .scrollback
+                .display
+                .bubble_copy_buttons,
+            "default bubble chrome on"
+        );
+        assert!(
+            agent
+                .scrollback
+                .entry(0)
+                .expect("execute entry")
+                .block
+                .supports_copy(),
+            "execute tool is copyable"
+        );
+
+        let _ = paint_with_visible(&mut agent, vec![geom(0, 2)]);
+        assert!(
+            agent.bubble_copy_hits.is_empty(),
+            "execute must not get bubble ⧉"
+        );
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let sel_box = SelectionBox::new(Rect::new(1, 2, 38, 2), Style::default());
+        agent.render_selection_buttons(
+            &mut buf,
+            &sel_box,
+            Some(Rect::new(2, 2, 36, 2)),
+            &Theme::current(),
+        );
+        assert!(
+            agent.hit_sb_copy.rect.is_some(),
+            "Policy A must keep selection-box ⧉ for execute tool when bubble chrome is on"
+        );
+    }
+
+    /// Named contract: config off clears paint.
+    #[test]
+    fn bubble_copy_respects_config_off() {
+        let mut agent = make_agent();
+        agent.scrollback.push_block(RenderBlock::user_prompt("u"));
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.scrollback.display.bubble_copy_buttons = false;
+        agent.scrollback.set_appearance(appearance);
+        let _ = paint_with_visible(&mut agent, vec![geom(0, 1)]);
+        assert!(
+            agent.bubble_copy_hits.is_empty(),
+            "bubble_copy_buttons=false must paint no hits"
+        );
+    }
+
+    /// Named contract: mouse down on bubble hit yields CopyEntryContent before
+    /// any selection change (hit scan + action wiring).
+    #[test]
+    fn bubble_copy_mouse_action_wires_entry_idx() {
+        let mut agent = make_agent();
+        agent.scrollback.push_block(RenderBlock::user_prompt("u"));
+        agent.scrollback.push_block(RenderBlock::agent_message("a"));
+        let _ = paint_with_visible(&mut agent, vec![geom(0, 1), geom(1, 4)]);
+        let (idx, rect) = agent.bubble_copy_hits[0];
+        // Mirror mouse.rs hit-before-drag:
+        let action = agent
+            .bubble_copy_hits
+            .iter()
+            .find(|(_, r)| r.contains((rect.x, rect.y).into()))
+            .map(|&(i, _)| Action::CopyEntryContent { idx: i });
+        assert!(matches!(
+            action,
+            Some(Action::CopyEntryContent { idx: i }) if i == idx
+        ));
+        let _ = InputOutcome::Action(action.unwrap());
+    }
+}

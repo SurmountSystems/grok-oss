@@ -1589,20 +1589,23 @@ fn show_limits_on_welcome_screen_is_noop() {
 }
 
 #[test]
-fn show_limits_pushes_cached_snapshot_block() {
+fn show_limits_opens_modal_with_cached_snapshot() {
     use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+    use crate::views::modal::ActiveModal;
 
     let mut app = test_app_with_agent();
     app.credit_balance = Some(CreditBalance {
         usage_pct: 24.0,
         effective_usage_pct: 24.0,
         period_end_display: Some("Jul 30, 12:00".into()),
+        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
         prepaid_balance_cents: Some(1250),
         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
         is_unified_billing_user: None,
+        grok_build_usage_pct: None,
     });
     {
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -1622,9 +1625,29 @@ fn show_limits_pushes_cached_snapshot_block() {
             ),
         "limits shows cache (+ optional silent management refresh): {effects:?}"
     );
-    assert_eq!(agent_scrollback_len(&app), before + 1);
-    let text = last_system_text(&app, AgentId(0));
-    assert!(text.contains("Limits"), "header: {text}");
+    // Primary surface is a dismissible modal — not a scrollback dump.
+    assert_eq!(
+        agent_scrollback_len(&app),
+        before,
+        "limits must not pollute chat with a static block"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let Some(ActiveModal::Limits { state }) = agent.active_modal.as_ref() else {
+        panic!(
+            "expected Limits modal, got {:?}",
+            agent.active_modal.as_ref().map(|m| m.message(false))
+        );
+    };
+    let text = state.content_lines(chrono::Utc::now()).join("\n");
+    // Body has no second "Limits" title (modal chrome owns it).
+    assert!(
+        text.contains("Live sampling:"),
+        "live sampling line: {text}"
+    );
+    assert!(
+        !text.starts_with("Limits\n") && !text.starts_with("Limits\r"),
+        "body must not double the chrome title: {text}"
+    );
     assert!(
         text.contains("Included weekly allowance: 24% used · 76% remaining"),
         "{text}"
@@ -1637,7 +1660,9 @@ fn show_limits_pushes_cached_snapshot_block() {
             || text.contains("Balance: no management team id")
             || text.contains("Balance: loading team prepaid...")
             || text.contains("Balance: team prepaid unavailable")
-            || text.contains("Balance (console team prepaid):"),
+            || text
+                .lines()
+                .any(|l| l.trim_start().starts_with("Balance: $")),
         "honest console prepaid gap: {text}"
     );
     assert!(
@@ -1653,6 +1678,7 @@ fn show_limits_pushes_cached_snapshot_block() {
 #[test]
 fn show_limits_console_live_keeps_meters_distinct() {
     use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+    use crate::views::modal::ActiveModal;
 
     let mut app = test_app_with_agent();
     {
@@ -1662,24 +1688,37 @@ fn show_limits_console_live_keeps_meters_distinct() {
             usage_pct: 100.0,
             effective_usage_pct: 100.0,
             period_end_display: Some("Jul 30, 12:00".into()),
+            period_end_at: None,
             pay_as_you_go: false,
             on_demand_cap_cents: None,
             on_demand_used_cents: None,
             prepaid_balance_cents: Some(500),
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
             is_unified_billing_user: None,
+            grok_build_usage_pct: None,
         });
     }
     let _ = dispatch(Action::ShowLimits, &mut app);
-    let text = last_system_text(&app, AgentId(0));
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let Some(ActiveModal::Limits { state }) = agent.active_modal.as_ref() else {
+        panic!("expected Limits modal");
+    };
+    let text = state.content_lines(chrono::Utc::now()).join("\n");
     assert!(text.contains("Live sampling: console key"), "{text}");
-    assert!(text.contains("Path: live"), "{text}");
+    assert!(text.contains("Requests: console"), "{text}");
+    assert!(
+        !text.contains("saved"),
+        "omit saved; presence is implicit: {text}"
+    );
+    assert!(!text.contains("Path:"), "Path: wording retired: {text}");
     assert!(
         text.contains("Balance: no management key")
             || text.contains("Balance: no management team id")
             || text.contains("Balance: loading team prepaid...")
             || text.contains("Balance: team prepaid unavailable")
-            || text.contains("Balance (console team prepaid):"),
+            || text
+                .lines()
+                .any(|l| l.trim_start().starts_with("Balance: $")),
         "honest console prepaid gap: {text}"
     );
     assert!(
@@ -1696,10 +1735,109 @@ fn show_limits_console_live_keeps_meters_distinct() {
     );
 }
 
+/// Named contract: `/limits --json` → conversation-visible JSON with
+/// `schemaVersion` / `liveSampling` (same shape as CLI `grok limits --json`).
+#[test]
+fn show_limits_json_prints_to_scrollback_not_modal() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+    use crate::views::modal::ActiveModal;
+
+    let mut app = test_app_with_agent();
+    app.credit_balance = Some(CreditBalance {
+        usage_pct: 24.0,
+        effective_usage_pct: 24.0,
+        period_end_display: Some("Jul 30, 12:00".into()),
+        period_end_at: None,
+        pay_as_you_go: false,
+        on_demand_cap_cents: None,
+        on_demand_used_cents: None,
+        prepaid_balance_cents: Some(1250),
+        period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+        is_unified_billing_user: None,
+        grok_build_usage_pct: None,
+    });
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = None;
+        // Ensure a modal is not left open by a prior path.
+        agent.active_modal = Some(ActiveModal::Limits {
+            state: Box::new(crate::views::limits_modal::LimitsModalState::new(
+                crate::views::limits_snapshot::LimitsSnapshot::from_billing(
+                    None,
+                    None,
+                    SamplingIdentityKind::SuperGrokSession,
+                ),
+            )),
+        });
+    }
+    let before = agent_scrollback_len(&app);
+    let effects = dispatch(Action::ShowLimitsJson, &mut app);
+    assert!(
+        effects.is_empty()
+            || matches!(
+                effects.as_slice(),
+                [Effect::FetchBilling { silent: true, .. }]
+            ),
+        "json path is cache (+ optional silent refresh): {effects:?}"
+    );
+    assert!(
+        agent_scrollback_len(&app) > before,
+        "JSON must land in conversation scrollback"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.active_modal.is_none(),
+        "--json bypasses modal; modal must be cleared"
+    );
+    let last_idx = agent.scrollback.len().saturating_sub(1);
+    let last = agent
+        .scrollback
+        .get(last_idx)
+        .expect("scrollback entry after ShowLimitsJson");
+    let text = match &last.block {
+        RenderBlock::System(sys) => sys.text.clone(),
+        _ => panic!("expected system block for /limits --json"),
+    };
+    assert!(
+        text.contains("```json") || text.contains("schemaVersion"),
+        "fenced or raw JSON body: {text}"
+    );
+    // Parse JSON body (strip optional fence).
+    let json_body = text
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| text.trim().strip_prefix("```"))
+        .map(|s| s.trim_end_matches('`').trim())
+        .unwrap_or(text.trim());
+    let v: serde_json::Value = serde_json::from_str(json_body)
+        .unwrap_or_else(|e| panic!("JSON parse failed: {e}; body={json_body}"));
+    assert_eq!(v["schemaVersion"], "1", "{v}");
+    assert_eq!(v["liveSampling"], "supergrok_session", "{v}");
+    assert!(
+        v["liveSamplingLabel"]
+            .as_str()
+            .unwrap_or("")
+            .contains("SuperGrok"),
+        "liveSamplingLabel: {v}"
+    );
+    assert_eq!(
+        v["supergrok"]["principals"][0]["includedUsedPct"], 24.0,
+        "{v}"
+    );
+    // No secret-looking material in the dump.
+    let flat = text.to_ascii_lowercase();
+    assert!(!flat.contains("access_token"));
+    assert!(!flat.contains("api_key"));
+    assert!(!flat.contains("eyj"));
+}
+
 /// Named contract: fixture Management prepaid cents → `/limits` Balance dollars.
 #[test]
 fn show_limits_console_live_with_management_fixture_shows_prepaid_balance() {
     use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+    use crate::views::modal::ActiveModal;
 
     let mut app = test_app_with_agent();
     app.console_team_prepaid_cents = Some(12_500);
@@ -1711,25 +1849,36 @@ fn show_limits_console_live_with_management_fixture_shows_prepaid_balance() {
             usage_pct: 100.0,
             effective_usage_pct: 100.0,
             period_end_display: Some("Jul 30, 12:00".into()),
+            period_end_at: None,
             pay_as_you_go: false,
             on_demand_cap_cents: None,
             on_demand_used_cents: None,
             prepaid_balance_cents: Some(996),
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
             is_unified_billing_user: None,
+            grok_build_usage_pct: None,
         });
     }
     let effects = dispatch(Action::ShowLimits, &mut app);
-    // Cache already warm → no silent refresh required.
+    // Console prepaid cache is warm (no management cold path). Dual SuperGrok
+    // hosts may still silent-refresh when a sibling included row is empty.
     assert!(
-        effects.is_empty(),
-        "warm prepaid: no FetchBilling: {effects:?}"
+        effects.is_empty()
+            || matches!(
+                effects.as_slice(),
+                [Effect::FetchBilling { silent: true, .. }]
+            ),
+        "warm prepaid: no effects or optional sibling silent refresh: {effects:?}"
     );
-    let text = last_system_text(&app, AgentId(0));
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let Some(ActiveModal::Limits { state }) = agent.active_modal.as_ref() else {
+        panic!("expected Limits modal");
+    };
+    let text = state.content_lines(chrono::Utc::now()).join("\n");
     assert!(text.contains("Live sampling: console key"), "{text}");
     assert!(
-        text.contains("Balance (console team prepaid): $125"),
-        "management prepaid on /limits: {text}"
+        text.contains("Balance: $125"),
+        "management prepaid on /limits (short Balance): {text}"
     );
     assert!(
         !text.contains("no $ meter yet")

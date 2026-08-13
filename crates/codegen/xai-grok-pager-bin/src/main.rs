@@ -1777,6 +1777,14 @@ async fn async_main() -> Result<()> {
                 )
                 .await;
             }
+            Command::Doctor(_) => {
+                unreachable!("doctor was consumed before runtime startup")
+            }
+            Command::Limits(limits_args) => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return xai_grok_pager::limits_cmd::run(limits_args).await;
+            }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 xai_grok_shell::inspect::inspect(&cwd, json).await?;
@@ -1891,6 +1899,7 @@ async fn async_main() -> Result<()> {
                 device_auth,
                 openrouter,
                 api_key,
+                management_key,
                 list_api_keys,
                 devbox,
             } => {
@@ -1900,6 +1909,17 @@ async fn async_main() -> Result<()> {
                 if list_api_keys {
                     xai_grok_shell::auth::run_list_console_api_keys(&grok_home)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    xai_grok_shell::instrumentation::finalize_and_exit(0);
+                }
+                // Management API key (console team prepaid / Business Usage) —
+                // distinct store from inference XAI_API_KEY / SuperGrok OAuth.
+                if management_key.is_some() {
+                    let key =
+                        xai_grok_shell::auth::materialize_cli_api_key(management_key.as_deref())
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    xai_grok_shell::auth::run_management_key_login(&grok_home, key.as_deref())
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    println!();
                     xai_grok_shell::instrumentation::finalize_and_exit(0);
                 }
                 // OpenRouter and console key paths: one materialize gate so
