@@ -80,4 +80,6 @@ Do not invent product to paper over a live SuperGrok / console session on this m
 
 ## SHA
 
-See the recon-unsigned tip after this report is committed (same commit or follow-up). Parent at write time: `48f0bf1a6307d25cb30561295de6e89aa37d59c5`.
+Product mop tip: `1a38c1f8842dd4d6ac16a1b4f426598806ad6dc4`  
+Parent: `48f0bf1a6307d25cb30561295de6e89aa37d59c5`  
+This report SHA pin is a follow-up commit-tree on that parent.
