@@ -236,8 +236,8 @@ Detail also in project [`AGENTS.md`](../AGENTS.md) § *Onto / put-history*.
 |-------|--------|
 | Branch | `onto-xai/b13fa526f511` |
 | xAI tip | `b13fa526f5112c0b20dad5f1f2300d3d3b127895` (tree `0f26f4082a3b9602ec712b218e177626b2bf72e5`) |
-| Onto tip | `11f4fd5cff326e55c59f99aab73177239e10866e` |
-| Onto tree | `17c3aa9f158d4c0d86e5a760e083368fc08b3470` |
+| Onto tip | `9060f502978900ef1293faa97dc84d39650c2599` |
+| Onto tree | `168086434791ce1c16e5b951da03b3cffda3a8e3` |
 | Join | Done (`ea7a9ad5`, `-s ours`); `origin/main` (`a1515fe1`) is ancestor |
 | Post-join mop | Cargo feature dedupe + shell `local-workspace` / `test-support` flags |
 | Cherry-picks | **Done** — no active pick |
