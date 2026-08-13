@@ -3094,38 +3094,12 @@ fn ensure_ref_arg_safe(value: &str, what: &str) -> Result<()> {
     );
     Ok(())
 }
-/// Seed a committed `.gitignore` (secrets never enter git)
-/// when a fresh conversation branch is created and the repo has none. Distinct
-/// from [`seed_default_excludes`], which seeds the *local-only* `info/exclude`
-/// as a `stage_all` backstop; this file is meant to be committed, so it also
-/// protects explicit user commits and BYO-remote exports. Never overwrites an
-/// existing `.gitignore`.
-async fn seed_default_gitignore(git_root: &Path) -> Result<()> {
-    let path = git_root.join(".gitignore");
-    if tokio::fs::metadata(&path).await.is_ok() {
-        return Ok(());
-    }
-    tokio::fs::write(&path, xai_grok_workspace_types::binding::DEFAULT_GITIGNORE).await?;
-    git_cli(git_root, &["add", "--end-of-options", ".gitignore"]).await?;
-    git_cli(
-        git_root,
-        &[
-            "commit",
-            "-m",
-            "Seed default .gitignore",
-            "--end-of-options",
-            ".gitignore",
-        ],
-    )
-    .await?;
-    tracing::debug!(path = %path.display(), "seeded and committed default .gitignore");
-    Ok(())
-}
 /// `EnsureBinding` (`workspace.git_ensure_binding`): make the conversation
 /// branch exist and be checked out. Resolution order: already-current → local
 /// branch → remote `conv/<id>` (resume in a fresh sandbox: check it out, do not
-/// re-fork) → fork off `base_ref`. The base is never written directly. On a
-/// genuine fresh fork a committed `.gitignore` is seeded if absent.
+/// re-fork) → fork off `base_ref`. The base is never written directly. A
+/// genuine fresh fork leaves HEAD at `base_ref` (no extra commit). Local-only
+/// `info/exclude` seeding stays on `git_commit` via [`seed_default_excludes`].
 pub async fn ensure_binding(
     git_root: &Path,
     session_branch: &str,
@@ -3209,7 +3183,6 @@ pub async fn ensure_binding(
             )
             .await?;
             created = true;
-            seed_default_gitignore(git_root).await?;
         }
     }
     super::git_gate::invalidate(git_root);

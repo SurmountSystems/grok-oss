@@ -74,6 +74,19 @@ fn sudo_alias_injection() -> String {
 /// functions, and aliases as base64-encoded replayable shell snippets.
 const DUMP_BASH_STATE_SCRIPT: &str = r##"
 dump_bash_state() {
+  # Capture the user's option set (including allexport) *before* isolating
+  # this dump. `set -euo pipefail` is this function's own (set is
+  # shell-global in bash) and must not be replayed. Allexport *must* be
+  # replayed, but we turn it off for the rest of the dump so temps —
+  # especially `_emit_encoded`'s `content` holding the full `export -p`
+  # payload — are not exported into helper `exec` environments. On large
+  # CI/Nix envs that exec has been seen to fail with status 126, which
+  # then replaced the user command's exit code.
+  local posix_opts
+  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail)$' || true)
+  builtin set +o allexport 2>/dev/null || true
+  builtin declare +x posix_opts 2>/dev/null || true
+
   set -euo pipefail
   if ! command -v base64 >/dev/null 2>&1; then
     echo "Error: base64 command is required" >&2
@@ -101,13 +114,9 @@ dump_bash_state() {
   _emit "$PWD"
 
   local env_vars
-  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROK_SANDBOX|GROK_AGENT=|SUDO_ASKPASS|GROK_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
+  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROK_SANDBOX|GROK_AGENT=|SUDO_ASKPASS|GROK_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY|__grok_user_cmd' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
-  # errexit/pipefail here are this function's own `set -euo pipefail` (set is
-  # shell-global in bash); replaying them would abort later user commands.
-  local posix_opts
-  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail)$' || true)
   _emit_encoded "$posix_opts" "POSIX_OPTS_B64"
 
   local bash_opts
@@ -449,11 +458,14 @@ impl ShellState {
                 // plain `bash -c "<command>"` execution path, where $# is 0.
                 //
                 // The snapshot can restore `allexport` (set -a), which would
-                // auto-export the temp variable — so strip the export
-                // attribute post-assignment (`declare +x`; inline `declare +x
-                // var=value` does NOT beat allexport) and unset it after the
-                // eval so it can never reach child processes or the state
-                // dump (`export -p`).
+                // auto-export the temp variable — so briefly clear allexport
+                // around the assignment (`declare +x` after `var=value` is
+                // the backstop; inline `declare +x var=value` does NOT beat
+                // allexport), restore allexport if the user had it, and unset
+                // the temp after eval so it never reaches child processes or
+                // the state dump (`export -p`). Dump is `|| true` so a dump
+                // helper exec failure cannot replace the user exit code
+                // (`set -e` inside dump_bash_state is shell-global).
                 "{dump_script} \
                  snap=$(command cat <&3) && builtin shopt -s extglob && builtin eval -- \"$snap\" && \
                  {{ builtin set +u 2>/dev/null || true; \
@@ -461,9 +473,13 @@ impl ShellState {
                  builtin export PWD=\"$(builtin pwd)\"; \
                  builtin shopt -s expand_aliases 2>/dev/null; {sudo_inject}{search_inject}\
                  builtin printf '%s' \"${{2:-}}\"; \
-                 __grok_user_cmd=\"$1\"; builtin declare +x __grok_user_cmd 2>/dev/null; builtin set --; \
+                 __grok_had_allexport=0; \
+                 if builtin shopt -qo allexport 2>/dev/null; then __grok_had_allexport=1; builtin set +o allexport; fi; \
+                 __grok_user_cmd=\"$1\"; builtin declare +x __grok_user_cmd 2>/dev/null; \
+                 if [ \"$__grok_had_allexport\" -eq 1 ]; then builtin set -o allexport; fi; \
+                 builtin unset __grok_had_allexport; builtin set --; \
                  builtin eval \"$__grok_user_cmd\" 2>&1; }}; \
-                 COMMAND_EXIT_CODE=$?; builtin unset __grok_user_cmd 2>/dev/null; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE"
+                 COMMAND_EXIT_CODE=$?; builtin unset __grok_user_cmd 2>/dev/null; {dump_fn} >&4 || true; builtin exit $COMMAND_EXIT_CODE"
             ),
             // After snapshot restore: force nonomatch so login dumps cannot re-arm NOMATCH for model globs.
             // See the bash wrapper comment for why positional parameters are
@@ -483,7 +499,7 @@ impl ShellState {
                  builtin printf '%s' \"${{2:-}}\"; \
                  __grok_user_cmd=\"$1\"; builtin typeset +x __grok_user_cmd 2>/dev/null; builtin set --; \
                  builtin eval \"$__grok_user_cmd\" 2>&1; }}; \
-                 COMMAND_EXIT_CODE=$?; builtin unset __grok_user_cmd 2>/dev/null; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE"
+                 COMMAND_EXIT_CODE=$?; builtin unset __grok_user_cmd 2>/dev/null; {dump_fn} >&4 || true; builtin exit $COMMAND_EXIT_CODE"
             ),
         };
 

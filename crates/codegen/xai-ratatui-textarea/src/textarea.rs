@@ -2075,7 +2075,9 @@ impl TextArea {
             }
             // Document-level: Ctrl+Home / Ctrl+PageUp → buffer start;
             // Ctrl+End / Ctrl+PageDown → buffer end. Bare Home/End stay
-            // visual-row (soft wrap). Ctrl+A/E remain logical-line (emacs).
+            // on this logical line (not wrap-row, not buffer). Ctrl+A/E
+            // remain logical-line with chain (emacs). Super+Left/Right
+            // stay visual-row.
             KeyEvent {
                 code: KeyCode::Home | KeyCode::PageUp,
                 modifiers: KeyModifiers::CONTROL,
@@ -2090,18 +2092,20 @@ impl TextArea {
             } => {
                 self.set_cursor(self.text.len());
             }
-            // Home/End → visual row; Ctrl+A/E → logical line (emacs).
+            // Home/End → this logical line; Super+Left/Right → visual row.
             KeyEvent {
                 code: KeyCode::Home,
                 ..
             } => {
-                self.move_cursor_to_beginning_of_line(false);
+                let bol = self.beginning_of_current_line();
+                self.set_cursor(bol);
             }
 
             KeyEvent {
                 code: KeyCode::End, ..
             } => {
-                self.move_cursor_to_end_of_line(false);
+                let eol = self.end_of_current_line();
+                self.set_cursor(eol);
             }
             _o => {
                 #[cfg(feature = "debug-logs")]
@@ -2559,8 +2563,9 @@ impl TextArea {
         }
     }
 
-    /// Home / Super+Left when `move_up_at_bol` is false (visual row if wrapped);
+    /// Super+Left when `move_up_at_bol` is false (visual row if wrapped);
     /// Ctrl+A when true (logical line; already-at-BOL chains to previous line).
+    /// Bare Home is handled in `input` and stays on this logical line.
     pub fn move_cursor_to_beginning_of_line(&mut self, move_up_at_bol: bool) {
         if move_up_at_bol {
             self.apply_edit_command(EditCommand::MoveLogicalLineStart, None);
@@ -2575,8 +2580,9 @@ impl TextArea {
         self.set_cursor(bol);
     }
 
-    /// End / Super+Right when `move_down_at_eol` is false (visual row if wrapped);
+    /// Super+Right when `move_down_at_eol` is false (visual row if wrapped);
     /// Ctrl+E when true (logical line; already-at-EOL chains to next line).
+    /// Bare End is handled in `input` and stays on this logical line.
     pub fn move_cursor_to_end_of_line(&mut self, move_down_at_eol: bool) {
         if move_down_at_eol {
             self.apply_edit_command(EditCommand::MoveLogicalLineEnd, None);
