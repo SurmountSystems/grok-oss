@@ -1,13 +1,18 @@
-//! Leave SuperGrok when included weekly/monthly allowance is full (billing %).
+//! Leave SuperGrok when included weekly/monthly allowance is full (billing %)
+//! **and** SuperGrok $ extras are gone or unknown.
 //!
-//! When included SuperGrok usage reports fully used and a console API key
-//! failover path exists, mark the session JWT fingerprint out of allowance so
+//! When included SuperGrok usage reports fully used, a console API key failover
+//! path exists, and SuperGrok Extra Usage Credits are not a positive after-burner
+//! (0 or never observed), mark the session JWT fingerprint out of allowance so
 //! the sampler prefers the console key **before** the next request — without
-//! waiting for HTTP 402 (extras would still succeed on SuperGrok and burn paid
-//! balance).
+//! waiting for HTTP 402.
 //!
-//! Also holds a process-local map of **included** headroom + `reset_at` per
-//! SuperGrok identity (from billing polls). `load_supergrok_session_candidates`
+//! With `[auth] auto_use_included_limits` and known **positive** SuperGrok $
+//! extras, do **not** mark (after-burner / SuperGrok $ extras before console):
+//! ranking keeps SuperGrok session primary and console only as failover.
+//!
+//! Also holds a process-local map of **included** headroom + `reset_at` + extras
+//! per SuperGrok identity (from billing polls). `load_supergrok_session_candidates`
 //! merges that into ranking when present. Honest absence when never polled.
 
 use std::collections::BTreeMap;
@@ -55,6 +60,7 @@ pub fn remember_supergrok_included_billing(
         reset_at: None,
         period_type: None,
         prepaid_balance_cents: None,
+        grok_build_usage_pct: None,
     });
     entry.usage_pct = Some(usage_pct);
     if let Some(r) = reset_at {
@@ -83,8 +89,31 @@ pub fn remember_supergrok_dollar_extras(identity_id: &str, prepaid_balance_cents
         reset_at: None,
         period_type: None,
         prepaid_balance_cents: None,
+        grok_build_usage_pct: None,
     });
     entry.prepaid_balance_cents = Some(prepaid_balance_cents);
+}
+
+/// Remember Grok Build `productUsage` % for one SuperGrok principal.
+///
+/// Process cache only. Does not invent: call only when wire had the field.
+/// Dual `/limits` sibling rows read this so Build % is not hard-coded None.
+pub fn remember_supergrok_build_usage(identity_id: &str, grok_build_usage_pct: f64) {
+    let id = identity_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut map = INCLUDED_BILLING_BY_IDENTITY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let entry = map.entry(id.to_owned()).or_insert(IncludedBillingFields {
+        usage_pct: None,
+        reset_at: None,
+        period_type: None,
+        prepaid_balance_cents: None,
+        grok_build_usage_pct: None,
+    });
+    entry.grok_build_usage_pct = Some(grok_build_usage_pct);
 }
 
 /// Remember included billing for the **active** SuperGrok session (base token).
@@ -406,6 +435,8 @@ pub fn load_supergrok_session_candidates(
                     reset_at: None,
                 },
                 access_token: token.to_owned(),
+                prepaid_balance_cents: None,
+                hard_expired,
             }
         })
         .collect();
@@ -413,10 +444,34 @@ pub fn load_supergrok_session_candidates(
     if !billing.is_empty() {
         // Billing usage % must not resurrect a hard-expired multi-slot as
         // "included headroom" (personal % can still poll for a dead JWT).
-        enrich_candidates_with_included_billing(&mut candidates, &billing, |tok| {
+        // Live free SuperGrok period headroom (used percent below 100) clears
+        // a stale out-of-allowance memo so prefer_live and network re-resolve
+        // put SuperGrok back instead of sticking on console.
+        let clear_tokens =
+            enrich_candidates_with_included_billing(&mut candidates, &billing, |tok| {
+                let t = tok.trim();
+                // Hard-expired stays "exhausted" for enrich force-zero when no
+                // usage is present; live usage < 100 still applies remaining
+                // only for non-hard-expired (hard-expired filtered below).
+                xai_grok_sampler::is_credential_exhausted(t) || hard_expired_tokens.contains(t)
+            });
+        for tok in clear_tokens {
             let t = tok.trim();
-            xai_grok_sampler::is_credential_exhausted(t) || hard_expired_tokens.contains(t)
-        });
+            if hard_expired_tokens.contains(t) {
+                // Never clear memo via billing for a JWT the wire would reject.
+                continue;
+            }
+            if xai_grok_sampler::is_credential_exhausted(t) {
+                xai_grok_sampler::clear_exhausted(&grok_rate_limit::fingerprint_secret(t));
+            }
+        }
+        // After memo clear, re-zero hard-expired rows that enrich may have
+        // set from usage % (sibling poll can still report % for a dead JWT).
+        for c in &mut candidates {
+            if hard_expired_tokens.contains(c.access_token.trim()) {
+                c.headroom.included_remaining = 0;
+            }
+        }
     }
     candidates
 }
@@ -443,12 +498,115 @@ pub fn apply_billing_usage_to_session_exhaust_with_period(
     grok_home: &Path,
     period_end_rfc3339: Option<&str>,
 ) -> xai_grok_sampler::AllowanceExhaustAction {
+    let status = collect_dual_auth_status(grok_home);
+    // Prefer config.toml under the same home apply is evaluating (hermetic tests
+    // + multi-home hosts) before process-global effective config.
+    let auto_use =
+        auto_use_included_limits_for_home(grok_home).unwrap_or(status.auto_use_included_limits);
+    apply_billing_usage_to_session_exhaust_inner(
+        usage_pct,
+        grok_home,
+        period_end_rfc3339,
+        auto_use,
+        status.dual_auth_ready(),
+    )
+}
+
+/// Pure after-burner memo gate: skip marking SuperGrok out of allowance when
+/// included is full but SuperGrok $ extras remain under auto_use + dual-auth.
+///
+/// When true, callers clear any prior mark and leave SuperGrok live so prefer_live
+/// does not hop to console before after-burner spend.
+pub fn afterburner_skips_allowance_mark(
+    usage_pct: f64,
+    auto_use_included_limits: bool,
+    dual_auth_ready: bool,
+    prepaid_balance_cents: Option<i64>,
+) -> bool {
+    usage_pct >= xai_grok_sampler::INCLUDED_ALLOWANCE_EXHAUST_PCT
+        && auto_use_included_limits
+        && dual_auth_ready
+        && super::supergrok_identity_rank::has_positive_supergrok_dollar_extras(
+            prepaid_balance_cents,
+        )
+}
+
+/// Read `[auth] auto_use_included_limits` (or aliases) from `$home/config.toml`.
+///
+/// `None` = file missing / key absent (caller falls back to process config).
+fn auto_use_included_limits_for_home(grok_home: &Path) -> Option<bool> {
+    let path = grok_home.join("config.toml");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let value: toml::Value = toml::from_str(&raw).ok()?;
+    let table_bool = |section: &str, key: &str| -> Option<bool> {
+        value
+            .get(section)
+            .and_then(|t| t.get(key))
+            .and_then(|v| v.as_bool())
+    };
+    table_bool("auth", "auto_use_included_limits")
+        .or_else(|| table_bool("grok_com_config", "auto_use_included_limits"))
+        .or_else(|| table_bool("auth", "prefer_sooner_reset"))
+        .or_else(|| table_bool("grok_com_config", "prefer_sooner_reset"))
+}
+
+fn apply_billing_usage_to_session_exhaust_inner(
+    usage_pct: f64,
+    grok_home: &Path,
+    period_end_rfc3339: Option<&str>,
+    auto_use_included_limits: bool,
+    dual_auth_ready: bool,
+) -> xai_grok_sampler::AllowanceExhaustAction {
     // Feed ranking even when dual-auth is not ready (multi SuperGrok alone).
     // Period type unknown on this path (usage-only callers); leave prior or None.
     remember_active_supergrok_included_billing(grok_home, usage_pct, period_end_rfc3339, None);
 
-    let status = collect_dual_auth_status(grok_home);
-    if !status.dual_auth_ready() {
+    // After-burner: with auto_use_included_limits and known positive SuperGrok
+    // $ extras, keep SuperGrok session live — do not mark out of allowance so
+    // prefer_live does not hop to console before extras burn.
+    if dual_auth_ready {
+        if let Some(identity_id) = active_supergrok_identity_id(grok_home) {
+            let extras = included_billing_fields_snapshot()
+                .get(&identity_id)
+                .and_then(|f| f.prepaid_balance_cents);
+            if afterburner_skips_allowance_mark(
+                usage_pct,
+                auto_use_included_limits,
+                dual_auth_ready,
+                extras,
+            ) {
+                let Some(token) = load_session_access_token(grok_home) else {
+                    return xai_grok_sampler::AllowanceExhaustAction::None;
+                };
+                // Clear any prior mark so prefer_live does not hop to console.
+                // Pass usage under the floor so sync clears without re-marking;
+                // included is still full — ranking uses extras after-burner.
+                let action = xai_grok_sampler::sync_allowance_exhaust_from_usage(
+                    0.0,
+                    Some(token.as_str()),
+                    true,
+                );
+                if matches!(action, xai_grok_sampler::AllowanceExhaustAction::Cleared) {
+                    tracing::info!(
+                        target: "xai_grok_shell::auth",
+                        usage_pct,
+                        prepaid_balance_cents = extras,
+                        "SuperGrok included full but $ extras remain; cleared allowance memo for after-burner"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "xai_grok_shell::auth",
+                        usage_pct,
+                        prepaid_balance_cents = extras,
+                        "SuperGrok included full but $ extras remain; not marking out of allowance (after-burner)"
+                    );
+                }
+                return action;
+            }
+        }
+    }
+
+    if !dual_auth_ready {
         // Still allow clear of a prior mark if usage dropped but console key
         // was removed — only when we can fingerprint the session.
         let Some(token) = load_session_access_token(grok_home) else {
@@ -467,7 +625,7 @@ pub fn apply_billing_usage_to_session_exhaust_with_period(
         tracing::info!(
             target: "xai_grok_shell::auth",
             usage_pct,
-            "SuperGrok included usage full; remembering session out of allowance so next request uses console key"
+            "SuperGrok included usage full (extras gone or unknown); remembering session out of allowance so next request uses console key"
         );
     }
     action
@@ -520,6 +678,7 @@ mod tests {
     /// Named contract: sibling/full credits poll can remember SuperGrok Extra
     /// Usage Credits (`prepaidBalance`) without inventing console team $.
     #[test]
+    #[serial_test::serial]
     fn remember_dollar_extras_stores_prepaid_cents_for_limits_fill() {
         clear_included_billing_cache();
         remember_supergrok_included_billing(
@@ -542,6 +701,33 @@ mod tests {
             "included re-remember must keep prepaidBalance"
         );
         assert_eq!(snap2.get("team-surmount").unwrap().usage_pct, Some(70.0));
+        clear_included_billing_cache();
+    }
+
+    /// Named contract (Issue 4): sibling credits poll can remember Grok Build
+    /// productUsage % for dual `/limits` (not hard-coded None).
+    #[test]
+    #[serial_test::serial]
+    fn remember_build_usage_stores_product_pct_for_limits_fill() {
+        clear_included_billing_cache();
+        remember_supergrok_included_billing(
+            "team-sibling",
+            65.0,
+            Some("2026-08-04T01:25:32Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_build_usage("team-sibling", 54.0);
+        let snap = included_billing_fields_snapshot();
+        let fields = snap.get("team-sibling").expect("remembered identity");
+        assert_eq!(fields.grok_build_usage_pct, Some(54.0));
+        // Included re-remember must not wipe Build %.
+        remember_supergrok_included_billing("team-sibling", 66.0, None, None);
+        let snap2 = included_billing_fields_snapshot();
+        assert_eq!(
+            snap2.get("team-sibling").unwrap().grok_build_usage_pct,
+            Some(54.0),
+            "included re-remember must keep Build productUsage %"
+        );
         clear_included_billing_cache();
     }
 
@@ -587,6 +773,144 @@ mod tests {
         });
     }
 
+    fn write_auto_use_config(home: &Path, enabled: bool) {
+        let body = format!(
+            "[auth]\nauto_use_included_limits = {}\n",
+            if enabled { "true" } else { "false" }
+        );
+        std::fs::write(home.join("config.toml"), body).expect("write config.toml");
+    }
+
+    /// Pure gate: after-burner skips mark only when auto_use + dual-auth + extras > 0.
+    #[test]
+    fn afterburner_skips_allowance_mark_pure_policy() {
+        assert!(afterburner_skips_allowance_mark(
+            100.0,
+            true,
+            true,
+            Some(10_029)
+        ));
+        assert!(
+            !afterburner_skips_allowance_mark(100.0, true, true, Some(0)),
+            "extras 0 must still mark"
+        );
+        assert!(
+            !afterburner_skips_allowance_mark(100.0, true, true, None),
+            "unknown extras must still mark"
+        );
+        assert!(
+            !afterburner_skips_allowance_mark(100.0, false, true, Some(10_029)),
+            "auto_use off → mark"
+        );
+        assert!(
+            !afterburner_skips_allowance_mark(100.0, true, false, Some(10_029)),
+            "no dual-auth → no after-burner skip"
+        );
+        assert!(
+            !afterburner_skips_allowance_mark(99.0, true, true, Some(10_029)),
+            "included not full → not this gate"
+        );
+    }
+
+    /// Named contract (Issue 1): dual-auth + auto_use + positive extras + 100%
+    /// included → do not mark SuperGrok out of allowance (after-burner).
+    #[test]
+    #[serial_test::serial]
+    fn apply_billing_100_pct_with_positive_extras_and_auto_use_does_not_mark() {
+        with_isolated_home(|home| {
+            clear_included_billing_cache();
+            let session = "session-jwt-afterburner-no-mark";
+            write_oidc(home, session);
+            write_auto_use_config(home, true);
+            let store = CredentialsStore::at_grok_home(home);
+            assert!(add_console_api_key(&store, "console-failover-key").unwrap());
+
+            // write_oidc user_id is "user-1" → active identity_id.
+            remember_supergrok_dollar_extras("user-1", 10_029);
+
+            let action = apply_billing_usage_to_session_exhaust(100.0, home);
+            assert_eq!(
+                action,
+                AllowanceExhaustAction::None,
+                "after-burner must not Mark when extras remain; got {action:?}"
+            );
+            assert!(
+                !xai_grok_sampler::is_credential_exhausted(session),
+                "session must stay live for SuperGrok $ extras after-burner"
+            );
+            clear_included_billing_cache();
+        });
+    }
+
+    /// Named contract (Issue 1): prior mark + auto_use + positive extras → Cleared.
+    #[test]
+    #[serial_test::serial]
+    fn apply_billing_100_pct_with_positive_extras_clears_prior_mark() {
+        with_isolated_home(|home| {
+            clear_included_billing_cache();
+            let session = "session-jwt-afterburner-clear";
+            write_oidc(home, session);
+            write_auto_use_config(home, true);
+            let store = CredentialsStore::at_grok_home(home);
+            assert!(add_console_api_key(&store, "console-failover-key").unwrap());
+
+            // Pre-mark as if extras were unknown earlier.
+            let pre =
+                xai_grok_sampler::sync_allowance_exhaust_from_usage(100.0, Some(session), true);
+            assert_eq!(pre, AllowanceExhaustAction::Marked);
+            assert!(xai_grok_sampler::is_credential_exhausted(session));
+
+            remember_supergrok_dollar_extras("user-1", 5_000);
+            let action = apply_billing_usage_to_session_exhaust(100.0, home);
+            assert_eq!(
+                action,
+                AllowanceExhaustAction::Cleared,
+                "after-burner must clear prior mark so prefer_live does not hop"
+            );
+            assert!(
+                !xai_grok_sampler::is_credential_exhausted(session),
+                "session must be live after after-burner clear"
+            );
+            clear_included_billing_cache();
+        });
+    }
+
+    /// Named contract (Issue 1): extras 0 or unknown still Mark under auto_use.
+    #[test]
+    #[serial_test::serial]
+    fn apply_billing_100_pct_auto_use_marks_when_extras_gone_or_unknown() {
+        with_isolated_home(|home| {
+            clear_included_billing_cache();
+            let session = "session-jwt-afterburner-mark-no-extras";
+            write_oidc(home, session);
+            write_auto_use_config(home, true);
+            let store = CredentialsStore::at_grok_home(home);
+            assert!(add_console_api_key(&store, "console-failover-key").unwrap());
+
+            // Unknown extras → Mark.
+            let action_none = apply_billing_usage_to_session_exhaust(100.0, home);
+            assert_eq!(
+                action_none,
+                AllowanceExhaustAction::Marked,
+                "unknown extras must still prefer console"
+            );
+            assert!(xai_grok_sampler::is_credential_exhausted(session));
+
+            // Clear and try extras 0.
+            let _ = xai_grok_sampler::sync_allowance_exhaust_from_usage(0.0, Some(session), true);
+            assert!(!xai_grok_sampler::is_credential_exhausted(session));
+            remember_supergrok_dollar_extras("user-1", 0);
+            let action_zero = apply_billing_usage_to_session_exhaust(100.0, home);
+            assert_eq!(
+                action_zero,
+                AllowanceExhaustAction::Marked,
+                "extras 0 must still Mark"
+            );
+            assert!(xai_grok_sampler::is_credential_exhausted(session));
+            clear_included_billing_cache();
+        });
+    }
+
     #[test]
     #[serial_test::serial]
     fn apply_billing_session_only_does_not_mark() {
@@ -598,6 +922,137 @@ mod tests {
                 apply_billing_usage_to_session_exhaust(100.0, home),
                 AllowanceExhaustAction::None
             );
+        });
+    }
+
+    /// Named contract (period reset → SuperGrok again): after free SuperGrok
+    /// period allowance was memoized full, a later billing read with used
+    /// percent below 100% must clear the memo, rank SuperGrok primary, and
+    /// omit console from the hop chain (limits before credits; network
+    /// re-resolve must not stick on console credits).
+    #[test]
+    #[serial_test::serial]
+    fn period_reset_clears_memo_and_ranks_supergrok_primary_without_console() {
+        use crate::auth::supergrok_identity_rank::order_credentials_for_preferred_auto;
+        use xai_grok_sampler::{
+            SamplerConfig, clear_all_including_durable, prefer_live_identity_after_credit_exhaust,
+        };
+
+        with_isolated_home(|home| {
+            let session = "session-jwt-period-reset-primary";
+            write_oidc(home, session);
+            let store = CredentialsStore::at_grok_home(home);
+            assert!(add_console_api_key(&store, "console-team-prepaid-key").unwrap());
+            write_auto_use_config(home, true);
+
+            // Last period: included full → mark + sticky console path.
+            assert_eq!(
+                apply_billing_usage_to_session_exhaust(100.0, home),
+                AllowanceExhaustAction::Marked
+            );
+            assert!(xai_grok_sampler::is_credential_exhausted(session));
+
+            // Period reset: free SuperGrok period used percent drops.
+            assert_eq!(
+                apply_billing_usage_to_session_exhaust(7.0, home),
+                AllowanceExhaustAction::Cleared
+            );
+            assert!(
+                !xai_grok_sampler::is_credential_exhausted(session),
+                "period reset must clear exhaust memo"
+            );
+
+            let candidates = load_supergrok_session_candidates(home);
+            assert!(
+                candidates
+                    .iter()
+                    .any(|c| c.access_token == session && c.headroom.has_included_headroom()),
+                "load after reset must show SuperGrok included headroom: {:?}",
+                candidates
+                    .iter()
+                    .map(|c| (c.access_token.as_str(), c.headroom.included_remaining))
+                    .collect::<Vec<_>>()
+            );
+
+            let order = order_credentials_for_preferred_auto(
+                &candidates,
+                &["console-team-prepaid-key".into()],
+            );
+            assert_eq!(
+                order.primary.as_deref(),
+                Some(session),
+                "auto rank primary must be SuperGrok session after period reset"
+            );
+            assert!(
+                !order
+                    .failover
+                    .iter()
+                    .any(|k| k == "console-team-prepaid-key"),
+                "console omitted while free SuperGrok period headroom remains: {:?}",
+                order.failover
+            );
+
+            // prefer_live must not hop to console after clear.
+            let mut cfg = SamplerConfig {
+                api_key: Some(session.into()),
+                failover_api_keys: order.failover.clone(),
+                session_identity_key: Some(session.into()),
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                model: "grok-4".into(),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                ..Default::default()
+            };
+            assert!(
+                prefer_live_identity_after_credit_exhaust(&mut cfg).is_none(),
+                "prefer_live must leave SuperGrok after period-reset clear"
+            );
+            assert_eq!(cfg.api_key.as_deref(), Some(session));
+
+            clear_all_including_durable();
+            clear_included_billing_cache();
+        });
+    }
+
+    /// Named contract (stale memo + remembered headroom only): even when
+    /// `apply_billing` was not re-run, enrich on load with free SuperGrok
+    /// period used percent below 100 must clear the memo and restore SuperGrok
+    /// primary (covers shell remember-only path + process restart with durable
+    /// memo + fresh billing cache).
+    #[test]
+    #[serial_test::serial]
+    fn load_candidates_period_reset_billing_clears_stale_memo_without_apply() {
+        use crate::auth::supergrok_identity_rank::order_credentials_for_preferred_auto;
+        use xai_grok_sampler::{clear_all_including_durable, sync_allowance_exhaust_from_usage};
+
+        with_isolated_home(|home| {
+            let session = "session-jwt-stale-memo-only";
+            write_oidc(home, session);
+            // Mark without going through apply (durable + process memo).
+            assert_eq!(
+                sync_allowance_exhaust_from_usage(100.0, Some(session), true),
+                AllowanceExhaustAction::Marked
+            );
+            assert!(xai_grok_sampler::is_credential_exhausted(session));
+
+            // Billing cache only (no apply_billing): free SuperGrok period low %.
+            remember_active_supergrok_included_billing(home, 3.0, None, None);
+
+            let candidates = load_supergrok_session_candidates(home);
+            assert!(
+                !xai_grok_sampler::is_credential_exhausted(session),
+                "load enrich must clear stale exhaust memo when free SuperGrok period used percent is below 100"
+            );
+            let order = order_credentials_for_preferred_auto(&candidates, &["console-key".into()]);
+            assert_eq!(order.primary.as_deref(), Some(session));
+            assert!(
+                !order.failover.iter().any(|k| k == "console-key"),
+                "console must not be in hop chain after period-reset enrich: {:?}",
+                order.failover
+            );
+
+            clear_all_including_durable();
+            clear_included_billing_cache();
         });
     }
 
@@ -911,6 +1366,7 @@ mod tests {
     /// Hermetic: two SuperGrok principals in auth.json load as two rank candidates
     /// (deduped; not doubled by base + multi-slot).
     #[test]
+    #[serial_test::serial]
     fn load_supergrok_candidates_two_principals_deduped() {
         use crate::auth::model::upsert_supergrok_session;
         use crate::auth::supergrok_identity_rank::{
@@ -1137,6 +1593,7 @@ mod tests {
 
     /// One SuperGrok principal → no non-active billing poll targets.
     #[test]
+    #[serial_test::serial]
     fn non_active_poll_targets_empty_when_single_principal() {
         clear_included_billing_cache();
         let dir = TempDir::new().unwrap();
@@ -1153,6 +1610,7 @@ mod tests {
 
     /// Two SuperGrok principals → non-active list is the sibling (not active base).
     #[test]
+    #[serial_test::serial]
     fn non_active_poll_targets_returns_sibling_when_dual_principals() {
         use crate::auth::model::upsert_supergrok_session;
 

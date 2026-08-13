@@ -13,8 +13,11 @@
 //!    end). Skipped when the block is an exact echo of the user prompt just
 //!    run (avoids re-queueing the same primary implement).
 //!
-//! Explicit `/implement --effort N` is **honored** on auto-queue (economic mode
-//! only soft-caps context; it does not rewrite the operator’s effort flag).
+//! Implement-loop effort may be rewritten via Token Economy: optional lock and
+//! min floor always apply when set; when **economic mode** is on and
+//! `[token_economy] cap_implement_effort_when_economic` is true, hard ceiling
+//! (default 3) and desired inject when missing (default 2) also apply, with a
+//! toast on rewrite. See `xai_grok_shell::token_economy`.
 //!
 //! Enqueue is always **append** (`push_back`): existing local queued prompts
 //! are kept; the follow-up `/implement` is added at the end.
@@ -97,15 +100,31 @@ pub fn extract_implement_block_at(text: &str, start: usize) -> Option<String> {
     }
 }
 
-/// Preserve the implement command text for auto-queue.
+/// Apply Token Economy implement-effort policy when economic mode + cap master
+/// are on. Returns the (possibly rewritten) command string.
 ///
-/// Previously this rewrote `--effort N` / `effort N` above 1 down to 1 when
-/// economic mode was on. That silently ignored an explicit operator request
-/// (e.g. `/implement --effort 2 …` became effort 1). Economic mode still
-/// soft-caps context; it must not revise implement effort. `economic_mode` is
-/// retained so call sites stay stable.
-pub fn clamp_implement_effort_for_economic_mode(cmd: &str, _economic_mode: bool) -> String {
-    cmd.to_string()
+/// Prefer [`apply_implement_effort_for_product`] when the toast is needed.
+pub fn clamp_implement_effort_for_economic_mode(cmd: &str, economic_mode: bool) -> String {
+    apply_implement_effort_for_product(cmd, economic_mode).command
+}
+
+/// Full product rewrite: command + optional toast (clamp or desired inject).
+pub fn apply_implement_effort_for_product(
+    cmd: &str,
+    economic_mode: bool,
+) -> xai_grok_shell::token_economy::ImplementEffortRewrite {
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    xai_grok_shell::token_economy::apply_implement_effort_policy(cmd, economic_mode, &cfg)
+}
+
+/// Same as [`apply_implement_effort_for_product`] with an explicit config
+/// (unit tests / settings preview).
+pub fn apply_implement_effort_with_config(
+    cmd: &str,
+    economic_mode: bool,
+    cfg: &xai_grok_shell::token_economy::TokenEconomyConfig,
+) -> xai_grok_shell::token_economy::ImplementEffortRewrite {
+    xai_grok_shell::token_economy::apply_implement_effort_policy(cmd, economic_mode, cfg)
 }
 
 /// Byte offset of a follow-up implement start in `text`, or `None` when the
@@ -279,8 +298,9 @@ pub fn maybe_enqueue_auto_implement(agent: &mut AgentView, enabled: bool) -> Opt
     let raw = from_user.or(from_assistant)?;
 
     let economic = crate::appearance::cache::load_economic_mode();
-    let cmd = clamp_implement_effort_for_economic_mode(&raw, economic);
-    let toast = auto_implement_toast_for(&raw, &cmd, economic);
+    let rewrite = apply_implement_effort_for_product(&raw, economic);
+    let cmd = rewrite.command;
+    let toast = auto_implement_toast_for(&raw, &cmd, economic, rewrite.toast.as_deref());
 
     let ranges = agent
         .prompt
@@ -292,14 +312,20 @@ pub fn maybe_enqueue_auto_implement(agent: &mut AgentView, enabled: bool) -> Opt
 
 /// Toast when a follow-up was auto-queued.
 ///
-/// Args retained for call-site stability. Effort is no longer rewritten under
-/// economic mode, so the toast is always the plain auto-run copy.
+/// When Token Economy rewrote implement effort, prefer that toast; otherwise
+/// the plain auto-run copy. `effort_toast` is the optional rewrite message.
 pub fn auto_implement_toast_for(
     _raw_cmd: &str,
     _enqueued_cmd: &str,
     _economic_mode: bool,
+    effort_toast: Option<&str>,
 ) -> String {
-    AUTO_IMPLEMENT_TOAST.to_string()
+    if let Some(t) = effort_toast.filter(|s| !s.is_empty()) {
+        // Combine so operators still know auto-run fired.
+        format!("{AUTO_IMPLEMENT_TOAST} · {t}")
+    } else {
+        AUTO_IMPLEMENT_TOAST.to_string()
+    }
 }
 
 /// After a clean agent turn ends (before queue drain): enqueue a follow-up
@@ -424,44 +450,69 @@ more review notes";
         assert!(got.contains("more review notes"));
     }
 
-    /// Named contract: explicit `/implement --effort N` (or bare `effort N`)
-    /// must be honored. Economic mode must not silently rewrite N down to 1.
+    /// Named contract (Token Economy): economic on + default max 3 clamps
+    /// effort 5 → 3; effort 2 stays 2; missing injects desired 2; off = identity.
     #[test]
-    fn explicit_implement_effort_honored_when_economic_mode_on() {
-        // Operator-reported path: effort 2 must stay 2 (not revised to 1).
+    fn economic_implement_effort_policy_ceiling_desired_and_off() {
+        let cfg = xai_grok_shell::token_economy::TokenEconomyConfig::default();
+
+        // Effort 2 stays 2 (not the old silent clamp-to-1).
         let effort2 = "/implement --effort 2 Linear freestanding contracts";
-        assert_eq!(
-            clamp_implement_effort_for_economic_mode(effort2, true),
-            effort2,
-            "economic mode must not downgrade explicit --effort 2 to 1"
-        );
-        assert_eq!(
-            clamp_implement_effort_for_economic_mode(effort2, false),
-            effort2
-        );
+        let r2 = apply_implement_effort_with_config(effort2, true, &cfg);
+        assert_eq!(r2.command, effort2);
+        assert!(r2.toast.is_none());
 
+        // Over ceiling → max + toast.
         let high = "/implement --effort 5 residual work:\n1) wire Systems.Proc";
-        let got = clamp_implement_effort_for_economic_mode(high, true);
+        let r5 = apply_implement_effort_with_config(high, true, &cfg);
         assert!(
-            got.starts_with("/implement --effort 5 "),
-            "explicit --effort 5 must stay 5 under economic mode: {got}"
+            r5.command.starts_with("/implement --effort 3 "),
+            "effort 5 must clamp to max 3: {}",
+            r5.command
         );
-        assert!(got.contains("1) wire Systems.Proc"));
-        assert_eq!(clamp_implement_effort_for_economic_mode(high, false), high);
+        assert!(r5.command.contains("1) wire Systems.Proc"));
+        assert!(
+            r5.toast
+                .as_deref()
+                .is_some_and(|t| t.contains("capped at 3") && t.contains("was 5")),
+            "{:?}",
+            r5.toast
+        );
 
-        let low = "/implement --effort 1 fix tests";
-        assert_eq!(clamp_implement_effort_for_economic_mode(low, true), low);
-
-        let bare = "/implement effort 3 do the thing";
+        // Economic off → no rewrite.
         assert_eq!(
-            clamp_implement_effort_for_economic_mode(bare, true),
-            bare,
-            "bare effort form must also be honored: {}",
-            clamp_implement_effort_for_economic_mode(bare, true)
+            apply_implement_effort_with_config(high, false, &cfg).command,
+            high
         );
 
+        // Missing → desired 2.
         let none = "/implement fix the gate";
-        assert_eq!(clamp_implement_effort_for_economic_mode(none, true), none);
+        let r_none = apply_implement_effort_with_config(none, true, &cfg);
+        assert_eq!(r_none.command, "/implement --effort 2 fix the gate");
+        assert!(r_none.toast.is_some());
+
+        // clamp helper matches command field.
+        assert_eq!(clamp_implement_effort_for_economic_mode(high, false), high);
+    }
+
+    /// Inventory: product entry paths that must apply the shared helper.
+    #[test]
+    fn implement_effort_entry_paths_use_shared_helper() {
+        // Call-site inventory (keep in sync when adding paths):
+        // 1) auto_implement::maybe_enqueue_auto_implement
+        // 2) dispatch_send_prompt_inner PassThrough / plain implement submit
+        // Both call apply_implement_effort_for_product / clamp_*.
+        let src = include_str!("auto_implement.rs");
+        assert!(
+            src.contains("apply_implement_effort_for_product"),
+            "auto_implement must call shared product helper"
+        );
+        let prompt_src = include_str!("dispatch/prompt.rs");
+        assert!(
+            prompt_src.contains("apply_implement_effort_for_product")
+                || prompt_src.contains("clamp_implement_effort_for_economic_mode"),
+            "dispatch_send_prompt_inner must apply implement effort policy"
+        );
     }
 
     #[test]
@@ -515,17 +566,16 @@ Do the work.
             AUTO_IMPLEMENT_TOAST,
             "next task /implement detected, automatically running"
         );
-        // Explicit effort is not rewritten under economic mode, so the toast
-        // stays the plain auto-run copy (no "economic mode: --effort capped").
+        let cfg = xai_grok_shell::token_economy::TokenEconomyConfig::default();
         let raw = "/implement --effort 5 residual";
-        let enqueued = clamp_implement_effort_for_economic_mode(raw, true);
-        assert_eq!(enqueued, raw);
+        let rewrite = apply_implement_effort_with_config(raw, true, &cfg);
+        assert!(rewrite.command.starts_with("/implement --effort 3 "));
+        let toast = auto_implement_toast_for(raw, &rewrite.command, true, rewrite.toast.as_deref());
+        assert!(toast.contains(AUTO_IMPLEMENT_TOAST));
+        assert!(toast.contains("capped at 3"));
+        // No rewrite → plain auto-run toast.
         assert_eq!(
-            auto_implement_toast_for(raw, &enqueued, true),
-            AUTO_IMPLEMENT_TOAST
-        );
-        assert_eq!(
-            auto_implement_toast_for(raw, raw, true),
+            auto_implement_toast_for(raw, raw, false, None),
             AUTO_IMPLEMENT_TOAST
         );
     }

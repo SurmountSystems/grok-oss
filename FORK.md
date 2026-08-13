@@ -77,12 +77,13 @@ list when you ship fork work.
 - [x] **Binary / branding** — `grok-oss` (crate package still `xai-grok-pager-bin`); welcome, terminal/tab titles, resume hints, and docs say Grok OSS / `grok-oss`
 - [x] **OpenRouter** — separate model option (`openrouter-grok-4.5`); login/logout; secret store; optional Zed credential probe (read-only)
 - [x] **Multi-key OpenRouter** — comma lists / failover keys for credit + rate-limit rotation
-- [x] **SuperGrok OAuth ↔ console API key dual-auth** — first-party resolve merge (session primary + console failover by default; `preferred_method=api_key` reverses); identity switch on **credit / SuperGrok Heavy usage-limit** and **plain 429** (session→key clears bearer; key→session via JWT in failover list); also switches API host (SuperGrok proxy ↔ `api.x.ai`); credit/allowance exhausted-fingerprint memo (process cache + durable `$GROK_HOME/exhausted_credits/`, 1h TTL; **console-key success clears**, **session success does not** — extras-paid SuperGrok 200s must not put SuperGrok back) + status/toast (“out of allowance” vs “rate limited”; labels only); when billing included `usage_pct ≥ 100%` + dual-auth, mark SuperGrok used up and prefer console key before the next request (no 402; clear on period reset); rate-limit switch uses temporary shared `grok-rate-limit` cooldown (not credit memo); kill-switch clears key failover + host metadata; console keys in keyring/`provider_credentials.json` + env/auth.json; **live re-bind without prior stash** (`session_bearer_resolver`); **multi-add** `grok login --api-key` + `--list-api-keys` (fingerprints only). **Also:** `[auth] auto_use_included_limits` rank+hop (prefer included before SuperGrok $ extras; sooner `reset_at` + headroom; ExhaustedAll→console; oauth/api_key pins fail-closed); sticky-console meter honesty (no SuperGrok $ extras sell while console is the live principal). **Multi SuperGrok OAuth:** two principals; second login does not wipe the first; doctor / list show both (role labels + fingerprints only); dual `/limits` rows; sibling billing poll for the non-active SuperGrok on the same included-safe path. **SuperGrok Heavy multi-slot load:** when base JWT is live/fresher and multi-slot is stale/exhausted, ranking + doctor prefer the **live base** (not blind multi-slot); enrichment upsert keeps multi-slot in lockstep with base. Plans: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md), [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md), [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md).
+- [x] **SuperGrok OAuth ↔ console API key dual-auth** — first-party resolve merge (session primary + console failover by default; `preferred_method=api_key` reverses); identity switch on **credit / SuperGrok Heavy usage-limit** and **plain 429** (session→key clears bearer; key→session via JWT in failover list); also switches API host (SuperGrok proxy ↔ `api.x.ai`); credit/allowance exhausted-fingerprint memo (process cache + durable `$GROK_HOME/exhausted_credits/`, 1h TTL; **console-key success clears**, **session success does not** — extras-paid SuperGrok 200s must not put SuperGrok back) + status/toast (“out of allowance” vs “rate limited”; labels only); when free SuperGrok period used percent `≥ 100%` + dual-auth, mark SuperGrok used up and prefer console key before the next request (no 402; clear on period reset); rate-limit switch uses temporary shared `grok-rate-limit` cooldown (not credit memo); kill-switch clears key failover + host metadata; console keys in keyring/`provider_credentials.json` + env/auth.json; **live re-bind without prior stash** (`session_bearer_resolver`); **multi-add** `grok login --api-key` + `--list-api-keys` (fingerprints only). **Also:** `[auth] auto_use_included_limits` rank+hop (prefer free SuperGrok period allowance before SuperGrok top-up dollars; sooner `reset_at` + headroom; ExhaustedAll→console; oauth/api_key pins fail-closed); **new/empty Grok home defaults this flag to true** (2026-08-03; explicit `false` preserved). Sticky-console meter honesty (no SuperGrok top-up sell while console is the live principal). **Multi SuperGrok OAuth:** two principals; second login does not wipe the first; doctor / list show both (role labels + fingerprints only); dual `/limits` rows; sibling billing poll for the non-active SuperGrok on the free-period-safe path. **SuperGrok Heavy multi-slot load:** when base JWT is live/fresher and multi-slot is stale/exhausted, ranking + doctor prefer the **live base** (not blind multi-slot); enrichment upsert keeps multi-slot in lockstep with base. Plans: [`.agents/plans/plan-secure-key-failover.md`](.agents/plans/plan-secure-key-failover.md), [`.agents/plans/plan-rate-limit-failover.md`](.agents/plans/plan-rate-limit-failover.md), [`.agents/plans/plan-auth-preferred-roles-failover.md`](.agents/plans/plan-auth-preferred-roles-failover.md).
 - [x] **Billing meters (two halves; core shipped)** — meters stay distinct: personal SuperGrok **included weekly** ≠ SuperGrok **dollar extras** ≠ **console team prepaid** (Business Usage class) ≠ second SuperGrok OAuth principal. **Honesty:** multi-pool / “paying double” is xAI product billing structure (docs + surfaces), **not** a missing code merge of pools on this branch. **Half A shipped:** dual SuperGrok `/limits`, sibling poll, footer honesty for included weekly + SuperGrok $ extras. **Half B core prepaid shipped:** management key (keyring URL `https://management-api.x.ai`) + `[endpoints] management_team_id` + hermetic `GET …/billing/teams/{team_id}/prepaid/balance`; footer `Console key · team prepaid: $N` when console live; `/limits` balance line; honest **distinct** gaps (`no management key` | `no management team id` | `loading team prepaid...` | `team prepaid unavailable` — not a forever mushy “no $ meter”). `/usage` when console-live names console team prepaid, not SuperGrok session spend. **Still open (not shipped):** token/spend **series charts** UI. Live prepaid dogfood (2026-08-02): `total.val` → **$340** is correct; console dashboard ~$1317 is defaultCredits/composite, not prepaid wallet (keep meters distinct). See `RESIDUAL.md` §4. Operator how-tos: user-guide `02-authentication` (two SuperGrok logins + honesty), `04-slash-commands` `/limits` (status-bar meter click); joins `/tmp/grok-join-limits-dogfood-howto.md`, `/tmp/grok-join-second-supergrok-oidc-howto.md`.
 - [x] **Keyring login time-box + fail-loud + secure fallback + TTY progress** — OS keyring get/set/delete wall-clock budget (`KEYRING_OP_TIMEOUT`); interactive `grok login --api-key` / OpenRouter login require a **secure** backend (primary platform store, then on Linux automatic **keyutils** fallback when Secret Service times out/errors). TTY stderr progress counts seconds up to **2× timeout (~6s)** during store RMW+write (suppressed non-TTY / env short-circuit). Only if **all** secure backends fail → clear error, **no** silent `provider_credentials.json` secret dump. File mirror only after successful secure write. `GROK_CREDENTIALS_FORCE_FILE` = tests/CI only (not user recovery).
-- [x] **Economic mode** — soft-cap effective context at the Grok 4.5 long-context price cliff (~200k); `/economic-mode`; settings default on
+- [x] **Economic mode** — soft-cap effective context at the Grok 4.5 long-context price cliff (~200k); `/economic-mode`; settings default on. Separate from Token Economy implement-effort caps (see next).
+- [x] **Token Economy (full product)** — four pillars: (1) implement-loop effort 1–5 policy on all entry paths (auto-run + human `/implement`): **lock** (`lock_implement_effort`, optional) and **min floor** (`min_implement_effort`, default **1**) always apply when set; when `[ui] economic_mode` and `cap_implement_effort_when_economic` (default true), hard ceiling (default max **3**) and desired inject **2** when missing; order lock → desired/present → min floor → economic ceiling; toasts on rewrite; default min 1 keeps prior behavior (set min **2** for always-a-reviewer); (2) free SuperGrok **billing period** linear-burn pacing on credit/status + `/limits` + `/usage` (“ahead/behind **linear burn**”; omit without bounds; console-live honesty; never dollar-ize period %); (3) double-entry local `usage.jsonl` book vs Management remote samples on `/spend` and a `/limits` section with gap honesty when local cost is missing; (4) durable store **`$GROK_HOME/grok_oss.db`** (not session sqlite; fail-open; multiproc busy timeout; no secrets; additive schema). Config table `[token_economy]`. Modules: shell `token_economy/` + `grok_oss/`.
 - [x] **Auto-compact default 95% + live-apply** — stock Grok 4.5 catalog omits a per-model undercut (was 80); remote `models_cache` undercuts on stock models are dropped so the product default applies; user session/env still win; banner shows usage **and** configured threshold. Settings commit live-applies to open sessions (`restart_required: false`): disk persist → ACP `x.ai/auto_compact_threshold_changed` → `SessionCommand::SetAutoCompactThreshold` → CompactionConfig Cells (same write path as model switch). Live-apply pushes the **committed Settings value** (race-safe vs disk); env `GROK_AUTO_COMPACT_THRESHOLD_*` wins again on the next full resolve (spawn / model switch). Detail: `docs/dev/research/rca-auto-compact-early-fire.md`
-- [x] **Auto-run `/implement`** — after a successful turn, queue a follow-up implement block when present; **appends** after any already-queued prompts (does not drop them); explicit `--effort N` is honored (economic mode does not rewrite it)
+- [x] **Auto-run `/implement`** — after a successful turn, queue a follow-up implement block when present; **appends** after any already-queued prompts (does not drop them). Product may rewrite implement-loop `--effort` via Token Economy (lock / min floor always when set; economic ceiling + desired inject when caps are on; toast on rewrite)
 - [x] **Shared rate limits** — crate `grok-rate-limit` (Surmount name, not `xai-`); cooldowns under `~/.grok/rate_limits/`; optional `GROK_DISABLE_SHARED_RATE_LIMIT=1`
 - [x] **Updates** — no xAI auto-update channel by default (wrong product). `grok-oss update --check` compares to Surmount `main`. Escape hatch: `GROK_OSS_ENABLE_XAI_UPDATER=1`
 - [x] **Soft interject only** — mid-turn interject (Ctrl+Enter / terminal alts, queue `[Interject]`) injects into the **current** turn and **never cancels**. Cancel is Esc/stop only. Shell contracts: `interject_contract_*` tests. Do **not** re-unify user mid-turn steer on `SendPromptNow` (cancel-and-send). Idle + live background subagents holding the queue: status `… Interject to force`, queue row `[Interject]` force-drains (same as chord). User copy: tip/status say **Enter to interject** (not “send now”). Esc on cancel-turn panel dismisses only. **Parked sendable-wait exception (intentional):** while the agent is **blocked waiting** (task/subagent) **and the queue is empty**, plain Enter with text may still cancel-and-send to unblock immediately — not soft Interject; documented in user-guide `03-keyboard-shortcuts`. Detail: user-guide `03-keyboard-shortcuts` § during an active turn.
@@ -105,7 +106,7 @@ list when you ship fork work.
 - [x] **Upstream tooling** — detect / import / put-history / **join-main-into-onto** / sync scripts; scheduled export watch workflow
 - [x] **Onto land path** — after product is on their tip, join Surmount `main` with `merge -s ours` so the tip is PR-able (`docs/upstream-history.md`, `just upstream-join-main`)
 - [x] **PRs accepted** — CONTRIBUTING / this fork
-- [x] **Parent = HITL only** — main thread (agent **L1**) goals/spawn/join notes/human git; research + implementation in subagents (**L2**); L2 may spawn specialists (**L3 max**, no deeper). Hard stop on CI / multi-file. **Also** / “this too” = additive second slice (do not kill healthy in-flight work). Plan approval = product CTAs only (not freeform chat approve). Red/green TDD for behavior bugs. See [`AGENTS.md`](AGENTS.md)
+- [x] **Parent = HITL only** — main thread (agent **L1**) goals/spawn/reports/human git; research + implementation in subagents (**L2**); L2 may spawn specialists (**L3 max**, no deeper). Hard stop on CI / multi-file. **Also** / “this too” = additive second slice (do not kill healthy in-flight work). Plan approval = product CTAs only (not freeform chat approve). Red/green TDD for behavior bugs. See [`AGENTS.md`](AGENTS.md)
 - [x] **Subagent worktree policy** — prefer isolation none; product default
   `[subagents] allow_worktree = false` (empty config force-none; opt in with
   `true`). Spawn still forces none when false. User-guide migration notes in
@@ -115,7 +116,7 @@ list when you ship fork work.
 - [x] **`/execute-plan` honors `allow_worktree`** — host skill defaults to
   shared-cwd protocol (serial/disjoint writers, on-disk reviews, no worktree
   path handoffs); worktree only when policy allows; fall back if spawn forces
-  none or create fails. Join:
+  none or create fails. Report:
   `doc/dev/research/execute-plan-no-worktree-2026-07-24.md`
 - [x] **Todo levels product surface** — `todo_write` accepts optional
   `priority` + `meta` (`kind`, `parentId`, `namespace`); `merge: false`
@@ -123,13 +124,13 @@ list when you ship fork work.
   `recon:`, `residual:`, `ask:`, `feat:`, `bug:`). Feature suggestions use
   `feat:`; user-reported bugs use `bug:` (session board; not durable residual
   unless campaign-ranked). Red/green TDD for user-reported bugs/features.
-  Light `[kind]` badge in todo pane. Join:
+  Light `[kind]` badge in todo pane. Report:
   `doc/dev/research/todo-levels-product-2026-07-24.md`
 - [x] **Todo fib leaves + weighted progress** — optional `size` on items
   (only **1|2**; `meta.size` fallback); reject size on parents with children;
   progress = Σ leaf sizes (legacy item counts when no sizes); badge
   `N/M pts` in points mode; tool output `progress` + merge:false archive
-  warning; prompt + tool blurb teach merge-only + fib structure. Join:
+  warning; prompt + tool blurb teach merge-only + fib structure. Report:
   `doc/dev/research/todo-progress-fib-2026-07-26.md`
 - [x] **Cleared todo archive** — items dropped by `merge: false` (unprotected
   unmentioned) or ask-cap prune land on a capped `cleared_todos` ring on
@@ -139,13 +140,13 @@ list when you ship fork work.
 - [x] **Session notes channel** — `/note` stores operator mid-session
   annotations that are **not** pending main-turn prompts (session-local
   store; list via bare `/note` / `/notes`; count on `/tasks`). Does not
-  replace on-disk L2 join notes. Join:
+  replace short on-disk L2 reports. Report:
   `doc/dev/research/notes-channel-2026-07-24.md`
 - [x] **Git recon depth** — host skill `/git-recon` (status → route →
   conflict ≤3 buckets → stage → human-sign → land; never agent-commit);
   product `scripts/recon-status.sh` + `just recon-status` (read-only probe);
   pin in `FORK_PATHS` + `assert-process-pins`; optional
-  `.grok/workflows/git-recon-status.rhai`. Joins:
+  `.grok/workflows/git-recon-status.rhai`. Reports:
   `doc/dev/research/git-recon-skill-created-2026-07-24.md`,
   `doc/dev/research/recon-status-script-2026-07-24.md`
 - [x] **Prefer Rust tools over ad-hoc Python** — standing preference + inventory
@@ -283,6 +284,12 @@ list when you ship fork work.
   session `plan.md` on open / body resolve (frozen reverse-request snapshot is
   fallback only). Product CTAs only; no freeform chat approve. User-guide
   `19-plan-mode`.
+- [x] **Fearless global pause** — `Ctrl+Shift+Space` toggles pause of **all**
+  in-process agent sessions (not only the focused one): cancels running turns,
+  holds queue drain, toast tracks paused duration + sessions held. Resume
+  re-queues interrupted mid-turn prompts **once** and drains true pending work
+  only; finished agents are never re-spawned; empty resume is a no-op. Bare
+  Space and voice `Ctrl+Space` unchanged. User-guide `03-keyboard-shortcuts`.
 - [x] **Plan mode selection + screenshots** — revise/clarify feedback carries
   `@plan.md:N` (or `N-M`) + quoted line text for single- and multi-line
   highlight; **Ctrl/Cmd+V** clipboard images and file-path paste attach on the
@@ -303,13 +310,13 @@ list when you ship fork work.
 - [x] **Trailing-whitespace strip after product edits** — default ON for
   `search_replace`, OpenCode `write`/`edit`, `apply_patch`, hashline edit;
   shared `util/trailing_ws`; disable with `GROK_STRIP_TRAILING_WHITESPACE=0`.
-  Join: [`doc/dev/research/trailing-ws-strip-2026-07-26.md`](doc/dev/research/trailing-ws-strip-2026-07-26.md)
+  Report: [`doc/dev/research/trailing-ws-strip-2026-07-26.md`](doc/dev/research/trailing-ws-strip-2026-07-26.md)
 - [x] **ASCII scrub of assistant output** — default ON at stream Text +
   chat_state + fallback chunks; map em/en dash, smart quotes, zero-width/NBSP
   → ASCII-safe; env `GROK_SCRUB_ASCII_PUNCT=0` + `[ui] scrub_ascii_punct` +
   Appearance settings row; agent disable only with permission approval
   (`disable_ascii_scrub` tool → permission UX; AllowOnce session / AllowAlways
-  disk `[ui] scrub_ascii_punct` / Reject keeps on). Join:
+  disk `[ui] scrub_ascii_punct` / Reject keeps on). Report:
   [`doc/dev/research/ascii-scrub-assistant-2026-07-26.md`](doc/dev/research/ascii-scrub-assistant-2026-07-26.md)
 
 ### Skills (multi-source)
@@ -455,6 +462,30 @@ If behind: rebuild or reinstall from this repo / packaging — not the official
 Concurrent `grok-oss` processes share cooldowns under `~/.grok/rate_limits/`
 (`grok-rate-limit`). On HTTP 429-style limits, the strictest wait wins across
 processes. Disable shared coordination with `GROK_DISABLE_SHARED_RATE_LIMIT=1`.
+
+Product HTTP paths that wait before send and observe on 429 (403 only when a
+retry hint such as `Retry-After` is present):
+
+| Class | Provider key shape | Examples |
+|-------|--------------------|----------|
+| Chat / inference | host + key fingerprint | sampler (xAI, SuperGrok proxy, OpenRouter, BYOK base URLs) |
+| SuperGrok billing | proxy host + session fingerprint | `GET …/billing?format=credits`, auto-topup |
+| Management API | management host + management-key fingerprint | prepaid, postpaid, usage series, key validation |
+| Imagine image | host + fingerprint + `imagine` | `image_gen`, `image_edit` |
+| Imagine video | host + fingerprint + `video` | `video_gen` start + poll |
+| Voice STT | host + fingerprint + `voice` | streaming `wss://…/v1/stt` |
+| Responses | host + fingerprint + `responses` | `web_search` |
+| GitHub | logical `github` | OSS update compare |
+
+Waits prefer server headers (`Retry-After`, then `x-ratelimit-reset`) over
+hardcoded tier tables. Public docs (accessed 2026-08-03):
+
+- [xAI rate limits](https://docs.x.ai/developers/rate-limits) (per-model RPS/TPM;
+  Imagine image/video have separate RPS; Voice/Imagine tier increases via sales)
+- [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits) (honor
+  `Retry-After` / `X-RateLimit-*` on 429)
+- [GitHub REST rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
+  (primary + secondary; `Retry-After` / `x-ratelimit-reset`)
 
 ## Canonical repo
 

@@ -4479,7 +4479,9 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
 /// - `auto_use_included_limits = true` (and not api_key pin) → prefer included
 ///   SuperGrok limits; rank multi-identity by headroom (sooner reset heuristic);
 ///   omit console keys from primary/failover while any SuperGrok still has
-///   included remaining (limits-before-credits); after ExhaustedAll, console leads
+///   included remaining (limits-before-credits); after all included pools are
+///   exhausted, SuperGrok $ extras (when known positive) stay primary with
+///   console as failover; when extras are 0 or unknown, console leads
 ///
 /// OpenRouter never receives an xAI session. Enterprise
 /// [`enforce_disable_api_key_auth`] clears console-key failover.
@@ -4520,6 +4522,8 @@ pub fn resolve_credentials_preferring_with_rank(
                     reset_at: None,
                 },
                 access_token: sess.to_owned(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
             });
         }
         if !candidates.is_empty() {
@@ -4539,8 +4543,9 @@ pub fn resolve_credentials_preferring_with_rank(
 /// Uses pure ranking: SuperGrok with included headroom first (sooner reset
 /// heuristic among included pools). While any SuperGrok still has included
 /// headroom, console keys are **omitted** from the sampling chain (limits
-/// before credits). When all SuperGrok included pools are exhausted, console
-/// leads. When ranking is off, falls through to
+/// before credits). When all SuperGrok included pools are exhausted, SuperGrok
+/// $ extras (when known positive) keep the session primary with console as
+/// failover; otherwise console leads. When ranking is off, falls through to
 /// [`resolve_credentials_preferring_inner`] with the first candidate token.
 pub fn resolve_credentials_preferring_with_supergrok_sessions(
     model: &ModelEntry,
@@ -5026,6 +5031,11 @@ pub fn inject_url_derived_headers(
     }
     let _ = (alpha_test_key, base_url);
 }
+/// Resolve a catalog model id to a [`SamplerConfig`] with dual-auth rank.
+///
+/// Pass live `[auth] preferred_method` and `auto_use_included_limits` so this
+/// helper cannot re-introduce console keys while SuperGrok included still has
+/// headroom (same chain as main prepare / ModelsManager).
 pub fn resolve_model_to_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
@@ -5033,11 +5043,18 @@ pub fn resolve_model_to_sampling_config(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     fallback_entry: Option<ModelEntry>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
 ) -> Option<SamplerConfig> {
     let entry = find_model_by_id(models, model_id)
         .cloned()
         .or(fallback_entry)?;
-    let credentials = resolve_credentials(&entry, session_key);
+    let credentials = resolve_credentials_preferring_with_rank(
+        &entry,
+        session_key,
+        preferred,
+        auto_use_included_limits,
+    );
     Some(sampling_config_for_model(
         &entry,
         credentials,

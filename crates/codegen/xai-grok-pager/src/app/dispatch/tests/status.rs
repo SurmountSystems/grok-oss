@@ -1606,6 +1606,7 @@ fn show_limits_opens_modal_with_cached_snapshot() {
         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
         is_unified_billing_user: None,
         grok_build_usage_pct: None,
+        included_usage_known: true,
     });
     {
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -1696,6 +1697,7 @@ fn show_limits_console_live_keeps_meters_distinct() {
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
             is_unified_billing_user: None,
             grok_build_usage_pct: None,
+            included_usage_known: true,
         });
     }
     let _ = dispatch(Action::ShowLimits, &mut app);
@@ -1756,6 +1758,7 @@ fn show_limits_json_prints_to_scrollback_not_modal() {
         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
         is_unified_billing_user: None,
         grok_build_usage_pct: None,
+        included_usage_known: true,
     });
     {
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -1857,6 +1860,7 @@ fn show_limits_console_live_with_management_fixture_shows_prepaid_balance() {
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
             is_unified_billing_user: None,
             grok_build_usage_pct: None,
+            included_usage_known: true,
         });
     }
     let effects = dispatch(Action::ShowLimits, &mut app);

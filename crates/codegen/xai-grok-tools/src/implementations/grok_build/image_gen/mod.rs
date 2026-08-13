@@ -61,6 +61,10 @@ pub struct ImageGenClient {
     edit_model: String,
     writer: super::storage::SessionFileWriter,
     api_key_provider: Option<SharedApiKeyProvider>,
+    /// Static config bearer (default Authorization). Used for rate-limit
+    /// provider keys when the dynamic provider is empty so cooldowns still
+    /// key on the credential that is actually sent.
+    fallback_api_key: String,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
     /// Imagine API emits an `auth_401_attribution` event with
     /// `consumer == "ImageGen"` for unified auth-failure telemetry.
@@ -149,6 +153,7 @@ impl ImageGenClient {
             edit_model,
             writer: super::storage::SessionFileWriter::new(DEFAULT_IMAGE_DIR, "jpg"),
             api_key_provider,
+            fallback_api_key: api_key.clone(),
             attribution_callback: None,
             tier_restricted: *tier_restricted,
         })
@@ -176,6 +181,16 @@ impl ImageGenClient {
         crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
     }
 
+    /// Bearer used for shared rate-limit keys: dynamic provider if present,
+    /// else the static config key that is still sent as default Authorization.
+    pub(crate) async fn rate_limit_bearer(&self) -> Option<String> {
+        match self.current_bearer().await {
+            Some(k) if !k.trim().is_empty() => Some(k),
+            _ if !self.fallback_api_key.trim().is_empty() => Some(self.fallback_api_key.clone()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
         crate::attribution::emit_401(self.attribution_callback.as_ref(), consumer, sent_bearer);
     }
@@ -201,6 +216,8 @@ impl ImageGenClient {
         prompt: &str,
         aspect_ratio: &str,
     ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+        // Shared multi-process cooldowns for Imagine (separate from chat).
+        // Docs: https://docs.x.ai/developers/rate-limits (accessed: 2026-08-03)
         let url = format!("{}/images/generations", self.base_url.trim_end_matches('/'));
 
         let payload = serde_json::json!({
@@ -216,6 +233,13 @@ impl ImageGenClient {
         // emit see the same value (even if the provider rotates between
         // the send and the response handling).
         let sent_bearer = self.current_bearer().await;
+        let rate_bearer = self.rate_limit_bearer().await;
+        let rate_key = crate::shared_http_rate_limit::imagine_provider_key(
+            &self.base_url,
+            rate_bearer.as_deref(),
+        );
+        crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
+
         let mut req = self.http.post(&url).json(&payload);
         if let Some(ref key) = sent_bearer {
             req = req.header(AUTHORIZATION, format!("Bearer {key}"));
@@ -232,9 +256,20 @@ impl ImageGenClient {
             self.record_401_attribution(ToolConsumer::ImageGen, sent_bearer.as_deref());
         }
         if !status.is_success() {
+            crate::shared_http_rate_limit::observe_http_rate_limit(
+                &rate_key,
+                status.as_u16(),
+                response.headers(),
+                "Imagine image generation rate limit",
+            );
             let body = response.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(200).collect();
             tracing::warn!(http_status = %status, "Imagine API error: {truncated}");
+            if status.as_u16() == 429 {
+                return Err(xai_tool_runtime::ToolError::rate_limited(format!(
+                    "Image generation rate limited (HTTP {status}): {truncated}"
+                )));
+            }
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
                 format!("Image generation failed with HTTP {status}: {truncated}"),
@@ -676,6 +711,78 @@ mod tests {
                 assert!(t.text.contains("supergrok?referrer=grok-build"));
             }
             other => panic!("expected Text upsell, got {other:?}"),
+        }
+    }
+
+    /// Named contract: Imagine 429 + Retry-After publishes multi-process shared
+    /// cooldown so a peer process on the same GROK_HOME waits.
+    /// Docs: https://docs.x.ai/developers/rate-limits (accessed: 2026-08-03)
+    #[tokio::test]
+    async fn imagine_429_observes_shared_rate_limit_store() {
+        use std::time::Duration;
+
+        use grok_rate_limit::{DISABLE_ENV, SharedRateLimitStore};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let prev = std::env::var_os(DISABLE_ENV);
+        if prev.is_some() {
+            unsafe { std::env::remove_var(DISABLE_ENV) };
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = SharedRateLimitStore::open(dir.path()).unwrap();
+        let _override =
+            crate::shared_http_rate_limit::override_shared_store_for_test(store.clone());
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "3")
+                    .set_body_string("rate limited"),
+            )
+            .mount(&server)
+            .await;
+
+        let api_key = "hermetic-imagine-rate-limit-key";
+        let cfg = ImageGenConfig::Enabled {
+            api_key: api_key.into(),
+            base_url: server.uri(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: true,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+        };
+        let client = ImageGenClient::new(&cfg, None).unwrap();
+        let err = client
+            .generate("a test", "1:1")
+            .await
+            .expect_err("429 must fail");
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("rate"),
+            "expected rate-limit error, got: {err}"
+        );
+
+        let rate_key =
+            crate::shared_http_rate_limit::imagine_provider_key(&server.uri(), Some(api_key));
+        let rem = store.remaining(&rate_key);
+        assert!(
+            rem >= Duration::from_secs(1),
+            "429 must leave shared remaining, got {rem:?}"
+        );
+        let peer = SharedRateLimitStore::open(dir.path()).unwrap();
+        assert!(
+            peer.remaining(&rate_key) >= Duration::from_secs(1),
+            "peer handle must see same cooldown"
+        );
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
+            None => {}
         }
     }
 }

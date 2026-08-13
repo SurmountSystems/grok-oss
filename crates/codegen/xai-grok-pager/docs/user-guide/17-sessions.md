@@ -42,9 +42,24 @@ Grok stores each session in its own directory, grouped by working directory. It 
 
 ## Starting and Ending Sessions
 
+### Opening a folder (default)
+
+When you launch `grok` (or open a project folder) with no resume flags, Grok
+loads the **most recent conversation for that workspace** by last activity.
+
+- If **other** conversations exist in the same folder, a short toast notes that
+  the next most recent one was N minutes, hours, or days ago (so you know the
+  rest of history is still available via `/resume`).
+- If this is a **new folder** with no prior conversations, the welcome screen
+  shows a soft yellow informational note that this is a fresh workspace (not an
+  error). Start typing or use the welcome menu as usual.
+
+Headless one-shot runs and `--worktree` still start a fresh session unless you
+pass `-c` / `--resume`. Explicit `/new` always starts a new conversation.
+
 ### New Session
 
-The TUI creates a new session each time you launch. To explicitly start fresh mid-session:
+To start fresh mid-session (or from the welcome screen):
 
 ```
 /new
@@ -98,11 +113,14 @@ grok --resume <session-id-or-title>
 
 A value that is not a session ID is matched against session titles for the current directory, ignoring letter case (a simple lowercase comparison) — handy after `/rename`. If several sessions share the title, a single manually renamed session wins over auto-generated duplicates; otherwise the command errors and lists the matching IDs. UUID-shaped values are always treated as session IDs, never titles. Scripts should prefer IDs.
 
-Run `grok --resume` without a value to resume the most recent session for the current directory.
+Run `grok --resume` without a value (or `grok -c`) to resume the most recent session for the current directory. Bare `grok` does the same for interactive TUI opens (see [Opening a folder](#opening-a-folder-default)).
 
 ### From the Welcome Screen
 
-When you launch `grok`, the welcome screen lists recent sessions for the current directory. Select one to resume it.
+When a workspace has **no** prior conversations, launch lands on the welcome
+screen (with the new-folder note above). When conversations already exist,
+launch resumes the latest one; open `/resume` or the welcome menu (via `/home`)
+to pick an older session.
 
 ---
 

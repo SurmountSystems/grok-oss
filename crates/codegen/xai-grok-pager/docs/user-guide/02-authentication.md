@@ -138,37 +138,55 @@ On first-party xAI models you may use **both** a consumer SuperGrok OAuth sessio
 | Session (default) | Console key(s) from env, secret store, or `auth.json` (order above) | Both available; SuperGrok daily + Business when needed |
 | Console key(s) | Remaining console keys, then session JWT last | `[auth] preferred_method = "api_key"` and both available |
 
-Optional: set `[auth] auto_use_included_limits = true` to prefer **included**
-SuperGrok limits (personal and/or Business) before SuperGrok dollar extras /
-console API $. When more than one SuperGrok login identity is available, both
-pools' headroom are considered and ranked among included pools (sooner reset is
-a ranking heuristic). While **any** live SuperGrok principal still has included
-remaining, console keys are **omitted** from the sampling chain entirely (not
-primary and not silent failover) so a mid-turn rate-limit or credit hop cannot
-burn console Grok Build $ while included weekly still has room. Exhausted
-included pool fails over to another SuperGrok with included headroom; only when
-**all** SuperGrok included pools are exhausted does console become primary.
-For a single principal, if the active base session was refreshed but a
-multi-slot copy is still stale or marked out of allowance, ranking uses the
-**live** SuperGrok JWT (including SuperGrok Heavy tier sessions) rather than
-silently staying on the console API key. This is **not** a `preferred_method`
-value (`preferred_method` stays `api_key` / `oauth` / `oidc` only, matching
-ordinary grok). Hard pin: `[auth] preferred_method = "api_key"` stays
-console-primary even when SuperGrok included still has headroom (operator chose
-console).
+By default (new or empty Grok home config), `[auth] auto_use_included_limits`
+is **true**: the product prefers the **free SuperGrok allowance for the current
+billing period** (personal and/or Business SuperGrok) before SuperGrok prepaid
+top-up dollars and the console API key. When more than one SuperGrok login is
+available, both free-period meters are considered and ranked among free-period
+pools (sooner reset is a ranking heuristic). While **any** live SuperGrok login
+still has free period allowance left (used percent below 100), console keys are
+**omitted** from the sampling chain entirely (not primary and not silent
+failover) so a mid-turn rate-limit or credit hop cannot burn console Grok Build
+dollars while free SuperGrok period allowance remains. When one SuperGrok
+login's free period is full, ranking fails over to another SuperGrok login that
+still has free period left. When **every** SuperGrok free period is full but
+SuperGrok **prepaid top-up dollars** still remain (session prepaid balance known
+positive), the SuperGrok session stays primary and console keys are only
+failover. When free period is full and top-up dollars are 0 or unknown, console
+becomes primary. For a single principal, if the active base session was
+refreshed but a multi-slot copy is still stale or marked out of allowance,
+ranking uses the **live** SuperGrok JWT (including SuperGrok Heavy tier
+sessions) rather than silently staying on the console API key.
 
-When SuperGrok **included** weekly/monthly usage is marked used up and at least
-one console key is bound, sampling **prefers the first live console key** (and
-`api.x.ai` when hosts are split) and does **not** keep spending SuperGrok
-prepaid extras as the silent default. Exhausted SuperGrok is dropped from the
-failover list while a usable console key remains.
+This free-period-first setting is **not** a `preferred_method` value
+(`preferred_method` stays `api_key` / `oauth` / `oidc` only, matching ordinary
+grok). Hard pin: `[auth] preferred_method = "api_key"` stays console-primary even
+when free SuperGrok period allowance remains (you chose console).
+
+**Turn free-period-first off** (classic dual-auth: session primary + console
+failover without free-period ranking) by setting in `$GROK_HOME/config.toml`:
+
+```toml
+[auth]
+auto_use_included_limits = false
+```
+
+Existing homes that already set the flag (including explicit `false`) keep that
+value. Only missing key / empty new config gets the default `true`.
+
+When free SuperGrok period allowance is full, SuperGrok top-up dollars are gone
+or unknown, and at least one console key is bound, sampling **prefers the first
+live console key** (and `api.x.ai` when hosts are split). When top-up dollars
+still remain under free-period-first ranking (`auto_use_included_limits`), the
+SuperGrok session stays primary until top-ups run out or a true credit/402 hop
+switches to console.
 
 Mid-request hop uses the next configured identity when:
 
 | Trigger | Behavior |
 |---------|----------|
 | **Credit / spending / SuperGrok Heavy usage limit** (HTTP 402, or credit-/usage-limit-worded 403/429/400 — including SuperGrok Heavy caps; not bare 403) | Switch identity immediately; remember the dead one is out of allowance (~1h memo under `$GROK_HOME/exhausted_credits/` + process cache; cleared on a later successful **console-key** request with that fingerprint — SuperGrok session success does not clear, so paid extras do not put SuperGrok back) |
-| **Included SuperGrok weekly/monthly at 100%** (billing usage; dual-auth only) | Mark SuperGrok out of allowance **before** the next request and prefer the console key (no HTTP 402 required — extras would still succeed on SuperGrok). Memo clears when usage drops below 100% (period reset) |
+| **Free SuperGrok period allowance at 100% used** (billing usage; dual-auth only) | When SuperGrok top-up dollars are 0 or unknown: mark SuperGrok out of allowance **before** the next request and prefer the console key (no HTTP 402 required). When free-period-first ranking is on (`auto_use_included_limits`) and top-up dollars remain positive: keep SuperGrok session; console only as failover. Memo clears when used percent drops below 100% (period reset) or that after-full path clears a prior mark |
 | **Plain rate-limit 429** (no credit wording) | Switch identity immediately when another identity remains; temporary shared cooldown on the left key (not the allowance memo) so the primary can be tried again when cool |
 
 Without a failover list, plain 429 still waits and retries on the same credential. OpenRouter and other BYOK hosts never receive the xAI session token. Enterprise `disable_api_key_auth` forces a single session identity and clears console-key failover.
@@ -262,9 +280,22 @@ Honest gap copy is **distinct** by what is missing (no invented balance):
 `grok limits` also prints a short **Notes** hint when the management key or
 team id is missing (how to configure). SuperGrok $ extras stay SuperGrok-only.
 
-Token / spend **series** charts are not wired yet (POST usage analytics;
-dogfood later). Enterprise `GROK_DEPLOYMENT_KEY` is a different surface (managed
-config / attribution), not a substitute for this meter.
+When postpaid preview is available, `/limits` and `grok limits` also show:
+
+- **Team default credits** (dashboard allotment from postpaid `defaultCredits`,
+  often about $1500 on the wire) as its **own** labeled line. That number is
+  **not** the console team prepaid wallet, **not** free SuperGrok period
+  allowance, and **not** SuperGrok prepaid top-up dollars. JSON:
+  `console.teamDefaultCreditsUsd`.
+- **Team usage series** (Management `POST …/billing/teams/{team_id}/usage` with
+  `analyticsRequest`): a short day-window summary with OAuth / Grok Build class
+  vs API-key class totals (and top description rows). Not a GET invent. JSON:
+  `console.teamUsageSeriesOauthClassUsd` / `teamUsageSeriesApiClassUsd` plus
+  window start/end. Full chart UI may grow later; the series path is live when
+  management credentials work.
+
+Enterprise `GROK_DEPLOYMENT_KEY` is a different surface (managed config /
+attribution), not a substitute for these meters.
 
 ---
 

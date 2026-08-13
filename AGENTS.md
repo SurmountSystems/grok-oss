@@ -5,7 +5,7 @@ apply (`~/.grok/AGENTS.md`).
 
 ## Document hierarchy (D0–D3)
 
-Not the same as session-board L0–L2 (todos / child joins). Doc layers:
+Not the same as session-board L0–L2 (todos / reports). Doc layers:
 
 | Layer | Role | Always load? | Paths |
 |-------|------|--------------|-------|
@@ -41,7 +41,7 @@ less than product code and tests. Do not invent long essays or git nags.
 3. **Never bulk find-and-replace.** Bulk **find** (`rg`) is fine. Edits must
    be surgical and reviewed in context.
 3a. **Rustfmt after every Rust save (targeted).** When you create or edit
-   `*.rs` files, run **`cargo fmt` for the touched packages** before join /
+   `*.rs` files, run **`cargo fmt` for the touched packages** before report /
    handoff (e.g. `cargo fmt -p xai-grok-pager` or multiple `-p` crates). Prefer
    package-scoped fmt over a full `cargo fmt --all` every micro-edit when
    packages are known. Do **not** call bare `rustfmt path.rs` without cargo
@@ -51,7 +51,7 @@ less than product code and tests. Do not invent long essays or git nags.
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
    replies, product docs, tests, or **filenames**. **No bare plan-step codes**
-   (`S1`, `S3`, `D3`, `B2`, …) in residual, chat, join notes, **or identifiers**
+   (`S1`, `S3`, `D3`, `B2`, …) in residual, chat, reports, **or identifiers**
    without the plain name next to them — agents and humans misread them (e.g.
    **S3** ≠ Amazon, **B2** ≠ Backblaze).
    **Names are product (pinned 2026-07-27):** **file and directory names first**
@@ -66,15 +66,40 @@ less than product code and tests. Do not invent long essays or git nags.
    Experience; open residual [`RESIDUAL.md`](RESIDUAL.md) §2f. Do not dump
    novels here.
    **Billing meters stay distinct:** personal SuperGrok dollar credits ≠
-   included weekly allowance ≠ console API spend. Name which meter.
+   free SuperGrok period allowance ≠ console API spend. Name which meter.
+   **Complete thoughts (pinned 2026-08-03):** Plans, residual, reports, board
+   titles, user-facing docs, and chat about product work must use **complete
+   American English thoughts**. Do not use half-labels as if they were sentences
+   (wrong: "SuperGrok included weekly"). Right: "the free SuperGrok allowance
+   for the current billing period (how much of that free quota is already used)."
+   When naming a meter, say what it is and what it is not. Conditions use full
+   clauses (not "room/headroom"). Config and wire names may follow the plain
+   thought in parentheses. Operator corrections about incomplete phrasing are
+   permanent law. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **Self-improving feedback loop (pinned 2026-08-03):** trigger phrases such as
+   "always remember", "please remember", "I hate repeating myself" (and close
+   variants) mean same-turn standing pin (project `AGENTS.md` / residual when
+   product-specific; host `~/.grok/AGENTS.md` when cross-repo). Prefer a short
+   named subsection. Chat alone does not survive compaction. Full host pin:
+   `~/.grok/AGENTS.md` § *Self-improving feedback loop*.
+   **Citation standard (pinned 2026-08-03):** docs and non-trivial comments that
+   rely on external rate limits, APIs, or vendor policy need a markdown link to
+   the public page plus **accessed: YYYY-MM-DD**. Example: See
+   [xAI Rate Limits](https://docs.x.ai/developers/rate-limits)
+   (accessed: 2026-08-03). Host dual-pin: `~/.grok/AGENTS.md` § *Citation
+   standard for external limits and policy*.
+   **Plan revise (pinned 2026-08-03):** on plan panel **Revise**, rewrite
+   session `plan.md` and re-present; do not invent `ask:*` queues as a
+   substitute. **Clarify** is answer-only. Host:
+   `~/.grok/AGENTS.md` § *Plan approval* item 8.
    **Dual-auth language (pinned 2026-07-27):** ban bare jargon **proactive hop**,
    **sticky exhaust** / **sticky hop**, and **dual-host** without plain
    explanation. Prefer: *mark SuperGrok used up from billing % / leave SuperGrok
-   when weekly included is full*; *stay on the console key after switch /
-   remember this SuperGrok identity is out of allowance*; *also switch the API
-   host (SuperGrok proxy ↔ `api.x.ai`)*. Residual, joins, comments, tests, and
-   **identifiers** use the plain names. (UI sticky headers / permission sticky
-   cursor are unrelated product terms — leave those alone.)
+   when free SuperGrok period allowance is full*; *stay on the console key after
+   switch / remember this SuperGrok identity is out of allowance*; *also switch
+   the API host (SuperGrok proxy ↔ `api.x.ai`)*. Residual, reports, comments,
+   tests, and **identifiers** use the plain names. (UI sticky headers /
+   permission sticky cursor are unrelated product terms — leave those alone.)
 5. **Never ask permission to continue clear work.** If the goal is known
    (finish the onto stack, resolve conflicts, keep going), **do the next step**
    — do not end with “say the word,” “want me to continue?,” or similar. Ask
@@ -111,7 +136,7 @@ less than product code and tests. Do not invent long essays or git nags.
     - **Titles:** one clear product outcome (or two tightly joined). Prefer a
       short sentence or conventional `area: outcome`. Avoid theme shopping
       lists, deck prefixes (`Operator UX:`), and **internal** words on a
-      public PR (`dogfood`, board ids, join paths, residual codes).
+      public PR (`dogfood`, board ids, report paths, residual codes).
     - **Bodies:** complete sentences, plain American English, what changed for
       operators first. Theme sections are fine in the body; not as the title.
     - Match the professionalism bar in product prompts (good grammar, only
@@ -139,16 +164,23 @@ less than product code and tests. Do not invent long essays or git nags.
 
 ## Subagents — parent is HITL UX only (hard)
 
-The **main/parent thread is HITL UX only**: goals, spawn/wait, join **short
-on-disk notes** subagents wrote, brief user status. **Research and
+The **main/parent thread is HITL UX only**: goals, spawn/wait, read **short
+on-disk reports** subagents wrote, brief user status. **Research and
 implementation never run in the parent** — not even “just a quick look.” Full
 rule: `~/.grok/AGENTS.md` § *Regressions…* + § *Hard stop — parent is
 coordinator only*. Git handoff only when the operator asked for complex git
 help (see hard constraint **Git silence**).
 
+**Reports, not “joins” (pinned 2026-08-03):** On-disk handoff files are
+**reports** (prefer `.agents/reports/`). Do not call them join notes / join
+artifacts. Fork-join parallelism may still be named when explaining
+hierarchically structured subagent work (agent depth L1 main / L2 subagents /
+L3 specialists max). Host dual-pin: `~/.grok/AGENTS.md`. Legacy files may
+remain under `.agents/joins/`; new work uses **reports**.
+
 ### Agent depth L1 / L2 / L3 (pinned 2026-07-29) — not session-board layers
 
-**Not** the session-board L0/L1/L2 table below (residual / todos / join notes).
+**Not** the session-board L0/L1/L2 table below (residual / todos / reports).
 Product agent depth:
 
 | Depth | Name | Role |
@@ -162,9 +194,9 @@ L1 coordinates; deeper layers do the heavy work. Product: soft-park that
 panel CTAs), not forced keyboard capture of the main thread.
 
 **Default loop (pinned 2026-07-27):** track on board → **spawn** → **wait** →
-join on disk. Do **not** kill/respawn mid-flight to re-scope; do **not**
+read the short report on disk. Do **not** kill/respawn mid-flight to re-scope; do **not**
 monologue interim workarounds while an implementer runs. Mid-flight operator
-clarifications → board upsert only; **resume** after join (or additive spawn
+clarifications → board upsert only; **resume** after the report (or additive spawn
 if disjoint). Host: § *Hard stop* default loop.
 
 - **User-facing language** (mirror of host `~/.grok/AGENTS.md` § Language,
@@ -175,7 +207,7 @@ if disjoint). Host: § *Hard stop* default loop.
 - **CI fail, regression, multi-file diagnosis, non-trivial fix, skills-location
   claims:** first tool turn is `spawn_subagent` — not parent `grep` / `gh` log
   pull / test file reads / “I’ll check the docs.”
-- Parent may: goals, spawn/wait, read **short on-disk join notes**, brief user
+- Parent may: goals, spawn/wait, read **short on-disk reports**, brief user
   status; git handoff only when asked for complex git/recon work.
 - Parent must **not**: pull CI logs, open failing tests, re-run nextest, edit
   product code, re-do the subagent’s greps “to be sure,” or research/implement
@@ -189,7 +221,7 @@ if disjoint). Host: § *Hard stop* default loop.
 - **Multi-track (prose is not enough):** every parent tool turn inventories live
   subagent `task_id`s + board owners before spawn/demote/complete. Never demote
   `in_progress` work that still has a live subagent (abandonment = kill class).
-  First track stays `in_progress` until join; closeout still required. Product
+  First track stays `in_progress` until the report; closeout still required. Product
   binding (todo ↔ agent id, block demote while live) is open residual, not
   shipped. Host: § *Multi-track: prose is not enough*.
 
@@ -203,7 +235,7 @@ intent, or recon survival from prose alone.
 - First tool turn for multi-file / CI / regression / “where do skills live?” is
   **spawn_subagent** (explore or general-purpose as fits).
 - Verify against **code and load paths** (and live trees) before asserting.
-- Join on short on-disk notes; do not re-prove the subagent in the parent.
+- Read short on-disk reports; do not re-prove the subagent in the parent.
 - **Auth / credentials store / keyring:** diagnose with **red/green TDD**
   (`cargo test` contracts), not host shell D-Bus/keyring probes. Do **not** fan
   out explore + implementer on the same store bug. One implementer owns TDD.
@@ -282,7 +314,7 @@ history). Detail: [`docs/upstream-history.md`](docs/upstream-history.md).
 
 No `MODE=overlay` / commit-tree. No `cherry-pick --abort` or `FORCE=1` rebuild
 while a healthy stack is mid-pick. Multi-file conflicts → subagents on disjoint
-paths; join on disk. Every continue/join merge = human `git commit -S`.
+paths; subagents write short reports on disk. Every continue/join merge = human `git commit -S`.
 
 ## Residual
 
@@ -292,14 +324,14 @@ paths; join on disk. Every continue/join merge = human `git commit -S`.
 
 ## Operator orchestration (session board L0–L2)
 
-Session-board layers only (todos / joins). **Do not confuse** with agent depth
+Session-board layers only (todos / reports). **Do not confuse** with agent depth
 **main thread (L1) / subagents (L2) / specialists (L3 max)** above.
 
 | Session layer | Where |
 |---------------|--------|
 | **L0** durable residual | `RESIDUAL.md` (D0 open) / campaign docs |
 | **L1** session todos | Namespaced `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` `ask:*` `feat:*` `bug:*` — **never casual wipe**; merge upsert only; product keep-unless-mentioned on `merge: false`. **Fib leaves:** size **1 or 2** only; larger work → split children; **progress = Σ leaf sizes** (phases/containers unsized). Prefer `meta.kind` + `parentId`. See [`doc/dev/research/todo-progress-fib-2026-07-26.md`](doc/dev/research/todo-progress-fib-2026-07-26.md). |
-| **L2** child joins | Short on-disk notes |
+| **L2** reports | Short on-disk reports under `.agents/reports/` (legacy: `.agents/joins/`) |
 
 ### Session board: track well and close out (pinned 2026-08-01)
 
@@ -309,14 +341,14 @@ Essence for recon survival:
 - **Track well:** short actionable outcome owed, not a verbatim user-message
   dump; namespaced ids; quote only when a precise contract needs it.
 - **Close out:** complete the item same turn the ask/fix/feature is finished
-  (join or parent status); cancel only with a real reason recorded.
+  (report or parent status); cancel only with a real reason recorded.
 - **No wipe theater:** never `merge: false` mass-clear or mass-cancel to tidy;
   after a wave, audit open items (still real / complete / cancel+why).
 - **Substance first:** complete only when handled; partial work stays open with
-  updated remaining content. Parent completes from join notes + operator
+  updated remaining content. Parent completes from reports + operator
   messages without re-research.
 
-Prefer no worktrees (`allow_worktree = false` default). Campaign + joins:
+Prefer no worktrees (`allow_worktree = false` default). Campaign + reports:
 `doc/dev/campaigns/operator-orchestration-2026-07.md`,
 `doc/dev/research/todo-levels-product-2026-07-24.md`,
 `doc/dev/research/execute-plan-no-worktree-2026-07-24.md`,

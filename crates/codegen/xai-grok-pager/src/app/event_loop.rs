@@ -1450,7 +1450,15 @@ pub(crate) async fn run(
                 git_ref: args.worktree_ref.clone(),
             })
         }
-        MaterializedStartup::Resume { session_id, .. } => {
+        MaterializedStartup::Resume {
+            session_id,
+            other_conversation_relative,
+            ..
+        } => {
+            // Default open: when other conversations exist, toast next-oldest age.
+            if let Some(rel) = other_conversation_relative {
+                app.show_toast(&crate::app::session_startup::format_other_conversations_toast(rel));
+            }
             // CLI resume has no roster entry: `chat_kind` on LoadSession is the
             // conversation-entry bit only (false here). Process-wide `--chat`
             // still stamps kind=chat via SessionFlags.chat_mode in the load
@@ -1485,14 +1493,24 @@ pub(crate) async fn run(
             parent_cwd: parent_cwd.clone().or(session_cwd.clone()),
             new_session_id: new_session_id.clone(),
         }),
-        MaterializedStartup::NewAuto if args.worktree.is_some() => {
+        MaterializedStartup::NewAuto { .. } if args.worktree.is_some() => {
             Some(Action::NewWorktreeSession {
                 load_session_id: None,
                 label: args.worktree.as_ref().filter(|s| !s.is_empty()).cloned(),
                 git_ref: args.worktree_ref.clone(),
             })
         }
-        MaterializedStartup::NewAuto => None,
+        MaterializedStartup::NewAuto { new_folder_notice } => {
+            // Soft yellow informational banner (not an error): empty workspace.
+            if *new_folder_notice {
+                app.startup_warnings.push(crate::startup::StartupWarning {
+                    severity: crate::startup::WarningSeverity::Warning,
+                    message: crate::app::session_startup::new_folder_startup_message().to_string(),
+                    action: None,
+                });
+            }
+            None
+        }
     };
 
     if let Some(action) = startup_action {

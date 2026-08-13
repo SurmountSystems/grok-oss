@@ -698,16 +698,10 @@ impl ScrollbackPane {
 
         // When timestamps are shown on message blocks, reserve right margin in the
         // block's content width so wrapped text doesn't collide with the overlaid
-        // timestamp (matches behavior in EntryRenderer for normal content).
-        let ts_reserved = if appearance.show_timestamps
-            && matches!(
-                &entry.block,
-                RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-            ) {
-            10
-        } else {
-            0
-        };
+        // timestamp (and bubble ⧉ when both chrome share the row). Matches
+        // EntryRenderer / message_right_chrome_reserve.
+        let ts_reserved =
+            crate::scrollback::wrappers::message_right_chrome_reserve(&entry.block, appearance);
         let content_width_for_block = layout.content_width().saturating_sub(ts_reserved);
 
         let ctx = entry.context_with_mode_and_budget(
@@ -924,19 +918,24 @@ impl ScrollbackPane {
         // overlay in EntryRenderer but adapted for the header render path + clip
         // (scratch buffer) case. Hover expansion works for pinned (absolute coords);
         // pushed headers always get the short format.
+        // When bubble ⧉ shares the row, leave trailing inset so copy does not
+        // cover the time/date (same layout as EntryRenderer).
         if ctx.appearance.show_timestamps
             && !output.lines.is_empty()
-            && matches!(
-                &entry.block,
-                RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-            )
+            && crate::scrollback::wrappers::block_shows_timestamp(&entry.block)
             && let Some(ts) = entry.created_at
         {
             let first_content_y = content_area.y + if use_vpad { 1 } else { 0 };
+            let copy_inset = crate::scrollback::wrappers::bubble_copy_trailing_inset(
+                &entry.block,
+                &ctx.appearance,
+            );
+            let content_right = content_area.x + content_area.width;
+            let ts_zone_right = content_right.saturating_sub(copy_inset);
+            let ts_zone_left =
+                ts_zone_right.saturating_sub(crate::scrollback::wrappers::TIMESTAMP_SHORT_RESERVE);
             let ts_hovered = mouse_pos.is_some_and(|(mx, my)| {
-                my == first_content_y
-                    && mx >= content_area.x + content_area.width.saturating_sub(10)
-                    && mx < content_area.x + content_area.width
+                my == first_content_y && mx >= ts_zone_left && mx < ts_zone_right
             });
             let ts_str = if ts_hovered {
                 ts.format("  %H:%M:%S | %b %d").to_string()
@@ -944,10 +943,10 @@ impl ScrollbackPane {
                 ts.format("  %-I:%M %p").to_string()
             };
             let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1
+            if content_area.width > ts_width + 1 + copy_inset
                 && first_content_y < content_area.y + content_area.height
             {
-                let ts_x = content_area.x + content_area.width - ts_width;
+                let ts_x = ts_zone_right.saturating_sub(ts_width);
                 let ts_style = Style::default().fg(theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
             }

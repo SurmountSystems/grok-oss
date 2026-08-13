@@ -1525,8 +1525,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned: `[ui].economic_mode` + process-wide cache. Default ON —
         // soft-caps effective context at the Grok 4.5 long-context price cliff
-        // (200K). Does not rewrite auto-run /implement --effort. Override per
-        // conversation with `/economic-mode`.
+        // (200K). Also gates Token Economy implement-loop effort caps when
+        // `[token_economy] cap_implement_effort_when_economic` is true (defaults:
+        // max 3, desired 2). Override per conversation with `/economic-mode`.
         SettingMeta {
             key: "economic_mode",
             category: SettingCategory::Agent,
@@ -1535,10 +1536,13 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Cap effective context at 200K tokens so Grok 4.5 requests stay on the \
                           lower pricing tier (prices double above 200K for the entire request). \
                           Catalog context remains larger (e.g. 500K); compaction, the context \
-                          bar, and auto-compact % thresholds use the capped size. Does not \
-                          change explicit /implement --effort. Default on. Override for \
-                          one conversation with /economic-mode. Pair with Auto-compact at → \
-                          200k tokens to summarise before the cliff on uncapped sessions.",
+                          bar, and auto-compact % thresholds use the capped size. When on, also \
+                          enables Token Economy implement-loop effort policy (default ceiling 3, \
+                          desired 2 when missing; over-ceiling clamps with a toast) unless \
+                          [token_economy] turns the cap off. Default on. Override for one \
+                          conversation with /economic-mode. Pair with Auto-compact at → 200k \
+                          tokens to summarise before the cliff on uncapped sessions. Full knobs: \
+                          config.toml [token_economy]; /spend for double-entry books.",
             keywords: &[
                 "economic",
                 "economy",
@@ -1555,6 +1559,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "implement",
                 "effort",
                 "compact",
+                "token_economy",
+                "pacing",
+                "spend",
             ],
             kind: SettingKind::Bool {
                 default: ui_default.economic_mode.unwrap_or(true),

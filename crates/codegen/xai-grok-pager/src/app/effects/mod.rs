@@ -4053,7 +4053,14 @@ pub(crate) fn execute(
                     // Always refresh OpenRouter credits alongside xAI billing so
                     // OR-only / OR-active sessions still update the footer when
                     // the xAI extension is unavailable (no grok.com auth).
-                    let openrouter_balance = fetch_openrouter_credit_balance().await;
+                    // Management team prepaid + postpaid run in parallel (no-op
+                    // when key/team unset). Postpaid fills process cache for
+                    // `/limits` rebuild; TTL honored unless explicit open cleared.
+                    let (openrouter_balance, console_team_prepaid_cents, _) = tokio::join!(
+                        fetch_openrouter_credit_balance(),
+                        fetch_console_team_prepaid_cents(),
+                        fetch_console_team_postpaid_into_process_cache(),
+                    );
                     let req = acp::ExtRequest::new(
                         "x.ai/billing",
                         serde_json::value::to_raw_value(&serde_json::json!({}))
@@ -4072,11 +4079,15 @@ pub(crate) fn execute(
                             >(result.clone())
                         }
                         Err(e) => {
-                            // Still surface a successful OR balance if we got one.
-                            if openrouter_balance.is_some() {
+                            // SuperGrok path failed — never wipe SuperGrok cache.
+                            // Still surface OR / console prepaid if we got them
+                            // (CreditBalanceFetch::Unchanged keeps last-good SuperGrok).
+                            if openrouter_balance.is_some()
+                                || console_team_prepaid_cents.is_some()
+                            {
                                 return TaskResult::BillingFetched {
                                     agent_id,
-                                    balance: None,
+                                    balance: crate::views::credit_bar::CreditBalanceFetch::Unchanged,
                                     silent,
                                     subscription_tier: None,
                                     autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -4093,10 +4104,13 @@ pub(crate) fn execute(
                     let billing = match parsed {
                         Ok(billing) => billing,
                         Err(e) => {
-                            if openrouter_balance.is_some() {
+                            // Same keep-last-good SuperGrok policy as transport fail.
+                            if openrouter_balance.is_some()
+                                || console_team_prepaid_cents.is_some()
+                            {
                                 return TaskResult::BillingFetched {
                                     agent_id,
-                                    balance: None,
+                                    balance: crate::views::credit_bar::CreditBalanceFetch::Unchanged,
                                     silent,
                                     subscription_tier: None,
                                     autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
@@ -4111,15 +4125,39 @@ pub(crate) fn execute(
                         }
                     };
                     let subscription_tier = billing.subscription_tier;
-                    let balance = billing.config.map(credit_balance_from_config);
-                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
+                    let period_end_rfc3339 = billing.config.as_ref().and_then(|c| {
+                        c.current_period
+                            .as_ref()
+                            .and_then(|p| p.end.clone())
+                            .or_else(|| c.billing_period_end.clone())
+                    });
+                    let period_type = billing.config.as_ref().and_then(|c| {
+                        c.current_period
+                            .as_ref()
+                            .and_then(|p| p.period_type.clone())
+                    });
+                    let balance_opt = billing.config.map(credit_balance_from_config);
+                    // Feed ranking only when included usage is a known reading
+                    // (never placeholder 0.0 with included_usage_known: false).
+                    if let Some(ref bal) = balance_opt
+                        && crate::views::credit_bar::should_apply_included_usage_side_effects(bal)
+                    {
+                        let grok_home = xai_grok_shell::util::grok_home::grok_home();
+                        xai_grok_shell::auth::remember_active_supergrok_included_billing(
+                            &grok_home,
+                            bal.usage_pct,
+                            period_end_rfc3339.as_deref(),
+                            period_type.as_deref(),
+                        );
+                    }
+                    let autotopup = if has_prepaid_credits(balance_opt.as_ref()) {
                         fetch_auto_topup_info(&tx).await
                     } else {
                         crate::views::credit_bar::AutoTopupFetch::Cleared
                     };
                     TaskResult::BillingFetched {
                         agent_id,
-                        balance,
+                        balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(balance_opt),
                         silent,
                         subscription_tier,
                         autotopup,
@@ -4188,13 +4226,42 @@ pub(crate) fn execute(
                                 BillingConfigResponse,
                             >(result.clone()) {
                                 Ok(billing) => {
-                                    let balance = billing
-                                        .config
-                                        .map(|c| crate::views::credit_bar::CreditBalance {
+                                    let period_end_rfc3339 =
+                                        billing.config.as_ref().and_then(|c| {
+                                            c.current_period
+                                                .as_ref()
+                                                .and_then(|p| p.end.clone())
+                                                .or_else(|| c.billing_period_end.clone())
+                                        });
+                                    let period_type = billing.config.as_ref().and_then(|c| {
+                                        c.current_period
+                                            .as_ref()
+                                            .and_then(|p| p.period_type.clone())
+                                    });
+                                    // App-level poll historically hid period_end_display
+                                    // on the status bar; keep that, but still feed ranking
+                                    // only when included usage is known.
+                                    let balance_opt = billing.config.map(|c| {
+                                        crate::views::credit_bar::CreditBalance {
                                             period_end_display: None,
                                             ..credit_balance_from_config(c)
-                                        });
-                                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
+                                        }
+                                    });
+                                    if let Some(ref bal) = balance_opt
+                                        && crate::views::credit_bar::should_apply_included_usage_side_effects(
+                                            bal,
+                                        )
+                                    {
+                                        let grok_home =
+                                            xai_grok_shell::util::grok_home::grok_home();
+                                        xai_grok_shell::auth::remember_active_supergrok_included_billing(
+                                            &grok_home,
+                                            bal.usage_pct,
+                                            period_end_rfc3339.as_deref(),
+                                            period_type.as_deref(),
+                                        );
+                                    }
+                                    let autotopup = if has_prepaid_credits(balance_opt.as_ref()) {
                                         fetch_auto_topup_info(&tx).await
                                     } else {
                                         crate::views::credit_bar::AutoTopupFetch::Cleared
@@ -4202,16 +4269,23 @@ pub(crate) fn execute(
                                     let openrouter_balance =
                                         fetch_openrouter_credit_balance().await;
                                     TaskResult::AppBillingFetched {
-                                        balance,
+                                        balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(
+                                            balance_opt,
+                                        ),
                                         autotopup,
                                         openrouter_balance,
                                     }
                                 }
                                 Err(_) => {
-                                    let openrouter_balance =
-                                        fetch_openrouter_credit_balance().await;
+                                    // SuperGrok parse fail: keep last-good SuperGrok;
+                                    // still refresh side meters when available.
+                                    let (openrouter_balance, console_team_prepaid_cents) =
+                                        tokio::join!(
+                                            fetch_openrouter_credit_balance(),
+                                            fetch_console_team_prepaid_cents(),
+                                        );
                                     TaskResult::AppBillingFetched {
-                                        balance: None,
+                                        balance: crate::views::credit_bar::CreditBalanceFetch::Unchanged,
                                         autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
                                         openrouter_balance,
                                     }
@@ -4221,7 +4295,7 @@ pub(crate) fn execute(
                         Err(_) => {
                             let openrouter_balance = fetch_openrouter_credit_balance().await;
                             TaskResult::AppBillingFetched {
-                                balance: None,
+                                balance: crate::views::credit_bar::CreditBalanceFetch::Unchanged,
                                 autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
                                 openrouter_balance,
                             }

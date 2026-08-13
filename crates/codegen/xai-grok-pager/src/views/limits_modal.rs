@@ -371,6 +371,7 @@ mod tests {
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
             is_unified_billing_user: None,
             grok_build_usage_pct: None,
+            included_usage_known: true,
         }
     }
 

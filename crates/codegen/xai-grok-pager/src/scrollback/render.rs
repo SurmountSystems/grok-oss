@@ -53,20 +53,11 @@ pub fn media_open_button_col(content_width: u16, is_video: bool) -> u16 {
     content_width.saturating_sub(label_w) / 2
 }
 
-/// Width reserved for the timestamp on message blocks.
+/// Width reserved for the timestamp (+ bubble ⧉ when both on) on message blocks.
 ///
-/// Matches the constant in `EntryRenderer::timestamp_reserved()`.
+/// Matches `EntryRenderer::timestamp_reserved()` / `message_right_chrome_reserve`.
 fn timestamp_reserved_for_block(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    if appearance.show_timestamps
-        && matches!(
-            block,
-            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-        )
-    {
-        10
-    } else {
-        0
-    }
+    crate::scrollback::wrappers::message_right_chrome_reserve(block, appearance)
 }
 
 /// A reusable scratch buffer for rendering clipped entries.

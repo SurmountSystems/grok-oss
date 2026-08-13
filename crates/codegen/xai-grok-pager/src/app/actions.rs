@@ -416,6 +416,8 @@ pub enum Action {
     },
     /// Cancel the currently running turn.
     CancelTurn,
+    /// Pause or resume all in-process agent work (Ctrl+Shift+Space).
+    ToggleGlobalPause,
     /// User confirmed a cancel-turn choice from the panel.
     CancelTurnChoice(crate::views::modal::CancelTurnChoice),
     /// Kill a background task by task_id.
@@ -723,6 +725,8 @@ pub enum Action {
     /// `/limits` — SuperGrok included / dollar extras / console path detail
     /// from cached billing (not session token ledger). Opens dismissible modal.
     ShowLimits,
+    /// `/spend` — double-entry local vs Management spend books (Token Economy).
+    ShowSpend,
     /// `/limits --json` — same meters as [`ShowLimits`] / `grok limits --json`,
     /// printed as pretty JSON into conversation scrollback (no modal).
     ShowLimitsJson,
@@ -2843,7 +2847,9 @@ pub enum TaskResult {
     /// Billing data fetched from the agent.
     BillingFetched {
         agent_id: AgentId,
-        balance: Option<crate::views::credit_bar::CreditBalance>,
+        /// SuperGrok three-state: `Resolved(None)` clears SuperGrok cache;
+        /// `Unchanged` keeps last-known SuperGrok when that path failed.
+        balance: crate::views::credit_bar::CreditBalanceFetch,
         /// When true, update `credit_balance` silently (no scrollback message).
         silent: bool,
         /// Subscription tier piggybacked from remote settings.
@@ -2858,7 +2864,8 @@ pub enum TaskResult {
     },
     /// App-level billing data (welcome screen).
     AppBillingFetched {
-        balance: Option<crate::views::credit_bar::CreditBalance>,
+        /// SuperGrok three-state (same policy as [`Self::BillingFetched`]).
+        balance: crate::views::credit_bar::CreditBalanceFetch,
         autotopup: crate::views::credit_bar::AutoTopupFetch,
         /// OpenRouter account credits when a key is available (`None` = keep cache).
         openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,

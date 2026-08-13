@@ -344,19 +344,28 @@ pub(super) fn apply_auto_topup(
 pub(super) fn handle_billing_fetched(
     app: &mut AppView,
     agent_id: AgentId,
-    balance: Option<crate::views::credit_bar::CreditBalance>,
+    balance: crate::views::credit_bar::CreditBalanceFetch,
     silent: bool,
     subscription_tier: Option<String>,
     autotopup: crate::views::credit_bar::AutoTopupFetch,
     openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
     console_team_prepaid_cents: Option<i64>,
 ) -> Vec<Effect> {
-    // Parse/transport failures route to `BillingError`, so a `None`
-    // balance here means the response carried no billing config. Clear
-    // the cached balance + polling so the status bar agrees with the
-    // "No billing data available." message rather than showing a stale
-    // value.
-    app.credit_balance = balance.clone();
+    use crate::views::credit_bar::{CreditBalanceFetch, should_apply_included_usage_side_effects};
+
+    // SuperGrok three-state:
+    // - `Resolved(None)` = successful response with no config → clear SuperGrok
+    //   cache + SuperGrok-only poll (status bar matches "No billing data").
+    // - `Resolved(Some)` = apply that balance.
+    // - `Unchanged` = SuperGrok transport/parse failed → keep last-known SuperGrok
+    //   (side meters may still update). Pure SuperGrok-only failures still use
+    //   `BillingError`, which also keeps cache.
+    match &balance {
+        CreditBalanceFetch::Resolved(bal) => {
+            app.credit_balance = bal.clone();
+        }
+        CreditBalanceFetch::Unchanged => {}
+    }
     // `Resolved` updates the cached rule, `Cleared` resets it to unknown
     // (no credits), `Unchanged` keeps the last-known-good (fetch failed).
     apply_auto_topup(&mut app.auto_topup, &autotopup);
@@ -377,11 +386,15 @@ pub(super) fn handle_billing_fetched(
     //
     // When marked, sampler stays on the console key — update meter identity so
     // the footer does not keep showing SuperGrok prepaid extras as spend.
-    let exhaust_action = if let Some(bal) = balance.as_ref() {
-        let grok_home = xai_grok_shell::util::grok_home::grok_home();
-        xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(bal.usage_pct, &grok_home)
-    } else {
-        xai_grok_shell::auth::AllowanceExhaustAction::None
+    //
+    // Only known included readings feed exhaust / ranking. Placeholder 0.0 with
+    // `included_usage_known: false` must not clear a Marked memo.
+    let exhaust_action = match app.credit_balance.as_ref() {
+        Some(bal) if should_apply_included_usage_side_effects(bal) => {
+            let grok_home = xai_grok_shell::util::grok_home::grok_home();
+            xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(bal.usage_pct, &grok_home)
+        }
+        _ => xai_grok_shell::auth::AllowanceExhaustAction::None,
     };
     // Meter honesty: Marked → console live; Cleared → SuperGrok again only when
     // console is not the auth primary (preferred_method=api_key / is_api_key_auth).
@@ -402,9 +415,15 @@ pub(super) fn handle_billing_fetched(
             agent.sampling_identity = kind;
         }
     }
-    app.billing_poll_wanted = balance
+    app.billing_poll_wanted = app
+        .credit_balance
         .as_ref()
-        .map(|b| b.usage_pct >= 99.0)
+        .map(|b| {
+            // Near exhaust, or included meter still unknown (do not stick at 0%).
+            b.usage_pct >= 99.0 || !b.included_usage_known
+        })
+        // No SuperGrok balance (explicit clear or never warmed): SuperGrok-only
+        // poll off. OpenRouter / console team prepaid still keep polling below.
         .unwrap_or(false)
         // Keep polling when OpenRouter or console team prepaid is in use so the
         // footer balance refreshes.
@@ -423,22 +442,50 @@ pub(super) fn handle_billing_fetched(
     // ran). Cold/pre-fetch surfaces use Loading via the default resolve.
     let prepaid_gap =
         crate::views::credit_bar::resolve_console_team_prepaid_gap_after_billing_fetch();
+    // Effective SuperGrok balance after three-state apply (for agent + scrollback).
+    let effective_supergrok = app.credit_balance.clone();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         // Gateway/chat-kind: do not attach Build coding credits.
         let mut topup = agent.auto_topup.clone();
         apply_auto_topup(&mut topup, &autotopup);
-        agent.apply_credit_balance(balance.clone(), topup, app_or);
+        match &balance {
+            CreditBalanceFetch::Resolved(bal) => {
+                agent.apply_credit_balance(bal.clone(), topup, app_or);
+            }
+            CreditBalanceFetch::Unchanged => {
+                // Keep SuperGrok last-good; still refresh autotopup + OpenRouter.
+                if !agent.chat_kind {
+                    agent.auto_topup = topup;
+                    if let Some(or) = app_or {
+                        agent.openrouter_credit_balance = Some(or);
+                    }
+                }
+            }
+        }
         agent.apply_console_team_prepaid_cents(app_console_prepaid);
         if !silent && !agent.chat_kind {
             let live = agent.sampling_identity;
             let prepaid = agent.console_team_prepaid_cents.or(app_console_prepaid);
-            let msg = crate::views::credit_bar::format_usage_summary_with_live_identity_and_gap(
-                balance.as_ref(),
-                summary_topup.as_ref(),
-                live,
-                prepaid,
-                prepaid_gap,
-            );
+            // Branch 2b honesty: flat multi-sample SuperGrok poll + C6 when
+            // process postpaid cache shows OAuth class dominates. Do not invent
+            // flags (history/cache cold → false). Observed Build/extras come
+            // from the same series so flat note does not overclaim.
+            let flat_ev = xai_grok_shell::auth::flat_poll_evidence_from_history();
+            let oauth_postpaid_dominates =
+                xai_grok_shell::auth::cached_console_team_postpaid_default()
+                    .is_some_and(|m| m.oauth_class_dominates());
+            let msg =
+                crate::views::credit_bar::format_usage_summary_with_live_identity_gap_and_honesty(
+                    effective_supergrok.as_ref(),
+                    summary_topup.as_ref(),
+                    live,
+                    prepaid,
+                    prepaid_gap,
+                    flat_ev.unproven,
+                    flat_ev.observed_build,
+                    flat_ev.observed_extras,
+                    oauth_postpaid_dominates,
+                );
             agent.scrollback.push_block(RenderBlock::System(
                 crate::scrollback::blocks::SystemMessageBlock::new(msg),
             ));

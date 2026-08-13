@@ -62,6 +62,7 @@ pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
+pub mod spend;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -146,6 +147,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(import_claude::ImportClaudeCommand),
         Arc::new(usage::UsageCommand),
         Arc::new(limits::LimitsCommand),
+        Arc::new(spend::SpendCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
         Arc::new(clear_completed_todos::ClearCompletedTodosCommand),
@@ -276,6 +278,7 @@ mod tests {
             "debug",
             "docs",
             "doctor",
+            "double-entry",
             "edit-prompt",
             "econ",
             "economic",
@@ -300,6 +303,7 @@ mod tests {
             "imagine-video",
             "import-claude",
             "jump",
+            "ledger",
             "limits",
             "login",
             "logout",
@@ -340,6 +344,7 @@ mod tests {
             "share",
             "show-plan",
             "skills",
+            "spend",
             "summarize",
             "tasks",
             "terminal-check",

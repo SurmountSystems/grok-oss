@@ -104,7 +104,7 @@ use super::status::{
     dispatch_privacy_banner_customize, dispatch_share_session, dispatch_show_context_info,
     dispatch_show_limits, dispatch_show_limits_json, dispatch_show_privacy_info,
     dispatch_show_queue, dispatch_show_release_notes, dispatch_show_session_info,
-    dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
+    dispatch_show_spend, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -934,6 +934,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::CancelTurn => dispatch_cancel_turn(app),
+        Action::ToggleGlobalPause => super::global_pause::dispatch_toggle_global_pause(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
         Action::KillSubagent(subagent_id) => dispatch_kill_subagent(app, subagent_id),
@@ -954,6 +955,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
         Action::ShowLimits => dispatch_show_limits(app),
+        Action::ShowSpend => dispatch_show_spend(app),
         Action::ShowLimitsJson => dispatch_show_limits_json(app),
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),

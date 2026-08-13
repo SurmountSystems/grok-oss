@@ -256,7 +256,24 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let cancel_rewind_enabled = app.cancel_rewind_enabled;
+    do_cancel_turn_for(app, id, cancel_subagents, true)
+}
+
+/// Cancel a running turn on a specific agent (active or background session).
+///
+/// Used by single-session CancelTurn and by fearless global pause so every
+/// open session can be interrupted, not only the focused one.
+///
+/// `allow_local_rewind`: when true (interactive cancel), a pristine in-flight
+/// prompt may restore into the composer. Global pause sets this false so the
+/// interrupted text is held for a single resume re-queue instead of duplicating
+/// into the composer.
+pub(super) fn do_cancel_turn_for(
+    app: &mut AppView,
+    id: AgentId,
+    cancel_subagents: bool,
+    allow_local_rewind: bool,
+) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -340,8 +357,9 @@ fn cancel_agent_turn(
     // non-empty composer holds a NEWER draft the rewind would clobber.
     // Trigger-agnostic on purpose: fall back to the standard cancel.
     let composer_has_draft = !agent.prompt.text().is_empty() || !agent.prompt.images.is_empty();
-    let rewinding = agent.shared_queue.is_empty()
-        && cancel_rewind_enabled
+    let rewinding = allow_local_rewind
+        && agent.shared_queue.is_empty()
+        && app.cancel_rewind_enabled
         && agent.session.in_flight_prompt.is_some()
         && agent.session.pending_prompts.is_empty()
         && !in_flight_committed

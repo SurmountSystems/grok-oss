@@ -166,6 +166,7 @@ xai-grok-auth = { workspace = true, features = ["middleware"] }
 xai-grok-telemetry = { workspace = true }
 xai-grok-http = { workspace = true }
 xai-grok-models = { workspace = true }
+grok-rate-limit = { workspace = true }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
 flate2 = { workspace = true }
 fs2 = { workspace = true }

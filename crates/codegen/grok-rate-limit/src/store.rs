@@ -62,6 +62,34 @@ impl ProviderKey {
         let fp: String = key_fingerprint.chars().take(16).collect();
         Self::new(format!("{host}+{fp}"))
     }
+
+    /// Host + optional fingerprint + API class for type-appropriate cooldowns.
+    ///
+    /// Use when the same host has separate rate-limit buckets (e.g. xAI text vs
+    /// Imagine image vs video). Chat inference keeps
+    /// [`Self::from_base_url_and_key_fingerprint`] without a class so existing
+    /// cooldown files stay stable.
+    ///
+    /// Empty `api_class` falls back to host (+ fingerprint when present).
+    pub fn from_base_url_fingerprint_and_class(
+        base_url: &str,
+        key_fingerprint: &str,
+        api_class: &str,
+    ) -> Self {
+        let host = url_host(base_url).unwrap_or_else(|| "unknown".into());
+        let class = api_class.trim();
+        let fp: String = key_fingerprint.chars().take(16).collect();
+        if class.is_empty() {
+            if fp.is_empty() {
+                return Self::new(host);
+            }
+            return Self::new(format!("{host}+{fp}"));
+        }
+        if fp.is_empty() {
+            return Self::new(format!("{host}+{class}"));
+        }
+        Self::new(format!("{host}+{fp}+{class}"))
+    }
 }
 
 fn url_host(base_url: &str) -> Option<String> {
@@ -397,6 +425,33 @@ mod tests {
             "got {}",
             a.as_str()
         );
+    }
+
+    #[test]
+    fn provider_key_api_class_separates_buckets_on_same_host() {
+        let fp = "deadbeefdeadbeef";
+        let chat = ProviderKey::from_base_url_and_key_fingerprint("https://api.x.ai/v1", fp);
+        let imagine = ProviderKey::from_base_url_fingerprint_and_class(
+            "https://api.x.ai/v1",
+            fp,
+            crate::api_class::IMAGINE,
+        );
+        let video = ProviderKey::from_base_url_fingerprint_and_class(
+            "https://api.x.ai/v1",
+            fp,
+            crate::api_class::VIDEO,
+        );
+        assert_ne!(chat.as_str(), imagine.as_str());
+        assert_ne!(imagine.as_str(), video.as_str());
+        assert!(
+            imagine.as_str().contains("imagine"),
+            "got {}",
+            imagine.as_str()
+        );
+        assert!(video.as_str().contains("video"), "got {}", video.as_str());
+        // Empty class matches host+fingerprint.
+        let empty = ProviderKey::from_base_url_fingerprint_and_class("https://api.x.ai/v1", fp, "");
+        assert_eq!(empty.as_str(), chat.as_str());
     }
 
     #[test]

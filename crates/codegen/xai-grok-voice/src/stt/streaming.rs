@@ -34,6 +34,12 @@ pub struct StreamingSttSession {
 impl StreamingSttSession {
     /// Connect and wait for `transcript.created` before sending audio.
     pub async fn connect(config: &VoiceConfig, bearer: &str) -> Result<Self, VoiceError> {
+        // Shared multi-process cooldowns for Voice STT (separate product limit).
+        // xAI rate limits: https://docs.x.ai/developers/rate-limits (accessed: 2026-08-03)
+        // Voice/Imagine tier increases: contact sales@x.ai per those docs.
+        let rate_key = voice_provider_key(&config.api_base, bearer);
+        wait_before_voice(&rate_key).await;
+
         let url = build_stt_ws_url(config)?;
         let mut request = url
             .as_str()
@@ -66,7 +72,10 @@ impl StreamingSttSession {
         )
         .await
         .map_err(|_| VoiceError::WebSocket("connect timed out".into()))?
-        .map_err(|e| VoiceError::WebSocket(format!("connect: {e}")))?;
+        .map_err(|e| {
+            observe_voice_connect_error(&rate_key, &e);
+            VoiceError::WebSocket(format!("connect: {e}"))
+        })?;
 
         let (mut ws_write, mut ws_read) = ws.split();
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -233,6 +242,47 @@ fn insert_optional_header(request: &mut WsRequest, name: &'static str, value: &s
     }
 }
 
+/// Provider key for Voice STT: host + bearer fingerprint + `voice` class.
+pub(crate) fn voice_provider_key(api_base: &str, bearer: &str) -> grok_rate_limit::ProviderKey {
+    use grok_rate_limit::{ProviderKey, api_class, fingerprint_secret};
+    let fp = fingerprint_secret(bearer.trim());
+    ProviderKey::from_base_url_fingerprint_and_class(api_base, &fp, api_class::VOICE)
+}
+
+async fn wait_before_voice(key: &grok_rate_limit::ProviderKey) {
+    grok_rate_limit::SharedRateLimitStore::process_default()
+        .wait_if_limited(key)
+        .await;
+}
+
+/// Best-effort observe when WebSocket handshake fails with HTTP 429/403.
+///
+/// Tungstenite surfaces HTTP errors as `Http(Response)` when the upgrade is
+/// rejected; we parse status and optional `Retry-After` from that response.
+fn observe_voice_connect_error(key: &grok_rate_limit::ProviderKey, err: &WsError) {
+    let WsError::Http(response) = err else {
+        return;
+    };
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok());
+    let reset = response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok());
+    let store = grok_rate_limit::SharedRateLimitStore::process_default();
+    let _ = grok_rate_limit::observe_status(
+        &store,
+        key,
+        status,
+        retry_after,
+        reset,
+        "Voice STT WebSocket rate limit",
+    );
+}
+
 fn build_stt_ws_url(config: &VoiceConfig) -> Result<Url, VoiceError> {
     // Resolve `auto` / aliases here so the wire value is always a concrete
     // catalog code (the STT API does not accept `auto`, unlike TTS).
@@ -253,6 +303,28 @@ fn build_stt_ws_url(config: &VoiceConfig) -> Result<Url, VoiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_provider_key_uses_class_and_fingerprint() {
+        let secret = "voice-bearer-DEADBEEF-secret";
+        let key = voice_provider_key("https://api.x.ai", secret);
+        let s = key.as_str();
+        assert!(s.contains("voice"), "got {s}");
+        assert!(!s.contains(secret), "raw secret in key: {s}");
+        assert!(!s.contains("DEADBEEF"), "secret fragment in key: {s}");
+        // Distinct from chat (no class) and imagine class.
+        let chat = grok_rate_limit::ProviderKey::from_base_url_and_key_fingerprint(
+            "https://api.x.ai",
+            &grok_rate_limit::fingerprint_secret(secret),
+        );
+        let imagine = grok_rate_limit::ProviderKey::from_base_url_fingerprint_and_class(
+            "https://api.x.ai",
+            &grok_rate_limit::fingerprint_secret(secret),
+            grok_rate_limit::api_class::IMAGINE,
+        );
+        assert_ne!(s, chat.as_str());
+        assert_ne!(s, imagine.as_str());
+    }
 
     #[test]
     fn stt_url_includes_query_params() {

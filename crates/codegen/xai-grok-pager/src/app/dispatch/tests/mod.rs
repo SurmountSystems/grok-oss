@@ -3,6 +3,7 @@ mod auth;
 mod billing;
 mod cta_e2e;
 mod dashboard;
+mod global_pause;
 mod jump;
 mod modes;
 mod notes;
@@ -79,6 +80,7 @@ fn test_app() -> AppView {
         active_view: ActiveView::Welcome,
         auth_return_view: None,
         agents: IndexMap::new(),
+        global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
         next_agent_id: 0,
         models: ModelState::default(),
         registry: crate::actions::ActionRegistry::defaults(),
@@ -1037,5 +1039,6 @@ fn test_bal(usage_pct: f64) -> crate::views::credit_bar::CreditBalance {
         period_type: None,
         is_unified_billing_user: None,
         grok_build_usage_pct: None,
+        included_usage_known: true,
     }
 }

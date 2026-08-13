@@ -155,7 +155,13 @@ Do **not** claim inference `XAI_API_KEY` can return console.x.ai business remain
 
 - `POST …/usage` time series for chart-class token/spend rows (group by description, sum `usd`, day buckets). Only if dogfood needs charts.
 - Operator live dogfood with real management key + team_id.
-- Soft polish: prepaid cents refresh ≤60s TTL + last-good on error (documented known UX).
+- Soft polish **shipped (2026-08-02):** Management billing process cache ≤60s
+  (`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`, prepaid alias kept) for TUI
+  background polls; app last-good cents on fetch `None`. Explicit `grok
+  limits` collect busts prepaid+postpaid process caches (FetchBilling does
+  not). `/limits` honesty when prepaid $ shown: process-cache lag + UI
+  last-good can outlive TTL; `grok limits` forces fresh Management fetch.
+  Join: `.agents/joins/impl-prepaid-cache-ttl-polish-2026-08-02.md`.
 
 ### Blocked / out of scope for this research
 

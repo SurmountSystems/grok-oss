@@ -12,6 +12,10 @@ use crate::theme::Theme;
 #[derive(Debug, Clone)]
 pub struct CreditBalance {
     /// Usage as a percentage of the allowance (0.0–100.0).
+    ///
+    /// Only meaningful when [`Self::included_usage_known`] is true. When
+    /// unknown, chrome must paint an honest placeholder (`...%`), never a
+    /// silent `0%` lie.
     pub usage_pct: f64,
     /// Usage as a percentage of total budget (free + on-demand when enabled).
     pub effective_usage_pct: f64,
@@ -20,6 +24,8 @@ pub struct CreditBalance {
     pub period_end_display: Option<String>,
     /// Absolute period end (UTC) when billing provided an RFC 3339 end.
     /// Used by `/limits` live countdown; display string stays local format.
+    /// With [`Self::period_type`], also drives free SuperGrok period linear-burn
+    /// pacing (start derived when wire start is absent).
     pub period_end_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether pay-as-you-go (on-demand) billing is enabled.
     pub pay_as_you_go: bool,
@@ -40,6 +46,13 @@ pub struct CreditBalance {
     /// Distinct from top-level included `usage_pct`. `None` when not on wire
     /// or not observed (sibling process-cache-only path).
     pub grok_build_usage_pct: Option<f64>,
+    /// Whether [`Self::usage_pct`] is a real included-allowance reading.
+    ///
+    /// `false` when the billing config had neither `credit_usage_percent` nor
+    /// a usable monthly limit/used pair (honest absence — same rule as shell
+    /// [`xai_grok_shell::extensions::billing::included_usage_and_period_end`]).
+    /// True zero (`usage_pct == 0.0` with this flag true) is allowed.
+    pub included_usage_known: bool,
 }
 
 /// OpenRouter account credits remaining (USD cents), from `GET /api/v1/credits`.
@@ -246,6 +259,55 @@ impl CreditBalance {
             _ => "Usage",
         }
     }
+
+    /// Free SuperGrok period linear-burn pacing when period end + type allow it.
+    ///
+    /// Uses free SuperGrok period **used percent** only (never dollars). Missing
+    /// bounds → `None`. Respects `[token_economy] show_period_pacing`.
+    pub fn period_pacing(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<xai_grok_shell::token_economy::PeriodPacing> {
+        let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+        if !cfg.show_period_pacing {
+            return None;
+        }
+        let end = self.period_end_at?;
+        let start = xai_grok_shell::token_economy::resolve_period_start(
+            None,
+            Some(end),
+            self.period_type.as_deref(),
+        )?;
+        xai_grok_shell::token_economy::compute_period_pacing(self.usage_pct, start, end, now)
+    }
+
+    /// Compact pacing chip for credit/status chrome, or `None` when omitted.
+    pub fn pacing_chip(
+        &self,
+        live: SamplingIdentityKind,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<String> {
+        let p = self.period_pacing(now)?;
+        Some(if live.is_console() {
+            p.compact_label_console_live()
+        } else {
+            p.compact_label()
+        })
+    }
+
+    /// Full pacing sentence for `/usage` / `/limits`, or `None` when omitted.
+    pub fn pacing_sentence(
+        &self,
+        live: SamplingIdentityKind,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<String> {
+        let p = self.period_pacing(now)?;
+        Some(if live.is_console() {
+            p.full_sentence_console_live()
+        } else {
+            p.full_sentence()
+        })
+    }
 }
 
 /// Auto top-up rule data used by the `/usage` summary.
@@ -286,6 +348,47 @@ pub enum AutoTopupFetch {
     Cleared,
 }
 
+/// Outcome of a SuperGrok included/credits billing fetch.
+///
+/// Mirrors [`AutoTopupFetch`]: a transport or parse failure must **not** wipe
+/// last-known SuperGrok chrome when OpenRouter or console team prepaid still
+/// succeed. Only a successful response with **no** `config` object clears the
+/// SuperGrok cache (`Resolved(None)`).
+#[derive(Debug, Clone)]
+pub enum CreditBalanceFetch {
+    /// SuperGrok path succeeded. `None` = response carried no billing config
+    /// (clear SuperGrok app/agent cache). `Some` = apply that balance.
+    Resolved(Option<CreditBalance>),
+    /// SuperGrok transport/parse failed — keep last-known-good SuperGrok
+    /// balance. Side meters (OpenRouter / console prepaid) may still update.
+    Unchanged,
+}
+
+/// Pure SuperGrok cache policy (no network). Unit-tested so effects cannot
+/// silently regress to "side meter success ⇒ wipe SuperGrok."
+///
+/// - `supergrok_ok = true` → [`CreditBalanceFetch::Resolved`]`(balance_when_ok)`
+/// - `supergrok_ok = false` → [`CreditBalanceFetch::Unchanged`]
+pub fn credit_balance_fetch_from_supergrok_path(
+    supergrok_ok: bool,
+    balance_when_ok: Option<CreditBalance>,
+) -> CreditBalanceFetch {
+    if supergrok_ok {
+        CreditBalanceFetch::Resolved(balance_when_ok)
+    } else {
+        CreditBalanceFetch::Unchanged
+    }
+}
+
+/// Whether a SuperGrok balance may feed ranking cache / allowance exhaust.
+///
+/// Placeholder `usage_pct: 0.0` with `included_usage_known: false` must not
+/// poison ranking or clear a Marked exhaust memo as if free SuperGrok period
+/// reset.
+pub fn should_apply_included_usage_side_effects(bal: &CreditBalance) -> bool {
+    bal.included_usage_known
+}
+
 /// Format `cents` as a dollar string: whole dollars as `$N`, otherwise `$N.NN`.
 fn fmt_dollars(cents: i64) -> String {
     let dollars = cents as f64 / 100.0;
@@ -306,19 +409,53 @@ fn fmt_dollars(cents: i64) -> String {
 /// - auto top-up on, no max   → `Auto topup: $N`
 /// - auto top-up on, max set  → `Auto topup: $N` + `Max monthly topup: $M`
 ///
+/// When wire `productUsage` carried Grok Build %, that line is always shown
+/// (branch 2b); never invented when absent.
+///
 /// SuperGrok-primary path only. When live sampling is a console key, use
 /// [`format_usage_summary_with_live_identity`] so SuperGrok extras are never
 /// sold as the live console spend.
 pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopupInfo>) -> String {
+    format_usage_summary_with_live(
+        balance,
+        autotopup,
+        SamplingIdentityKind::SuperGrokSession,
+        chrono::Utc::now(),
+    )
+}
+
+/// Like [`format_usage_summary`] with live identity (console honesty) and clock.
+pub fn format_usage_summary_with_live(
+    balance: &CreditBalance,
+    autotopup: Option<&AutoTopupInfo>,
+    live: SamplingIdentityKind,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     // Floor to match the backend SpendingLimiter's `as u8` truncation
-    // (99.994% → 99%, never 100% until truly exhausted).
-    let mut lines = vec![format!(
-        "{}: {}%",
-        balance.usage_label(),
-        balance.usage_pct.floor() as i64
-    )];
+    // (99.994% → 99%, never 100% until truly exhausted). Unknown included
+    // reading must not paint a silent 0%.
+    let mut lines = vec![if balance.included_usage_known {
+        format!(
+            "{}: {}%",
+            balance.usage_label(),
+            balance.usage_pct.floor() as i64
+        )
+    } else {
+        format!("{}: not yet available", balance.usage_label())
+    }];
     if let Some(reset) = &balance.period_end_display {
         lines.push(format!("Next reset: {reset}"));
+    }
+    // Free SuperGrok period linear-burn pacing (omit when bounds missing).
+    if balance.included_usage_known
+        && let Some(pacing) = balance.pacing_sentence(live, now)
+    {
+        lines.push(pacing);
+    }
+    // Branch 2b: surface Grok Build productUsage % when observed (distinct
+    // from top-level included %). Shared phrase with `/limits` (Issue 5).
+    if let Some(build_pct) = balance.grok_build_usage_pct {
+        lines.push(crate::views::limits_honesty::format_grok_build_product_usage_line(build_pct));
     }
 
     // Billing stores credit / top-up amounts as negative cents (accounting
@@ -392,6 +529,40 @@ pub fn format_usage_summary_with_live_identity_and_gap(
     console_team_prepaid_cents: Option<i64>,
     console_team_prepaid_gap: ConsoleTeamPrepaidGap,
 ) -> String {
+    format_usage_summary_with_live_identity_gap_and_honesty(
+        balance,
+        autotopup,
+        sampling_identity,
+        console_team_prepaid_cents,
+        console_team_prepaid_gap,
+        false,
+        false,
+        false,
+        false,
+    )
+}
+
+/// Like [`format_usage_summary_with_live_identity_and_gap`] plus SuperGrok
+/// honesty notes (branch 2b flat-poll + C6 OAuth Usage).
+///
+/// When live sampling is SuperGrok session, appends the same honesty stack as
+/// `/limits` for the given flags. Console live never gets SuperGrok burn /
+/// flat / C6 notes (meters stay distinct; no session-path parenthetical).
+///
+/// `has_included_reading` aligns with snapshot: a SuperGrok `CreditBalance`
+/// always carries included usage % (same meter as `primary.included.is_some()`
+/// on `/limits`), so `balance.is_some()` is the correct gate (Issue 7).
+pub fn format_usage_summary_with_live_identity_gap_and_honesty(
+    balance: Option<&CreditBalance>,
+    autotopup: Option<&AutoTopupInfo>,
+    sampling_identity: SamplingIdentityKind,
+    console_team_prepaid_cents: Option<i64>,
+    console_team_prepaid_gap: ConsoleTeamPrepaidGap,
+    flat_poll_unproven_debit: bool,
+    flat_poll_observed_build: bool,
+    flat_poll_observed_extras: bool,
+    oauth_postpaid_dominates: bool,
+) -> String {
     if sampling_identity.is_console() {
         let mut lines = vec![format!("Live sampling: {}", sampling_identity.as_str())];
         match console_team_prepaid_cents {
@@ -404,13 +575,45 @@ pub fn format_usage_summary_with_live_identity_and_gap(
                 console_team_prepaid_gap.as_display_str()
             )),
         }
+        // SuperGrok period pacing is context only (not live principal); never dollars.
+        if let Some(bal) = balance
+            && let Some(pacing) =
+                bal.pacing_sentence(SamplingIdentityKind::ConsoleKey, chrono::Utc::now())
+        {
+            lines.push(pacing);
+        }
         return lines.join("\n");
     }
 
-    match balance {
-        Some(bal) => format_usage_summary(bal, autotopup),
+    let mut body = match balance {
+        Some(bal) => {
+            format_usage_summary_with_live(bal, autotopup, sampling_identity, chrono::Utc::now())
+        }
         None => "No billing data available.".to_string(),
+    };
+    // Honest included reading only when the balance carries a known meter
+    // (mirrors snapshot primary.included.is_some() for the single-cache path).
+    let has_included_reading = balance.is_some_and(|b| b.included_usage_known);
+    let notes = crate::views::limits_honesty::honesty_notes_for_limits(
+        crate::views::limits_honesty::LimitsHonestyInput {
+            live: sampling_identity,
+            has_included_reading,
+            flat_poll_unproven_debit,
+            flat_poll_observed_build,
+            flat_poll_observed_extras,
+            oauth_postpaid_dominates,
+            // `/usage` SuperGrok path does not attach console team prepaid $;
+            // lag note is for `/limits` when Management prepaid is shown.
+            has_console_team_prepaid_reading: false,
+            // Default credits live on `/limits` postpaid preview, not `/usage`.
+            has_team_default_credits_reading: false,
+        },
+    );
+    for note in notes {
+        body.push('\n');
+        body.push_str(&note);
     }
+    body
 }
 
 /// Low-balance ($10) and pay-as-you-go critical ($5) warning thresholds, in cents.
@@ -614,6 +817,10 @@ pub fn usage_warning_for_session_with_identity_principal_and_gap(
         .filter(|c| *c > 0);
 
     let Some(credits_cents) = credits else {
+        // No known included % → no percentage warning (avoid inventing "100% left").
+        if !balance.included_usage_known {
+            return None;
+        }
         // Pay-as-you-go (legacy on-demand): warn on dollars left in the cap once
         // the included allowance is spent.
         if balance.pay_as_you_go {
@@ -687,14 +894,20 @@ pub fn credit_bar_line(balance: &CreditBalance, hovered: bool, theme: &Theme) ->
 
 /// Like [`credit_bar_line`], but returns `None` for gateway/chat-kind sessions
 /// so the status bar never implies Build sampler / coding-credit usage.
+///
+/// When included usage is unknown, paints the same honest `...%` placeholder
+/// as a cold cache — never a silent `0%`.
 pub fn credit_bar_line_for_session(
     balance: &CreditBalance,
-    _hovered: bool,
+    hovered: bool,
     theme: &Theme,
     gateway_chat: bool,
 ) -> Option<Line<'static>> {
     if gateway_chat {
         return None;
+    }
+    if !balance.included_usage_known {
+        return Some(credit_bar_loading_line(hovered, theme));
     }
     let pct = balance.usage_pct;
     let color = if pct >= 100.0 {
@@ -706,7 +919,12 @@ pub fn credit_bar_line_for_session(
     };
 
     // Compact: percent only (implicit weekly included). Never "Credits used:".
-    let text = format!("{pct:.0}%");
+    // Optional linear-burn chip when bounds exist (space-friendly short form).
+    let text = match balance.pacing_chip(SamplingIdentityKind::SuperGrokSession, chrono::Utc::now())
+    {
+        Some(chip) if chip.len() <= 28 => format!("{pct:.0}% · {chip}"),
+        _ => format!("{pct:.0}%"),
+    };
 
     let style = Style::default().fg(color).bg(theme.bg_base);
     Some(Line::from(Span::styled(text, style)))
@@ -744,6 +962,7 @@ mod tests {
             period_type: None,
             is_unified_billing_user: None,
             grok_build_usage_pct: None,
+            included_usage_known: true,
         }
     }
 
@@ -1431,6 +1650,8 @@ mod tests {
 
     #[test]
     fn usage_summary_supergrok_live_keeps_session_billing() {
+        use crate::views::limits_honesty::NOTE_INCLUDED_PCT_IS_BILLING_POLL;
+
         let b = CreditBalance {
             prepaid_balance_cents: Some(10000),
             ..bal(25.0)
@@ -1442,9 +1663,133 @@ mod tests {
             Some(12_500),
         );
         // SuperGrok-primary still uses session billing; console cents are not mixed in.
-        assert_eq!(
-            text,
-            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"
+        assert!(
+            text.starts_with("Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"),
+            "session billing body: {text}"
+        );
+        assert!(
+            !text.contains("Console team prepaid"),
+            "must not mix console prepaid into SuperGrok usage: {text}"
+        );
+        assert!(
+            !text.contains("$125"),
+            "console cents must not appear on SuperGrok path: {text}"
+        );
+        // Branch 2b: SuperGrok live usage surfaces base poll honesty (not burn claim).
+        assert!(
+            text.contains(NOTE_INCLUDED_PCT_IS_BILLING_POLL),
+            "base poll honesty on SuperGrok live usage: {text}"
+        );
+    }
+
+    /// Named contract (branch 2b): `/usage` surfaces Grok Build productUsage %
+    /// when wire has it; never invents when None.
+    #[test]
+    fn usage_summary_surfaces_grok_build_product_usage_when_on_wire() {
+        let b = CreditBalance {
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            grok_build_usage_pct: Some(54.0),
+            prepaid_balance_cents: Some(10029),
+            ..bal(65.0)
+        };
+        let text = format_usage_summary(&b, None);
+        assert!(
+            text.contains("Grok Build product usage: 54% used"),
+            "usage summary must surface Build % when on wire: {text}"
+        );
+        let cold = CreditBalance {
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            prepaid_balance_cents: Some(10029),
+            ..bal(65.0)
+        };
+        let cold_text = format_usage_summary(&cold, None);
+        assert!(
+            !cold_text.contains("Grok Build product usage:"),
+            "must not invent Build %: {cold_text}"
+        );
+    }
+
+    /// Named contract (branch 2b): SuperGrok live + flat-poll flag → honesty
+    /// note on `/usage` (footer/scrollback surface), not only `/limits`.
+    #[test]
+    fn usage_summary_supergrok_live_surfaces_flat_poll_honesty() {
+        use crate::views::limits_honesty::flat_poll_unproven_debit_note;
+
+        let b = CreditBalance {
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            prepaid_balance_cents: Some(10029),
+            ..bal(65.0)
+        };
+        // Extras observed on balance; Build not on wire this call.
+        let expected = flat_poll_unproven_debit_note(false, true);
+        let text = format_usage_summary_with_live_identity_gap_and_honesty(
+            Some(&b),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            true,  // flat_poll_unproven_debit
+            false, // observed_build
+            true,  // observed_extras
+            false, // oauth_postpaid_dominates
+        );
+        assert!(
+            text.contains(&expected),
+            "flat-poll honesty required on usage when flag set: {text}"
+        );
+        assert!(
+            text.contains("included debit is unproven"),
+            "must say debit unproven: {text}"
+        );
+        assert!(
+            !text.contains("Grok Build product %"),
+            "must not claim Build flat when not observed: {text}"
+        );
+        // Console live: never SuperGrok flat honesty.
+        let console = format_usage_summary_with_live_identity_gap_and_honesty(
+            Some(&b),
+            None,
+            SamplingIdentityKind::ConsoleKey,
+            Some(34_000),
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            true,
+            true,
+            true,
+            true,
+        );
+        assert!(
+            !console.contains("included debit is unproven"),
+            "console live must not sell SuperGrok flat honesty: {console}"
+        );
+    }
+
+    /// Named contract C6 on `/usage`: SuperGrok live + OAuth postpaid dominates.
+    #[test]
+    fn usage_summary_supergrok_live_surfaces_c6_team_usage_honesty() {
+        use crate::views::limits_honesty::NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS;
+
+        let b = CreditBalance {
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..bal(65.0)
+        };
+        let text = format_usage_summary_with_live_identity_gap_and_honesty(
+            Some(&b),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            false, // flat
+            false, // build
+            false, // extras
+            true,  // oauth
+        );
+        assert!(
+            text.contains(NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS),
+            "C6 honesty on usage when OAuth postpaid dominates: {text}"
+        );
+        assert!(
+            text.contains("without proving") && text.contains("included weekly"),
+            "must not sell team Usage $ as SuperGrok included debit: {text}"
         );
     }
 
@@ -1894,6 +2239,73 @@ mod tests {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "0%");
         assert_eq!(line.spans[0].style.fg, Some(theme.accent_success));
+    }
+
+    /// Named contract: unknown included meter must not paint a silent `0%`.
+    #[test]
+    fn unknown_included_usage_paints_loading_placeholder_not_zero() {
+        let theme = Theme::default();
+        let mut unknown = bal(0.0);
+        unknown.included_usage_known = false;
+        let line = credit_bar_line(&unknown, false, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "...%");
+        assert!(!text.contains("0%"), "unknown must not look like true zero");
+    }
+
+    /// Named contract: true zero (known reading of 0%) stays `0%`.
+    #[test]
+    fn true_zero_included_usage_paints_zero_percent() {
+        let theme = Theme::default();
+        let known_zero = bal(0.0);
+        assert!(known_zero.included_usage_known);
+        let text: String = credit_bar_line(&known_zero, false, &theme)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text, "0%");
+    }
+
+    /// Console live meter is prepaid dollars (or honest gap), never SuperGrok %.
+    #[test]
+    fn usage_warning_console_live_names_console_prepaid_not_supergrok_pct() {
+        let mut supergrok = bal(0.0);
+        supergrok.included_usage_known = false;
+        let warn = usage_warning_for_session_with_identity_principal_and_gap(
+            Some(&supergrok),
+            None,
+            None,
+            true,
+            false,
+            false,
+            SamplingIdentityKind::ConsoleKey,
+            None,
+            Some(2500),
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+        )
+        .expect("console live should show team prepaid");
+        assert!(
+            warn.0.to_ascii_lowercase().contains("console") && warn.0.contains("$25"),
+            "console live meter must name console prepaid, got {:?}",
+            warn.0
+        );
+        assert!(
+            !warn.0.contains("0%"),
+            "must not show SuperGrok 0% on console live"
+        );
+    }
+
+    #[test]
+    fn usage_summary_unknown_included_says_not_yet_available() {
+        let mut b = bal(0.0);
+        b.included_usage_known = false;
+        let out = format_usage_summary(&b, None);
+        assert!(
+            out.contains("not yet available"),
+            "unknown included must not print 0%, got {out}"
+        );
+        assert!(!out.contains("0%"), "got {out}");
     }
 
     #[test]

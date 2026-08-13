@@ -27,6 +27,9 @@ pub use util::toon::{
 
 pub mod attribution;
 
+/// Multi-process shared HTTP cooldowns for Imagine / video / responses tools.
+pub mod shared_http_rate_limit;
+
 pub mod bridge;
 pub mod computer;
 pub mod gitignore;

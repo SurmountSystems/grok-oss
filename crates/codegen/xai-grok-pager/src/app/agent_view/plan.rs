@@ -582,7 +582,7 @@ impl AgentView {
         self.clear_unsent_prompt_draft();
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
-        self.show_toast("Plan revision sent.");
+        self.show_toast("Revision sent — agent will rewrite the plan.");
         {
             use xai_grok_telemetry::events::PlanSubmit;
             use xai_grok_telemetry::session_ctx::log_event;
@@ -633,7 +633,7 @@ impl AgentView {
         self.clear_unsent_prompt_draft();
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
-        self.show_toast("Clarifying question sent.");
+        self.show_toast("Clarify sent — answers without rewriting the plan.");
         {
             use xai_grok_telemetry::events::PlanSubmit;
             use xai_grok_telemetry::session_ctx::log_event;
@@ -1545,6 +1545,203 @@ mod approve_plan_flush_tests {
                 .as_str()
                 .unwrap_or("")
                 .contains("drop Redis")
+        );
+    }
+
+    /// Phase P: freeform + saved line comments under **Revise** intent must
+    /// submit ACP `"cancelled"` (rewrite the plan), never `"questions"`, and
+    /// must carry `@plan.md:N` + quoted line text + freeform.
+    #[test]
+    fn revise_intent_freeform_plus_line_comments_submits_cancelled_not_questions() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "alpha\nbravo\ncharlie");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.source = PlanReviewSource::FileBacked;
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+            pav.comments.push(PlanComment {
+                id: 0,
+                line_range: 2..3,
+                text: "make this stronger".into(),
+            });
+            pav.next_comment_id = 1;
+        }
+        agent.prompt.set_text("drop Redis entirely");
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&enter);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(
+            parsed["outcome"], "cancelled",
+            "Revise intent must rewrite the plan (wire cancelled), not questions; got {parsed:?}"
+        );
+        assert_ne!(
+            parsed["outcome"], "questions",
+            "freeform + line comments under Revise must never send questions"
+        );
+        let feedback = parsed["feedback"].as_str().unwrap_or("");
+        assert!(
+            feedback.contains("@plan.md:2"),
+            "must include path+line anchor; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("> bravo"),
+            "must quote selected line text; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("make this stronger"),
+            "must keep line comment; got {feedback:?}"
+        );
+        assert!(
+            feedback.contains("drop Redis entirely"),
+            "must keep freeform revise notes; got {feedback:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "submit must clear parked approval"
+        );
+    }
+
+    /// Phase P: freeform that *looks* like a question under Revise still
+    /// rewrites (cancelled) — wording must not flip the wire outcome.
+    #[test]
+    fn revise_intent_question_shaped_freeform_still_submits_cancelled() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Plan\n\nUse Redis");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        // Operators often phrase revise notes as questions; intent wins.
+        agent
+            .prompt
+            .set_text("Why not use the in-memory cache instead?");
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&enter);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(
+            parsed["outcome"], "cancelled",
+            "Revise intent must not become questions just because freeform ends with ?; got {parsed:?}"
+        );
+        assert!(
+            parsed["feedback"]
+                .as_str()
+                .unwrap_or("")
+                .contains("in-memory cache"),
+            "feedback must carry the freeform; got {:?}",
+            parsed["feedback"]
+        );
+    }
+
+    /// Phase P: soft-park Revise CTA then freeform Enter → cancelled + notes.
+    #[test]
+    fn soft_park_revise_cta_then_enter_submits_cancelled() {
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Soft park revise");
+        assert!(agent.line_viewer.is_none(), "soft-park: no panel");
+
+        let hit = Rect::new(20, 24, 10, 1);
+        agent.hit_soft_park_ctas.revise.set(Some(hit));
+        agent
+            .handle_soft_park_cta_click(hit.x + 1, hit.y)
+            .expect("Revise click must dispatch");
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::Revise
+        );
+
+        agent.prompt.set_text("rewrite step 2");
+        // Soft-park CTA leaves Prompt focus; Enter submits under intent.
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&enter);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(
+            parsed["outcome"], "cancelled",
+            "soft-park Revise → Enter must rewrite; got {parsed:?}"
+        );
+        assert!(
+            parsed["feedback"]
+                .as_str()
+                .unwrap_or("")
+                .contains("rewrite step 2")
+        );
+    }
+
+    /// Phase P: soft-park Clarify CTA alone → questions (not revise/cancelled).
+    #[test]
+    fn soft_park_clarify_cta_then_enter_submits_questions() {
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Soft park clarify");
+        assert!(agent.line_viewer.is_none(), "soft-park: no panel");
+
+        let hit = Rect::new(10, 24, 10, 1);
+        agent.hit_soft_park_ctas.clarify.set(Some(hit));
+        agent
+            .handle_soft_park_cta_click(hit.x + 1, hit.y)
+            .expect("Clarify click must dispatch");
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::Questions
+        );
+
+        agent.prompt.set_text("Why Redis?");
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&enter);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(
+            parsed["outcome"], "questions",
+            "soft-park Clarify → Enter must answer without rewrite; got {parsed:?}"
+        );
+        assert!(
+            parsed["feedback"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Why Redis")
+        );
+    }
+
+    /// Phase P: default soft-park freeform (no CTA click) still revises —
+    /// constructor default intent is Revise, not Questions.
+    #[test]
+    fn soft_park_default_freeform_enter_submits_cancelled_not_questions() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Default freeform revise");
+        assert!(
+            matches!(
+                agent.plan_approval_view.as_ref().map(|p| p.prompt_intent),
+                Some(PlanPromptIntent::Revise)
+            ),
+            "parked approval must default to Revise intent"
+        );
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        agent.prompt.set_text("add error handling section");
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&enter);
+
+        let parsed = parse_outcome(rx);
+        assert_eq!(
+            parsed["outcome"], "cancelled",
+            "default freeform Enter must revise (cancelled), not questions; got {parsed:?}"
         );
     }
 

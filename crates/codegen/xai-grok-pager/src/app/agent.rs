@@ -44,7 +44,7 @@ impl QueueEntryKind {
 ///
 /// Stored session-locally so the operator can leave notes while a turn,
 /// plan approval, or background subagent is running without hijacking the
-/// agent queue. Does not replace on-disk L2 join notes for agents.
+/// agent queue. Does not replace short on-disk L2 reports for agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionNote {
     /// Monotonic ID unique within this session. Never reused.
