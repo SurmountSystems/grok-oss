@@ -608,7 +608,13 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("context_length_exceeded")
 }
 
-/// Credit / spending-limit wording shared by xAI Build, OpenRouter, and proxies.
+/// Credit / spending-limit wording shared by xAI Build, OpenRouter, SuperGrok
+/// Heavy subscription caps, and proxies.
+///
+/// SuperGrok **Heavy / usage limit** bodies (e.g. "SuperGrok Heavy usage limit")
+/// are treated as credit-exhausted so dual-auth can hop to a console key with
+/// sticky memo — not only plain 429 throttle. Keep tight: bare 403 and
+/// "usage guidelines" policy text must not match.
 pub fn is_credit_exhausted_message(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     m.contains("out of credits")
@@ -616,7 +622,10 @@ pub fn is_credit_exhausted_message(message: &str) -> bool {
         || m.contains("spending-limit")
         || m.contains("spending limit")
         || m.contains("usage balance exhausted")
-        || m.contains("usage limit reached")
+        // Subscription / SuperGrok Heavy caps ("…usage limit", not only "…reached").
+        || m.contains("usage limit")
+        || m.contains("heavy limit")
+        || m.contains("resource_exhausted")
         || m.contains("insufficient credits")
         || m.contains("insufficient_quota")
         || m.contains("payment required")
@@ -1220,6 +1229,77 @@ mod tests {
         assert!(
             !unauthorized.is_credit_exhausted(),
             "401 stays auth even if body mentions credits"
+        );
+    }
+
+    /// SuperGrok Heavy / subscription usage-limit bodies that should hop to a
+    /// console key (credit path + sticky memo), not sleep as plain throttle.
+    ///
+    /// Bare 403 and generic "usage guidelines" stay non-credit.
+    #[test]
+    fn credit_exhausted_detects_supergrok_heavy_and_usage_limit() {
+        // Named fixtures: subscription Heavy cap without the older
+        // "usage limit reached" / "out of credits" exact phrases.
+        let heavy_403 = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message:
+                "You have reached your SuperGrok Heavy usage limit. Upgrade or wait for reset."
+                    .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            heavy_403.is_credit_exhausted(),
+            "SuperGrok Heavy usage limit must hop as credit-exhausted"
+        );
+
+        let heavy_429 = SamplingError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "Heavy usage limit exceeded for this SuperGrok plan".into(),
+            model_metadata: None,
+            retry_after_secs: Some(60),
+            should_retry: None,
+        };
+        assert!(
+            heavy_429.is_credit_exhausted(),
+            "Heavy usage limit on 429 is sticky credit, not plain rate-limit only"
+        );
+        // Still rate-limited status-wise; credit path runs first in the sampler.
+        assert!(heavy_429.is_rate_limited());
+
+        let plan_limit = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "resource_exhausted: monthly usage limit for grok-heavy".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            plan_limit.is_credit_exhausted(),
+            "resource_exhausted + heavy monthly usage limit must hop"
+        );
+
+        // Must not over-broaden: bare 403 / policy text still no-hop.
+        let bare_403 = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Forbidden".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!bare_403.is_credit_exhausted());
+
+        let guidelines = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: "Content violates usage guidelines.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            !guidelines.is_credit_exhausted(),
+            "usage guidelines is not a credit/usage-limit cap"
         );
     }
 

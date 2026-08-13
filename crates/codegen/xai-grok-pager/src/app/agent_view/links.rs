@@ -2297,9 +2297,9 @@ mod link_click_tests {
     #[test]
     fn router_slash_blocked_while_btw_panel_open() {
         let (mut agent, reg) = make_search_agent();
-        agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
-            question: "q".into(),
-        });
+        agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::loading(
+            "q".into(),
+        ));
         route_slash(&mut agent, &reg);
         assert!(agent.scrollback_search.is_none());
     }
@@ -2577,7 +2577,7 @@ mod link_click_tests {
     /// (wrongly or historically) handed to `draw` at the same time. The
     /// session tip's bold `Tip: ` prefix used to underpaint the row and —
     /// because `Cell::set_style` merges modifiers — leak BOLD into the first
-    /// five cells of the ephemeral tip ("**Queue**d · Enter to send now").
+    /// five cells of the ephemeral tip ("**Queue**d · Enter to interject").
     #[test]
     fn ephemeral_tip_not_bolded_by_session_tip_underpaint() {
         use ratatui::style::Modifier;

@@ -3419,18 +3419,37 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
+        Effect::SendBtw {
+            agent_id,
+            session_id,
+            question,
+            btw_session_id,
+            prior_turns,
+            minimal_request_id,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
+                    let prior_json: Vec<serde_json::Value> = prior_turns
+                        .into_iter()
+                        .map(|(q, a)| {
+                            serde_json::json!({
+                                "question": q,
+                                "answer": a,
+                            })
+                        })
+                        .collect();
+                    let mut params = serde_json::json!({
+                        "sessionId": session_id.0.to_string(),
+                        "question": question,
+                        "priorTurns": prior_json,
+                    });
+                    if let Some(id) = btw_session_id {
+                        params["btwSessionId"] = serde_json::Value::String(id);
+                    }
                     let request = acp::ExtRequest::new(
                         "x.ai/btw",
-                        serde_json::value::to_raw_value(
-                                &serde_json::json!(
-                                    { "sessionId" : session_id.0.to_string(), "question" :
-                                    question, }
-                                ),
-                            )
+                        serde_json::value::to_raw_value(&params)
                             .expect("serialize btw params")
                             .into(),
                     );

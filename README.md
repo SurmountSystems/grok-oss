@@ -65,6 +65,7 @@ cd grok-oss
 cargo install --path crates/codegen/xai-grok-pager-bin --locked --force
 # installs: ~/.cargo/bin/grok-oss
 grok-oss --version
+# Dist build (thin LTO + .debug sidecar): just install-dist
 ```
 
 ### Nix

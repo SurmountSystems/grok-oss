@@ -1,7 +1,14 @@
-//! PTY, flag-file driven like `endline_park_is_markerless`: the "queued
-//! message appears 2x" regression. A message queued mid-turn holds through
-//! the turn's sendable wait, then drains as its own turn — asserting it
-//! renders exactly once as a queue row and exactly once as a "❯ " block.
+//! PTY: the core "queued message appears 2x" regression. A message queued
+//! mid-turn HOLDS through the turn's sendable wait, rendering exactly once
+//! as a queue row (id/kind+text reconciled — no optimistic-echo duplicate),
+//! suppressing the park marker, and advertising send-now on the status row;
+//! after the wait returns and the turn ends it drains as its own turn and
+//! renders exactly once as a "❯ " block.
+//!
+//! Flag-file driven like `endline_park_two_static_markers`: background a
+//! flag-gated command, hold the turn on a flag-gated foreground command
+//! (queueing happens in this window), then block on
+//! `get_command_or_subagent_output(timeout_ms: 600000)`.
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -104,10 +111,10 @@ async fn queued_message_renders_once_not_twice() {
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
     // The wait parks the turn with the row HELD: the status row explains the
-    // hold ("1 queued — Enter to send now"; the top row is a sendable server
-    // row), the park writes no marker, and the row renders exactly once.
+    // hold ("1 queued — Enter to interject"; the top row is a sendable server
+    // row), the park marker is suppressed, and the row renders exactly once.
     harness
-        .wait_for_text("1 queued \u{2014} Enter to send now", Duration::from_secs(60))
+        .wait_for_text("1 queued \u{2014} Enter to interject", Duration::from_secs(60))
         .unwrap_or_else(|_| {
             panic!(
                 "held-queue status hint never appeared; screen:\n{}\n--- non-system messages ---\n{}",
@@ -117,7 +124,7 @@ async fn queued_message_renders_once_not_twice() {
         });
     assert!(
         !harness.contains_text("Worked for"),
-        "a park writes no marker\nscreen:\n{}",
+        "held queued rows must suppress the park marker\nscreen:\n{}",
         harness.screen_contents()
     );
     assert_eq!(

@@ -1145,6 +1145,10 @@ pub fn is_auto_mode_allowlisted_access(access: &AccessKind) -> bool {
 }
 
 /// Tool names that are metadata / coordination only (safe allowlist by name).
+///
+/// Note: `enter_plan_mode` is **not** listed — mode entry needs user consent
+/// (see [`auto_mode_fast_path`]). Casual "plan" language must not flip mode
+/// without approval; `/plan` and settings remain user-initiated paths.
 pub fn is_auto_mode_allowlisted_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -1156,8 +1160,6 @@ pub fn is_auto_mode_allowlisted_tool_name(tool_name: &str) -> bool {
             | "WaitTasks"
             | "ask_user_question"
             | "AskUserQuestion"
-            | "enter_plan_mode"
-            | "EnterPlanMode"
             | "exit_plan_mode"
             | "ExitPlanMode"
             | "switch_mode"
@@ -1199,6 +1201,13 @@ pub fn auto_mode_fast_path(
     requires_user_interaction: bool,
 ) -> AutoFastPath {
     if requires_user_interaction {
+        return AutoFastPath::PromptUser;
+    }
+    // enter_plan_mode maps to AccessKind::Read (read-only capability) and would
+    // otherwise fast-path Allow via the access allowlist. Force a user prompt
+    // so incidental model calls do not flip plan mode without consent.
+    // Explicit `/plan` and settings bypass this tool entirely.
+    if matches!(tool_name, "enter_plan_mode" | "EnterPlanMode") {
         return AutoFastPath::PromptUser;
     }
     if is_auto_mode_allowlisted_access(access) || is_auto_mode_allowlisted_tool_name(tool_name) {
@@ -1672,6 +1681,34 @@ mod tests {
         assert!(!is_auto_mode_allowlisted_access(&AccessKind::Bash(
             "rm -rf /".into()
         )));
+    }
+
+    /// enter_plan_mode must not ride the name allowlist (false plan-mode entry).
+    #[test]
+    fn enter_plan_mode_not_auto_allowlisted_by_name() {
+        assert!(!is_auto_mode_allowlisted_tool_name("enter_plan_mode"));
+        assert!(!is_auto_mode_allowlisted_tool_name("EnterPlanMode"));
+        // Exit remains coordination-safe to auto-allow by name.
+        assert!(is_auto_mode_allowlisted_tool_name("exit_plan_mode"));
+        assert!(is_auto_mode_allowlisted_tool_name("ExitPlanMode"));
+    }
+
+    /// Even as AccessKind::Read, enter_plan_mode must PromptUser in auto mode.
+    #[test]
+    fn enter_plan_mode_fast_path_prompts_user() {
+        assert_eq!(
+            auto_mode_fast_path(&AccessKind::Read(None), "enter_plan_mode", false),
+            AutoFastPath::PromptUser
+        );
+        assert_eq!(
+            auto_mode_fast_path(&AccessKind::Read(None), "EnterPlanMode", false),
+            AutoFastPath::PromptUser
+        );
+        // Ordinary reads still allow.
+        assert_eq!(
+            auto_mode_fast_path(&AccessKind::Read(None), "read_file", false),
+            AutoFastPath::Allow
+        );
     }
 
     #[test]

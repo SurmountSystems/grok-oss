@@ -6,7 +6,9 @@ use std::time::Duration as StdDuration;
 use super::AuthManager;
 use super::lock::try_lock_auth_file_async;
 use crate::auth::manager::AUTH_LOCK_TIMEOUT;
-use crate::auth::model::{GrokAuth, UserInfo, lookup_auth};
+use crate::auth::model::{
+    GrokAuth, UserInfo, is_supergrok_session_mode, lookup_auth, upsert_supergrok_session,
+};
 use crate::auth::storage::{read_auth_json, write_auth_json};
 
 /// `/user` fetch budget, shared by the inline (login) and background paths.
@@ -201,7 +203,14 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
 
     apply_user_info_enrichment(&mut disk, user_info);
 
-    map.insert(manager.scope.clone(), disk.clone());
+    // Keep SuperGrok multi-slot in lockstep with base (same identity). A
+    // base-only write left stale multi-slot JWTs that `auto_use_included_limits`
+    // preferred as exhausted → console API instead of SuperGrok Heavy.
+    if is_supergrok_session_mode(disk.auth_mode) {
+        upsert_supergrok_session(&mut map, &manager.scope, disk.clone());
+    } else {
+        map.insert(manager.scope.clone(), disk.clone());
+    }
     let write_started = std::time::Instant::now();
     if let Err(e) = write_auth_json(&manager.path, &map) {
         xai_grok_telemetry::unified_log::error(

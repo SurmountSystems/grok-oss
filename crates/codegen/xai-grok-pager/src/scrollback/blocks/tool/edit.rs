@@ -2781,7 +2781,7 @@ mod tests {
 
     /// Pins GrokNight via the shared test-lock guard; hold it for the whole
     /// test so a concurrent theme flip can't skew the compared highlighter walks.
-    fn pin_groknight_syntect() -> std::sync::MutexGuard<'static, ()> {
+    fn pin_groknight_syntect() -> crate::theme::cache::ThemePinGuard {
         let guard = crate::theme::cache::pin_theme();
         assert!(
             !Theme::groknight().diff_uses_line_fg(),

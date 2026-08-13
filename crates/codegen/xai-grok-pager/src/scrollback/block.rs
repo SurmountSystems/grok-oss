@@ -986,16 +986,24 @@ impl RenderBlock {
         let theme = Theme::current();
 
         match self {
-            RenderBlock::UserPrompt(_) => Some(theme.text_primary),
-            RenderBlock::AgentMessage(_) => None, // No accent for agent messages
+            // Finish-flash / lookup: same Human token as live UserPrompt rail.
+            RenderBlock::UserPrompt(_) => Some(theme.accent_user),
+            // Finished agent messages paint no left rail (active-only magenta).
+            // No finish-flash on AgentMessage; keep None so lookups match paint.
+            RenderBlock::AgentMessage(_) => None,
             RenderBlock::Workflow(_) => None,
             RenderBlock::ToolCall(block) => {
-                // Execute: Green for success, red for failure
+                // Execute: user `!` bash keeps success green; agent Run uses
+                // neutral tool chrome when finished (not Human green rail).
                 // Read/Edit/ListDir/Search: No accent
                 match block {
                     ToolCallBlock::Execute(b) => {
                         if b.is_success() {
-                            Some(theme.accent_success)
+                            if b.bash_mode {
+                                Some(theme.accent_success)
+                            } else {
+                                Some(theme.accent_tool)
+                            }
                         } else {
                             Some(theme.accent_error)
                         }

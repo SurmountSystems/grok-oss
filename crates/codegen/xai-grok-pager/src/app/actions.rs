@@ -148,9 +148,11 @@ pub enum Action {
     /// identically to `SendPrompt` otherwise — same registry resolution,
     /// same effect outputs — but skips the `prompt.set_text("")` calls.
     SendSlashCommandPreservingDraft(String),
-    /// Send a mid-turn interjection without canceling the running turn.
-    /// Reserved for text that answers the running turn (plan-review comments,
-    /// permission follow-ups); user send-now takes [`Self::SendPromptNow`].
+    /// Soft mid-turn interjection: inject into the running turn without
+    /// canceling it. Primary path for the InterjectPrompt chord (Ctrl+Enter),
+    /// queue-row `[Interject]`, plan-review comments, and permission follow-ups.
+    /// Cancel is Esc/stop only — do not route mid-turn steer through
+    /// [`Self::SendPromptNow`].
     Interject {
         text: String,
         /// Pasted images riding along with the interjection. Empty for
@@ -159,8 +161,8 @@ pub enum Action {
     },
     /// Cancel-and-send: cancel the running turn (background tasks and queued
     /// rows survive shell-side) and run this text as the next prompt turn.
-    /// The send-now chord, empty-composer Enter on a queued local row, and
-    /// the deferred-paste re-issue produce this.
+    /// **Not** the primary mid-turn steer path — keep only for true send-now
+    /// call sites if any remain. User product is soft [`Self::Interject`].
     SendPromptNow {
         text: String,
         /// Pasted images riding along with the prompt.
@@ -233,13 +235,14 @@ pub enum Action {
     QueueReleaseEditShared {
         id: String,
     },
-    /// Interject a server-authoritative (shared) queued prompt into the running
-    /// turn: the agent atomically removes it from the queue and
-    /// merges its text into the in-flight turn. Routed as `x.ai/queue/interject`;
-    /// the `x.ai/session/interjection` + `x.ai/queue/changed` rebroadcasts are
-    /// the source of truth (no optimistic client-side block). Mirrors the local
-    /// "Send now" / `Ctrl+Enter` path, which uses [`Interject`](Self::Interject)
-    /// directly because the local queue is client-owned.
+    /// Soft-interject a server-authoritative (shared) queued prompt into the
+    /// running turn: the agent atomically removes it from the queue and
+    /// merges its text into the in-flight turn (never cancels). Routed as
+    /// `x.ai/queue/interject`; the `x.ai/session/interjection` +
+    /// `x.ai/queue/changed` rebroadcasts are the source of truth (no optimistic
+    /// client-side block). Mirrors the local `[Interject]` / `Ctrl+Enter` path,
+    /// which uses [`Interject`](Self::Interject) directly because the local
+    /// queue is client-owned.
     QueueInterjectShared {
         id: String,
         expected_version: u64,
@@ -311,6 +314,9 @@ pub enum Action {
     ToggleScrollDebugHud,
     /// Toggle the release-safe FPS HUD (`/debug fps`).
     ToggleFpsHud,
+    /// Capture the current rendered TUI frame as a PNG under
+    /// `$GROK_HOME/screenshots/` (toast shows the path). Slash: `/screenshot`.
+    CaptureTuiScreenshot,
     /// Toggle the scroll flight recorder at runtime (`/debug log`;
     /// `GROK_SCROLL_LOG=1` enables it from startup).
     ToggleScrollLog,
@@ -318,6 +324,11 @@ pub enum Action {
     ShowDebugStatus,
     /// Copy selected block's content to clipboard.
     CopyBlockContent,
+    /// Copy the scrollback entry at `idx` (mouse always-on bubble ⧉). Does not
+    /// change selection. Keyboard `y` stays on [`Self::CopyBlockContent`].
+    CopyEntryContent {
+        idx: usize,
+    },
     /// Copy the Nth most recent assistant message (1 = latest).
     /// `None` => clipboard (with file fallback on failure); `Some(p)` => write UTF-8 file.
     CopyAssistantMessage {
@@ -513,6 +524,18 @@ pub enum Action {
     /// live-applied via `AppView::set_appearance` and persisted to
     /// pager.toml via `Effect::PersistSetting`.
     SetRespectManualFolds(bool),
+    /// Set `[scrollback.display].bubble_copy_buttons`. PAGER-owned:
+    /// live-applied via `AppView::set_appearance` and persisted to pager.toml.
+    SetBubbleCopyButtons(bool),
+    /// Set `[ui].cancel_subagents_on_turn_cancel` (`ask` | `always_stop` |
+    /// `always_continue`). Persists via `Effect::PersistSetting`.
+    SetCancelSubagentsOnTurnCancel(String),
+    /// Set auto return-from-away recap (`[ui.notifications] session_recap`).
+    SetNotificationsSessionRecap(bool),
+    /// Set auto recap debounce seconds.
+    SetNotificationsSessionRecapThresholdSecs(i64),
+    /// Set master `[features] session_recap` (restart-required for ACP gate).
+    SetFeaturesSessionRecap(bool),
     /// Set the canonical for `[ui].default_selected_permission`. Persists
     /// via `Effect::PersistSetting`. Payload is the registry's canonical
     /// string (`default` | `allow_once` | `allow_always` | `reject`).
@@ -537,12 +560,18 @@ pub enum Action {
     ToggleCompactMode,
     /// Set compact mode (reduce user message padding).
     SetCompactMode(bool),
+    /// Hide the top agent status bar (`[ui].hide_header`).
+    SetHideHeader(bool),
     /// Set timestamp display on messages.
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).
     SetTimeline(bool),
     /// Set `[ui].page_flip_on_send` (default ON). Persists via `Effect::PersistSetting`.
     SetPageFlipOnSend(bool),
+    /// Set `[ui].scrub_ascii_punct` (default ON). Persists via `Effect::PersistSetting`.
+    SetScrubAsciiPunct(bool),
+    /// Set `[ui].plan_approval_park` (`soft` | `modal`). Persists via `Effect::PersistSetting`.
+    SetPlanApprovalPark(String),
     /// Set whether the drain call site merges the run of leading queued
     /// `Prompt` entries into one turn instead of sending them one by one.
     /// SHARED-owned: updates the process-wide cache mirror (read by the
@@ -596,7 +625,7 @@ pub enum Action {
     /// Commit auto-compact threshold: percent of window **or** absolute tokens.
     /// Persists `[session].auto_compact_threshold_percent` or
     /// `[session].auto_compact_threshold_tokens` (clearing the sibling field).
-    /// Restart-required — sessions resolve the threshold at build time.
+    /// Live-applied to open sessions via ACP after disk persist.
     SetAutoCompactThreshold(crate::settings::AutoCompactThresholdChoice),
     /// Commit `[ui.display_refresh].auto_cadence_enabled`. Restart-required —
     /// cadence is pinned once at startup.
@@ -691,6 +720,9 @@ pub enum Action {
     ShowContextInfo,
     /// `/usage` — session token/cost, plus consumer credits when visible.
     ShowUsage,
+    /// `/limits` — SuperGrok included / dollar extras / console path detail
+    /// from cached billing (not session token ledger).
+    ShowLimits,
     /// `/usage manage` — open consumer billing (no-op if surface hidden).
     ManageBilling,
     /// Commit a read-only list of the queued prompts as a system block
@@ -700,6 +732,8 @@ pub enum Action {
     /// tasks as a system block (`/tasks`). The surface minimal mode uses in
     /// place of the `TasksPane`.
     ShowTasks,
+    /// Archive completed/cancelled todos (shell `x.ai/todo/clear_completed`).
+    ClearCompletedTodos,
     /// Store an operator mid-session note (`/note <text>`). Does **not**
     /// enqueue a user turn or touch the pending-prompt queue.
     AddSessionNote {
@@ -732,7 +766,11 @@ pub enum Action {
     /// Save the currently displayed remember note from the review modal.
     SaveRememberNoteFromModal,
     /// Send a /btw side question (bypasses queue, works while agent is busy).
+    /// First-shot or slash-command path (no prior turns).
     SendBtw(String),
+    /// Follow-up in the open btw panel (reuses `btw_session_id` + prior turns
+    /// from overlay state). Empty string uses the in-panel composer draft.
+    SendBtwFollowUp(String),
     /// Request a session recap ("where was I" summary). `auto` is `true` for
     /// the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).
@@ -1559,6 +1597,8 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Operator clear of completed/cancelled todos via shell ext method.
+    ClearCompletedTodos { session_id: acp::SessionId },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -1956,6 +1996,10 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         question: String,
+        /// Reuse on follow-up turns; `None` mints a new shell-side session id.
+        btw_session_id: Option<String>,
+        /// Completed prior Q/A turns (oldest first) for multi-turn context.
+        prior_turns: Vec<(String, String)>,
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
     },
@@ -2384,6 +2428,11 @@ pub enum TaskResult {
         agent_id: AgentId,
         result: Result<(), String>,
     },
+    /// Operator clear completed todos finished.
+    ClearCompletedTodosComplete {
+        cleared: usize,
+        error: Option<String>,
+    },
     /// Background task kill result. `outcome` is `None` when the agent
     /// returned an error envelope or an unparseable payload (treated as
     /// "clear pending state, keep the row").
@@ -2681,6 +2730,8 @@ pub enum TaskResult {
     BtwResponse {
         agent_id: AgentId,
         result: Result<String, String>,
+        /// Shell-issued (or reused) btw thread id for follow-ups + history.
+        btw_session_id: Option<String>,
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
     },
@@ -2798,6 +2849,9 @@ pub enum TaskResult {
         autotopup: crate::views::credit_bar::AutoTopupFetch,
         /// OpenRouter account credits when a key is available (`None` = keep cache).
         openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+        /// Console team prepaid remaining cents when Management fetch succeeded
+        /// (`None` = keep prior app/agent cache).
+        console_team_prepaid_cents: Option<i64>,
     },
     /// App-level billing data (welcome screen).
     AppBillingFetched {
@@ -2805,6 +2859,9 @@ pub enum TaskResult {
         autotopup: crate::views::credit_bar::AutoTopupFetch,
         /// OpenRouter account credits when a key is available (`None` = keep cache).
         openrouter_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
+        /// Console team prepaid remaining cents when Management fetch succeeded
+        /// (`None` = keep prior cache).
+        console_team_prepaid_cents: Option<i64>,
     },
     GateRefreshed {
         settings: Option<xai_grok_shell::util::config::RemoteSettings>,

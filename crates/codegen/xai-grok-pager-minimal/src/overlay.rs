@@ -976,7 +976,12 @@ mod tests {
         let area = Rect::new(0, 0, content_w as u16, multi_h);
         let mut buf = Buffer::empty(area);
         let cursor = render_question(&mut buf, area, &mut multi, &theme, screen_h);
-        assert!(cursor.is_some(), "InputMode returns the editor cursor");
+        // Prompt paints a software box caret and hides the terminal hardware
+        // cursor so the two do not stack — InputMode still draws the editor.
+        assert!(
+            cursor.is_none(),
+            "software caret: hardware cursor_pos stays None, got {cursor:?}"
+        );
 
         // Editor occupies the last 3 rows; its first row carries the prefix.
         let editor_top = multi_h - 3;

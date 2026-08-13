@@ -281,6 +281,7 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
+            (&grok_build::DisableAsciiScrubTool).into(),
         ],
         behavior_preset: None,
     }

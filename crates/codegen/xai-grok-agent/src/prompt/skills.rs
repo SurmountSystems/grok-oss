@@ -733,6 +733,45 @@ mod tests {
         fs::write(dir.join("SKILL.md"), content).unwrap();
     }
 
+    /// Pin `HOME` for skill-discovery tests that must not see the real
+    /// `~/.agents` / vendor homes. Pair with `#[serial_test::serial(home_env)]`.
+    /// Restores the previous `HOME` on drop (including panic paths).
+    struct TestHome {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl TestHome {
+        fn pin(home: &Path) -> Self {
+            let prev = std::env::var_os("HOME");
+            // SAFETY: test-only; callers serialize on `home_env`.
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+            Self { prev }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            // SAFETY: test-only; callers serialize on `home_env`.
+            unsafe {
+                if let Some(h) = self.prev.take() {
+                    std::env::set_var("HOME", h);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+            }
+        }
+    }
+
+    /// Post-steps shared with `list_skills_with_plugins` when ignore is empty
+    /// and there are no plugins: filter → stable sort-by-scope → merge/dedupe.
+    fn pipeline_like_list_skills_with_plugins(raw: Vec<SkillInfo>) -> Vec<SkillInfo> {
+        let mut skills = filter_skills(raw, &[]);
+        skills.sort_by_key(|s| s.scope);
+        merge_skills_with_plugins(skills, vec![])
+    }
+
     // ── Server-synced skills (injected server_skill_dirs) ────────────────
 
     #[tokio::test]
@@ -2130,31 +2169,29 @@ mod tests {
         );
     }
 
+    /// Production-shaped user layout: `HOME/.agents` and `HOME/.grok` (grok_home
+    /// is `HOME/.grok`). Full pipeline matches `list_skills_with_plugins`
+    /// (collect → ignore filter → sort-by-scope → dedupe). Agents must win so
+    /// host operator packs (L1/L2/L3 hierarchy pins, etc.) override stale
+    /// `~/.grok/skills` copies of the same bare name.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn agents_home_skills_shadow_grok_user_skills() {
-        // When both ~/.agents/skills and ~/.grok/skills define the same name,
-        // agents wins (first-seen after Priority-3 order: agents then grok_home).
         let tmp = tempfile::tempdir().unwrap();
-        let grok_home = tmp.path().join("grok_home");
         let real_home = tmp.path().join("real_home");
+        let grok_home = real_home.join(".grok");
         let repo_root = tmp.path().join("repo");
         fs::create_dir_all(&repo_root).unwrap();
         init_git_repo(&repo_root);
 
+        // Same bare name; winner is identified by path (and pre-dedup count).
         write_skill_md(&grok_home.join("skills").join("commit"), "commit");
-        // Agents copy: same frontmatter name, different path — must win.
         write_skill_md(
             &real_home.join(".agents").join("skills").join("commit"),
             "commit",
         );
 
-        // Point HOME at real_home so collect_skill_config_dirs finds .agents.
-        // grok_home is the separate Grok data root (skills under skills/).
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: test-only; single-threaded for this assertion path.
-        unsafe {
-            std::env::set_var("HOME", &real_home);
-        }
+        let _home = TestHome::pin(&real_home);
 
         let raw = list_skills_with_options(
             Some(repo_root.to_str().unwrap()),
@@ -2164,17 +2201,16 @@ mod tests {
         )
         .await;
 
-        if let Some(h) = prev_home {
-            unsafe {
-                std::env::set_var("HOME", h);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("HOME");
-            }
-        }
+        // Drop the guard before asserts so HOME is restored even if we keep
+        // holding `raw` (Drop still runs on panic during await/asserts).
+        drop(_home);
 
-        // Both paths are discovered (different files); first-seen must be agents.
+        // Both files discovered before dedup (different canonical paths).
+        assert_eq!(
+            raw.iter().filter(|s| s.name == "commit").count(),
+            2,
+            "expected agents + grok commit before dedup, got {raw:?}"
+        );
         let first = raw
             .iter()
             .find(|s| s.name == "commit")
@@ -2185,32 +2221,74 @@ mod tests {
             first.path
         );
 
-        let deduped = dedupe_skills(raw);
-        let commits: Vec<_> = deduped.iter().filter(|s| s.name == "commit").collect();
+        let merged = pipeline_like_list_skills_with_plugins(raw);
+        let commits: Vec<_> = merged.iter().filter(|s| s.name == "commit").collect();
         assert_eq!(
             commits.len(),
             1,
-            "expected one commit after dedup, got {commits:?}"
+            "expected one commit after full pipeline, got {commits:?}"
         );
         assert!(
             commits[0].path.contains(".agents"),
-            "agents must override grok user skill, got path {}",
+            "agents must override grok user skill after sort+dedupe, got path {}",
             commits[0].path
         );
+        assert_eq!(commits[0].scope, SkillScope::User);
     }
 
+    /// Same-tier project override: cwd `.agents/skills` beats cwd `.grok/skills`.
     #[tokio::test]
-    async fn user_skills_shadow_bundled_skills() {
+    async fn local_agents_skills_shadow_local_grok_skills() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
         let repo_root = tmp.path().join("repo");
         fs::create_dir_all(&repo_root).unwrap();
         init_git_repo(&repo_root);
 
-        // User skill at <home>/skills/commit/SKILL.md
+        write_skill_md(
+            &repo_root.join(".grok").join("skills").join("deploy"),
+            "deploy",
+        );
+        write_skill_md(
+            &repo_root.join(".agents").join("skills").join("deploy"),
+            "deploy",
+        );
+
+        let raw = list_skills_with_options(
+            Some(repo_root.to_str().unwrap()),
+            None,
+            // Empty global home so user/bundled dirs do not interfere.
+            &tmp.path().join("empty-grok-home"),
+            CompatConfig::default(),
+        )
+        .await;
+
+        let merged = pipeline_like_list_skills_with_plugins(raw);
+        let deploys: Vec<_> = merged.iter().filter(|s| s.name == "deploy").collect();
+        assert_eq!(deploys.len(), 1, "expected one deploy, got {deploys:?}");
+        assert!(
+            deploys[0].path.contains(".agents"),
+            "local .agents must override local .grok, got {}",
+            deploys[0].path
+        );
+        assert_eq!(deploys[0].scope, SkillScope::Local);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(home_env)]
+    async fn user_skills_shadow_bundled_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Isolated HOME so real ~/.agents cannot add a third "commit".
+        let real_home = tmp.path().join("real_home");
+        fs::create_dir_all(&real_home).unwrap();
+        let home = tmp.path().join("grok_home");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        init_git_repo(&repo_root);
+
+        // User skill at <grok_home>/skills/commit/SKILL.md
         write_skill_md(&home.join("skills").join("commit"), "commit");
 
-        // Bundled skill at <home>/bundled/skills/commit/SKILL.md (different body)
+        // Bundled skill at <grok_home>/bundled/skills/commit/SKILL.md (different body)
         let bundled_skill_dir = home.join("bundled").join("skills").join("commit");
         fs::create_dir_all(&bundled_skill_dir).unwrap();
         fs::write(
@@ -2219,6 +2297,7 @@ mod tests {
         )
         .unwrap();
 
+        let _home = TestHome::pin(&real_home);
         let raw = list_skills_with_options(
             Some(repo_root.to_str().unwrap()),
             None,
@@ -2226,6 +2305,7 @@ mod tests {
             CompatConfig::default(),
         )
         .await;
+        drop(_home);
 
         // Both are discovered at the list_skills_with_options level (different canonical paths)
         assert_eq!(
@@ -2241,14 +2321,15 @@ mod tests {
             first_commit.path
         );
 
-        // After name-based dedup (as list_skills_with_plugins does), only user version survives
-        let deduped = dedupe_skills(raw);
-        let commit_skills: Vec<&SkillInfo> =
-            deduped.iter().filter(|s| s.name == "commit").collect();
+        // Full production post-pipeline (not collection order alone): filter →
+        // sort-by-scope → merge so a future collection reorder still fails red
+        // if User no longer wins after sort+dedupe.
+        let merged = pipeline_like_list_skills_with_plugins(raw);
+        let commit_skills: Vec<&SkillInfo> = merged.iter().filter(|s| s.name == "commit").collect();
         assert_eq!(
             commit_skills.len(),
             1,
-            "Expected exactly one 'commit' after dedup, got {}",
+            "Expected exactly one 'commit' after full pipeline, got {}",
             commit_skills.len()
         );
         assert!(
@@ -2256,6 +2337,7 @@ mod tests {
             "User skill should win over bundled: {}",
             commit_skills[0].path
         );
+        assert_eq!(commit_skills[0].scope, SkillScope::User);
     }
 
     // ── Command file discovery ────────────────────────────────────────

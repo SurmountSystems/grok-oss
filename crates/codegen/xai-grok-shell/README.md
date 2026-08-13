@@ -1578,18 +1578,26 @@ Skills are reusable prompt packages that extend Grok with specialized workflows,
 
 ### Skill Locations
 
-Grok discovers skills from these directories (in priority order):
+Grok discovers skills from these directories (higher bare-name priority first).
+At each project or home tier, config dir names are **`.agents` → `.grok` →
+vendor (`.claude` / `.cursor` when compat is on)**. Same-named skills: higher
+scope wins; within a scope, first-seen wins (so `~/.agents/skills` overrides
+`~/.grok/skills`).
 
-| Location                    | Scope | Priority |
-| --------------------------- | ----- | -------- |
-| `./.grok/skills/`           | Local | Highest  |
-| `<repo_root>/.grok/skills/` | Repo  | Medium   |
-| `~/.grok/skills/`           | User  | Lowest   |
-| `~/.claude/skills/`         | User  | Lowest   |
+| Location | Scope | Priority |
+| -------- | ----- | -------- |
+| `./.agents/skills/`, `./.grok/skills/` (+ vendor if on) | Local | Highest |
+| Intermediate dirs cwd → git root (same name order) | Repo | High |
+| `<repo_root>/.agents/…`, `<repo_root>/.grok/…` | Repo | High |
+| `~/.agents/skills/`, `~/.grok/skills/` (+ vendor homes) | User | Medium |
+| `[skills].paths` | Repo or User | Medium |
+| Server-injected dirs | Server | Lower |
+| `~/.grok/bundled/skills/` | Bundled | Lower |
+| Plugin skills | Plugin | Lowest bare name |
 
-Skills with the same name are deduplicated — higher priority locations override lower ones.
-
-Repo-scoped skills (Local and Repo) respect `.gitignore` and are filtered out if ignored. User-scoped skills (`~/.grok/skills/`) are outside the repo and never filtered.
+Skill and command discovery does **not** consult `.gitignore`. Known skill
+roots always load when present on disk. Hide a skill with `[skills] ignore`,
+not repo ignore rules. Full table: user-guide `08-skills.md`.
 
 ### Configuration
 
@@ -1878,22 +1886,24 @@ not a source for models OpenRouter does not host (e.g. Composer-class models).
 
 1. `OPENROUTER_API_KEY` (portable; shared with Zed and other tools)
 2. `OPENROUTER_API_KEYS` (optional extra keys for multi-account failover)
-3. Grok OSS secret store (OS keyring service `grok-build`, or `~/.grok/provider_credentials.json`)
+3. Grok OSS secret store (OS keyring service `grok-build`; file mirror under `~/.grok/provider_credentials.json` only after a successful keyring write)
 4. **Read-only** shared harness probes — including keys already saved in **Zed**:
    - Dev channel: `~/.config/zed/development_credentials` (or `%APPDATA%\Zed\…`)
-   - OS store: Zed’s Secret Service / Keychain / Credential Manager layout  
+   - OS store: Zed’s Secret Service / Keychain / Credential Manager layout
      (Linux label `zed-github-account` + `url` attribute; Windows target `zed:url=…`)
 
-Grok OSS **never writes** into Zed’s stores. Override Zed config discovery with `GROK_ZED_CONFIG_DIR`. Set `GROK_CREDENTIALS_FORCE_FILE=1` to skip the OS keyring (CI / headless).
+Grok OSS **never writes** into Zed’s stores. Override Zed config discovery with `GROK_ZED_CONFIG_DIR`. Interactive login uses a secure keyring path (time-boxed). On Linux, if Secret Service times out or errors, login **automatically** tries kernel keyutils (no D-Bus unlock). Only if all secure backends fail does login error — no silent plaintext file dump. `GROK_CREDENTIALS_FORCE_FILE=1` skips the keyring for **tests / headless CI only** — not a recovery path for real secrets.
 
 ```bash
 # Preferred: environment variable (works for Grok OSS and Zed)
 export OPENROUTER_API_KEY="sk-or-..."
 
-# Or store a Grok OSS-local key
+# Or store a Grok OSS-local key (flag only — no-echo prompt; never pass the secret as argv)
 grok-oss login --openrouter
-# non-interactive:
-grok-oss login --openrouter --api-key "sk-or-..."
+# same prompt path with explicit flag:
+grok-oss login --openrouter --api-key
+# argv secrets are refused (shell history / process lists). Advanced automation:
+#   grok-oss login --openrouter --api-key -   # one line on non-TTY stdin
 
 # Clear Grok OSS stored key only (does not unset OPENROUTER_API_KEY or touch Zed)
 grok-oss logout --openrouter
@@ -1903,9 +1913,9 @@ grok-oss logout --openrouter
 spending-limit error (402 / “out of credits”), the sampler automatically tries
 the next configured key on the same host. Provide multiple keys as:
 
-- a comma- or newline-separated list in `OPENROUTER_API_KEY`  
+- a comma- or newline-separated list in `OPENROUTER_API_KEY`
   (`export OPENROUTER_API_KEY="sk-or-a,sk-or-b"`)
-- and/or `OPENROUTER_API_KEYS` for additional accounts  
+- and/or `OPENROUTER_API_KEYS` for additional accounts
   (`export OPENROUTER_API_KEYS="sk-or-b,sk-or-c"`)
 - and/or a key in the Grok secret store **plus** an env key (env is primary;
   store is used as failover when distinct)
@@ -2456,7 +2466,7 @@ disallowedTools:
 
 ### `web_fetch`
 
-Fetch a specific URL and return its content as markdown. **Disabled by default** — enable with `GROK_WEB_FETCH=1`. 
+Fetch a specific URL and return its content as markdown. **Disabled by default** — enable with `GROK_WEB_FETCH=1`.
 
 When no custom `allowed_domains` is set, the tool permits a default allowlist of useful documentation sites (SpaceXAI, language docs, frameworks, cloud providers, databases, etc.). Domains not on the allowlist prompt the user for approval; `--always-approve` auto-approves all. Domain matching is case-insensitive, strips `www.` prefixes, and supports path-scoped entries (e.g. `x.ai/company`).
 

@@ -2002,6 +2002,7 @@ mod tests {
             priority: Default::default(),
             status,
             meta: None,
+            size: None,
         }
     }
 

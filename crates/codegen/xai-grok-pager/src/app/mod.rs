@@ -1491,10 +1491,49 @@ fn restore_terminal(
     xai_tty_utils::restore_native_stderr();
     Ok(())
 }
+/// What to write for the terminal/tab window title (OSC 0 / crossterm SetTitle).
+///
+/// Distinct from in-app chrome (`[ui] hide_header`). Product always manages
+/// the window title on this path: never push `SetTitle("")` (empty payload
+/// blanks Alacritty + GNOME Alt-~ / overview). Dynamic agent-state titles are
+/// gated only by `[ui.notifications.title].enabled` (see TitleManager).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminalTitleAction {
+    /// SetTitle with a sanitized non-empty product-branded string.
+    Set(String),
+}
+
+/// Pure decision for window-title writes (hermetic tests; no TTY).
+///
+/// Always `Set` a non-empty branded string. There is no skip/hide gate on
+/// this path anymore; opt out of *dynamic* titles via `title.enabled`.
+fn terminal_title_action(title: &str) -> TerminalTitleAction {
+    TerminalTitleAction::Set(terminal_title_string(title))
+}
+
+/// OSC SetTitle payload. Named contract: never empty.
+///
+/// Empty strings blank DE switchers (Alacritty + GNOME overview/Alt-~).
+/// Always brand-fallback via [`terminal_title_string`].
+fn terminal_title_osc_payload(title: &str) -> String {
+    match terminal_title_action(title) {
+        TerminalTitleAction::Set(s) if s.is_empty() => {
+            // Belt-and-suspenders: `terminal_title_string` is non-empty, but
+            // never allow a blank OSC through if that invariant slips.
+            crate::client_identity::PRODUCT_CLI_NAME.into()
+        }
+        TerminalTitleAction::Set(s) => s,
+    }
+}
+
 pub(crate) fn set_terminal_title(title: &str) {
-    let full = terminal_title_string(title);
+    let payload = terminal_title_osc_payload(title);
+    debug_assert!(
+        !payload.is_empty(),
+        "refusing empty SetTitle (blank DE switcher)"
+    );
     xai_grok_shell::util::with_locked_stderr(|stderr| {
-        let _ = execute!(stderr, SetTitle(full));
+        let _ = execute!(stderr, SetTitle(payload));
     });
 }
 /// Sanitized/truncated window title. Strips control characters: crossterm's
@@ -1505,10 +1544,10 @@ pub(crate) fn set_terminal_title(title: &str) {
 fn terminal_title_string(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
-        "grok".into()
+        crate::client_identity::PRODUCT_CLI_NAME.into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 6).collect();
-        format!("{} - grok", truncated)
+        let truncated: String = sanitized.chars().take(80 - 9).collect();
+        format!("{} - {}", truncated, crate::client_identity::PRODUCT_CLI_NAME)
     }
 }
 fn set_panic_hook(mode: ScreenMode) {
@@ -1551,11 +1590,90 @@ mod tests {
     fn terminal_title_strips_control_characters() {
         assert_eq!(
             terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
-            "evil]52;c;payloadtitle - grok"
+            "evil]52;c;payloadtitle - grok-oss"
         );
-        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok");
-        assert_eq!(terminal_title_string(""), "grok");
-        assert_eq!(terminal_title_string("My chat"), "My chat - grok");
+        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok-oss");
+        assert_eq!(terminal_title_string(""), "grok-oss");
+        assert_eq!(terminal_title_string("My chat"), "My chat - grok-oss");
+    }
+
+    #[test]
+    fn window_title_always_manages_non_empty_branded_osc() {
+        // Named contract: product always manages the window/tab title (OSC 0)
+        // on this path — no hide_title_bar skip gate. Payloads are always
+        // non-empty and product-branded (`… - grok-oss` or bare brand).
+        // Never raw process argv. Distinct from in-app hide_header.
+        assert_eq!(
+            terminal_title_action("session name"),
+            TerminalTitleAction::Set("session name - grok-oss".into())
+        );
+        assert_eq!(
+            terminal_title_action(""),
+            TerminalTitleAction::Set("grok-oss".into())
+        );
+        let TerminalTitleAction::Set(s) = terminal_title_action("my chat");
+        assert!(!s.contains("--resume"), "got {s}");
+        assert!(!s.contains("~/"), "got {s}");
+    }
+
+    #[test]
+    fn window_title_osc_payload_never_empty_string() {
+        // Named contract (blank switcher failure mode): every managed OSC 0
+        // write carries a non-empty payload. Empty SetTitle blanks Alacritty
+        // + GNOME overview/Alt-~.
+        let seeds = ["", "   ", "my session", "agents busy", "\x07\x1b", "a\0b"];
+        for seed in seeds {
+            let payload = terminal_title_osc_payload(seed);
+            assert!(
+                !payload.is_empty(),
+                "empty OSC payload blanks DE switcher; seed={seed:?}"
+            );
+            assert!(
+                payload == "grok-oss" || payload.ends_with(" - grok-oss"),
+                "seed={seed:?} got {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn titles_on_session_name_osc_is_non_empty_branded() {
+        // Named contract: a session name becomes a non-empty OSC payload the
+        // host DE can show (session - grok-oss). Empty seed → brand only.
+        let payload = terminal_title_osc_payload("dash session");
+        assert!(!payload.is_empty());
+        assert_eq!(payload, "dash session - grok-oss");
+        let idle = terminal_title_osc_payload("");
+        assert_eq!(idle, "grok-oss");
+    }
+
+    #[test]
+    fn startup_title_never_contains_resume_argv() {
+        // Named contract: first product write is session or brand only —
+        // never leftover `grok-oss --resume …` argv noise.
+        for seed in ["", "my chat", "rename me"] {
+            match terminal_title_action(seed) {
+                TerminalTitleAction::Set(s) => {
+                    assert!(!s.contains("--resume"), "seed={seed:?} got {s}");
+                    assert!(!s.contains("~/"), "seed={seed:?} got {s}");
+                    assert!(
+                        s == "grok-oss" || s.ends_with(" - grok-oss"),
+                        "seed={seed:?} got {s}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_title_uses_product_cli_brand() {
+        // Surmount Grok OSS: tab/window titles must not say bare "grok".
+        assert_eq!(crate::client_identity::PRODUCT_CLI_NAME, "grok-oss");
+        let t = terminal_title_string("session");
+        assert!(t.ends_with(" - grok-oss"), "got {t}");
+        assert!(
+            !t.ends_with(" - grok"),
+            "must not use bare upstream brand: {t}"
+        );
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {

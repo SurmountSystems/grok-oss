@@ -1891,14 +1891,30 @@ async fn async_main() -> Result<()> {
                 device_auth,
                 openrouter,
                 api_key,
+                list_api_keys,
                 devbox,
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                if openrouter {
-                    let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                    xai_grok_shell::auth::run_openrouter_login(&grok_home, api_key.as_deref())
+                let grok_home = xai_grok_shell::util::grok_home::grok_home();
+                if list_api_keys {
+                    xai_grok_shell::auth::run_list_console_api_keys(&grok_home)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    xai_grok_shell::instrumentation::finalize_and_exit(0);
+                }
+                // OpenRouter and console key paths: one materialize gate so
+                // argv secrets are always refused before any store write.
+                if openrouter || api_key.is_some() {
+                    let key = xai_grok_shell::auth::materialize_cli_api_key(api_key.as_deref())
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if openrouter {
+                        xai_grok_shell::auth::run_openrouter_login(&grok_home, key.as_deref())
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    } else {
+                        // Bare `--api-key` → no-echo prompt; not OAuth fallthrough.
+                        xai_grok_shell::auth::run_xai_console_login(&grok_home, key.as_deref())
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    }
                     println!();
                     xai_grok_shell::instrumentation::finalize_and_exit(0);
                 }

@@ -333,10 +333,9 @@ async fn update_preserves_team_fields_when_proxy_omits_them() {
     assert_eq!(on_disk.team_id.as_deref(), Some("team-xyz"));
 }
 
-/// Team tokens are stored under the base scope key (same as personal).
-/// There is at most one OAuth entry per issuer/client pair.
+/// Team tokens are stored under the base active scope **and** a Business multi-slot.
 #[tokio::test]
-async fn update_stores_team_token_under_base_scope() {
+async fn update_stores_team_token_under_base_and_multi_slot() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     let base_scope = cfg.auth_scope();
@@ -361,44 +360,120 @@ async fn update_stores_team_token_under_base_scope() {
         store.keys().collect::<Vec<_>>()
     );
     assert_eq!(store.get(&base_scope).unwrap().key, "team-token");
+    let multi = format!("{base_scope}::team::team-abc");
+    assert!(
+        store.contains_key(&multi),
+        "team multi-slot missing, keys: {:?}",
+        store.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(store.get(&multi).unwrap().key, "team-token");
 }
 
-/// Logging in as personal must evict any existing team token
-/// (at most one OAuth session per issuer/client pair).
+/// Reauth `clear()` drops only the active base; multi-slots stay so a second
+/// SuperGrok OIDC login can add Business without wiping personal (or reverse).
 #[tokio::test]
-async fn team_login_then_personal_evicts_team_token() {
+async fn reauth_clear_keeps_supergrok_multi_slots() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     let base_scope = cfg.auth_scope();
     let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
 
-    // Step 1: login as team
-    let team_auth = GrokAuth {
+    mgr.update(GrokAuth {
+        key: "personal-token".into(),
+        auth_mode: AuthMode::Oidc,
+        user_id: "u-p".into(),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    })
+    .await
+    .unwrap();
+    mgr.update(GrokAuth {
         key: "team-token".into(),
+        auth_mode: AuthMode::Oidc,
+        user_id: "u-t".into(),
         principal_type: Some("Team".into()),
         principal_id: Some("team-abc".into()),
+        team_id: Some("team-abc".into()),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    })
+    .await
+    .unwrap();
+
+    // Simulate reauth prelude: clear active base only.
+    mgr.clear().unwrap();
+
+    let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
+    assert!(
+        !store.contains_key(&base_scope),
+        "active base cleared for reauth"
+    );
+    assert_eq!(
+        store
+            .get(&format!("{base_scope}::personal"))
+            .map(|a| a.key.as_str()),
+        Some("personal-token"),
+        "personal multi-slot must survive reauth clear"
+    );
+    assert_eq!(
+        store
+            .get(&format!("{base_scope}::team::team-abc"))
+            .map(|a| a.key.as_str()),
+        Some("team-token"),
+        "Business multi-slot must survive reauth clear"
+    );
+}
+
+/// Multi SuperGrok: team then personal keeps **both** principals (second login
+/// must not wipe the first). Active base is last login (personal).
+#[tokio::test]
+async fn team_login_then_personal_keeps_both_principals() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let base_scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
+
+    // Step 1: login as Business / team
+    let team_auth = GrokAuth {
+        key: "team-token".into(),
+        auth_mode: AuthMode::Oidc,
+        principal_type: Some("Team".into()),
+        principal_id: Some("team-abc".into()),
+        team_id: Some("team-abc".into()),
+        user_id: "user-team".into(),
         ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
     };
     mgr.update(team_auth).await.unwrap();
 
-    // Step 2: login as personal
+    // Step 2: login as personal (must not wipe Business)
     let personal_auth = GrokAuth {
         key: "personal-token".into(),
+        auth_mode: AuthMode::Oidc,
         principal_type: None,
         principal_id: None,
+        team_id: None,
+        user_id: "user-personal".into(),
         ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
     };
     mgr.update(personal_auth).await.unwrap();
 
     let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
     assert_eq!(
-        store.len(),
-        1,
-        "only one OAuth entry should remain, found: {:?}",
+        store.get(&base_scope).map(|a| a.key.as_str()),
+        Some("personal-token"),
+        "active base is last login"
+    );
+    let personal_slot = format!("{base_scope}::personal");
+    let team_slot = format!("{base_scope}::team::team-abc");
+    assert_eq!(
+        store.get(&personal_slot).map(|a| a.key.as_str()),
+        Some("personal-token"),
+        "personal multi-slot"
+    );
+    assert_eq!(
+        store.get(&team_slot).map(|a| a.key.as_str()),
+        Some("team-token"),
+        "Business multi-slot must survive second SuperGrok login; keys={:?}",
         store.keys().collect::<Vec<_>>()
     );
-    assert!(store.contains_key(&base_scope));
-    assert_eq!(store.get(&base_scope).unwrap().key, "personal-token");
 }
 
 /// Regression test: clear() must only remove the current scope, not the
@@ -3855,6 +3930,8 @@ async fn shared_api_key_provider_resolves_live_bearer() {
 async fn shared_api_key_provider_static_fallthrough() {
     use xai_grok_test_support::EnvGuard;
 
+    // store_api_key dual-writes credentials_store; avoid OS keyring D-Bus hangs.
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
     let provider = shared_api_key_provider(mgr.clone());
@@ -4024,6 +4101,8 @@ async fn shared_api_key_provider_sync_buffered_session_beats_static() {
 async fn shared_api_key_provider_disk_memo_follows_rewrites() {
     use xai_grok_test_support::EnvGuard;
 
+    // store_api_key dual-writes credentials_store; avoid OS keyring D-Bus hangs.
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
     let _xai = EnvGuard::unset("XAI_API_KEY");
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let dir = tempfile::tempdir().unwrap();
@@ -4089,6 +4168,8 @@ async fn process_key_from_model_env_key() {
 async fn process_key_precedence() {
     use xai_grok_test_support::EnvGuard;
 
+    // store_api_key dual-writes credentials_store; avoid OS keyring D-Bus hangs.
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
     let _xai = EnvGuard::unset("XAI_API_KEY");
     let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
     let dir = tempfile::tempdir().unwrap();

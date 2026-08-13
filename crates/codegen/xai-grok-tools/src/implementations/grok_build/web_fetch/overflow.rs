@@ -313,7 +313,6 @@ mod tests {
     fn all_query_tools() -> QueryTools {
         QueryTools {
             jq: Some("jq"),
-            python: Some("python3"),
             sed: Some("sed"),
             cut: Some("cut"),
         }
@@ -599,9 +598,9 @@ mod tests {
 
     #[test]
     fn steering_names_only_detected_query_utilities() {
+        // jq present only → JSON long-line steer names jq, never python.
         let detected = QueryTools {
-            jq: None,
-            python: Some("python3"),
+            jq: Some("jq"),
             sed: None,
             cut: None,
         };
@@ -615,9 +614,30 @@ mod tests {
         );
 
         assert!(steer.contains("ExecuteAsset"));
-        assert!(steer.contains("python3"));
+        assert!(steer.contains("jq"));
         assert!(!steer.contains("ReadAsset"));
-        assert!(!steer.contains("jq"));
+        assert!(
+            !steer.contains("python"),
+            "must not recommend python for overflow recovery: {steer}"
+        );
+
+        // No jq → still steers to ExecuteAsset but omits the examples clause.
+        let no_jq = QueryTools {
+            jq: None,
+            sed: None,
+            cut: None,
+        };
+        let no_examples = web_fetch_steer(
+            PayloadClassification {
+                format: PayloadFormat::Json,
+                has_long_line: true,
+            },
+            tools(Some("ReadAsset"), Some("ExecuteAsset")),
+            no_jq,
+        );
+        assert!(no_examples.contains("ExecuteAsset"));
+        assert!(!no_examples.contains("(e.g."));
+        assert!(!no_examples.contains("python"));
 
         let markdown = web_fetch_steer(
             PayloadClassification {
@@ -631,6 +651,7 @@ mod tests {
         assert!(markdown.contains("sed"));
         assert!(!markdown.contains("ReadAsset"));
         assert!(!markdown.contains("jq"));
+        assert!(!markdown.contains("python"));
     }
 
     #[tokio::test]

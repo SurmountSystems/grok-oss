@@ -333,12 +333,15 @@ pub(super) fn default_actions(
             default_key: key!('e', CONTROL),
             alt_keys: vec![],
             category: Category::ConversationAction,
-            context: When::ScrollbackFocused,
+            // AgentScreen so Ctrl+E works from the prompt as well as scrollback.
+            // ScrollbackFocused-only left the chord as textarea EOL while the
+            // prompt was focused (silent no-op for thinking expand).
+            context: When::AgentScreen,
             hint_priority: Some(3),
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Shows or hides the agent's reasoning (thinking) blocks across the whole transcript in one keypress.\nReveal how the agent reached an answer, or hide reasoning to focus on results.\nSeparate from E, which folds every entry regardless of type.",
+                "Shows or hides the agent's reasoning (thinking) blocks across the whole transcript in one keypress.\nReveal how the agent reached an answer, or hide reasoning to focus on results.\nWorks from the prompt or scrollback. Separate from E, which folds every entry regardless of type.",
             ),
         },
         ActionDef {
@@ -551,6 +554,24 @@ pub(super) fn default_actions(
             ),
         },
         ActionDef {
+            id: ActionId::ClearCompletedTodos,
+            label: "clear finished",
+            description: "Clear finished todos from the board",
+            // No AgentScreen default key: bare X is handled only when the todo
+            // pane is focused (panes.rs). AgentScreen binding would fire after
+            // Tasks/Catalog/Queue fallthrough. Chrome button + slash remain.
+            default_key: key!(Null),
+            alt_keys: vec![],
+            category: Category::Panels,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: Some("X"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Removes completed and cancelled items from the live session board and archives them.\nDoes not hide-only (that is h on the todo pane). Pending and in-progress stay.\nSame action as the pane clear-finished icon ([−], when the todo board is open and finished rows exist) and /clear-completed-todos. Key X is optional and only works with the todo pane focused.",
+            ),
+        },
+        ActionDef {
             id: ActionId::ToggleQueue,
             label: "queue",
             description: "Toggle prompt queue",
@@ -629,11 +650,11 @@ pub(super) fn default_actions(
         // ── Prompt ───────────────────────────────────────────────────
         ActionDef {
             id: ActionId::InterjectPrompt,
-            // "send now" label: Enter queues a follow-up while a turn runs;
-            // this chord is cancel-and-send — stop the current turn and run
-            // the message as the next one ("send now").
-            label: "send now",
-            description: "Send now while running (cancels the current turn)",
+            // Soft interject: inject into the running turn; never cancel.
+            // Cancel is Esc/stop only. Ctrl+Enter (or terminal-family alt) is
+            // the primary mid-turn steer chord.
+            label: "interject",
+            description: "Interject into the running turn (does not cancel)",
             default_key: if in_apple_terminal {
                 key!('o', CONTROL)
             } else if in_vscode_family {
@@ -657,7 +678,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Send now (cancel-and-send): stops the current turn and runs your message as the next one, so it appears at the bottom of the transcript.\nPlain Enter while a turn is running only queues a follow-up for later; use this chord when you need the agent to take the new message immediately.\nWith text in the composer, the chord cancels and sends that text. With an empty composer, bare Enter (or this chord) force-sends the top queued follow-up — no need to focus the queue pane. On the queue pane, this chord (or [Send now]) force-sends the selected row.\nIf nothing can be sent now, a short toast explains why (never a silent no-op).",
+                "Soft interject: injects your message into the running turn at the next safe point without cancelling it. Cancel is Esc/stop only.\nPlain Enter while a turn is running queues a follow-up for later; use this chord when you need the agent to hear you mid-turn.\nWith text in the composer, the chord soft-interjects that text. With an empty composer, bare Enter (or this chord) soft-interjects the top queued follow-up — no need to focus the queue pane. On the queue pane, this chord (or [Interject]) soft-interjects the selected row.\nIf nothing can be interjected, a short toast explains why (never a silent no-op).",
             ),
         },
         ActionDef {
@@ -850,6 +871,24 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: None,
+        },
+        // TUI self-screenshot: F9 was free (not mouse-toggle / voice / settings).
+        // Always so welcome, dashboard, and agent screens can capture. Slash
+        // `/screenshot` remains the primary discoverable surface.
+        ActionDef {
+            id: ActionId::CaptureTuiScreenshot,
+            label: "screenshot",
+            description: "Capture the current TUI frame as a PNG",
+            default_key: key!(F(9)),
+            alt_keys: vec![],
+            category: Category::GettingStarted,
+            context: When::Always,
+            hint_priority: None,
+            hint_key_display: Some("F9"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Writes the last rendered TUI frame to $GROK_HOME/screenshots/tui-*.png and toasts the path.\nDuring plan approval the PNG is also attached to the plan composer so approve/revise/clarify can send it multimodal (same path as pasting an image).\nSame action as /screenshot. Not an OS screenshot of other windows.",
+            ),
         },
     ];
 

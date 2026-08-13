@@ -3781,6 +3781,23 @@
             .collect()
     }
 
+    /// Software composer caret at the insertion cell: solid full-block glyph
+    /// or empty half (space). Empty half is plain space — same as a blank
+    /// cell — so callers that only have the symbol treat space as caret-ok.
+    fn is_composer_box_caret(sym: &str) -> bool {
+        sym == crate::glyphs::cursor_box_filled()
+            || sym == crate::glyphs::cursor_box_hollow()
+            || sym == " "
+    }
+
+    /// True when `region` is empty/whitespace or only the software box caret.
+    /// Ghost-suppressed / empty-ghost asserts use this so the insertion-cell
+    /// caret is not mistaken for ghost content.
+    fn region_is_empty_or_box_caret(region: &str) -> bool {
+        let t = region.trim();
+        t.is_empty() || is_composer_box_caret(t)
+    }
+
     #[test]
     fn set_and_has_ghost_text() {
         let mut pw = PromptWidget::new();
@@ -3835,16 +3852,26 @@
 
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
+        // Capture theme on this thread immediately around draw so fg matches
+        // whatever ambient Theme::current() the paint path saw.
+        let theme = Theme::current();
+        let ghost_fg = theme.ghost_text_style().fg;
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        // "hello" occupies x=0..5, ghost " world" at x=5..11
-        assert_eq!(buf_text_at(&buf, 5, 11, 0), " world");
+        // "hello" at x=0..5. Insertion cell x=5 holds the software box caret
+        // (ghost's leading space is blank, so the caret owns that column).
+        // Ghost body "world" follows at x=6..11.
+        let at_cursor = buf.cell((5, 0)).unwrap().symbol();
+        assert!(
+            is_composer_box_caret(at_cursor),
+            "insertion cell must be the filled/hollow box caret, got {at_cursor:?}"
+        );
+        assert_eq!(buf_text_at(&buf, 6, 11, 0), "world");
 
-        // Verify ghost cells have the correct style (dimmed italic).
-        let theme = Theme::current();
-        let cell = buf.cell((5, 0)).unwrap();
+        // Ghost body cells stay dimmed italic (caret style is only on x=5).
+        let cell = buf.cell((6, 0)).unwrap();
         let cell_style = cell.style();
-        assert_eq!(cell_style.fg, Some(theme.gray_dim),);
+        assert_eq!(cell_style.fg, ghost_fg);
         assert!(cell_style.add_modifier.contains(Modifier::ITALIC));
     }
 
@@ -3878,7 +3905,11 @@
         let mut buf = Buffer::empty(area);
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        assert_eq!(buf_text_at(&buf, 5, 10, 0).trim(), "");
+        // No ghost body — insertion cell may still hold the software box caret.
+        assert!(
+            region_is_empty_or_box_caret(&buf_text_at(&buf, 5, 10, 0)),
+            "slash-active must suppress ghost text (caret alone ok)"
+        );
     }
 
     #[test]
@@ -3920,9 +3951,14 @@
         let mut buf = Buffer::empty(area);
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        // truncate_str(" world and more stuff", 7) -> " world…"
-        let ghost = buf_text_at(&buf, 5, 12, 0);
-        assert_eq!(ghost, " world…");
+        // truncate_str(" world and more stuff", 7) -> " world…"; caret owns the
+        // leading blank column, body + ellipsis remain.
+        let at_cursor = buf.cell((5, 0)).unwrap().symbol();
+        assert!(
+            is_composer_box_caret(at_cursor),
+            "insertion cell must be the box caret, got {at_cursor:?}"
+        );
+        assert_eq!(buf_text_at(&buf, 6, 12, 0), "world…");
     }
 
     #[test]
@@ -3998,7 +4034,11 @@
         let mut buf = Buffer::empty(area);
         pw.draw(&mut buf, area, None, &ghost_test_style(), None, None);
 
-        assert_eq!(buf_text_at(&buf, 5, 10, 0).trim(), "");
+        // Empty ghost paints nothing; software box caret may occupy x=5.
+        assert!(
+            region_is_empty_or_box_caret(&buf_text_at(&buf, 5, 10, 0)),
+            "empty ghost must not paint ghost body (caret alone ok)"
+        );
     }
 
     // --- paint_slash_token_highlight (wrap-aware token painting) ---
@@ -4499,79 +4539,681 @@
         }
     }
 
-    /// Draw a bordered prompt into a fresh `width`×4 buffer and return it.
-    fn draw_bordered(width: u16, style: &PromptStyle) -> Buffer {
-        let mut pw = PromptWidget::new();
-        let area = Rect::new(0, 0, width, 4);
-        let mut buf = Buffer::empty(area);
-        pw.draw(&mut buf, area, None, style, None, None);
-        buf
-    }
-
     #[test]
     fn title_renders_on_top_border_with_corners_intact() {
-        let buf = draw_bordered(40, &title_test_style(Some("my session")));
+        use crate::theme::cache;
+        // Continuous caption fade is non-DOGE (DOGE solid-steps at 0.6 → full
+        // secondary, same as border). Pin GrokNight for hermetic blend asserts.
+        let _pin = cache::pin_theme();
 
-        // ` my session ` is 12 cols, right-aligned ending 2 cells before ╮:
-        // label at x 25..=36, dashes at 37..=38, corner at 39.
-        assert_eq!(buf_text_at(&buf, 25, 37, 0), " my session ");
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(Some("my session"));
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        // Copy chrome sits near the top-right corner (`[⧉]` + pad before ╮).
+        let copy = pw.copy_button_area().expect("copy chrome on bordered prompt");
+        assert_eq!(copy.y, 0);
+        assert_eq!(copy.width, 3);
+        assert_eq!(
+            buf.cell((copy.x, 0)).unwrap().symbol(),
+            "[",
+            "copy button opens with '['"
+        );
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
-        assert_eq!(buf_text_at(&buf, 37, 39, 0), "\u{2500}\u{2500}");
 
-        // Info-line treatment: dimmed secondary text on the prompt bg (same
-        // blend as `render_info_line`'s model name), no bold, no inverse.
+        // Title sits left of the copy chrome.
+        let row = buf_text_at(&buf, 0, 40, 0);
+        assert!(
+            row.contains("my session"),
+            "session title must still paint left of copy chrome; row={row:?}"
+        );
+
+        // Top-border session title stays dimmed secondary caption chrome
+        // (model name on the bottom info line uses `accent_model` instead).
         let theme = Theme::current();
         let expected_fg =
             crate::render::color::blend_color(theme.bg_base, theme.text_secondary, 0.6)
                 .unwrap_or(theme.gray);
-        let title_cell = buf.cell((26, 0)).unwrap().style();
+        // Find a title letter cell.
+        let title_x = (0..area.width)
+            .find(|&x| buf.cell((x, 0)).is_some_and(|c| c.symbol() == "m"))
+            .expect("title 'm' cell");
+        let title_cell = buf.cell((title_x, 0)).unwrap().style();
         assert_eq!(title_cell.fg, Some(expected_fg));
         assert_eq!(title_cell.bg, Some(theme.bg_base));
         assert!(!title_cell.add_modifier.contains(Modifier::BOLD));
         assert!(!title_cell.add_modifier.contains(Modifier::REVERSED));
         let border = buf.cell((1, 0)).unwrap().style();
         assert_eq!(border.bg, title_cell.bg);
-        // Fg delta vs the border rule (like the bottom info line vs its ╰─╯
-        // rule) — only meaningful with color support, same guard as the
-        // slash-highlight test above (monochrome themes resolve to Reset).
         if theme.text_secondary != ratatui::style::Color::Reset {
             assert_ne!(border.fg, title_cell.fg);
         }
     }
 
+    /// Focused info-line model label paints `theme.accent_model` (magenta on DOGE).
     #[test]
-    fn no_title_keeps_plain_top_border() {
-        let buf = draw_bordered(40, &title_test_style(None));
+    fn info_line_model_name_uses_accent_model_not_gray() {
+        use crate::views::prompt_widget::{PromptFlag, PromptInfo, PromptWidget};
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::doge();
+        let pw = PromptWidget::new();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        let info = PromptInfo {
+            model_name: "Grok 4.5 (high)",
+            flags: &[] as &[PromptFlag],
+            multiline: false,
+            usage_warning: None,
+            usage_warning_critical: false,
+        };
+        pw.render_info_line(&mut buf, area, &info, theme.bg_base, &theme, true);
+
+        // Info line is right-aligned: find the 'G' of "Grok 4.5 (high)".
+        let model_cell = (0..area.width)
+            .find_map(|x| {
+                let c = buf.cell((x, 0))?;
+                (c.symbol() == "G").then_some(c.clone())
+            })
+            .expect("model text 'G' cell");
+        assert_eq!(
+            model_cell.style().fg,
+            Some(theme.accent_model),
+            "model label must use accent_model (magenta on DOGE), got {:?}",
+            model_cell.style().fg
+        );
+        assert_ne!(
+            model_cell.style().fg,
+            Some(theme.gray),
+            "model label must not be gray secondary chrome"
+        );
+    }
+
+    /// Named contract: bordered prompt top bar paints a ⧉ hit target for
+    /// one-click draft copy (payload is composer plain text).
+    #[test]
+    fn bordered_prompt_top_bar_sets_copy_button_hit_area() {
+        let mut pw = PromptWidget::new();
+        pw.set_text("draft body with [Image #1] chip label");
+        let style = title_test_style(None);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        let copy = pw
+            .copy_button_area()
+            .expect("bordered prompt must expose ⧉ draft-copy hit target");
+        assert_eq!(copy.height, 1);
+        assert_eq!(copy.y, area.y);
+        assert!(
+            copy.x + copy.width < area.x + area.width,
+            "copy button must sit inside the top border before ╮"
+        );
+        assert_eq!(
+            pw.draft_plain_text(),
+            "draft body with [Image #1] chip label",
+            "draft plain text keeps multimodal chip labels as typed"
+        );
+        // Corners intact.
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
+        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+    }
+
+    #[test]
+    fn chromeless_prompt_skips_copy_button() {
+        let mut pw = PromptWidget::new();
+        let style = PromptStyle::overlay();
+        let area = Rect::new(0, 0, 40, 2);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        assert!(
+            pw.copy_button_area().is_none(),
+            "overlay/chromeless prompts have no top-bar copy chrome"
+        );
+    }
+
+    #[test]
+    fn no_title_keeps_corners_and_copy_chrome() {
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(None);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
 
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
-        assert_eq!(buf_text_at(&buf, 1, 39, 0), "\u{2500}".repeat(38));
+        assert!(pw.copy_button_area().is_some());
+        // Left of copy chrome is still the border rule.
+        let copy = pw.copy_button_area().unwrap();
+        assert_eq!(
+            buf.cell((1, 0)).unwrap().symbol(),
+            "\u{2500}",
+            "border dash left of chrome"
+        );
+        assert_eq!(buf.cell((copy.x, 0)).unwrap().symbol(), "[");
     }
 
     #[test]
     fn long_title_truncates_on_top_border_and_keeps_corners() {
         let long = "a".repeat(60);
-        let buf = draw_bordered(40, &title_test_style(Some(&long)));
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(Some(&long));
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
 
-        // max_w = 40 - 6 = 34: label spans x 3..=36 with a trailing ellipsis.
         let row = buf_text_at(&buf, 0, 40, 0);
         assert!(row.contains('\u{2026}'), "expected ellipsis in: {row}");
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
         assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+        assert!(
+            pw.copy_button_area().is_some(),
+            "copy chrome remains with a long title"
+        );
         assert_eq!(buf_text_at(&buf, 1, 3, 0), "\u{2500}\u{2500}");
-        assert_eq!(buf_text_at(&buf, 37, 39, 0), "\u{2500}\u{2500}");
     }
 
     #[test]
     fn blank_title_or_narrow_area_skips_border_title() {
-        // Whitespace-only titles never paint on the border.
-        let buf = draw_bordered(40, &title_test_style(Some("   ")));
-        assert_eq!(buf_text_at(&buf, 1, 39, 0), "\u{2500}".repeat(38));
+        // Whitespace-only titles never paint; copy chrome still may.
+        let mut pw = PromptWidget::new();
+        let style = title_test_style(Some("   "));
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        let row = buf_text_at(&buf, 0, 40, 0);
+        assert!(
+            !row.contains("session"),
+            "blank title must not invent text; row={row:?}"
+        );
+        assert!(pw.copy_button_area().is_some());
 
-        // Too narrow for the min label width (max_w < 6): plain border, no panic.
-        let buf = draw_bordered(11, &title_test_style(Some("my session")));
-        assert_eq!(buf_text_at(&buf, 1, 10, 0), "\u{2500}".repeat(9));
+        // Very narrow: no panic; corners stay.
+        let mut pw = PromptWidget::new();
+        let buf = {
+            let style = title_test_style(Some("my session"));
+            let area = Rect::new(0, 0, 11, 4);
+            let mut buf = Buffer::empty(area);
+            pw.draw(&mut buf, area, None, &style, None, None);
+            buf
+        };
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
+        assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "\u{256e}");
+    }
+
+    /// Focused composer paints a Human-green solid/empty block caret and hides
+    /// the terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
+    ///
+    /// Wall-clock phase may land on solid or empty:
+    /// - Solid: full-cell Human accent plate + filled glyph.
+    /// - Empty: true empty cell (space, canvas bg) - no accent plate, no hole.
+    /// Never the old hole-punch (`■` on accent plate).
+    #[test]
+    fn focused_composer_paints_human_green_box_caret_hides_terminal_cursor() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("");
+        let style = PromptStyle {
+            focused: true,
+            chrome: true,
+            show_borders: true,
+            show_prefix: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        let result = pw.draw(&mut buf, area, None, &style, None, None);
+        assert!(
+            result.cursor_pos.is_none(),
+            "software box caret hides the terminal cursor"
+        );
+
+        let filled = crate::glyphs::cursor_box_filled();
+        let theme = crate::theme::Theme::current();
+        // Human chrome family (pointer / rail / OSC 12), not agent magenta.
+        assert_eq!(theme.accent_running, Color::Rgb(255, 0, 255));
+        assert_eq!(theme.accent_user, Color::Rgb(0, 255, 0));
+        let mut found_solid_plate = false;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    let sym = cell.symbol();
+                    // Reject hole-punch design if it ever reappears.
+                    assert_ne!(
+                        (sym, cell.bg, cell.fg),
+                        ("\u{25a0}", theme.accent_user, theme.bg_base),
+                        "must not paint black-square hole on accent plate"
+                    );
+                    if sym == filled {
+                        assert_eq!(
+                            cell.bg, theme.accent_user,
+                            "solid blank caret is full-cell Human green plate"
+                        );
+                        assert_eq!(
+                            cell.fg, theme.accent_user,
+                            "solid blank caret uses Human green ink on the plate"
+                        );
+                        assert_ne!(
+                            cell.bg, theme.accent_running,
+                            "caret must not use agent magenta accent_running"
+                        );
+                        found_solid_plate = true;
+                    }
+                }
+            }
+        }
+        // Empty half is plain space on canvas - not scannable as a unique
+        // glyph. When wall-clock lands on solid, the accent plate must be
+        // present; phase-injected unit tests cover both halves always.
+        let _ = found_solid_plate;
+        // Hardware cursor stays hidden whenever the software caret paints.
+    }
+
+    /// Composer box caret colour is Human green (`accent_user`), not agent
+    /// magenta (`accent_running`). DOGE: human input surface / rails / OSC 12.
+    /// Pin: do not flip caret back to magenta "because agent chrome".
+    #[test]
+    fn paint_composer_box_cursor_uses_human_green_not_agent_magenta() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let agent = theme.accent_running;
+        let human = theme.accent_user;
+        let canvas = theme.bg_base;
+        assert_eq!(agent, Color::Rgb(255, 0, 255), "DOGE accent_running is magenta");
+        assert_eq!(human, Color::Rgb(0, 255, 0), "DOGE accent_user is green");
+        assert_ne!(agent, human);
+
+        let area = Rect::new(0, 0, 4, 2);
+        let mut solid_buf = Buffer::empty(area);
+        super::paint_composer_box_cursor_phase(&mut solid_buf, 1, 0, &theme, canvas, true);
+        let solid = solid_buf.cell((1, 0)).expect("solid cell");
+        assert_eq!(solid.bg, human, "solid plate is Human green");
+        assert_eq!(solid.fg, human, "solid ink is Human green");
+        assert_ne!(solid.bg, agent, "solid plate must not be agent magenta");
+        assert_ne!(solid.fg, agent, "solid ink must not be agent magenta");
+
+        let mut grapheme_buf = Buffer::empty(area);
+        grapheme_buf
+            .cell_mut((1, 0))
+            .expect("cell")
+            .set_symbol("x");
+        super::paint_composer_box_cursor_phase(&mut grapheme_buf, 1, 0, &theme, canvas, true);
+        let rev = grapheme_buf.cell((1, 0)).expect("reverse");
+        assert_eq!(rev.bg, human, "grapheme reverse plate is Human green");
+        assert_ne!(rev.bg, agent, "grapheme reverse must not be agent magenta");
+
+        let mut empty_g = Buffer::empty(area);
+        empty_g.cell_mut((1, 0)).expect("cell").set_symbol("x");
+        super::paint_composer_box_cursor_phase(&mut empty_g, 1, 0, &theme, canvas, false);
+        let empty = empty_g.cell((1, 0)).expect("empty grapheme");
+        assert_eq!(empty.fg, human, "empty grapheme ink is Human green");
+        assert_ne!(empty.fg, agent, "empty grapheme ink must not be agent magenta");
+    }
+
+    /// Blank-cell solid vs empty: classic full-cell block on/off.
+    ///
+    /// Named contract (operator dogfood: hole-punch `■` on accent plate looked
+    /// like a mini badge with a void, not a terminal block caret):
+    /// - Silhouette for **both** phases is the terminal **cell** itself.
+    /// - Solid (full): Human accent plate + ink (`█`), full cell height, no DIM.
+    /// - Empty (off): plain space, **canvas** bg (true empty cell), **no**
+    ///   accent plate, no DIM. Not an accent frame with a dark center.
+    /// - Symbols and styles differ so the blink is visible.
+    #[test]
+    fn paint_composer_box_cursor_blank_phases_are_visually_distinct() {
+        use crate::theme::cache;
+        use ratatui::style::{Color, Modifier};
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        let canvas = theme.bg_base;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let area = Rect::new(0, 0, 4, 2);
+        let filled_glyph = crate::glyphs::cursor_box_filled();
+        let empty_glyph = crate::glyphs::cursor_box_hollow();
+        assert_ne!(
+            filled_glyph, empty_glyph,
+            "glyph helpers must already differ (solid block vs empty space)"
+        );
+        assert_eq!(empty_glyph, " ", "empty half glyph is plain space");
+
+        let mut solid_buf = Buffer::empty(area);
+        super::paint_composer_box_cursor_phase(&mut solid_buf, 1, 0, &theme, canvas, true);
+        let solid = solid_buf.cell((1, 0)).expect("solid cell");
+        assert_eq!(solid.symbol(), filled_glyph, "solid uses full-block glyph");
+        assert_eq!(solid.fg, accent, "solid plate uses Human green ink");
+        assert_eq!(
+            solid.bg, accent,
+            "solid outer box is full-cell Human green plate (not glyph metrics)"
+        );
+        assert!(
+            !solid.modifier.contains(Modifier::DIM),
+            "solid plate must not be dimmed"
+        );
+
+        let mut empty_buf = Buffer::empty(area);
+        super::paint_composer_box_cursor_phase(&mut empty_buf, 1, 0, &theme, canvas, false);
+        let empty = empty_buf.cell((1, 0)).expect("empty cell");
+        assert_eq!(
+            empty.symbol(),
+            empty_glyph,
+            "empty half uses plain space (true empty cell)"
+        );
+        assert_ne!(
+            empty.symbol(),
+            filled_glyph,
+            "empty must not paint the solid full-block glyph"
+        );
+        assert_ne!(
+            empty.symbol(),
+            "\u{25a0}",
+            "empty must not be black-square hole-punch"
+        );
+        // True empty: canvas plate, no accent outer frame.
+        assert_eq!(
+            empty.bg, canvas,
+            "empty half has canvas bg (no accent plate / no green frame)"
+        );
+        assert_eq!(
+            empty.fg, canvas,
+            "empty half has canvas ink (no hole-punch accent frame)"
+        );
+        assert_ne!(
+            empty.bg, accent,
+            "empty must not keep an accent outer plate (hole-punch design)"
+        );
+        assert!(
+            !empty.modifier.contains(Modifier::DIM),
+            "empty must not be DIM of solid - blink is plate on vs off"
+        );
+
+        // Same cell silhouette via on/off fill; styles and symbols differ.
+        assert_ne!(
+            solid.bg, empty.bg,
+            "solid fills the cell plate; empty is canvas (on/off block)"
+        );
+        assert_ne!(
+            solid.fg, empty.fg,
+            "solid accent ink vs empty canvas ink"
+        );
+        assert_ne!(
+            solid.symbol(),
+            empty.symbol(),
+            "solid and empty blank symbols must differ"
+        );
+        assert!(
+            solid.fg != empty.fg
+                || solid.bg != empty.bg
+                || solid.modifier != empty.modifier
+                || solid.symbol() != empty.symbol(),
+            "solid and empty blank must differ for a visible blink"
+        );
+    }
+
+    /// Grapheme under caret: reverse plate on solid, accent ink on empty (no DIM).
+    #[test]
+    fn paint_composer_box_cursor_grapheme_phases_keep_letter() {
+        use crate::theme::cache;
+        use ratatui::style::{Color, Modifier, Style};
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        let canvas = theme.bg_base;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let area = Rect::new(0, 0, 4, 2);
+        let mut solid_buf = Buffer::empty(area);
+        solid_buf
+            .cell_mut((1, 0))
+            .expect("cell")
+            .set_symbol("x");
+        solid_buf
+            .cell_mut((1, 0))
+            .expect("cell")
+            .set_style(Style::default().fg(Color::White).bg(canvas));
+        super::paint_composer_box_cursor_phase(&mut solid_buf, 1, 0, &theme, canvas, true);
+        let solid = solid_buf.cell((1, 0)).expect("solid");
+        assert_eq!(solid.symbol(), "x", "solid keeps grapheme under caret");
+        assert_eq!(solid.fg, canvas, "solid reverse plate: canvas ink");
+        assert_eq!(solid.bg, accent, "solid reverse plate: Human green bg");
+        assert!(!solid.modifier.contains(Modifier::DIM));
+
+        let mut empty_buf = Buffer::empty(area);
+        empty_buf
+            .cell_mut((1, 0))
+            .expect("cell")
+            .set_symbol("x");
+        empty_buf
+            .cell_mut((1, 0))
+            .expect("cell")
+            .set_style(Style::default().fg(Color::White).bg(canvas));
+        super::paint_composer_box_cursor_phase(&mut empty_buf, 1, 0, &theme, canvas, false);
+        let empty = empty_buf.cell((1, 0)).expect("empty");
+        assert_eq!(empty.symbol(), "x", "empty keeps grapheme under caret");
+        assert_eq!(empty.fg, accent, "empty half: Human green ink on grapheme");
+        assert_eq!(empty.bg, canvas, "empty half: canvas bg (no plate steal)");
+        assert!(!empty.modifier.contains(Modifier::DIM));
+    }
+
+    /// True when a cell still carries Human-green caret plate / reverse /
+    /// empty-phase ink (or the solid block glyph left after the caret moved).
+    fn cell_has_composer_caret_residue(
+        cell: &ratatui::buffer::Cell,
+        accent: ratatui::style::Color,
+    ) -> bool {
+        let filled = crate::glyphs::cursor_box_filled();
+        if cell.symbol() == filled {
+            return true;
+        }
+        cell.bg == accent || cell.fg == accent
+    }
+
+    /// Contract: after the software caret moves (arrows / home / end), cells it
+    /// previously occupied must repaint as normal text — no leftover green
+    /// plate, reverse accent, empty-phase green ink, or solid block glyph.
+    ///
+    /// Operator dogfood: typed `BLA`, final `A` stuck Human-green while the
+    /// real caret was elsewhere. Human caret stays green on the *current*
+    /// cell only.
+    #[test]
+    fn caret_move_clears_previous_cell_caret_styling() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let style = ghost_test_style(); // chromeless: text at area origin
+        let area = Rect::new(0, 0, 40, 1);
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("BLA");
+        pw.set_cursor(pw.text().len());
+        // End of text: insertion cell is blank after 'A' (x=3).
+        assert_eq!(pw.cursor(), 3);
+
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        // Move onto 'A' (index 2) — caret paints that grapheme green.
+        pw.set_cursor(2);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        let on_a = buf.cell((2, 0)).expect("A cell while caret on A");
+        assert_eq!(on_a.symbol(), "A");
+        assert!(
+            cell_has_composer_caret_residue(on_a, accent),
+            "caret on A must style A with Human green (precondition)"
+        );
+
+        // Move onto 'L' (index 1). 'A' must lose all caret styling / glyph.
+        pw.set_cursor(1);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        let a_after = buf.cell((2, 0)).expect("A after caret left");
+        assert_eq!(a_after.symbol(), "A", "letter must remain after caret leaves");
+        assert!(
+            !cell_has_composer_caret_residue(a_after, accent),
+            "A must not keep caret green plate/ink or solid block after caret moved; \
+             got fg={:?} bg={:?} sym={:?}",
+            a_after.fg,
+            a_after.bg,
+            a_after.symbol()
+        );
+
+        // Blank insertion cell after the word must not keep a solid █ from when
+        // the caret lived at end-of-text.
+        let after_word = buf.cell((3, 0)).expect("cell after A");
+        assert_ne!(
+            after_word.symbol(),
+            crate::glyphs::cursor_box_filled(),
+            "end-of-text blank must not keep solid box caret glyph after move"
+        );
+        assert!(
+            !cell_has_composer_caret_residue(after_word, accent),
+            "end-of-text blank must not keep Human green after caret moved; \
+             got fg={:?} bg={:?} sym={:?}",
+            after_word.fg,
+            after_word.bg,
+            after_word.symbol()
+        );
+
+        // Current caret cell ('L') is still allowed green styling.
+        let on_l = buf.cell((1, 0)).expect("L under caret");
+        assert_eq!(on_l.symbol(), "L");
+        assert!(
+            cell_has_composer_caret_residue(on_l, accent),
+            "current caret cell must still use Human green"
+        );
+    }
+
+    /// Solid blank caret replaces the insertion cell with `█`. A full prompt
+    /// redraw after the caret moves must not leave that block glyph (or its
+    /// green plate) on the old cell — even when the textarea never re-paints
+    /// blanks beyond the text.
+    #[test]
+    fn caret_move_clears_forced_solid_blank_caret_glyph() {
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        let canvas = theme.bg_base;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let style = ghost_test_style();
+        let area = Rect::new(0, 0, 40, 1);
+        let filled = crate::glyphs::cursor_box_filled();
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("BLA");
+        pw.set_cursor(3); // blank insertion after 'A'
+
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+        // Force solid phase regardless of wall-clock blink half.
+        super::paint_composer_box_cursor_phase(&mut buf, 3, 0, &theme, canvas, true);
+        let solid = buf.cell((3, 0)).expect("solid blank caret");
+        assert_eq!(solid.symbol(), filled);
+        assert_eq!(solid.bg, accent);
+
+        // Move caret onto 'L' and full-draw again (same buffer = ratatui reuse).
+        pw.set_cursor(1);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        let after = buf.cell((3, 0)).expect("old blank caret cell");
+        assert_ne!(
+            after.symbol(),
+            filled,
+            "solid blank caret glyph must not remain after caret moved; got {:?}",
+            after.symbol()
+        );
+        assert!(
+            !cell_has_composer_caret_residue(after, accent),
+            "old blank caret cell must not keep Human green; fg={:?} bg={:?} sym={:?}",
+            after.fg,
+            after.bg,
+            after.symbol()
+        );
+
+        // 'A' must stay normal text (no green) when caret is on 'L'.
+        let a = buf.cell((2, 0)).expect("A");
+        assert_eq!(a.symbol(), "A");
+        assert!(
+            !cell_has_composer_caret_residue(a, accent),
+            "A must not keep caret styling; fg={:?} bg={:?}",
+            a.fg,
+            a.bg
+        );
+    }
+
+    /// Lower-level paint contract: painting the caret at j must not leave
+    /// caret styling on a previously painted caret cell at i when the caller
+    /// re-paints normal text first (full-line dirty) then the new caret only.
+    /// Pins the "only current caret cell uses caret styling" rule for
+    /// grapheme reverse / empty-phase ink.
+    #[test]
+    fn paint_composer_box_cursor_phase_only_styles_current_cell_after_text_repaint() {
+        use crate::theme::cache;
+        use ratatui::style::{Color, Style};
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let accent = theme.accent_user;
+        let canvas = theme.bg_base;
+        let text_fg = theme.text_primary;
+        assert_eq!(accent, Color::Rgb(0, 255, 0));
+
+        let area = Rect::new(0, 0, 8, 1);
+        let mut buf = Buffer::empty(area);
+        // Simulate frame 1: text + caret solid reverse on 'A' at x=2.
+        buf.set_string(0, 0, "BLA", Style::default().fg(text_fg).bg(canvas));
+        super::paint_composer_box_cursor_phase(&mut buf, 2, 0, &theme, canvas, true);
+        assert_eq!(buf.cell((2, 0)).unwrap().bg, accent);
+
+        // Frame 2: full-line text repaint (normal ink) + caret on 'L' at x=1.
+        buf.set_string(0, 0, "BLA", Style::default().fg(text_fg).bg(canvas));
+        // set_string with explicit fg/bg must clear prior reverse plate on A.
+        let a_mid = buf.cell((2, 0)).unwrap();
+        assert_eq!(a_mid.symbol(), "A");
+        assert_eq!(a_mid.fg, text_fg, "text repaint must restore A fg");
+        assert_eq!(a_mid.bg, canvas, "text repaint must restore A bg");
+        super::paint_composer_box_cursor_phase(&mut buf, 1, 0, &theme, canvas, true);
+
+        let a_after = buf.cell((2, 0)).unwrap();
+        assert_eq!(a_after.symbol(), "A");
+        assert_ne!(a_after.bg, accent, "A must not keep reverse green plate");
+        assert_ne!(a_after.fg, accent, "A must not keep green ink");
+        assert_eq!(a_after.fg, text_fg);
+        assert_eq!(a_after.bg, canvas);
+
+        let l = buf.cell((1, 0)).unwrap();
+        assert_eq!(l.symbol(), "L");
+        assert_eq!(l.bg, accent, "current caret keeps reverse plate");
     }
 
     // ── PromptBg::Panel chip remap (inline surfaces) ────────────────

@@ -237,16 +237,48 @@ mod tests {
     #[test]
     fn test_base_template_contains_resolved_tool_names() {
         let prompt = render_base(&default_renderer(), &default_placeholders());
-        // The minimal prompt only resolves the read/edit tool names, inside
-        // <tool_calling>. (todo_write / run_terminal_command lived in sections
-        // that the trimmed prompt no longer renders.)
+        // Base prompt resolves read/edit in <tool_calling> and plan tool in
+        // <planning> when ToolKind::Plan is present.
         assert!(prompt.contains("read_file"), "Should contain 'read_file'");
         assert!(
             prompt.contains("search_replace"),
             "Should contain 'search_replace'"
         );
+        assert!(
+            prompt.contains("todo_write"),
+            "default renderer includes Plan tool; prompt should teach todo_write"
+        );
         assert!(!prompt.contains("${{"), "No unresolved template variables");
         assert!(!prompt.contains("${%"), "No unresolved template blocks");
+    }
+
+    #[test]
+    fn test_base_template_plan_present_includes_planning() {
+        let prompt = render_base(&default_renderer(), &default_placeholders());
+        assert!(
+            prompt.contains("<planning>"),
+            "Planning section should render when plan tool is present"
+        );
+        assert!(
+            prompt.contains("todo_write"),
+            "Planning section should resolve plan tool name"
+        );
+        assert!(
+            prompt.contains("Ctrl+T"),
+            "Planning section should mention the session board affordance"
+        );
+        assert!(
+            prompt.contains("feat:"),
+            "Planning section should mention feat: namespace"
+        );
+        assert!(
+            prompt.contains("bug:"),
+            "Planning section should mention bug: namespace"
+        );
+        assert!(
+            prompt.contains("red/green TDD") || prompt.contains("failing test first"),
+            "Planning section should mention red/green TDD for user-reported bugs/features"
+        );
     }
 
     #[test]
@@ -291,8 +323,12 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_base(&r, &default_placeholders());
         assert!(
-            !prompt.contains("Task Management"),
-            "Task Management section should be omitted"
+            !prompt.contains("<planning>"),
+            "Planning section should be omitted when plan tool is absent"
+        );
+        assert!(
+            !prompt.contains("todo_write"),
+            "todo_write must not appear when plan tool is absent"
         );
     }
 

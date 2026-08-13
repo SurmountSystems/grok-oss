@@ -1,7 +1,7 @@
 # Skills & process pins vs upstream reconciliation (2026-07-24)
 
 **Mode:** read-only research.  
-**Workspace:** `/home/hunter/Projects/surmount/grok-build`  
+**Workspace:** `$REPO`  
 **Sources:** `docs/upstream-history.md`, `docs/upstream-onto-log.md`, `FORK.md`,
 `AGENTS.md`, `RESIDUAL.md`, scripts under `scripts/*upstream*` / put-history /
 join / import, host skill `upstream-export-import` + `skill-maintenance`,
@@ -34,7 +34,7 @@ rewires history (`merge -s ours`) and **does not fold content** from `main`.
 | Shared paths (user-guide, shell/pager) | **xAI version** | Wrong side resolve can drop product | No content merge |
 | `AGENTS.md`, `RESIDUAL.md`, `doc/dev/**`, `README` (fork shape) | **Not** in `FORK_PATHS` → **drop / xAI** | Depends on picks + resolve | Keeps whatever is already on tip |
 | `scripts/join-main-into-onto.sh`, hermetic PATH script | **Not** in `FORK_PATHS` → **drop** | Comes back only if stacked commits include them | Same |
-| Host skill bodies | Unaffected | Unaffected | Unaffected |
+| Host skill packs | Unaffected | Unaffected | Unaffected |
 | Stale host skill text about MODE=overlay | Unaffected by git; **discipline gap** | Skill lies about current scripts | — |
 
 **Process pins must live on disk in places recon cannot silently delete**
@@ -210,7 +210,7 @@ Ranked by survival under recon + compaction:
 | User-guide under pager (product-facing skills/subagents prose) | Shipped docs | Upstream path — **re-apply on conflict/import** |
 | Optional project `.agents/skills/**` | Collaborator skill packs | Supported by product loader; **not** import-protected |
 
-### B. Must live on host (operator skill bodies + cross-repo law)
+### B. Must live on host (operator skill packs + cross-repo law)
 
 | Pin home | Role | vs product recon |
 |----------|------|------------------|
@@ -230,7 +230,7 @@ Ranked by survival under recon + compaction:
 
 **Same-turn disk pin rule** (global + project AGENTS): operator corrections that
 change “what is left / how recon works” must land in living files **in the same
-turn** — FORK / AGENTS / upstream-history / residual / host skill bodies as
+turn** — FORK / AGENTS / upstream-history / residual / host skill packs as
 appropriate — not “I’ll remember.”
 
 ---
@@ -357,16 +357,16 @@ Priority: **P0** = prevent silent loss of law; **P1** = make recon hard to misus
 
 | Path | Role |
 |------|------|
-| `/home/hunter/Projects/surmount/grok-build/docs/upstream-history.md` | Canonical recon + HITL |
-| `/home/hunter/Projects/surmount/grok-build/docs/upstream-onto-log.md` | Onto stack ledger |
-| `/home/hunter/Projects/surmount/grok-build/docs/upstream-import-log.md` | Import ledger |
-| `/home/hunter/Projects/surmount/grok-build/scripts/import-upstream-export.sh` | `FORK_PATHS` authority |
-| `/home/hunter/Projects/surmount/grok-build/scripts/put-history-on-xai.sh` | Cherry-pick stack |
-| `/home/hunter/Projects/surmount/grok-build/scripts/join-main-into-onto.sh` | History join, tree kept |
-| `/home/hunter/Projects/surmount/grok-build/FORK.md` | Product divergence + sync jobs |
-| `/home/hunter/Projects/surmount/grok-build/AGENTS.md` | Project process pins |
-| `/home/hunter/Projects/surmount/grok-build/RESIDUAL.md` | Open residuals only |
-| `/home/hunter/Projects/surmount/grok-build/doc/dev/research/where-skills-come-from-2026-07-24.md` | Skill load order / host vs branch |
+| `$REPO/docs/upstream-history.md` | Canonical recon + HITL |
+| `$REPO/docs/upstream-onto-log.md` | Onto stack ledger |
+| `$REPO/docs/upstream-import-log.md` | Import ledger |
+| `$REPO/scripts/import-upstream-export.sh` | `FORK_PATHS` authority |
+| `$REPO/scripts/put-history-on-xai.sh` | Cherry-pick stack |
+| `$REPO/scripts/join-main-into-onto.sh` | History join, tree kept |
+| `$REPO/FORK.md` | Product divergence + sync jobs |
+| `$REPO/AGENTS.md` | Project process pins |
+| `$REPO/RESIDUAL.md` | Open residuals only |
+| `$REPO/doc/dev/research/where-skills-come-from-2026-07-24.md` | Skill load order / host vs branch |
 | `~/.agents/skills/upstream-export-import/SKILL.md` | Host recon skill (stale sections) |
 | `~/.agents/skills/skill-maintenance/SKILL.md` | Host skill reconcile (not product recon) |
 | `~/.grok/AGENTS.md` | Global Hard stop / never commit |

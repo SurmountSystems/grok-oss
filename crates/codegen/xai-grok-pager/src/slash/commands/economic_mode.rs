@@ -24,7 +24,7 @@ impl SlashCommand for EconomicModeCommand {
     }
 
     fn description(&self) -> &str {
-        "Cap context at 200K for cheaper Grok 4.5 pricing; clamps auto /implement --effort to 1 (on by default)"
+        "Cap context at 200K for cheaper Grok 4.5 pricing (on by default)"
     }
 
     fn session_scoped(&self) -> bool {

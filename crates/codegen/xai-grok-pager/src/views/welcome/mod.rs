@@ -653,6 +653,14 @@ pub struct WelcomeRenderParams<'a> {
     pub upgrade_cta: Option<&'a str>,
     /// Non-blocking welcome privacy banner above the prompt.
     pub privacy_banner: bool,
+    /// When true (`[ui] hide_header`), the welcome location top bar is
+    /// zero-height — same knob that hides the agent status bar.
+    pub hide_header: bool,
+}
+
+/// Height of the welcome location top bar (0 when `[ui] hide_header`).
+pub(crate) fn welcome_top_bar_height(hide_header: bool) -> u16 {
+    if hide_header { 0 } else { 1 }
 }
 
 /// Render the welcome screen.
@@ -673,22 +681,26 @@ pub fn render_welcome(
 
     buf.set_style(area, Style::default().bg(theme.bg_base));
 
-    // Announcements only render inside the hero box. Top bar is always 1 row.
+    // Announcements only render inside the hero box. Top bar is 1 row unless
+    // `[ui] hide_header` zeros it (same opt-in as the agent status bar).
+    let top_bar_h = welcome_top_bar_height(params.hide_header);
     let [_, top_bar_area, content_area, _] = Layout::vertical([
         Constraint::Length(v_margin),
-        Constraint::Length(1),
+        Constraint::Length(top_bar_h),
         Constraint::Min(10),
         Constraint::Length(v_margin),
     ])
     .areas(area);
 
-    let top_bar_inner = Rect {
-        x: top_bar_area.x + h_margin,
-        y: top_bar_area.y,
-        width: top_bar_area.width.saturating_sub(h_margin * 2),
-        height: 1,
-    };
-    render_top_bar(top_bar_inner, buf, &theme, None);
+    if top_bar_h > 0 {
+        let top_bar_inner = Rect {
+            x: top_bar_area.x + h_margin,
+            y: top_bar_area.y,
+            width: top_bar_area.width.saturating_sub(h_margin * 2),
+            height: 1,
+        };
+        render_top_bar(top_bar_inner, buf, &theme, None);
+    }
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
@@ -2786,6 +2798,7 @@ mod tests {
             welcome_announcement_expanded: false,
             upgrade_cta: None,
             privacy_banner: false,
+            hide_header: false,
         }
     }
 
@@ -2796,6 +2809,56 @@ mod tests {
         let mut picker = PickerState::default();
         render_welcome(area, &mut buf, params, &mut prompt, &mut picker);
         buffer_text(&buf)
+    }
+
+    #[test]
+    fn hide_header_zeros_welcome_top_bar_height() {
+        assert_eq!(welcome_top_bar_height(false), 1);
+        assert_eq!(welcome_top_bar_height(true), 0);
+
+        let auth = AuthState::Done;
+        let trust = TrustState::Done;
+        let mut params = render_params(&auth, &trust, None);
+
+        // Row y=1 is the location top bar when visible (y=0 is the top margin).
+        // The top bar paints process cwd (tilde-collapsed); capture a stable
+        // fragment from the real process cwd so we can assert presence/absence.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd_marker = cwd
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(".");
+
+        params.hide_header = false;
+        let shown = render_done_text(&params);
+        params.hide_header = true;
+        let hidden = render_done_text(&params);
+
+        // Visible: top bar row carries the location path fragment.
+        let shown_top = shown.lines().nth(1).unwrap_or("");
+        assert!(
+            shown_top.contains(cwd_marker)
+                || shown.contains(cwd_marker)
+                || shown_top.contains('~')
+                || shown_top.contains('/'),
+            "expected location top bar glyphs when hide_header=false; row1={shown_top:?}"
+        );
+
+        // Hidden: location top bar is not painted; content starts where the
+        // bar was. The process-cwd marker must not appear on the former
+        // top-bar row (content at y=1 is logo/menu, not the location line).
+        let hidden_top = hidden.lines().nth(1).unwrap_or("");
+        assert!(
+            !hidden_top.contains(cwd_marker),
+            "location top bar still painted on row1 when hide_header=true: {hidden_top:?}"
+        );
+        // Layout reclaim: shown vs hidden full buffers must differ (bar gone).
+        assert_ne!(
+            shown_top.trim(),
+            hidden_top.trim(),
+            "top row should change when header is hidden"
+        );
     }
 
     #[test]

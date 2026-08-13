@@ -16,7 +16,7 @@ use crate::scrollback::text_selection::{
     reconstruct_table_selection_text, resolve_table_drag_kind, semantic_selection_at,
 };
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
-use crossterm::event::MouseEvent;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 
 /// Two fold/nav double-clicks on assistant text within this window count as a
@@ -607,6 +607,11 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         if self.active_pane == AgentPane::Prompt {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && self.try_copy_prompt_draft_at(mouse.column, mouse.row)
+            {
+                return InputOutcome::Changed;
+            }
             self.prompt.handle_mouse(mouse);
             InputOutcome::Changed
         } else {

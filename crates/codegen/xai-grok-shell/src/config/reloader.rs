@@ -404,6 +404,25 @@ impl ConfigReloader {
             });
         }
 
+        // Assistant ASCII scrub preference — process-local AtomicBool used by
+        // stream/chat_state choke points. Re-seed when `[ui].scrub_ascii_punct`
+        // changes so settings modal / config.toml edits take effect without a
+        // full restart (session agent override is not cleared here).
+        let old_scrub = self
+            .last_global_config
+            .get("ui")
+            .and_then(|u| u.get("scrub_ascii_punct"))
+            .and_then(|v| v.as_bool());
+        let new_scrub = new_global
+            .get("ui")
+            .and_then(|u| u.get("scrub_ascii_punct"))
+            .and_then(|v| v.as_bool());
+        if old_scrub != new_scrub {
+            let enabled = new_scrub.unwrap_or(true);
+            crate::session::helpers::assistant_ascii_scrub::set_config_enabled(enabled);
+            info!(enabled, "scrub_ascii_punct config preference updated");
+        }
+
         self.last_global_config = new_global;
         Ok(())
     }

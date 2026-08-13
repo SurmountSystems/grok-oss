@@ -77,7 +77,7 @@ failure mode was fixed by filtering `VOICE_NO_INPUT_DEVICE_ID` in
 | same tests | `is_command_available_detects_present_and_absent` | unit | Probes `"sh"` / bogus name — soft (sh expected everywhere CI cares about) |
 | `crates/codegen/xai-grok-pager/src/inline_media_ffmpeg.rs` | `ffmpeg_available`, package-manager probe | product | host PATH; tests use **`set_ffmpeg_available_for_test` / install-cmd inject** |
 | `crates/codegen/xai-grok-pager/src/wrap_cmd.rs` | wrap target `is_command_available` | product | host PATH |
-| `crates/codegen/xai-grok-tools/src/util/query_tools.rs` | `QueryTools::detect` (`jq`/`python`/`sed`/`cut`) | product | host PATH; steers only (no hard fail assert in unit tests found) |
+| `crates/codegen/xai-grok-tools/src/util/query_tools.rs` | `QueryTools::detect` (`jq`/`sed`/`cut`; **no python** after A1) | product | host PATH; steers only (no hard fail assert in unit tests found) |
 | `crates/codegen/xai-grok-tools/…/web_fetch/error.rs` | `gh_available` | product | host PATH; unit uses **`which_in` on temp dir** |
 | `crates/codegen/xai-grok-tools/…/embedded_search_tools.rs` | `which::which` + shell `command -v` for bfs/ugrep | product | host PATH for hints; unit tests assert inject string shape / skip if no bash |
 | `crates/codegen/xai-grok-tools/…/shell_state.rs` | `which::which("ugrep")` in test | unit | **Conditional** assert only when ugrep present |

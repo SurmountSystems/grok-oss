@@ -2281,7 +2281,20 @@ pub(super) fn row_layout(
 
 /// Terminal-native themes collapse selection tokens to `Reset`; use ANSI
 /// `DarkGray` (not silver `Gray`, which washes out default fg on dark profiles).
+///
+/// Under DOGE, never paint ANSI DarkGray / Gray — pure 8-colour law. Use the
+/// theme's own surface tokens (all pure black on DOGE) so selection stays on
+/// the palette; focus still reads via bold/fg chrome.
 pub(super) fn settings_list_row_bg(theme: &Theme, is_selected: bool, is_hovered: bool) -> Color {
+    if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
+        return if is_selected {
+            theme.bg_visual
+        } else if is_hovered {
+            theme.bg_hover
+        } else {
+            theme.bg_base
+        };
+    }
     if crate::theme::cache::terminal_native_locked() || matches!(theme.bg_visual, Color::Reset) {
         return if is_selected || is_hovered {
             Color::DarkGray

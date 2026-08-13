@@ -38,10 +38,39 @@ pub struct TitleState<'a> {
     /// Whether the agent is busy (turn or command running), even if
     /// `activity` is `None` (the "Waiting" gap before first chunk).
     pub is_busy: bool,
+    /// Count of busy top-level agents (for `TitleItem::Agents`).
+    pub busy_agent_count: usize,
     /// Whether the terminal pane/window is currently focused (from
     /// FocusTracker). Suppresses title blinking/oscillation while the
     /// user is actively interacting.
     pub focused: bool,
+}
+
+/// Prefer rename (`display_name`) over auto-generated session title.
+///
+/// Empty and whitespace-only strings are treated as missing. Trims the
+/// chosen value for the title slot.
+pub fn resolve_session_title_name<'a>(
+    display_name: Option<&'a str>,
+    generated_session_title: Option<&'a str>,
+) -> Option<&'a str> {
+    display_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            generated_session_title
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+}
+
+/// Format the busy-agent title part. Returns `None` when the count is not
+/// useful in the title (0 or 1 — single-agent activity already covers one).
+pub fn format_busy_agents_title_part(count: usize) -> Option<String> {
+    match count {
+        0 | 1 => None,
+        n => Some(format!("{n} agents")),
+    }
 }
 
 pub struct TitleManager {
@@ -163,6 +192,13 @@ fn write_item(
             push_separator(buf, has_parts);
             write_truncated(buf, name, 40);
         }
+        TitleItem::Agents => {
+            let Some(label) = format_busy_agents_title_part(state.busy_agent_count) else {
+                return false;
+            };
+            push_separator(buf, has_parts);
+            buf.push_str(&label);
+        }
         TitleItem::Model => {
             let Some(model) = state.model.filter(|s| !s.is_empty()) else {
                 return false;
@@ -276,10 +312,18 @@ fn write_truncated(buf: &mut String, s: &str, max: usize) {
 /// Control characters are stripped here: title parts include remote-sourced
 /// strings (e.g. grok.com conversation titles), which must not terminate the
 /// OSC sequence early or inject escapes into the terminal.
+///
+/// Empty or all-control input falls back to the product binary name so we
+/// never emit `SetTitle("")` (blank DE switcher / Alt-~ entry).
 fn build_title_escape(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
+    let payload = if sanitized.is_empty() {
+        PRODUCT_CLI_NAME
+    } else {
+        sanitized.as_str()
+    };
     let mut buf = Vec::new();
-    let _ = crossterm::queue!(&mut buf, SetTitle(sanitized));
+    let _ = crossterm::queue!(&mut buf, SetTitle(payload));
     String::from_utf8(buf).expect("crossterm SetTitle produces valid UTF-8")
 }
 
@@ -307,6 +351,7 @@ mod tests {
             cwd: None,
             turn_elapsed: None,
             is_busy: false,
+            busy_agent_count: 0,
             focused: true,
         }
     }
@@ -902,5 +947,139 @@ mod tests {
             "title payload must be control-free: {inner:?}"
         );
         assert_eq!(inner, "evil]0;pwnedtitle");
+    }
+
+    /// Named contract (blank switcher): dynamic title OSC never carries an
+    /// empty payload. All-control or empty composition falls back to brand.
+    #[test]
+    fn title_escape_never_empty_payload() {
+        for seed in ["", "\x07\x1b\x00", "\u{7}"] {
+            let esc = build_title_escape(seed);
+            let inner = esc
+                .strip_prefix("\u{1b}]0;")
+                .and_then(|s| s.strip_suffix('\u{7}'))
+                .unwrap_or_else(|| panic!("crossterm OSC 0 framing for seed={seed:?}: {esc:?}"));
+            assert!(
+                !inner.is_empty(),
+                "empty OSC title blanks DE switcher; seed={seed:?}"
+            );
+            assert_eq!(inner, PRODUCT_CLI_NAME);
+        }
+        // Session-shaped title stays non-empty and unbranded here (branding
+        // is composition's job via TitleItem::Grok).
+        let esc = build_title_escape("my session");
+        let inner = esc
+            .strip_prefix("\u{1b}]0;")
+            .and_then(|s| s.strip_suffix('\u{7}'))
+            .expect("framing");
+        assert_eq!(inner, "my session");
+    }
+
+    // --- Session name resolution (display rename > generated) ---
+
+    #[test]
+    fn title_state_includes_session_name_from_display_or_generated() {
+        // Named contract: title session slot prefers display_name (rename)
+        // over generated_session_title; empty/whitespace skipped.
+        assert_eq!(
+            resolve_session_title_name(Some("renamed"), Some("auto-title")),
+            Some("renamed")
+        );
+        assert_eq!(
+            resolve_session_title_name(None, Some("auto-title")),
+            Some("auto-title")
+        );
+        assert_eq!(
+            resolve_session_title_name(Some("  "), Some("auto-title")),
+            Some("auto-title")
+        );
+        assert_eq!(resolve_session_title_name(Some(""), Some("")), None);
+        assert_eq!(resolve_session_title_name(None, None), None);
+        assert_eq!(
+            resolve_session_title_name(Some("  keep  "), None),
+            Some("keep")
+        );
+
+        let cfg = config_with_items(vec![TitleItem::SessionName, TitleItem::Grok]);
+        let mut mgr = TitleManager::new(&cfg);
+        let name = resolve_session_title_name(Some("my rename"), Some("generated")).unwrap();
+        let state = TitleState {
+            session_name: Some(name),
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert_eq!(mgr.last_title, "my rename - grok-oss");
+    }
+
+    // --- Busy agent count item ---
+
+    #[test]
+    fn title_state_includes_busy_agent_count() {
+        // Named contract: agents item renders "N agents" when busy count > 1;
+        // skipped at 0/1 (single-agent activity already covers one worker).
+        assert_eq!(format_busy_agents_title_part(0), None);
+        assert_eq!(format_busy_agents_title_part(1), None);
+        assert_eq!(
+            format_busy_agents_title_part(2).as_deref(),
+            Some("2 agents")
+        );
+        assert_eq!(
+            format_busy_agents_title_part(5).as_deref(),
+            Some("5 agents")
+        );
+
+        let cfg = config_with_items(vec![
+            TitleItem::SessionName,
+            TitleItem::Agents,
+            TitleItem::Grok,
+        ]);
+        let mut mgr = TitleManager::new(&cfg);
+        let state = TitleState {
+            session_name: Some("proj"),
+            busy_agent_count: 2,
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert_eq!(mgr.last_title, "proj - 2 agents - grok-oss");
+
+        let state = TitleState {
+            session_name: Some("proj"),
+            busy_agent_count: 1,
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert_eq!(mgr.last_title, "proj - grok-oss");
+    }
+
+    #[test]
+    fn default_title_items_include_agents() {
+        let items = TitleConfig::default().items;
+        assert!(
+            items.contains(&TitleItem::Agents),
+            "default title.items must include agents for multi-agent discoverability: {items:?}"
+        );
+        assert!(
+            items.contains(&TitleItem::SessionName),
+            "default title.items must include session-name: {items:?}"
+        );
+        assert!(
+            items.contains(&TitleItem::Grok),
+            "default title.items must keep brand: {items:?}"
+        );
+    }
+
+    #[test]
+    fn dashboard_title_has_session_when_available() {
+        // Pure helper: dashboard path uses the same resolve + composition.
+        let name = resolve_session_title_name(Some("dash session"), None).unwrap();
+        let cfg = config_with_items(vec![TitleItem::SessionName, TitleItem::Grok]);
+        let mut mgr = TitleManager::new(&cfg);
+        let state = TitleState {
+            session_name: Some(name),
+            busy_agent_count: 0,
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert_eq!(mgr.last_title, "dash session - grok-oss");
     }
 }

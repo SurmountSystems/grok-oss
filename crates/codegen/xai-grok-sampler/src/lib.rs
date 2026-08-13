@@ -23,8 +23,12 @@ pub mod commands;
 pub mod config;
 pub mod doom_loop;
 pub mod events;
+/// Process-local credit/allowance-exhausted credential fingerprints (dual-auth).
+pub mod exhausted_identity;
 pub mod handle;
 pub mod metrics;
+/// Prefer a live dual-auth identity after credit/allowance exhaust (pre-request).
+pub mod prefer_live_primary;
 pub mod retry;
 pub mod sampling_log;
 mod shared_http;
@@ -45,8 +49,18 @@ pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{
     SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason,
 };
+pub use exhausted_identity::{
+    AllowanceExhaustAction, CredentialLabel, HopCause, INCLUDED_ALLOWANCE_EXHAUST_PCT, clear_all,
+    clear_all_including_durable, clear_exhausted, format_credential_hop_reason, format_hop_reason,
+    format_rate_limit_hop_reason, is_credential_exhausted, is_credential_hop_reason, is_exhausted,
+    mark_exhausted, sync_allowance_exhaust_from_usage,
+};
 pub use handle::SamplerHandle;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
+pub use prefer_live_primary::{
+    prefer_live_identity_after_credit_exhaust, primary_is_memoized_credit_exhausted,
+    prune_exhausted_failover_candidates,
+};
 pub use retry::{
     DEFAULT_MAX_RETRIES, MAX_BACKOFF_SECS, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision,
     classify_error, format_sampling_error, is_unlimited_retries, resolve_max_retries,

@@ -214,8 +214,54 @@ pub fn diamond_hollow_char() -> char {
     diamond_hollow().chars().next().unwrap_or('\u{25C7}')
 }
 
-/// Rotating braille progress-spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧`) normally; a
-/// 1-column ASCII spinner (`|`, `/`, `-`, `\`) on legacy ConHost.
+/// DOGE pure-palette activity animation: dashed vertical strokes that cycle
+/// downward (a vertical marquee of stripes / dashes).
+///
+/// Replaces braille / pulsing-dot spinners under DOGE so agent activity never
+/// reads as gray/dim fade. Glyphs are pure box-drawing (no braille density
+/// ramp). Every frame is exactly 1 column.
+///
+/// Order reads as a stripe falling through the cell: heavy vertical ->
+/// dashed -> light dashed -> light vertical -> gap -> entering from top.
+pub fn doge_striped_down_frames() -> &'static [&'static str] {
+    // heavy / dashed / light cycle so the marquee reads slow and striped.
+    const FRAMES: &[&str] = &[
+        "\u{2503}", // ┃ heavy vertical
+        "\u{2507}", // ┇ heavy triple-dash vertical
+        "\u{250b}", // ┋ heavy quadruple-dash vertical
+        "\u{250a}", // ┊ light quadruple-dash vertical
+        "\u{2502}", // │ light vertical
+        "\u{2506}", // ┆ light triple-dash vertical
+        "\u{00b7}", // · middle dot (stripe gap)
+        "\u{2577}", // ╷ light down (stripe entering from top)
+    ];
+    FRAMES
+}
+
+/// Legacy-console / ASCII stand-in for [`doge_striped_down_frames`].
+fn doge_striped_down_frames_ascii() -> &'static [&'static str] {
+    // Classic dashed bar scrolling: | ! : . cycling for a downward feel.
+    const FRAMES: &[&str] = &["|", "!", ":", ".", ":", "!", "|", "."];
+    FRAMES
+}
+
+fn prefers_doge_striped_spinners() -> bool {
+    matches!(
+        crate::theme::Theme::current_kind(),
+        crate::theme::ThemeKind::Doge
+    )
+}
+
+/// Left-side / activity progress-spinner frames.
+///
+/// Normally rotating braille (`⠋⠙⠹…`); a 1-column ASCII spinner
+/// (`|`, `/`, `-`, `\`) on legacy ConHost; under DOGE a long striped
+/// downward marquee (see [`doge_striped_down_frames`]) so thinking /
+/// tool-running chrome never reads as a gray braille density fade.
+///
+/// Right-side status sparkles (top-bar busy-agent count, goal chip, row
+/// running icons) use [`dot_spinner_frames`] instead — those keep the
+/// classic density sparkle under DOGE and must not share this marquee.
 ///
 /// The U+2800 Braille Patterns block is not part of CP437 and renders as
 /// tofu on the legacy console raster font, so the turn-status line, the
@@ -228,21 +274,31 @@ pub fn braille_spinner_frames() -> &'static [&'static str] {
         "\u{2827}",
     ];
     const FALLBACK: &[&str] = &["|", "/", "-", "\\"];
-    if is_legacy_windows_console() {
+    if prefers_doge_striped_spinners() {
+        if is_legacy_windows_console() {
+            doge_striped_down_frames_ascii()
+        } else {
+            doge_striped_down_frames()
+        }
+    } else if is_legacy_windows_console() {
         FALLBACK
     } else {
         FANCY
     }
 }
 
-/// Pulsing dot progress-spinner frames (`⋅ : ⸬ ⁙`) normally; a quiet
-/// 1-column dot cycle (`.`, `:`, `·`) on legacy ConHost.
+/// Pulsing "sparky" dot frames (`⋅ : ⸬ ⁙`) for right-side status chrome and
+/// running-row icons — top-bar busy-agent count, goal chip, Tasks/Dashboard
+/// rows, session picker. A quiet 1-column dot cycle on legacy ConHost.
+///
+/// **Not** the left activity throbber. Under DOGE the left turn-status /
+/// thinking spinner uses [`braille_spinner_frames`] (striped downward
+/// marquee). This API keeps the classic density sparkle on every theme so
+/// the top-right cue does not collapse into the same dashed marquee.
 ///
 /// U+22C5 / U+2E2C / U+2059 are absent from the CP437 raster font, so the
-/// running-subagent / task rows (Tasks pane + Dashboard), the dashboard
-/// status chips, and the active-goal indicators fall back to a quiet dot
-/// cycle there — period, colon, and `·` (U+00B7, CP437 `0xFA`) all render
-/// on the raster font. Every frame in both sets is exactly 1 column.
+/// call sites fall back to a quiet dot cycle there. Every frame in both
+/// sets is exactly 1 column.
 pub fn dot_spinner_frames() -> &'static [&'static str] {
     const FANCY: &[&str] = &[
         "\u{22c5}", ":", "\u{2e2c}", "\u{2059}", "\u{22c5}", ":", "\u{2e2c}", "\u{2059}",
@@ -267,6 +323,103 @@ pub fn accent_bar() -> &'static str {
         "\u{2502}"
     } else {
         "\u{2503}"
+    }
+}
+
+/// Static striped (dashed) vertical for Yellow context/time rails.
+///
+/// Solid `┃` is the Human/Agent rail; context meta uses a dashed bar so it
+/// reads as stripes even when not animating. Legacy ConHost keeps light `│`.
+pub fn striped_accent_bar() -> &'static str {
+    if is_legacy_windows_console() {
+        "\u{2502}" // │
+    } else {
+        "\u{2507}" // ┇ heavy triple-dash vertical
+    }
+}
+
+/// Frame from the DOGE striped-down marquee for an animated striped rail.
+///
+/// `tick` advances the marquee; `row` offsets so a multi-row rail reads as
+/// stripes falling **downward**. Always 1 column.
+///
+/// Phase uses `phase - row` (not `phase + row`): with increasing tick, the
+/// glyph that was on row `r` appears on row `r + 1` next frame — pattern
+/// shifts down the rail. `phase + row` made stripes crawl **up**.
+pub fn striped_accent_bar_frame(tick: u64, row: u16) -> &'static str {
+    let frames = if is_legacy_windows_console() {
+        doge_striped_down_frames_ascii()
+    } else {
+        doge_striped_down_frames()
+    };
+    // Slow the cycle: advance one frame every 4 ticks so the marquee is
+    // readable (~7.5 fps at the default 30fps animation clock).
+    let n = frames.len() as u64;
+    let phase = tick / 4;
+    let row_off = u64::from(row) % n;
+    // (phase - row) mod n — downward marquee on a top-to-bottom row axis.
+    let idx = (phase + n - row_off) % n;
+    frames[idx as usize]
+}
+
+/// Composer caret: **solid** half of the classic full-cell block blink.
+///
+/// Paired with [`cursor_box_hollow`] as one **box/block caret family**: solid
+/// filled cell ↔ true empty cell of the **same terminal-cell silhouette**
+/// (Alacritty-style block on/off). Outer height is the cell itself via the
+/// background plate on the solid half — not outline glyph metrics.
+///
+/// Glyph (paint pairs with `fg = bg = accent` solid plate):
+/// - `█` U+2588 FULL BLOCK (classic solid block ink on the plate).
+/// - Legacy ConHost: `#`.
+///
+/// Rejected mates for the *empty* half: canvas hole-punch on an accent plate
+/// (`■` with `fg=canvas bg=accent` — reads as a green tile with a void),
+/// dimming the solid `█`, skinny `▯`, medium `◼`/`◻`, tiny mid-cell `□`,
+/// and short outline quads (`⎕` / `□`) whose ink is only a fraction of the
+/// cell in common monospace (e.g. Noto Sans Mono).
+pub fn cursor_box_filled() -> &'static str {
+    if is_legacy_windows_console() {
+        "#"
+    } else {
+        "\u{2588}" // █ FULL BLOCK
+    }
+}
+
+/// Composer caret: **empty** half of the classic full-cell block blink.
+///
+/// Mate of [`cursor_box_filled`]: **true empty cell** — a single space with
+/// **no** accent plate (paint: `fg = bg = canvas`). Blink is solid plate
+/// on/off of the same cell rectangle, not a green frame with a dark hole
+/// and not a dimmed solid.
+///
+/// Glyph:
+/// - ` ` U+0020 SPACE (empty cell; silhouette is the terminal cell itself).
+/// - Legacy ConHost: same space (no ASCII stand-in hole).
+///
+/// Rejected empty shapes: `■` hole-punch on accent plate, dim `█`, skinny
+/// `▯`, medium `◻`/`◼`, tiny `□`, short APL quad `⎕`.
+pub fn cursor_box_hollow() -> &'static str {
+    // Classic block empty half: plain space. Paint path must not put an
+    // accent background plate behind this glyph.
+    " "
+}
+
+/// Half-period for the composer filled↔empty block blink (milliseconds).
+/// ~600ms keeps the blink slow and readable (not seizure-fast).
+pub const CURSOR_BOX_BLINK_HALF_MS: u64 = 600;
+
+/// Whether the filled (solid plate) phase is showing at `now_ms` (monotonic millis).
+pub fn cursor_box_filled_phase(now_ms: u64) -> bool {
+    (now_ms / CURSOR_BOX_BLINK_HALF_MS).is_multiple_of(2)
+}
+
+/// Glyph for the composer caret at `now_ms` (filled `█` or empty space).
+pub fn cursor_box_glyph(now_ms: u64) -> &'static str {
+    if cursor_box_filled_phase(now_ms) {
+        cursor_box_filled()
+    } else {
+        cursor_box_hollow()
     }
 }
 
@@ -463,6 +616,39 @@ pub fn enlarge_button() -> &'static str {
     }
 }
 
+/// `"−"` (U+2212 MINUS SIGN) normally, `"-"` on legacy ConHost. Always 1
+/// column wide.
+///
+/// Todo-pane **clear finished** icon: remove finished rows off the live board
+/// (completed + cancelled). Minus reads as ordinary chrome "take off the
+/// board" without colliding with close/kill [`ballot_x`] or done
+/// [`check_mark`], and without the empty-set glyph that dogfood rejected as
+/// garbage in common fonts. No broom / trash glyph ships in the chrome set.
+/// Bracketed form: [`clear_finished_button`].
+pub fn clear_finished_icon() -> &'static str {
+    if is_legacy_windows_console() {
+        "-"
+    } else {
+        "\u{2212}"
+    }
+}
+
+/// `"[−]"` normally, `"[-]"` on legacy ConHost. Always 3 columns wide.
+///
+/// Pre-composed bracketed sibling of [`clear_finished_icon`] for todo-pane
+/// chrome (matches [`ballot_x_button`] / [`enlarge_button`] affordance).
+/// Tooltip / action label / status hints still say "Clear finished"; the
+/// painted control is this compact icon only. Product paints it when the todo
+/// board is open and finished rows exist (not always-on top-right; not
+/// focus-only).
+pub fn clear_finished_button() -> &'static str {
+    if is_legacy_windows_console() {
+        "[-]"
+    } else {
+        "[\u{2212}]"
+    }
+}
+
 /// Substitute the chrome glyphs that legacy ConHost can't render with
 /// legacy-console-safe equivalents (`✓` → `√`, `✗` → `x`, `⚠` → `!`) in
 /// free-flowing status text such as toasts.
@@ -621,6 +807,12 @@ mod tests {
                 "fallback {fallback:?} must be 1 column"
             );
         }
+        // Live helper (legacy or fancy) stays 1 col so fixed `[⧉]` hit widths hold.
+        assert_eq!(
+            copy_icon().width(),
+            1,
+            "copy_icon() must stay 1 column wide"
+        );
     }
 
     // Every diamond glyph and its legacy fallback must be exactly one
@@ -673,6 +865,8 @@ mod tests {
         for frame in braille_spinner_frames()
             .iter()
             .chain(dot_spinner_frames().iter())
+            .chain(doge_striped_down_frames().iter())
+            .chain(doge_striped_down_frames_ascii().iter())
             .chain(monitor_icon_frames().iter())
             .chain(
                 [
@@ -685,18 +879,249 @@ mod tests {
         }
     }
 
+    /// Striped accent bars and composer box cursors are 1 column.
+    #[test]
+    fn striped_rail_and_cursor_box_glyphs_are_one_column() {
+        assert_eq!(striped_accent_bar().width(), 1);
+        assert_eq!(cursor_box_filled().width(), 1);
+        assert_eq!(cursor_box_hollow().width(), 1);
+        // Solid block vs empty space are distinct glyphs, both 1 col.
+        assert_ne!(
+            cursor_box_filled(),
+            cursor_box_hollow(),
+            "solid filled and empty space must be different glyphs"
+        );
+        for t in 0..32u64 {
+            assert_eq!(striped_accent_bar_frame(t, 0).width(), 1);
+            assert_eq!(cursor_box_glyph(t * CURSOR_BOX_BLINK_HALF_MS).width(), 1);
+        }
+    }
+
+    /// Classic block pair: solid = full-cell `█` plate mate; empty = space
+    /// (true empty cell, no accent plate). Same cell silhouette via on/off
+    /// fill — not hole-punch `■` on green plate, not dim `█`, not short
+    /// outline quads. Outer height is the terminal cell, not glyph metrics.
+    #[test]
+    fn cursor_box_pair_is_matching_box_rectangles() {
+        // Empty half is always a plain space (classic block off).
+        assert_eq!(cursor_box_hollow(), " ");
+        if is_legacy_windows_console() {
+            assert_eq!(cursor_box_filled(), "#");
+            assert_ne!(cursor_box_filled(), cursor_box_hollow());
+            return;
+        }
+        // Solid: █ FULL BLOCK. Empty: space (no hole-punch square).
+        assert_eq!(cursor_box_filled(), "\u{2588}");
+        assert_ne!(
+            cursor_box_filled(),
+            cursor_box_hollow(),
+            "empty half must be space, not the solid full block"
+        );
+        // Reject empty shapes operator already turned down / hole-punch / short.
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{2588}",
+            "empty must not be FULL BLOCK (dim-of-solid / style-on-█ path)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25a0}",
+            "empty must not be BLACK SQUARE hole-punch (green plate + void)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25af}",
+            "must not be WHITE VERTICAL RECTANGLE (skinny ▯)"
+        );
+        assert_ne!(
+            cursor_box_filled(),
+            "\u{25fc}",
+            "must not be BLACK MEDIUM SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25fb}",
+            "must not be WHITE MEDIUM SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25a1}",
+            "must not be tiny WHITE SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{2395}",
+            "must not be short APL QUAD outline (mid-cell in common mono)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "O",
+            "empty must not be legacy ASCII hole stand-in"
+        );
+    }
+
+    /// Composer caret slowly alternates solid ↔ empty (~600ms half).
+    /// Glyph and phase both change: solid `█` vs empty space.
+    #[test]
+    fn cursor_box_blink_alternates_filled_and_hollow() {
+        let half = CURSOR_BOX_BLINK_HALF_MS;
+        assert!(
+            half >= 500 && half <= 800,
+            "half-period must be slow/readable"
+        );
+        assert!(cursor_box_filled_phase(0));
+        assert_eq!(cursor_box_glyph(0), cursor_box_filled());
+        assert!(!cursor_box_filled_phase(half));
+        assert_eq!(cursor_box_glyph(half), cursor_box_hollow());
+        // Solid vs empty: glyphs differ across the half-period.
+        assert_ne!(
+            cursor_box_glyph(0),
+            cursor_box_glyph(half),
+            "filled and empty phases must use different glyphs"
+        );
+        assert_ne!(
+            cursor_box_filled_phase(0),
+            cursor_box_filled_phase(half),
+            "filled↔empty phase must toggle with time"
+        );
+        assert!(cursor_box_filled_phase(half * 2));
+        assert_eq!(cursor_box_glyph(half * 2), cursor_box_filled());
+    }
+
+    /// Multi-row striped rail: as tick advances one frame, each glyph moves
+    /// to the row **below** (down the screen), not above.
+    ///
+    /// Contract: glyph at (phase, row) == glyph at (phase + 1, row + 1).
+    /// That is the definition of a downward-scrolling marquee when row 0 is
+    /// the top of the rail. The old `phase + row` index made stripes crawl up.
+    #[test]
+    fn striped_accent_bar_marquee_moves_down_not_up() {
+        assert!(!is_legacy_windows_console());
+        let n = doge_striped_down_frames().len() as u64;
+        assert!(n >= 2, "need at least two frames to observe motion");
+        for phase in 0..n {
+            let tick0 = phase * 4;
+            let tick1 = (phase + 1) * 4;
+            for row in 0..16u16 {
+                let g0 = striped_accent_bar_frame(tick0, row);
+                let g_down = striped_accent_bar_frame(tick1, row + 1);
+                assert_eq!(
+                    g0,
+                    g_down,
+                    "downward marquee: glyph at row {row} phase {phase} must \
+                     appear at row {} next phase (got {g0:?} vs {g_down:?})",
+                    row + 1
+                );
+                // Explicit anti-contract: must NOT match the row above.
+                if row > 0 {
+                    let g_up = striped_accent_bar_frame(tick1, row - 1);
+                    assert_ne!(
+                        g0,
+                        g_up,
+                        "must not crawl upward: glyph at row {row} phase {phase} \
+                         must not equal row {} next phase",
+                        row - 1
+                    );
+                }
+            }
+        }
+        // Single-cell path (row 0) still advances through the frame set.
+        let f0 = striped_accent_bar_frame(0, 0);
+        let f1 = striped_accent_bar_frame(4, 0);
+        assert_ne!(f0, f1, "row-0 spinner must still advance frames over time");
+    }
+
+    /// Under DOGE, the *left* activity spinner (braille API) uses the striped
+    /// downward marquee — not braille density ramps.
+    #[test]
+    fn doge_activity_spinners_use_striped_down_marquee_not_braille() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        assert!(!is_legacy_windows_console());
+        let striped = doge_striped_down_frames();
+        assert!(
+            striped.len() >= 6,
+            "striped marquee must be a long cycle, got {}",
+            striped.len()
+        );
+        assert_eq!(braille_spinner_frames(), striped);
+        // Must not be the legacy braille first frame.
+        assert_ne!(striped[0], "\u{280b}");
+        // Must include dashed verticals (the stripe look).
+        assert!(
+            striped
+                .iter()
+                .any(|f| *f == "\u{2507}" || *f == "\u{250b}" || *f == "\u{250a}"),
+            "expected dashed vertical stripe glyphs in {striped:?}"
+        );
+    }
+
+    /// Under DOGE, right-side status sparkles keep the classic density
+    /// frames (`⋅ : ⸬ ⁙`) and must not share the left dashed marquee.
+    ///
+    /// Top-bar busy-agent count, goal chip, and Tasks/Dashboard row icons
+    /// all call [`dot_spinner_frames`]; collapsing them onto
+    /// [`doge_striped_down_frames`] made the right chrome look like a second
+    /// copy of the left activity throbber.
+    #[test]
+    fn doge_right_status_sparkle_keeps_classic_dot_frames_not_striped() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        assert!(!is_legacy_windows_console());
+        let sparkle = dot_spinner_frames();
+        let striped = doge_striped_down_frames();
+        assert_ne!(
+            sparkle, striped,
+            "right-side sparkle must not reuse the left dashed marquee"
+        );
+        // Classic density sparkle: middle-dot · density ramp · four-dot cluster.
+        assert_eq!(sparkle[0], "\u{22c5}"); // ⋅
+        assert_eq!(sparkle[1], ":");
+        assert_eq!(sparkle[2], "\u{2e2c}"); // ⸬
+        assert_eq!(sparkle[3], "\u{2059}"); // ⁙
+        // No dashed vertical box-drawing in the sparkle set.
+        assert!(
+            sparkle.iter().all(|f| {
+                *f != "\u{2503}"
+                    && *f != "\u{2507}"
+                    && *f != "\u{250b}"
+                    && *f != "\u{250a}"
+                    && *f != "\u{2502}"
+                    && *f != "\u{2506}"
+                    && *f != "\u{2577}"
+            }),
+            "sparkle frames must not include striped-marquee glyphs: {sparkle:?}"
+        );
+    }
+
+    /// Non-DOGE themes keep classic braille / dot fancy frames.
+    #[test]
+    fn non_doge_spinners_keep_braille_and_dot_frames() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        assert!(!is_legacy_windows_console());
+        assert_eq!(braille_spinner_frames()[0], "\u{280b}");
+        assert_eq!(dot_spinner_frames()[2], "\u{2e2c}");
+    }
+
     // On the (non-Windows) test host the helpers must return the fancy
     // glyphs, and the `char` helpers must agree with their `&str` siblings.
     #[test]
     fn glyph_helpers_return_fancy_on_non_legacy() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
         assert!(!is_legacy_windows_console());
         assert_eq!(diamond_filled(), "\u{25C6}");
         assert_eq!(diamond_hollow(), "\u{25C7}");
         assert_eq!(diamond_dotted(), "\u{25C8}");
         assert_eq!(diamond_filled_char(), '\u{25C6}');
         assert_eq!(diamond_hollow_char(), '\u{25C7}');
-        assert_eq!(braille_spinner_frames()[0], "\u{280b}");
+        // Left activity under DOGE → striped marquee (not braille).
+        assert_eq!(braille_spinner_frames(), doge_striped_down_frames());
+        // Right sparkle under DOGE → classic density frames (not striped).
+        assert_eq!(dot_spinner_frames()[0], "\u{22c5}");
         assert_eq!(dot_spinner_frames()[2], "\u{2e2c}");
+        assert_ne!(dot_spinner_frames(), doge_striped_down_frames());
         assert_eq!(
             monitor_icon_frames(),
             ["\u{25CB}", "\u{25CE}", "\u{25C9}", "\u{25CE}"]
@@ -711,6 +1136,7 @@ mod tests {
         for (fancy, fallback, cols) in [
             ("[\u{2717}]", "[x]", 3), // ballot_x_button
             ("[\u{2197}]", "[o]", 3), // enlarge_button
+            ("[\u{2212}]", "[-]", 3), // clear_finished_button
         ] {
             assert_eq!(fancy.width(), cols, "button {fancy:?} must be {cols} cols");
             assert_eq!(

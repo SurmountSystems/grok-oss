@@ -12,15 +12,19 @@ pub mod ask_user_question;
 pub mod bash;
 #[path = "deploy_app_stub.rs"]
 pub mod deploy_app;
+pub mod disable_ascii_scrub;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
 pub mod grep;
 pub mod image_edit;
 pub mod image_gen;
+pub mod implement_memory;
+pub mod json_to_toon;
 pub mod kill_task;
 pub mod list_dir;
 pub mod lsp;
 pub mod monitor;
+pub mod plan_validate;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
@@ -36,6 +40,10 @@ pub mod workflow;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
+pub use disable_ascii_scrub::{
+    DISABLE_ASCII_SCRUB_TOOL_NAME, DisableAsciiScrubInput, DisableAsciiScrubOutput,
+    DisableAsciiScrubTool,
+};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use grep::GrepTool;
@@ -44,10 +52,17 @@ pub use image_gen::{
     IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, ImageGenTool, imagine_instruction,
     imagine_usage_message,
 };
+pub use implement_memory::{
+    IMPLEMENT_MEMORY_TOOL_NAME, ImplementMemoryInput, ImplementMemoryOutput, ImplementMemoryTool,
+};
+pub use json_to_toon::{JSON_TO_TOON_TOOL_NAME, JsonToToonInput, JsonToToonOutput, JsonToToonTool};
 pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;
+pub use plan_validate::{
+    PLAN_VALIDATE_TOOL_NAME, PlanValidateInput, PlanValidateOutput, PlanValidateTool,
+};
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{
     LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,

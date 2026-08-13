@@ -1,4 +1,5 @@
 pub(crate) mod api_key_probe;
+pub mod allowance_exhaust_from_billing;
 pub(crate) mod attribution;
 mod auth_provider;
 mod config;
@@ -7,6 +8,7 @@ pub mod credentials_store;
 #[path = "devbox_login_stub.rs"]
 pub(crate) mod devbox_login;
 pub(crate) mod device_code;
+pub mod dual_auth_status;
 pub mod error;
 mod external_auth;
 mod flow;
@@ -18,13 +20,18 @@ pub mod oidc;
 pub mod openrouter;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
+pub mod secret_entry;
+pub mod secret_store_progress;
 pub(crate) mod single_flight;
 mod storage;
+pub mod supergrok_identity_rank;
 mod token_output;
 pub(crate) mod token_type;
 pub(crate) use api_key_probe::{
     DEFAULT_PROBE_TIMEOUT, first_party_env_key_allows_advertise, should_probe_first_party_env_key,
 };
+pub mod xai_console;
+pub mod xai_management;
 pub use auth_provider::{AuthProviderConfig, AuthProviderRef};
 pub(crate) use auth_provider::{
     PROVIDER_TIMEOUT_CEILING_SECS, PROVIDER_TOKEN_EXPIRY_SKEW_SECS, ProviderRefreshOutcome,
@@ -48,11 +55,27 @@ pub use flow::{
 };
 pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
 mod meta;
+pub use allowance_exhaust_from_billing::{
+    SupergrokBillingPollTarget, active_supergrok_identity_id,
+    apply_billing_usage_to_session_exhaust, apply_billing_usage_to_session_exhaust_with_period,
+    clear_included_billing_cache, included_billing_fields_snapshot, load_all_session_access_tokens,
+    load_non_active_supergrok_billing_poll_targets, load_session_access_token,
+    load_supergrok_billing_poll_targets, load_supergrok_session_candidates,
+    remember_active_supergrok_included_billing, remember_supergrok_included_billing,
+    supergrok_out_of_allowance_with_console_ready,
+};
+pub use dual_auth_status::{
+    DualAuthStatus, collect_dual_auth_status, collect_dual_auth_status_with,
+};
 pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
 pub use manager::{AuthManager, shared_api_key_provider};
 pub(crate) use manager::{AuthRemedy, SilentRefresh};
 pub use meta::{AuthMeta, GateInfo};
-pub use model::{AuthMode, GrokAuth, lookup_auth};
+pub use model::{
+    AuthMode, GrokAuth, SupergrokPrincipalListing, fingerprint_session_token,
+    list_supergrok_principal_listings, lookup_auth, multi_slot_scope_for_auth,
+    upsert_supergrok_session,
+};
 pub(crate) use model::{TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired};
 pub(crate) use refresh::DiagnosticUploader;
 pub use harness_secrets::{
@@ -68,4 +91,39 @@ pub use openrouter::{
     openrouter_balance_usd_from_credits, run_openrouter_login, run_openrouter_logout,
     store_openrouter_api_key, usd_to_cents,
 };
+pub use secret_entry::{
+    API_KEY_STDIN_SENTINEL, CliApiKeyError, is_argv_api_key_secret, materialize_cli_api_key,
+    materialize_cli_api_key_with, prompt_api_key_no_echo, read_api_key_from_stdin,
+};
 pub use storage::{clear_api_key, read_api_key, read_auth_json, store_api_key};
+pub use supergrok_identity_rank::{
+    AutoCredentialOrder, AutoSupergrokOrder, IncludedBillingFields, PickSupergrokForAuto,
+    SupergrokAccountRole, SupergrokIdentityHeadroom, SupergrokPrincipalSlot,
+    SupergrokPrincipalSlotInput, SupergrokSessionCandidate, apply_included_billing_to_headroom,
+    enrich_candidates_with_included_billing, included_remaining_from_usage_pct,
+    list_supergrok_principal_slots, order_after_supergrok_included_exhaust,
+    order_credentials_for_preferred_auto, order_live_supergrok_for_auto,
+    pick_supergrok_identity_for_auto, preferred_is_console_primary,
+    preferred_uses_supergrok_auto_rank, principal_limits_label, reset_at_from_period_end,
+    role_from_session_fields, role_label,
+};
+pub use xai_console::{
+    XAI_CONSOLE_API_URL, XaiConsoleAuthError, add_console_api_key, clear_console_api_key,
+    credential_url as xai_console_credential_url, fingerprint_console_key,
+    list_console_api_key_fingerprints, load_stored_console_api_key, load_stored_console_api_keys,
+    run_list_console_api_keys, run_xai_console_login, store_console_api_key,
+};
+/// Outcome of applying SuperGrok included-usage % to the out-of-allowance memo.
+pub use xai_grok_sampler::AllowanceExhaustAction;
+pub use xai_management::{
+    ConsoleTeamPrepaidMeter, MANAGEMENT_API_BASE_URL, MANAGEMENT_CREDENTIAL_URL,
+    ManagementAuthError, PrepaidBalanceResponse, UsdCentsVal, cached_console_team_prepaid,
+    cached_console_team_prepaid_cents_default, clear_console_team_prepaid_cache,
+    clear_management_api_key, console_team_prepaid_from_response,
+    fetch_console_team_prepaid_balance, fetch_console_team_prepaid_balance_at,
+    fetch_console_team_prepaid_balance_default, fingerprint_management_key,
+    load_stored_management_api_key, management_api_base, management_credential_url,
+    prepaid_balance_path, prepaid_remaining_cents_from_total_val, resolve_management_api_key,
+    resolve_management_api_key_default, resolve_management_team_id,
+    resolve_management_team_id_default, store_management_api_key,
+};

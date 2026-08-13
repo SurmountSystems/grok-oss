@@ -2,6 +2,40 @@ use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use xai_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
+    /// Write live auto-compact threshold Cells (model switch + settings live-apply).
+    ///
+    /// When `tokens` is `Some(t)` with `t > 0`, absolute-token mode wins and
+    /// display percent is recomputed from the session's catalog window (or
+    /// the caller's `percent` when the window is unset). Percent-only mode
+    /// clears `threshold_tokens`.
+    pub(crate) fn apply_auto_compact_threshold(&self, percent: u8, tokens: Option<u64>) {
+        let (new_percent, new_tokens) = match tokens.filter(|&t| t > 0) {
+            Some(t) => {
+                let cw = self.compaction.model_context_window.get();
+                let display = if cw > 0 {
+                    crate::util::config::AutoCompactThreshold::Tokens(t).as_percent_of(cw)
+                } else {
+                    percent.min(100)
+                };
+                (display, Some(t))
+            }
+            None => (percent.min(100), None),
+        };
+        let prev_threshold = self.compaction.threshold_percent.get();
+        let prev_tokens = self.compaction.threshold_tokens.get();
+        if prev_threshold != new_percent || prev_tokens != new_tokens {
+            tracing::info!(
+                session_id = %self.session_info.id.0,
+                old_threshold = prev_threshold,
+                new_threshold = new_percent,
+                ?new_tokens,
+                "auto_compact_threshold updated live"
+            );
+        }
+        self.compaction.threshold_percent.set(new_percent);
+        self.compaction.threshold_tokens.set(new_tokens);
+    }
+
     pub(super) async fn handle_set_session_model(
         &self,
         sampling_config: xai_grok_sampler::SamplerConfig,
@@ -27,26 +61,11 @@ impl SessionActor {
             );
             std::num::NonZeroU64::new(capped).unwrap_or(catalog_context_window)
         });
-        let prev_threshold = self.compaction.threshold_percent.get();
-        let prev_tokens = self.compaction.threshold_tokens.get();
-        if prev_threshold != auto_compact_threshold_percent
-            || prev_tokens != auto_compact_threshold_tokens
-        {
-            tracing::info!(
-                session_id = %self.session_info.id.0,
-                new_model = %sampling_config.model,
-                old_threshold = prev_threshold,
-                new_threshold = auto_compact_threshold_percent,
-                ?auto_compact_threshold_tokens,
-                "auto_compact_threshold updated for model switch"
-            );
-        }
-        self.compaction
-            .threshold_percent
-            .set(auto_compact_threshold_percent);
-        self.compaction
-            .threshold_tokens
-            .set(auto_compact_threshold_tokens);
+        // Apply after model_context_window is set so token-mode display % is correct.
+        self.apply_auto_compact_threshold(
+            auto_compact_threshold_percent,
+            auto_compact_threshold_tokens,
+        );
         self.supports_backend_search
             .set(sampling_config.supports_backend_search);
         self.compactions_remaining
@@ -86,6 +105,9 @@ impl SessionActor {
             .update_credentials(xai_chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
                 failover_api_keys: sampling_config.failover_api_keys.clone(),
+                failover_base_url: sampling_config.failover_base_url.clone(),
+                session_base_url: sampling_config.session_base_url.clone(),
+                session_identity_key: sampling_config.session_identity_key.clone(),
                 auth_type: crate::agent::config::resolve_chat_state_auth_type(
                     sampling_config.model.as_str(),
                     session_key.as_deref(),

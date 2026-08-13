@@ -8,6 +8,7 @@ pub mod announcements;
 pub mod auto;
 pub mod btw;
 pub mod cd;
+pub mod clear_completed_todos;
 pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
@@ -35,6 +36,7 @@ pub mod imagine;
 pub mod imagine_video;
 pub mod import_claude;
 pub mod jump;
+pub mod limits;
 pub mod login;
 pub mod logout;
 pub mod loop_cmd;
@@ -55,6 +57,7 @@ pub mod rename;
 pub mod resume;
 pub mod rewind;
 pub mod screen_mode_switch;
+pub mod screenshot;
 pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
@@ -91,6 +94,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(find::FindCommand),
         Arc::new(history::HistoryCommand),
         Arc::new(export::ExportCommand),
+        Arc::new(screenshot::ScreenshotCommand),
         Arc::new(transcript::TranscriptCommand),
         Arc::new(edit_prompt::EditPromptCommand),
         Arc::new(expand::ExpandCommand),
@@ -141,8 +145,10 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(logout::LogoutCommand),
         Arc::new(import_claude::ImportClaudeCommand),
         Arc::new(usage::UsageCommand),
+        Arc::new(limits::LimitsCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
+        Arc::new(clear_completed_todos::ClearCompletedTodosCommand),
         Arc::new(note::NoteCommand),
         Arc::new(release_notes::ReleaseNotesCommand),
         Arc::new(tutorial::TutorialCommand),
@@ -257,6 +263,7 @@ mod tests {
             "changelog",
             "chat",
             "clear",
+            "clear-completed-todos",
             "cloud",
             "compact",
             "compact-mode",
@@ -293,6 +300,7 @@ mod tests {
             "imagine-video",
             "import-claude",
             "jump",
+            "limits",
             "login",
             "logout",
             "log",
@@ -308,6 +316,7 @@ mod tests {
             "note",
             "notes",
             "onboarding",
+            "options",
             "personas",
             "plan",
             "plan-view",
@@ -324,6 +333,7 @@ mod tests {
             "resume",
             "rewind",
             "scroll-debug",
+            "screenshot",
             "session-info",
             "sessions",
             "settings",

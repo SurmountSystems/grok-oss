@@ -844,6 +844,11 @@ pub struct Terminal(pub Arc<dyn TerminalBackend>);
 /// the subagent's own tasks on a shared terminal backend.
 #[derive(Debug, Clone)]
 pub struct OwnerSessionId(pub String);
+/// Optional session-scoped work join ULID (usage.jsonl / cleared_todos).
+///
+/// Loaded from `{session_dir}/work_ulid` when present (subagent spawn writes it).
+#[derive(Debug, Clone)]
+pub struct SessionWorkUlid(pub String);
 /// Shared citation counter for `[web:N]` numbering across web tools.
 ///
 /// Stored as `State<WebCitationCounter>` in Resources so web tools that emit

@@ -412,12 +412,28 @@ pub fn minimal_btw_surface_available(v: &AgentView) -> bool {
 
 /// Start a correlated minimal `/btw` loading panel on this agent.
 pub fn start_minimal_btw(v: &mut AgentView, question: String) -> uuid::Uuid {
+    start_minimal_btw_with_context(v, question, Vec::new(), None)
+}
+
+/// Start minimal `/btw` loading with optional multi-turn context.
+pub fn start_minimal_btw_with_context(
+    v: &mut AgentView,
+    question: String,
+    prior_turns: Vec<crate::views::btw_overlay::BtwTurn>,
+    btw_session_id: Option<String>,
+) -> uuid::Uuid {
     let request_id = uuid::Uuid::new_v4();
     v.minimal_btw_lifecycle = Some(MinimalBtwLifecycle::Active {
         request_id: Some(request_id),
         revision: uuid::Uuid::new_v4(),
     });
-    v.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading { question });
+    v.btw_state = Some(
+        crate::views::btw_overlay::BtwOverlayState::loading_follow_up(
+            question,
+            prior_turns,
+            btw_session_id,
+        ),
+    );
     v.btw_focused = false;
     request_id
 }
@@ -427,6 +443,7 @@ pub fn finish_minimal_btw(
     v: &mut AgentView,
     request_id: uuid::Uuid,
     result: Result<String, String>,
+    btw_session_id: Option<String>,
 ) -> bool {
     let Some(MinimalBtwLifecycle::Active {
         request_id: Some(active_id),
@@ -438,24 +455,27 @@ pub fn finish_minimal_btw(
     if active_id != request_id {
         return false;
     }
-    let Some(crate::views::btw_overlay::BtwOverlayState::Loading { question }) = v.btw_state.take()
-    else {
+    let Some(loading) = v.btw_state.take() else {
         return false;
     };
+    if !matches!(
+        loading,
+        crate::views::btw_overlay::BtwOverlayState::Loading { .. }
+    ) {
+        v.btw_state = Some(loading);
+        return false;
+    }
     v.minimal_btw_lifecycle = Some(MinimalBtwLifecycle::Active {
         request_id: None,
         revision: uuid::Uuid::new_v4(),
     });
     match result {
         Ok(response) => {
-            v.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::done(
-                question, response,
-            ));
+            v.btw_state = Some(loading.finish_loading(response, btw_session_id));
             v.btw_focused = true;
         }
         Err(error) => {
-            v.btw_state =
-                Some(crate::views::btw_overlay::BtwOverlayState::Error { question, error });
+            v.btw_state = Some(loading.finish_loading_error(error));
             v.btw_focused = false;
         }
     }
@@ -849,6 +869,18 @@ pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_plan_mode_active(v: &mut AgentView, on: bool) {
     v.plan_mode_active = on;
+}
+
+/// Test-only setter for `AgentView::plan_approval_view` (minimal plan-strip CTAs).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_plan_approval_view(v: &mut AgentView, val: Option<PlanApprovalViewState>) {
+    v.plan_approval_view = val;
+}
+
+/// Test-only: whether the plan line viewer is open.
+#[cfg(any(test, feature = "test-support"))]
+pub fn line_viewer_is_some(v: &AgentView) -> bool {
+    v.line_viewer.is_some()
 }
 
 /// Test-only setter for `AgentView::plan_mode_pending`.

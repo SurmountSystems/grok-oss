@@ -177,6 +177,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
             login_label,
             has_auth_provider_command,
         ),
+        // Unset preferred_method: advertise both (ranking is auto_use_included_limits).
         None => build_unpinned(
             has_external_api_key,
             has_cached_token,
@@ -419,7 +420,9 @@ pub(crate) fn method_id_after_cached_token_unavailable(
     preferred_method: Option<PreferredAuthMethod>,
 ) -> Option<&'static str> {
     match preferred_method {
+        // Strict pins: no fallthrough.
         Some(PreferredAuthMethod::Oidc) | Some(PreferredAuthMethod::ApiKey) => None,
+        // Unset preferred_method: may use console after SuperGrok included exhaust.
         None => Some(if has_external_api_key {
             XAI_API_KEY_METHOD_ID
         } else {
@@ -1176,5 +1179,37 @@ mod tests {
         });
         assert_eq!(method_ids(&built), vec![GROK_COM_METHOD_ID]);
         assert!(built.default_auth_method_id.is_none());
+    }
+
+    #[test]
+    fn unpinned_preferred_advertises_session_and_api_key() {
+        let built = build_auth_methods(AuthMethodsBuildInputs {
+            has_external_api_key: true,
+            has_cached_token: true,
+            preferred_method: None,
+            ..default_inputs()
+        });
+        let ids = method_ids(&built);
+        assert!(
+            ids.contains(&XAI_API_KEY_METHOD_ID),
+            "unpinned keeps console method for post-exhaust failover: {ids:?}"
+        );
+        assert!(
+            ids.contains(&CACHED_TOKEN_AUTH_METHOD_ID),
+            "unpinned keeps SuperGrok session method: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn after_cached_token_unavailable_unpinned_may_fall_to_api_key() {
+        assert_eq!(
+            method_id_after_cached_token_unavailable(true, None),
+            Some(XAI_API_KEY_METHOD_ID)
+        );
+        assert_eq!(
+            method_id_after_cached_token_unavailable(true, Some(PreferredAuthMethod::Oidc)),
+            None,
+            "strict oauth pin still fails closed"
+        );
     }
 }

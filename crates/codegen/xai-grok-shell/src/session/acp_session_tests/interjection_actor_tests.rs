@@ -3,9 +3,10 @@
 use super::support::*;
 use super::*;
 
-/// Send-now of an image-bearing queued prompt keeps its `ContentBlock::Image`s on the promoted row.
+/// Soft interject of an image-bearing queued prompt harvests images into
+/// `pending_interjections` and never cancels.
 #[tokio::test]
-async fn queue_send_now_keeps_prompt_block_images_on_promoted_row() {
+async fn interject_contract_queued_prompt_images_ride_pending_interjections() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -28,26 +29,20 @@ async fn queue_send_now_keeps_prompt_block_images_on_promoted_row() {
             let cancel = actor
                 .handle_interject_queued_prompt("p1", 0, None, None)
                 .await;
-            assert!(cancel, "promotion behind a running turn requests cancel");
+            assert!(!cancel, "soft interject must never request cancel");
 
             let state = actor.state.lock().await;
-            let promoted = state
-                .pending_inputs
-                .iter()
-                .find(|i| i.prompt_id == "p1")
-                .expect("promoted row stays queued to run next");
-            assert_eq!(
-                promoted
-                    .prompt_blocks
-                    .iter()
-                    .filter(|b| matches!(b, acp::ContentBlock::Image(_)))
-                    .count(),
-                1,
-                "image blocks must survive promotion"
-            );
             assert!(
-                actor.pending_interjections.is_empty(),
-                "send-now never buffers into the running turn"
+                state.pending_inputs.iter().all(|i| i.prompt_id != "p1"),
+                "interjected row must leave the queue"
+            );
+            drop(state);
+            let entries = actor.pending_interjections.drain_all();
+            assert_eq!(entries.len(), 1, "soft interject buffers one entry");
+            assert_eq!(
+                entries[0].attachments.len(),
+                1,
+                "image blocks must ride into pending_interjections"
             );
         })
         .await;

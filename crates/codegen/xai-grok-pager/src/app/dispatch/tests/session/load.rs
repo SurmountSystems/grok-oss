@@ -1302,6 +1302,7 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
         Action::TaskComplete(TaskResult::BtwResponse {
             agent_id: old_owner,
             result: Ok("old answer".into()),
+            btw_session_id: None,
             minimal_request_id: Some(request_id),
         }),
         &mut app,

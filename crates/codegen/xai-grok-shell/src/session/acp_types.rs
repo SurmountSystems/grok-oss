@@ -614,6 +614,10 @@ pub struct StartupHints {
     /// parent emits (which also key off the task type, not the resolved agent name).
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// Optional work/join ULID for this session's usage rows and related logs.
+    /// Minted at subagent spawn when known; main sessions usually leave this unset.
+    #[serde(default)]
+    pub work_ulid: Option<String>,
     /// Set on a fork spawn so `install_system_prompt` does NOT overwrite the
     /// inherited System at `conversation[0]`: the verbatim parent copy already
     /// holds the parent's System and overwriting it would bust the cache prefix.

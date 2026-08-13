@@ -41,7 +41,70 @@ impl AgentView {
             self.clear_minimal_btw_lifecycle();
         }
         self.session.session_id = Some(session_id);
+        // Resume/attach: restore durable unsent draft when the composer is empty.
+        self.maybe_restore_unsent_prompt_draft();
     }
+
+    /// Persist the live composer text as a session-scoped unsent draft.
+    ///
+    /// Fail-open: disk errors are logged and ignored. Empty text clears the file.
+    pub(crate) fn persist_unsent_prompt_draft(&self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let text = self.prompt.text();
+        if let Err(e) = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+            text,
+        ) {
+            tracing::warn!(?e, "failed to persist unsent prompt draft");
+        }
+    }
+
+    /// Clear durable unsent draft after a successful submit (or explicit discard).
+    pub(crate) fn clear_unsent_prompt_draft(&self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        if let Err(e) = xai_grok_shell::session::unsent_prompt_draft::clear_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+        ) {
+            tracing::warn!(?e, "failed to clear unsent prompt draft");
+        }
+    }
+
+    /// Load durable draft into an empty composer for the bound session.
+    pub(crate) fn maybe_restore_unsent_prompt_draft(&mut self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let draft = match xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(?e, "failed to load unsent prompt draft");
+                return;
+            }
+        };
+        let Some(text) = draft else {
+            return;
+        };
+        if xai_grok_shell::session::unsent_prompt_draft::should_restore_draft_into_composer(
+            self.prompt.text(),
+            &text,
+        ) {
+            self.prompt.set_text(&text);
+            self.prompt.set_cursor(text.len());
+        }
+    }
+
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
         if self.session.session_id.take().is_some() {
@@ -135,6 +198,8 @@ impl AgentView {
             credit_balance: None,
             auto_topup: None,
             openrouter_credit_balance: None,
+            console_team_prepaid_cents: None,
+            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
             goal_state: None,
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
@@ -181,7 +246,7 @@ impl AgentView {
             scrollback_visible_link_count: 0,
             highlighted_link_idx: None,
             hovered_link_idx: None,
-            last_pointer_on_link: false,
+            last_pointer_cursor: false,
             last_btw_selection_model: ResolvedSelectionModel::default(),
             last_btw_area: Rect::default(),
             pending_scrollback_click: None,
@@ -199,6 +264,7 @@ impl AgentView {
             hit_context: Default::default(),
             hit_credits: Default::default(),
             hit_todo_close: Default::default(),
+            hit_todo_clear_done: Default::default(),
             hit_bg_close: Default::default(),
             hit_subagent_close: Default::default(),
             hit_catalog_close: Default::default(),
@@ -211,6 +277,7 @@ impl AgentView {
             hit_queue_badge: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
+            hit_soft_park_ctas: Default::default(),
             hit_follow_indicator: Default::default(),
             hit_response_top_indicator: Default::default(),
             hit_cwd: Default::default(),
@@ -267,6 +334,8 @@ impl AgentView {
             scrollback_search: None,
             hit_sb_copy: Default::default(),
             hit_sb_view: Default::default(),
+            bubble_copy_hits: Vec::new(),
+            hovered_bubble_copy: None,
             question_view: None,
             hit_question_scrollbar: Default::default(),
             hovered_question_item: None,
@@ -293,6 +362,8 @@ impl AgentView {
             permission_pattern_edit: None,
             plan_approval_view: None,
             latest_inline_plan_content: None,
+            plan_card_committed_id: None,
+            plan_card_entry_id: None,
             plan_comments: Vec::new(),
             plan_next_comment_id: 0,
             casual_commenting_range: None,
@@ -1061,11 +1132,26 @@ impl AgentView {
             self.credit_balance = None;
             self.auto_topup = None;
             self.openrouter_credit_balance = None;
+            self.console_team_prepaid_cents = None;
             return;
         }
         self.credit_balance = balance;
         self.auto_topup = auto_topup;
         self.openrouter_credit_balance = openrouter;
+    }
+
+    /// Copy console team prepaid cents onto the agent (Management API meter).
+    ///
+    /// Separate from [`Self::apply_credit_balance`] so SuperGrok/OpenRouter
+    /// call sites stay unchanged. Chat-kind agents stay clear.
+    pub fn apply_console_team_prepaid_cents(&mut self, cents: Option<i64>) {
+        if self.chat_kind {
+            self.console_team_prepaid_cents = None;
+            return;
+        }
+        if let Some(c) = cents {
+            self.console_team_prepaid_cents = Some(c);
+        }
     }
     /// Record a key event to the input flight recorder.
     ///
@@ -2089,7 +2175,8 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             old_request,
-            Ok("old answer".into())
+            Ok("old answer".into()),
+            None,
         ));
         assert!(agent.btw_state.is_none());
         let replay_request =
@@ -2100,7 +2187,8 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             replay_request,
-            Ok("pre-replay answer".into())
+            Ok("pre-replay answer".into()),
+            None,
         ));
         assert!(agent.btw_state.is_none());
     }
@@ -2263,5 +2351,82 @@ mod reconnect_workflow_maps_tests {
                 .map(|r| r.status.as_str()),
             Some("complete")
         );
+    }
+}
+
+/// Durable unsent draft: agent_view wire-up (persist / restore / clear).
+#[cfg(test)]
+mod unsent_prompt_draft_wire_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn unsent_draft_survives_restart_simulation() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let sid = format!("draft-wire-{}", uuid::Uuid::new_v4());
+        let mut agent = test_agent_view(Some(&sid), cwd.clone());
+        let draft = "recover me after kill";
+        agent.prompt.set_text(draft);
+        agent.persist_unsent_prompt_draft();
+        // Simulate process death: empty composer, same session bind.
+        agent.prompt.set_text("");
+        agent.maybe_restore_unsent_prompt_draft();
+        assert_eq!(agent.prompt.text(), draft);
+        // Cleanup so we do not leave files under GROK_HOME.
+        agent.clear_unsent_prompt_draft();
+    }
+
+    #[test]
+    fn submit_clear_removes_durable_draft() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let sid = format!("draft-clear-{}", uuid::Uuid::new_v4());
+        let mut agent = test_agent_view(Some(&sid), cwd.clone());
+        agent.prompt.set_text("will send");
+        agent.persist_unsent_prompt_draft();
+        agent.clear_unsent_prompt_draft();
+        agent.prompt.set_text("");
+        agent.maybe_restore_unsent_prompt_draft();
+        assert!(
+            agent.prompt.text().is_empty(),
+            "after submit clear, restore must not resurrect the sent text"
+        );
+    }
+
+    #[test]
+    fn restore_does_not_clobber_nonempty_composer() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let sid = format!("draft-noclobber-{}", uuid::Uuid::new_v4());
+        let mut agent = test_agent_view(Some(&sid), cwd.clone());
+        agent.prompt.set_text("old disk draft");
+        agent.persist_unsent_prompt_draft();
+        agent.prompt.set_text("live typing now");
+        agent.maybe_restore_unsent_prompt_draft();
+        assert_eq!(agent.prompt.text(), "live typing now");
+        agent.clear_unsent_prompt_draft();
+    }
+
+    #[test]
+    fn wrong_session_id_does_not_cross_restore() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let sid_a = format!("draft-a-{}", uuid::Uuid::new_v4());
+        let sid_b = format!("draft-b-{}", uuid::Uuid::new_v4());
+        let mut agent_a = test_agent_view(Some(&sid_a), cwd.clone());
+        agent_a.prompt.set_text("only for A");
+        agent_a.persist_unsent_prompt_draft();
+        let mut agent_b = test_agent_view(Some(&sid_b), cwd.clone());
+        agent_b.maybe_restore_unsent_prompt_draft();
+        assert!(
+            agent_b.prompt.text().is_empty(),
+            "session B must not load session A draft"
+        );
+        agent_a.clear_unsent_prompt_draft();
     }
 }

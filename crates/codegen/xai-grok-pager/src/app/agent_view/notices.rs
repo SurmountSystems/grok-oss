@@ -288,6 +288,62 @@ impl AgentView {
         delivery
     }
 
+    /// Copy scrollback entry `idx` content to the clipboard.
+    ///
+    /// Shared by selected-block `y` / selection-box ⧉ and always-on bubble ⧉.
+    /// Does not change selection. No-ops when the entry is missing,
+    /// group-header-hidden, or has empty copy text.
+    pub(crate) fn copy_entry_content(&mut self, idx: usize) {
+        use crate::scrollback::block::RenderBlock;
+        if self.scrollback.entry_content_hidden_by_group(idx) {
+            return;
+        }
+        let Some(entry) = self.scrollback.entry(idx) else {
+            return;
+        };
+
+        let text = if let RenderBlock::BgTask(block) = &entry.block {
+            let stdout = self
+                .session
+                .bg_tasks
+                .get(&block.task_id)
+                .map(|t| t.stdout.clone())
+                .unwrap_or_default();
+            if stdout.is_empty() {
+                None
+            } else {
+                Some(stdout)
+            }
+        } else {
+            entry.block.copy_text(entry.raw)
+        };
+
+        if let Some(text) = text
+            && !text.is_empty()
+        {
+            self.copy_to_clipboard(&text);
+        }
+    }
+
+    /// If `(col, row)` hits the prompt top-bar draft-copy (`⧉`) chrome and the
+    /// composer has plain text, copy it via [`Self::copy_to_clipboard`].
+    /// Returns `true` when the click was on the hit target (even if the draft
+    /// was empty — empty is a quiet no-op so the click does not fall through
+    /// into the textarea).
+    pub(crate) fn try_copy_prompt_draft_at(&mut self, col: u16, row: u16) -> bool {
+        let Some(area) = self.prompt.copy_button_area() else {
+            return false;
+        };
+        if !area.contains((col, row).into()) {
+            return false;
+        }
+        let text = self.prompt.draft_plain_text().to_owned();
+        if !text.is_empty() {
+            self.copy_to_clipboard(&text);
+        }
+        true
+    }
+
     /// Like [`copy_to_clipboard`] but debounces the toast to prevent
     /// rapid flickering during quick word/line selections.
     pub(super) fn copy_to_clipboard_debounced(&mut self, text: &str) {
@@ -362,6 +418,88 @@ impl AgentView {
                 self.show_toast("Browser unavailable - URL shown above");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_draft_copy_tests {
+    use super::test_fixtures::make_agent;
+    use ratatui::layout::Rect;
+
+    fn with_grok_copy_file<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("last-copy.txt");
+        // SAFETY: test-only env mutation; callers use serial(grok_copy_file).
+        unsafe {
+            std::env::set_var(crate::clipboard::GROK_COPY_FILE_ENV, &path);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&path)));
+        unsafe {
+            std::env::remove_var(crate::clipboard::GROK_COPY_FILE_ENV);
+        }
+        match result {
+            Ok(v) => v,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    }
+
+    /// Named contract: clicking prompt top-bar ⧉ copies full composer plain
+    /// text through `copy_to_clipboard` (toast path) without clearing the draft.
+    #[test]
+    #[serial_test::serial(grok_copy_file)]
+    fn prompt_copy_button_click_copies_draft_plain_text() {
+        with_grok_copy_file(|copy_path| {
+            let mut agent = make_agent();
+            let draft = "hello draft with [Image #1]";
+            agent.prompt.set_text(draft);
+            // Paint bordered prompt so public copy_button_area() is populated.
+            {
+                use crate::views::prompt_widget::PromptStyle;
+                use ratatui::buffer::Buffer;
+                let style = PromptStyle::default();
+                let area = Rect::new(0, 10, 80, 4);
+                let mut buf = Buffer::empty(area);
+                agent.prompt.draw(&mut buf, area, None, &style, None, None);
+            }
+            let hit = agent
+                .prompt
+                .copy_button_area()
+                .expect("bordered draw must set ⧉ hit target");
+            assert!(
+                agent.try_copy_prompt_draft_at(hit.x + 1, hit.y),
+                "click on ⧉ must hit"
+            );
+            assert!(
+                agent.toast.is_some(),
+                "copy must show toast (clipboard or backup file)"
+            );
+            let written = std::fs::read_to_string(copy_path).expect("GROK_COPY_FILE payload");
+            assert_eq!(
+                written, draft,
+                "⧉ must copy full draft plain text including chip labels"
+            );
+            assert_eq!(agent.prompt.text(), draft, "copy must not clear the draft");
+            // Miss is not a hit.
+            assert!(!agent.try_copy_prompt_draft_at(0, 0));
+        });
+    }
+
+    #[test]
+    fn prompt_copy_button_empty_draft_is_quiet_noop() {
+        let mut agent = make_agent();
+        agent.prompt.set_text("");
+        use crate::views::prompt_widget::PromptStyle;
+        use ratatui::buffer::Buffer;
+        let style = PromptStyle::default();
+        let area = Rect::new(0, 10, 80, 4);
+        let mut buf = Buffer::empty(area);
+        agent.prompt.draw(&mut buf, area, None, &style, None, None);
+        let hit = agent.prompt.copy_button_area().expect("hit target");
+        assert!(agent.try_copy_prompt_draft_at(hit.x, hit.y));
+        assert!(
+            agent.toast.is_none(),
+            "empty draft must not toast a fake copy"
+        );
     }
 }
 

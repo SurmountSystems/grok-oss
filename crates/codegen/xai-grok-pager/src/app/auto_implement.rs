@@ -13,9 +13,8 @@
 //!    end). Skipped when the block is an exact echo of the user prompt just
 //!    run (avoids re-queueing the same primary implement).
 //!
-//! When **economic mode** is on (soft-cap context ≈ 200K), auto-queued blocks
-//! clamp explicit `--effort N` / `effort N` above 1 down to 1 so implement
-//! loops stay on the cheap tier (no multi-reviewer fan-out).
+//! Explicit `/implement --effort N` is **honored** on auto-queue (economic mode
+//! only soft-caps context; it does not rewrite the operator’s effort flag).
 //!
 //! Enqueue is always **append** (`push_back`): existing local queued prompts
 //! are kept; the follow-up `/implement` is added at the end.
@@ -25,9 +24,6 @@ use crate::scrollback::block::RenderBlock;
 
 /// Toast shown when a follow-up `/implement` is auto-queued after turn end.
 pub const AUTO_IMPLEMENT_TOAST: &str = "next task /implement detected, automatically running";
-
-/// Max explicit `/implement` effort when economic mode is enabled.
-pub const ECONOMIC_MODE_MAX_IMPLEMENT_EFFORT: u8 = 1;
 
 /// Whether `text` is an `/implement` command at the start of the string
 /// (optional args after whitespace). Case-insensitive command token.
@@ -101,96 +97,15 @@ pub fn extract_implement_block_at(text: &str, start: usize) -> Option<String> {
     }
 }
 
-/// Clamp explicit implement effort flags when economic mode is on.
+/// Preserve the implement command text for auto-queue.
 ///
-/// Rewrites leading `/implement --effort N` / `/implement effort N` so any
-/// `N > `[`ECONOMIC_MODE_MAX_IMPLEMENT_EFFORT`] becomes that max. Leaves the
-/// text unchanged when economic mode is off, when no effort flag is present,
-/// or when effort is already ≤ max. Only the first effort flag on the first
-/// line is rewritten (matches skill arg parsing).
-pub fn clamp_implement_effort_for_economic_mode(cmd: &str, economic_mode: bool) -> String {
-    if !economic_mode {
-        return cmd.to_string();
-    }
-    clamp_implement_effort(cmd, ECONOMIC_MODE_MAX_IMPLEMENT_EFFORT)
-}
-
-/// Rewrite the first `--effort N` / `effort N` after `/implement` if `N > max`.
-fn clamp_implement_effort(cmd: &str, max_effort: u8) -> String {
-    let trimmed = cmd.trim_start();
-    if !is_implement_command_sentence(trimmed) {
-        return cmd.to_string();
-    }
-    // Work on the first line only for the flag; keep the rest of the block.
-    let (first_line, rest) = match trimmed.find('\n') {
-        Some(i) => (&trimmed[..i], Some(&trimmed[i..])),
-        None => (trimmed, None),
-    };
-    let Some((prefix, n, suffix)) = split_first_effort_flag(first_line) else {
-        return cmd.to_string();
-    };
-    if n <= max_effort as u32 {
-        return cmd.to_string();
-    }
-    let mut out = String::with_capacity(cmd.len());
-    // Preserve any leading whitespace from the original `cmd`.
-    let lead = cmd.len() - cmd.trim_start().len();
-    out.push_str(&cmd[..lead]);
-    out.push_str(prefix);
-    out.push_str(&max_effort.to_string());
-    out.push_str(suffix);
-    if let Some(r) = rest {
-        out.push_str(r);
-    }
-    out
-}
-
-/// Find the first `--effort N` or `effort N` on an implement first line.
-/// Returns `(text_before_N, N, text_after_N)`.
-fn split_first_effort_flag(first_line: &str) -> Option<(&str, u32, &str)> {
-    let lower = first_line.to_ascii_lowercase();
-    // Prefer `--effort` over bare `effort` when both could match.
-    for needle in ["--effort", "effort"] {
-        let mut search_from = 0usize;
-        while let Some(rel) = lower[search_from..].find(needle) {
-            let abs = search_from + rel;
-            // Token boundary before: start or whitespace.
-            if abs > 0 && !first_line.as_bytes()[abs - 1].is_ascii_whitespace() {
-                search_from = abs + 1;
-                continue;
-            }
-            let after_flag = abs + needle.len();
-            let rest = &first_line[after_flag..];
-            // Require whitespace (or `=`) then digits.
-            let rest_trim_start =
-                rest.trim_start_matches(|c: char| c == '=' || c.is_ascii_whitespace());
-            if rest_trim_start.len() == rest.len() {
-                // No separator between flag and value.
-                search_from = abs + 1;
-                continue;
-            }
-            let digits_end = rest_trim_start
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest_trim_start.len());
-            if digits_end == 0 {
-                search_from = abs + 1;
-                continue;
-            }
-            let num_str = &rest_trim_start[..digits_end];
-            let Ok(n) = num_str.parse::<u32>() else {
-                search_from = abs + 1;
-                continue;
-            };
-            let value_start_in_line = after_flag + (rest.len() - rest_trim_start.len());
-            let value_end_in_line = value_start_in_line + digits_end;
-            return Some((
-                &first_line[..value_start_in_line],
-                n,
-                &first_line[value_end_in_line..],
-            ));
-        }
-    }
-    None
+/// Previously this rewrote `--effort N` / `effort N` above 1 down to 1 when
+/// economic mode was on. That silently ignored an explicit operator request
+/// (e.g. `/implement --effort 2 …` became effort 1). Economic mode still
+/// soft-caps context; it must not revise implement effort. `economic_mode` is
+/// retained so call sites stay stable.
+pub fn clamp_implement_effort_for_economic_mode(cmd: &str, _economic_mode: bool) -> String {
+    cmd.to_string()
 }
 
 /// Byte offset of a follow-up implement start in `text`, or `None` when the
@@ -375,16 +290,16 @@ pub fn maybe_enqueue_auto_implement(agent: &mut AgentView, enabled: bool) -> Opt
     Some(toast)
 }
 
-/// Toast when a follow-up was auto-queued. Mentions economic effort clamp when
-/// the enqueued text differs from the raw extract (effort was rewritten).
-pub fn auto_implement_toast_for(raw_cmd: &str, enqueued_cmd: &str, economic_mode: bool) -> String {
-    if economic_mode && raw_cmd.trim() != enqueued_cmd.trim() {
-        format!(
-            "{AUTO_IMPLEMENT_TOAST} (economic mode: --effort capped at {ECONOMIC_MODE_MAX_IMPLEMENT_EFFORT})"
-        )
-    } else {
-        AUTO_IMPLEMENT_TOAST.to_string()
-    }
+/// Toast when a follow-up was auto-queued.
+///
+/// Args retained for call-site stability. Effort is no longer rewritten under
+/// economic mode, so the toast is always the plain auto-run copy.
+pub fn auto_implement_toast_for(
+    _raw_cmd: &str,
+    _enqueued_cmd: &str,
+    _economic_mode: bool,
+) -> String {
+    AUTO_IMPLEMENT_TOAST.to_string()
 }
 
 /// After a clean agent turn ends (before queue drain): enqueue a follow-up
@@ -509,28 +424,42 @@ more review notes";
         assert!(got.contains("more review notes"));
     }
 
+    /// Named contract: explicit `/implement --effort N` (or bare `effort N`)
+    /// must be honored. Economic mode must not silently rewrite N down to 1.
     #[test]
-    fn clamp_effort_when_economic_rewrites_above_max() {
-        let raw = "/implement --effort 5 residual work:\n1) wire Systems.Proc";
-        let got = clamp_implement_effort_for_economic_mode(raw, true);
+    fn explicit_implement_effort_honored_when_economic_mode_on() {
+        // Operator-reported path: effort 2 must stay 2 (not revised to 1).
+        let effort2 = "/implement --effort 2 Linear freestanding contracts";
+        assert_eq!(
+            clamp_implement_effort_for_economic_mode(effort2, true),
+            effort2,
+            "economic mode must not downgrade explicit --effort 2 to 1"
+        );
+        assert_eq!(
+            clamp_implement_effort_for_economic_mode(effort2, false),
+            effort2
+        );
+
+        let high = "/implement --effort 5 residual work:\n1) wire Systems.Proc";
+        let got = clamp_implement_effort_for_economic_mode(high, true);
         assert!(
-            got.starts_with("/implement --effort 1 "),
-            "expected effort clamped to 1: {got}"
+            got.starts_with("/implement --effort 5 "),
+            "explicit --effort 5 must stay 5 under economic mode: {got}"
         );
         assert!(got.contains("1) wire Systems.Proc"));
-        // Off: unchanged.
-        assert_eq!(clamp_implement_effort_for_economic_mode(raw, false), raw);
-        // Already ≤ max: unchanged.
+        assert_eq!(clamp_implement_effort_for_economic_mode(high, false), high);
+
         let low = "/implement --effort 1 fix tests";
         assert_eq!(clamp_implement_effort_for_economic_mode(low, true), low);
-        // Bare `effort N` form.
+
         let bare = "/implement effort 3 do the thing";
-        let got_bare = clamp_implement_effort_for_economic_mode(bare, true);
-        assert!(
-            got_bare.starts_with("/implement effort 1 "),
-            "bare effort form: {got_bare}"
+        assert_eq!(
+            clamp_implement_effort_for_economic_mode(bare, true),
+            bare,
+            "bare effort form must also be honored: {}",
+            clamp_implement_effort_for_economic_mode(bare, true)
         );
-        // No flag: unchanged.
+
         let none = "/implement fix the gate";
         assert_eq!(clamp_implement_effort_for_economic_mode(none, true), none);
     }
@@ -586,18 +515,17 @@ Do the work.
             AUTO_IMPLEMENT_TOAST,
             "next task /implement detected, automatically running"
         );
+        // Explicit effort is not rewritten under economic mode, so the toast
+        // stays the plain auto-run copy (no "economic mode: --effort capped").
         let raw = "/implement --effort 5 residual";
-        let clamped = clamp_implement_effort_for_economic_mode(raw, true);
-        assert!(
-            auto_implement_toast_for(raw, &clamped, true).contains("economic mode"),
-            "clamped enqueue should mention economic mode in toast"
-        );
+        let enqueued = clamp_implement_effort_for_economic_mode(raw, true);
+        assert_eq!(enqueued, raw);
         assert_eq!(
-            auto_implement_toast_for(raw, raw, true),
+            auto_implement_toast_for(raw, &enqueued, true),
             AUTO_IMPLEMENT_TOAST
         );
         assert_eq!(
-            auto_implement_toast_for(raw, &clamped, false),
+            auto_implement_toast_for(raw, raw, true),
             AUTO_IMPLEMENT_TOAST
         );
     }

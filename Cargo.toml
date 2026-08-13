@@ -235,6 +235,7 @@ reqwest-middleware = { version = "0.4.1", features = ["json", "multipart"] }
 resvg = { version = "0.47", default-features = false, features = ["text"] }
 rhai = { version = "1.25", features = ["serde"] }
 ring = "0.17"
+rpassword = "7"
 rsa = "0.9"
 runfiles = "0.1"
 rustc-hash = "2"
@@ -292,6 +293,7 @@ unicode-segmentation = "1.12.0"
 unicode-width = "0.2"
 url = "2"
 urlencoding = "2"
+ulid = "1"
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
 vte = "0.15.0"
 wait-timeout = "0.2"

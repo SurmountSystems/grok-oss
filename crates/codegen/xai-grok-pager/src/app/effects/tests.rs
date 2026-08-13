@@ -749,17 +749,18 @@ async fn persist_setting_type_mismatch_errors_simple_mode() {
 }
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
-/// notifications. Exits when the channel closes.
-fn spawn_fake_acp_agent(
+/// Spawn a fake ACP agent that counts ExtNotifications for `method`.
+/// Exits when the channel closes.
+fn spawn_fake_acp_agent_counting(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
+    method: &'static str,
 ) -> Arc<AtomicUsize> {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let xai_acp_lib::AcpAgentMessage::ExtNotification(args) = msg {
-                if args.request.method.as_ref() == "x.ai/yolo_mode_changed" {
+                if args.request.method.as_ref() == method {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 }
                 let _ = args.response_tx.send(Ok(()));
@@ -767,6 +768,13 @@ fn spawn_fake_acp_agent(
         }
     });
     counter
+}
+/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
+/// notifications. Exits when the channel closes.
+fn spawn_fake_acp_agent(
+    rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
+) -> Arc<AtomicUsize> {
+    spawn_fake_acp_agent_counting(rx, "x.ai/yolo_mode_changed")
 }
 /// Redirect `GROK_HOME` to a tempdir for test isolation.
 fn setup_grok_home_in_tempdir() -> tempfile::TempDir {
@@ -881,6 +889,136 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
              SettingPersistFailedBestEffort (Err), got {result:?}",
     );
 }
+/// Helper notify: fires exactly one `x.ai/auto_compact_threshold_changed`.
+#[tokio::test]
+async fn notify_auto_compact_threshold_changed_fires_acp_once() {
+    use crate::settings::SettingValue;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter =
+        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
+    notify_auto_compact_threshold_changed(&tx, &SettingValue::Enum("98")).await;
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "notify helper must fire ACP auto_compact_threshold_changed once"
+    );
+}
+
+/// Unparseable / wrong kind must not spam ACP (no silent mass-reset).
+#[tokio::test]
+async fn notify_auto_compact_threshold_changed_skips_invalid_value() {
+    use crate::settings::SettingValue;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter =
+        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
+    notify_auto_compact_threshold_changed(&tx, &SettingValue::Bool(true)).await;
+    notify_auto_compact_threshold_changed(&tx, &SettingValue::Enum("not-a-choice")).await;
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "invalid live-apply values must not fire ACP"
+    );
+}
+
+/// Shipped path: `Effect::PersistSetting` for auto-compact fires ACP only after
+/// successful disk write (same gating as yolo permission mode).
+#[tokio::test]
+async fn persist_auto_compact_threshold_fires_acp_on_disk_success() {
+    use crate::settings::SettingValue;
+    use std::path::Path;
+    let _guard = setup_grok_home_in_tempdir();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter =
+        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        Effect::PersistSetting {
+            key: "auto_compact_threshold_percent",
+            value: SettingValue::Enum("98"),
+            rollback_value: SettingValue::Enum("95"),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("persist task should complete")
+        .expect("persist task should not panic");
+    assert!(
+        matches!(
+            result,
+            TaskResult::SettingPersisted {
+                key: "auto_compact_threshold_percent",
+                ..
+            }
+        ),
+        "disk Ok must yield SettingPersisted, got {result:?}"
+    );
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "ACP auto_compact_threshold_changed must fire exactly once after disk Ok"
+    );
+}
+
+/// Disk failure (kind mismatch) must not notify open sessions.
+#[tokio::test]
+async fn persist_auto_compact_threshold_no_acp_on_disk_failure() {
+    use crate::settings::SettingValue;
+    use std::path::Path;
+    let _guard = setup_grok_home_in_tempdir();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter =
+        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        Effect::PersistSetting {
+            key: "auto_compact_threshold_percent",
+            value: SettingValue::Bool(true),
+            rollback_value: SettingValue::Enum("95"),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("persist task should complete")
+        .expect("persist task should not panic");
+    assert!(
+        matches!(
+            result,
+            TaskResult::SettingPersistFailed {
+                key: "auto_compact_threshold_percent",
+                ..
+            }
+        ),
+        "kind mismatch must yield SettingPersistFailed, got {result:?}"
+    );
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "disk failure must not live-apply via ACP"
+    );
+}
+
 /// WithRollback: notification count matches disk outcome
 /// (1 on Ok, 0 on Err).
 #[tokio::test]

@@ -20,7 +20,8 @@ use super::system_appearance;
 /// In-memory theme kind, encoded as a `u8` matching the
 /// `ThemeKind` discriminants. Loaded from disk once at startup via
 /// `load_from_disk()`, then kept in sync by `set()`.
-static CURRENT: AtomicU8 = AtomicU8::new(ThemeKind::GrokNight as u8);
+/// Seed matches the product default (`Doge`) when config is unset.
+static CURRENT: AtomicU8 = AtomicU8::new(ThemeKind::Doge as u8);
 static LOADED: AtomicBool = AtomicBool::new(false);
 #[cfg(any(test, feature = "test-support"))]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -37,10 +38,10 @@ static AUTO_MODE: AtomicBool = AtomicBool::new(false);
 static TERMINAL_NATIVE_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// Decode the u8 stored in `CURRENT` back to a `ThemeKind`. Falls
-/// back to `GrokNight` if the byte is somehow out of range (which
-/// can't happen via `set` — the discriminant is always a valid
-/// variant — but defends against a future variant addition that
-/// forgot to extend this match).
+/// back to `Doge` (product default) if the byte is somehow out of
+/// range (which can't happen via `set` — the discriminant is always
+/// a valid variant — but defends against a future variant addition
+/// that forgot to extend this match).
 fn theme_kind_from_u8(byte: u8) -> ThemeKind {
     match byte {
         x if x == ThemeKind::GrokNight as u8 => ThemeKind::GrokNight,
@@ -48,8 +49,9 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
         x if x == ThemeKind::TokyoNight as u8 => ThemeKind::TokyoNight,
         x if x == ThemeKind::RosePineMoon as u8 => ThemeKind::RosePineMoon,
         x if x == ThemeKind::OscuraMidnight as u8 => ThemeKind::OscuraMidnight,
+        x if x == ThemeKind::Doge as u8 => ThemeKind::Doge,
         x if x == ThemeKind::Auto as u8 => ThemeKind::Auto,
-        _ => ThemeKind::GrokNight,
+        _ => ThemeKind::Doge,
     }
 }
 
@@ -64,7 +66,7 @@ static AUTO_THEME_CONFIG: Mutex<Option<AutoThemeConfig>> = Mutex::new(None);
 ///
 /// `dark_theme` and `light_theme` are the user-configured overrides read
 /// from `[ui].auto_dark_theme` and `[ui].auto_light_theme` in `config.toml`.
-/// When `None`, `to_theme_kind()` defaults to `GrokNight` / `GrokDay`.
+/// When `None`, `to_theme_kind()` defaults to `Doge` / `GrokDay`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AutoThemeConfig {
     pub dark_theme: Option<ThemeKind>,
@@ -167,7 +169,7 @@ pub fn invalidate_auto_theme_config() {
 /// Precedence:
 /// 1. Environment variable (`GROK_THEME` / `LC_GROK_THEME`)
 /// 2. Config file (`[ui].theme`)
-/// 3. Default: `GrokNight`
+/// 3. Default: `Doge` (product default for discoverability)
 #[must_use]
 pub fn resolve_initial_theme() -> ThemeKind {
     resolve_initial_theme_from(env_theme_name().as_deref(), load_from_disk(), true)
@@ -226,8 +228,8 @@ fn resolve_from_config(config_theme: Option<ThemeKind>, osc11_fallback: bool) ->
         return kind;
     }
 
-    // Default: GrokNight
-    ThemeKind::GrokNight
+    // Default: DOGE (product default; pure 8-colour, no truecolor required)
+    ThemeKind::Doge
 }
 
 /// Map an optional appearance detection result to a concrete `ThemeKind`.
@@ -235,13 +237,13 @@ fn resolve_from_appearance(appearance: Option<system_appearance::SystemAppearanc
     let config = auto_theme_config();
     appearance
         .map(|a| system_appearance::to_theme_kind(a, config.dark_theme, config.light_theme))
-        .unwrap_or(ThemeKind::GrokNight)
+        .unwrap_or(ThemeKind::Doge)
 }
 
 /// Resolve "auto" by detecting system appearance and mapping via config.
 ///
 /// Returns the concrete `ThemeKind` based on the current system appearance
-/// and the user's dark/light theme mapping. Falls back to `GrokNight`
+/// and the user's dark/light theme mapping. Falls back to `Doge`
 /// when detection fails.
 ///
 /// Uses desktop APIs + env hints (no OSC 11) — safe to call at runtime while
@@ -308,7 +310,7 @@ fn load_auto_theme_config() -> AutoThemeConfig {
 pub fn reset_for_test() {
     // Tests are serialized via TEST_LOCK so the AtomicU8/AtomicBool
     // pair is safe to reset without any cross-thread coordination.
-    CURRENT.store(ThemeKind::GrokNight as u8, Ordering::Relaxed);
+    CURRENT.store(ThemeKind::Doge as u8, Ordering::Relaxed);
     LOADED.store(false, Ordering::Release);
     AUTO_MODE.store(false, Ordering::Relaxed);
     set_terminal_native_lock(false);
@@ -328,21 +330,41 @@ pub fn test_lock() -> &'static Mutex<()> {
     &TEST_LOCK
 }
 
-/// Pin a deterministic theme + color level for a test's duration so exact
-/// height / screen-position assertions are hermetic. Rendered heights are
-/// computed under the process-global `Theme::current()` (which concurrent
-/// `set_theme` tests mutate) and `Theme::current()` reads the global color
-/// level; holding the shared test lock blocks a mid-test theme change. Hold the
-/// returned guard for the whole test.
+/// RAII pin: serializes theme mutations and forces TrueColor for the hold.
+/// Drop clears the color-level test override so later tests can still see a
+/// live `NO_COLOR` process env if they need it.
 #[cfg(any(test, feature = "test-support"))]
-pub fn pin_theme() -> std::sync::MutexGuard<'static, ()> {
-    let guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+pub struct ThemePinGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ThemePinGuard {
+    fn drop(&mut self) {
+        super::color_support::clear_test_override();
+    }
+}
+
+/// Pin a deterministic theme + color level for a test's duration so exact
+/// height / screen-position / accent-paint assertions are hermetic. Rendered
+/// heights and skill-token colors are computed under the process-global
+/// `Theme::current()` (which concurrent `set_theme` tests mutate). The shared
+/// test lock blocks a mid-test theme change. Hold the returned guard for the
+/// whole test.
+///
+/// Forces [`ColorLevel::TrueColor`] even when the process has `NO_COLOR` set
+/// (CI / agent runners), so skill vs body accent filters stay meaningful.
+/// Drop restores the prior detect path (env / OnceLock).
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_theme() -> ThemePinGuard {
+    let lock = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     set(ThemeKind::GrokNight);
-    // Color level is a write-once `OnceLock`; tests run without a TTY so it
-    // resolves to `TrueColor` anyway. Pin it explicitly (best-effort: ignore the
-    // already-initialized `Err`) so the measure path that reads it stays fixed.
+    // Prefer the test override (works after OnceLock already captured None
+    // from NO_COLOR). Also best-effort seed the OnceLock for code paths that
+    // only call `set` without going through detect_raw's override branch.
+    super::color_support::force_for_test(super::color_support::ColorLevel::TrueColor);
     let _ = super::color_support::set(super::color_support::ColorLevel::TrueColor);
-    guard
+    ThemePinGuard { _lock: lock }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -471,7 +493,7 @@ mod tests {
             );
             assert!(is_auto_mode(), "auto must arm the appearance watcher");
 
-            assert_eq!(resolve_from_config(None, false), ThemeKind::GrokNight);
+            assert_eq!(resolve_from_config(None, false), ThemeKind::Doge);
         });
     }
 
@@ -506,11 +528,11 @@ mod tests {
     // -- resolve_auto --------------------------------------------------------
 
     #[test]
-    fn resolve_auto_dark_system_returns_groknight() {
+    fn resolve_auto_dark_system_returns_doge() {
         with_test_env(|| {
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Dark));
             let result = resolve_auto();
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(result, ThemeKind::Doge);
         });
     }
 
@@ -524,11 +546,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_auto_detection_failure_returns_groknight() {
+    fn resolve_auto_detection_failure_returns_doge() {
         with_test_env(|| {
             system_appearance::set_mock(None);
             let result = resolve_auto();
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(result, ThemeKind::Doge);
         });
     }
 
@@ -556,11 +578,27 @@ mod tests {
 
     // -- resolve_from_config (resolve_initial_theme inner logic) ---------------
 
+    /// Named contract: product default theme is DOGE when `[ui].theme` is unset.
+    /// Discoverability pin (2026-07-30): new features default ON; DOGE is the
+    /// stock theme (users can still pick GrokNight / others in settings).
     #[test]
-    fn resolve_from_config_no_config_returns_groknight() {
+    fn default_theme_is_doge() {
         with_test_env(|| {
             let result = resolve_from_config(None, true);
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(
+                result,
+                ThemeKind::Doge,
+                "unset theme must resolve to DOGE (product default)"
+            );
+            assert!(!is_auto_mode());
+        });
+    }
+
+    #[test]
+    fn resolve_from_config_no_config_returns_doge() {
+        with_test_env(|| {
+            let result = resolve_from_config(None, true);
+            assert_eq!(result, ThemeKind::Doge);
             assert!(!is_auto_mode());
         });
     }
@@ -582,7 +620,7 @@ mod tests {
         with_test_env(|| {
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Dark));
             let result = resolve_from_config(Some(ThemeKind::Auto), true);
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(result, ThemeKind::Doge);
             assert!(is_auto_mode(), "auto config must enable auto mode");
         });
     }
@@ -602,7 +640,7 @@ mod tests {
         with_test_env(|| {
             system_appearance::set_mock(None);
             let result = resolve_from_config(Some(ThemeKind::Auto), true);
-            assert_eq!(result, ThemeKind::GrokNight);
+            assert_eq!(result, ThemeKind::Doge);
             assert!(is_auto_mode(), "auto mode is set before detection");
         });
     }

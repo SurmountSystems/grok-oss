@@ -4,6 +4,59 @@ use clap::{ArgAction, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// Clap value for `login --api-key` that never dumps secrets in [`Debug`].
+///
+/// Empty string = bare flag; `-` = stdin sentinel; any other value is refused
+/// at runtime by [`xai_grok_shell::auth::materialize_cli_api_key`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApiKeyCliValue(String);
+
+impl ApiKeyCliValue {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::ops::Deref for ApiKeyCliValue {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ApiKeyCliValue {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for ApiKeyCliValue {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_owned()))
+    }
+}
+
+impl std::fmt::Debug for ApiKeyCliValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Show structure only — never raw secrets (even on refuse path).
+        let shown = match self.0.as_str() {
+            "" => "\"\"",
+            "-" => "\"-\"",
+            _ => "\"<redacted>\"",
+        };
+        f.write_str("ApiKeyCliValue(")?;
+        f.write_str(shown)?;
+        f.write_str(")")
+    }
+}
+
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
@@ -45,11 +98,30 @@ pub enum Command {
         /// Keys go to the OS secret store (or `$GROK_HOME/provider_credentials.json`
         /// when the keyring is unavailable). Prefer `OPENROUTER_API_KEY` env over
         /// storing a key. Does not replace xAI login.
-        #[arg(long = "openrouter", conflicts_with_all = ["oauth", "device_auth"])]
+        #[arg(long = "openrouter", conflicts_with_all = ["oauth", "device_auth", "list_api_keys"])]
         openrouter: bool,
-        /// OpenRouter API key (with `--openrouter`). If omitted, prompts on stdin.
-        #[arg(long = "api-key", requires = "openrouter")]
-        api_key: Option<String>,
+        /// Add a console / Business API key (or OpenRouter key with `--openrouter`).
+        ///
+        /// Flag only (no value): no-echo prompt. Do **not** pass the secret as
+        /// an argument (refused — shell history / process lists). Optional `-`
+        /// reads one line from **non-TTY** stdin only (TTY stdin is refused).
+        /// Prefer `XAI_API_KEY` / `OPENROUTER_API_KEY` env for CI. List
+        /// fingerprints with `--list-api-keys`.
+        #[arg(
+            long = "api-key",
+            num_args = 0..=1,
+            default_missing_value = "",
+            value_name = "VALUE",
+            conflicts_with_all = ["oauth", "device_auth", "list_api_keys"]
+        )]
+        api_key: Option<ApiKeyCliValue>,
+        /// Dual-auth status: SuperGrok session?, N console keys (fingerprints),
+        /// env wins?, preferred method. Never prints raw keys or tokens.
+        #[arg(
+            long = "list-api-keys",
+            conflicts_with_all = ["oauth", "device_auth", "openrouter", "api_key"]
+        )]
+        list_api_keys: bool,
         /// Authenticate for remote development environments (hidden).
         ///
         /// Field is always present so match arms stay feature-unification-safe
@@ -1387,8 +1459,106 @@ mod tests {
             Some(Command::Login {
                 openrouter: true,
                 api_key: Some(key),
+                list_api_keys: false,
                 ..
-            }) => assert_eq!(key, "sk-or-test"),
+            }) => assert_eq!(key.as_str(), "sk-or-test"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_console_api_key_parses_without_openrouter() {
+        // Clap still accepts a value for parse-level tests; runtime refuses
+        // non-empty argv secrets via `materialize_cli_api_key`.
+        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key", "console-biz"])
+            .expect("login --api-key with value parses");
+        match args.command {
+            Some(Command::Login {
+                openrouter: false,
+                api_key: Some(key),
+                list_api_keys: false,
+                ..
+            }) => assert_eq!(key.as_str(), "console-biz"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_bare_api_key_flag_is_console_path_not_oauth() {
+        // Bare `--api-key` → Some("") (default_missing_value). Bin must call
+        // console login with None (interactive), not fall through to OAuth.
+        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key"])
+            .expect("login --api-key bare flag parses");
+        match args.command {
+            Some(Command::Login {
+                openrouter: false,
+                api_key: Some(key),
+                list_api_keys: false,
+                oauth: false,
+                device_auth: false,
+                ..
+            }) => {
+                assert!(
+                    key.is_empty(),
+                    "bare --api-key must be empty string missing value, got {key:?}"
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_api_key_stdin_sentinel_parses() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key", "-"])
+            .expect("login --api-key - parses");
+        match args.command {
+            Some(Command::Login {
+                api_key: Some(key),
+                openrouter: false,
+                ..
+            }) => assert_eq!(key.as_str(), "-"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_api_key_equals_form_parses() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key=xai-fake"])
+            .expect("login --api-key=value parses");
+        match args.command {
+            Some(Command::Login {
+                api_key: Some(key), ..
+            }) => assert_eq!(key.as_str(), "xai-fake"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_api_key_debug_redacts_secret_value() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key", "xai-secret-value"])
+            .expect("parses");
+        let dbg = format!("{:?}", args.command);
+        assert!(
+            !dbg.contains("xai-secret-value"),
+            "Debug must not dump argv secret: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>") || dbg.contains("ApiKeyCliValue"),
+            "expected redacted Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn login_list_api_keys_parses() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--list-api-keys"])
+            .expect("login --list-api-keys parses");
+        match args.command {
+            Some(Command::Login {
+                list_api_keys: true,
+                api_key: None,
+                openrouter: false,
+                ..
+            }) => {}
             other => panic!("unexpected command: {other:?}"),
         }
     }

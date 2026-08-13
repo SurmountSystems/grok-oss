@@ -452,6 +452,11 @@ mod tests {
 
     #[test]
     fn test_render_scrollbar_following_vs_not() {
+        // Hermetic: ambient theme may be monochrome DOGE where
+        // scrollbar_bg == bg_highlight (both pure black), so following
+        // vs not-following track backgrounds would match. Pin GrokNight
+        // for the two-tone follow-mode contrast contract.
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 10, 10);
         let (_, scrollbar_area) = split_area_for_scrollbar(area);
 

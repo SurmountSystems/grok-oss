@@ -57,6 +57,7 @@ fn dispatch_billing(
             subscription_tier,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
             openrouter_balance: None,
+            console_team_prepaid_cents: None,
         }),
         app,
     );
@@ -729,6 +730,144 @@ fn billing_fetched_non_silent_pushes_scrollback_message() {
     );
 }
 
+/// Named contract: console live + Management prepaid cents → non-silent
+/// `/usage` billing body names **console team prepaid** dollars and does not
+/// sell SuperGrok session extras as the live console spend.
+#[test]
+fn usage_billing_console_live_with_prepaid_names_console_team_prepaid() {
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+
+    let mut app = test_app_with_agent();
+    // Prefer console live even if allowance-exhaust sync clears SuperGrok memo.
+    app.is_api_key_auth = true;
+    app.console_team_prepaid_cents = Some(12_500);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.sampling_identity = SamplingIdentityKind::ConsoleKey;
+        agent.console_team_prepaid_cents = Some(12_500);
+    }
+
+    let bal = CreditBalance {
+        usage_pct: 100.0,
+        effective_usage_pct: 100.0,
+        period_end_display: Some("Jul 30, 12:00".into()),
+        pay_as_you_go: false,
+        on_demand_cap_cents: None,
+        on_demand_used_cents: None,
+        // SuperGrok session extras — must not be presented as live console spend.
+        prepaid_balance_cents: Some(996),
+        period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+        is_unified_billing_user: None,
+    };
+
+    dispatch(
+        Action::TaskComplete(TaskResult::BillingFetched {
+            agent_id: AgentId(0),
+            balance: Some(bal),
+            silent: false,
+            subscription_tier: None,
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            openrouter_balance: None,
+            console_team_prepaid_cents: Some(12_500),
+        }),
+        &mut app,
+    );
+
+    let text = last_system_text(&app, AgentId(0));
+    let lower = text.to_ascii_lowercase();
+    assert!(
+        lower.contains("console team prepaid"),
+        "must name console team prepaid when Management cents known: {text}"
+    );
+    assert!(
+        text.contains("$125"),
+        "must show console team prepaid dollars: {text}"
+    );
+    // SuperGrok extras $ must not appear as the sole/unlabeled live claim.
+    if text.contains("$9.96") {
+        assert!(
+            text.contains("SuperGrok"),
+            "any SuperGrok extras dollars must stay SuperGrok-labeled: {text}"
+        );
+    }
+    assert!(
+        !text.starts_with("Weekly limit:") && !text.starts_with("Usage:"),
+        "must not lead with SuperGrok session billing as live console spend: {text}"
+    );
+}
+
+/// Named contract: console live without Management prepaid → honest gap
+/// (not-configured / unavailable / loading), never soft "no $ meter yet",
+/// and not SuperGrok extras sold as the live console meter.
+#[test]
+fn usage_billing_console_live_without_prepaid_honest_gap_not_supergrok_extras() {
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+
+    let mut app = test_app_with_agent();
+    app.is_api_key_auth = true;
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.sampling_identity = SamplingIdentityKind::ConsoleKey;
+        agent.console_team_prepaid_cents = None;
+    }
+    app.console_team_prepaid_cents = None;
+
+    let bal = CreditBalance {
+        usage_pct: 100.0,
+        effective_usage_pct: 100.0,
+        period_end_display: Some("Jul 30, 12:00".into()),
+        pay_as_you_go: false,
+        on_demand_cap_cents: None,
+        on_demand_used_cents: None,
+        prepaid_balance_cents: Some(996),
+        period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+        is_unified_billing_user: None,
+    };
+
+    dispatch(
+        Action::TaskComplete(TaskResult::BillingFetched {
+            agent_id: AgentId(0),
+            balance: Some(bal),
+            silent: false,
+            subscription_tier: None,
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            openrouter_balance: None,
+            console_team_prepaid_cents: None,
+        }),
+        &mut app,
+    );
+
+    let text = last_system_text(&app, AgentId(0));
+    let lower = text.to_ascii_lowercase();
+    assert!(
+        !text.contains("no $ meter yet"),
+        "soft placeholder retired: {text}"
+    );
+    assert!(
+        !text.contains("no management key/team id"),
+        "mushy combined gap retired: {text}"
+    );
+    assert!(
+        lower.contains("no management key")
+            || lower.contains("no management team id")
+            || lower.contains("team prepaid unavailable")
+            || lower.contains("loading team prepaid")
+            || lower.contains("console team prepaid"),
+        "console live without prepaid must use honest gap family: {text}"
+    );
+    // Must not look like SuperGrok-only extras are the live console spend.
+    assert!(
+        !(text.contains("SuperGrok extras: $9.96")
+            && !lower.contains("console")
+            && !lower.contains("not live")),
+        "must not sell SuperGrok extras as live console spend: {text}"
+    );
+    assert!(
+        !text.starts_with("Weekly limit:") && !text.starts_with("Usage:"),
+        "must not lead with SuperGrok session billing as live: {text}"
+    );
+}
+
 #[test]
 fn billing_fetched_none_balance_shows_no_data_message() {
     let mut app = test_app_with_agent();
@@ -825,6 +964,7 @@ fn billing_fetched_stores_autotopup_on_app_and_agent() {
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(autotopup),
             openrouter_balance: None,
+            console_team_prepaid_cents: None,
         }),
         &mut app,
     );
@@ -855,6 +995,7 @@ fn billing_fetched_unchanged_autotopup_keeps_cached_rule() {
             subscription_tier: None,
             autotopup: resolved,
             openrouter_balance: None,
+            console_team_prepaid_cents: None,
         }),
         &mut app,
     );
@@ -867,6 +1008,7 @@ fn billing_fetched_unchanged_autotopup_keeps_cached_rule() {
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
             openrouter_balance: None,
+            console_team_prepaid_cents: None,
         }),
         &mut app,
     );
@@ -896,6 +1038,7 @@ fn billing_fetched_cleared_autotopup_resets_cache() {
                 },
             ),
             openrouter_balance: None,
+            console_team_prepaid_cents: None,
         }),
         &mut app,
     );
@@ -909,6 +1052,7 @@ fn billing_fetched_cleared_autotopup_resets_cache() {
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Cleared,
             openrouter_balance: None,
+            console_team_prepaid_cents: None,
         }),
         &mut app,
     );
@@ -930,6 +1074,7 @@ fn app_billing_fetched_stores_autotopup() {
                 crate::views::credit_bar::AutoTopupInfo::disabled(),
             ),
             openrouter_balance: None,
+            console_team_prepaid_cents: None,
         }),
         &mut app,
     );

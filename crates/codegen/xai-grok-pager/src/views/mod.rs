@@ -17,6 +17,7 @@ pub mod goal_detail;
 pub mod history_search;
 pub mod import_claude_modal;
 pub mod jump;
+pub mod limits_snapshot;
 pub mod list_pane;
 pub mod mcps_modal;
 pub mod memory_modal;

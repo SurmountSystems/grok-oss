@@ -809,7 +809,25 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.to_prompt_format().contains("\"ok\": true"));
+        // Gateway JSON is rendered for the model via densify-before-truncate
+        // (UDAX T3): structured objects re-encode under GROK_TOOL_RESULT_FORMAT
+        // default `auto`. For a tiny non-tabular object, TOON is shorter than
+        // compact JSON, so the model sees `ok: true` (not pretty `"ok": true`).
+        let prompt = result.to_prompt_format();
+        assert!(
+            !result.is_error(),
+            "successful gateway call must not map to MCP error: {prompt}"
+        );
+        assert!(
+            prompt.contains("ok") && prompt.contains("true"),
+            "gateway payload must remain model-visible after densify, got: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("ok: true")
+                || prompt.contains("\"ok\":true")
+                || prompt.contains("\"ok\": true"),
+            "expected densified TOON or compact/pretty JSON form of {{ok:true}}, got: {prompt:?}"
+        );
     }
 
     #[tokio::test]
@@ -1294,7 +1312,16 @@ mod tests {
         assert_eq!(kind, McpDumpKind::LongLineText);
         assert_eq!(kind.extension(), "txt");
         let steer = kind.steer("bash", all_tools());
-        assert!(steer.contains("python"), "should steer to python: {steer}");
+        // Long-line text steers to lightweight shell utilities (sed/cut), not
+        // python3 — native tools preferred; shell only when line-oriented tools fail.
+        assert!(
+            steer.contains("sed") || steer.contains("cut"),
+            "should name a present text utility: {steer}"
+        );
+        assert!(
+            !steer.contains("python"),
+            "must not recommend python for dump recovery: {steer}"
+        );
         assert!(
             steer.contains("grep"),
             "single-long-line steer must warn against grep: {steer}"
@@ -1331,7 +1358,6 @@ mod tests {
     fn all_tools() -> QueryTools {
         QueryTools {
             jq: Some("jq"),
-            python: Some("python3"),
             sed: Some("sed"),
             cut: Some("cut"),
         }
@@ -1339,19 +1365,18 @@ mod tests {
 
     #[test]
     fn steer_names_only_installed_tools() {
-        // jq absent, python present → the JSON steer names python, not jq.
+        // jq present, others absent → the JSON steer names jq only.
         let tools = QueryTools {
-            jq: None,
-            python: Some("python3"),
+            jq: Some("jq"),
             sed: None,
             cut: None,
         };
         let steer = McpDumpKind::LongLineJson.steer("bash", tools);
+        assert!(steer.contains("jq"), "names the present jq: {steer}");
         assert!(
-            steer.contains("python3"),
-            "names the present python: {steer}"
+            !steer.contains("python"),
+            "must not recommend python for dump recovery: {steer}"
         );
-        assert!(!steer.contains("jq"), "must not name absent jq: {steer}");
         assert!(
             !steer.contains("if available"),
             "no hedge once presence is known: {steer}"
@@ -1360,8 +1385,8 @@ mod tests {
 
     #[test]
     fn steer_omits_examples_when_no_query_tools_present() {
-        // Neither jq nor python → no "(e.g. …)" clause, but still steer to the
-        // shell tool (and keep the grep warning for the long line).
+        // No jq → no "(e.g. …)" clause, but still steer to the shell tool
+        // (and keep the grep warning for the long line). Never names python.
         let none = QueryTools::default();
         let steer = McpDumpKind::LongLineJson.steer("bash", none);
         assert!(
@@ -1393,6 +1418,15 @@ mod tests {
         use crate::types::context::TruncationConfig;
         use crate::types::output::{MCPOutput, MCPOutputDetails};
         use crate::types::resources::{Resources, SessionFolder, TruncationCfg};
+        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
+        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
+
+        // Pin compact JSON so densify-before-truncate keeps a JSON body
+        // (auto/toon would rewrite to TOON and dump as .txt).
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, Some("json"))]);
 
         let tmp = tempfile::tempdir().unwrap();
         let limit = 20_000;

@@ -29,10 +29,12 @@ use xai_grok_shell::agent::config::UiConfig;
 /// `SettingsRegistry::defaults().all()`.
 const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compact_mode",
+    "hide_header",
     "screen_mode",
     "show_timestamps",
     "show_timeline",
     "page_flip_on_send",
+    "scrub_ascii_punct",
     "combine_queued_prompts",
     "simple_mode",
     "vim_mode",
@@ -55,6 +57,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "coding_data_sharing",
     "default_selected_permission",
     "plan_mode",
+    "plan_approval_park",
     "show_tips",
     "auto_update",
     "fork_secondary_model",
@@ -66,9 +69,15 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "group_tool_verbs",
     "collapsed_edit_blocks",
     "respect_manual_folds",
+    "bubble_copy_buttons",
     "hunk_tracker_mode",
+    "voice_keybind_enabled",
     "voice_capture_mode",
     "voice_stt_language",
+    "notifications.session_recap",
+    "notifications.session_recap_threshold_secs",
+    "features.session_recap",
+    "cancel_subagents_on_turn_cancel",
     // Contextual-hints group + its per-tip child toggles (exercised via the
     // group sub-sheet, not as top-level rows).
     "contextual_hints",
@@ -214,6 +223,9 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         ("compact_mode", Action::SetCompactMode(b)) => {
             assert_eq!(b, expected, "SetCompactMode value differs from expected")
         }
+        ("hide_header", Action::SetHideHeader(b)) => {
+            assert_eq!(b, expected, "SetHideHeader value differs from expected")
+        }
         ("show_timestamps", Action::SetTimestamps(b)) => {
             assert_eq!(b, expected, "SetTimestamps value differs from expected")
         }
@@ -222,6 +234,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("page_flip_on_send", Action::SetPageFlipOnSend(b)) => {
             assert_eq!(b, expected, "SetPageFlipOnSend value differs from expected")
+        }
+        ("scrub_ascii_punct", Action::SetScrubAsciiPunct(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetScrubAsciiPunct value differs from expected"
+            )
         }
         ("combine_queued_prompts", Action::SetCombineQueuedPrompts(b)) => {
             assert_eq!(
@@ -244,6 +262,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
                 "SetRememberToolApprovals value differs from expected"
             )
         }
+        ("voice_keybind_enabled", Action::SetVoiceKeybindEnabled(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetVoiceKeybindEnabled value differs from expected"
+            )
+        }
         (
             "toolset.ask_user_question.timeout_enabled",
             Action::SetAskUserQuestionTimeoutEnabled(b),
@@ -264,6 +288,24 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetRespectManualFolds value differs from expected"
+            )
+        }
+        ("bubble_copy_buttons", Action::SetBubbleCopyButtons(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetBubbleCopyButtons value differs from expected"
+            )
+        }
+        ("notifications.session_recap", Action::SetNotificationsSessionRecap(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetNotificationsSessionRecap value differs from expected"
+            )
+        }
+        ("features.session_recap", Action::SetFeaturesSessionRecap(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetFeaturesSessionRecap value differs from expected"
             )
         }
         ("show_thinking_blocks", Action::SetShowThinkingBlocks(b)) => {
@@ -406,6 +448,15 @@ fn space_on_page_flip_on_send_dispatches_typed_setter() {
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     let default_on = UiConfig::default().page_flip_on_send_enabled();
     assert_set_bool_action(outcome, "page_flip_on_send", !default_on);
+}
+
+#[test]
+fn space_on_scrub_ascii_punct_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "scrub_ascii_punct");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    let default_on = UiConfig::default().scrub_ascii_punct_enabled();
+    assert_set_bool_action(outcome, "scrub_ascii_punct", !default_on);
 }
 
 #[test]
@@ -664,6 +715,21 @@ fn mouse_click_on_page_flip_on_send_indicator_toggles_in_one_click() {
     );
     let default_on = UiConfig::default().page_flip_on_send_enabled();
     assert_set_bool_action(outcome, "page_flip_on_send", !default_on);
+}
+
+#[test]
+fn mouse_click_on_scrub_ascii_punct_indicator_toggles_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "scrub_ascii_punct") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    let default_on = UiConfig::default().scrub_ascii_punct_enabled();
+    assert_set_bool_action(outcome, "scrub_ascii_punct", !default_on);
 }
 
 #[test]
@@ -1136,10 +1202,9 @@ fn filter_with_multiple_matches_navigates_between_settings() {
     assert_eq!(s.selected, simple_idx);
 
     // Drop the second keyword (Backspace x8 to remove "minimal" — 7
-    // chars + 1 space). Now "ascii" alone still matches only
-    // simple_mode but we're back to a single-keyword filter that
-    // doesn't ambiguously broaden. Asserts the "filter still narrows
-    // correctly when one keyword drops out" property.
+    // chars + 1 space). "ascii" alone matches both simple_mode and
+    // scrub_ascii_punct (both declare the keyword). Asserts the filter
+    // broadens correctly when one AND keyword drops out.
     for _ in 0..8 {
         let _ = handle_settings_key(&mut s, &press(KeyCode::Backspace));
     }
@@ -1152,7 +1217,7 @@ fn filter_with_multiple_matches_navigates_between_settings() {
             _ => None,
         })
         .collect();
-    assert_eq!(after_pop_keys, vec!["simple_mode"]);
+    assert_eq!(after_pop_keys, vec!["scrub_ascii_punct", "simple_mode"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,11 +1598,12 @@ fn filter_multi_word_with_one_unmatched_word_shows_zero_settings() {
 #[test]
 fn filter_and_semantics_narrow_strictly() {
     let reg = SettingsRegistry::defaults();
-    // "ascii" matches only simple_mode (keyword).
+    // "ascii" matches simple_mode and scrub_ascii_punct (both keywords).
     let single = reg.search("ascii");
-    assert_eq!(single.len(), 1);
-    assert_eq!(single[0].key, "simple_mode");
-    // "ascii minimal" — both simple_mode keywords. Still 1 match.
+    assert_eq!(single.len(), 2);
+    let single_keys: Vec<&str> = single.iter().map(|m| m.key).collect();
+    assert_eq!(single_keys, vec!["scrub_ascii_punct", "simple_mode"]);
+    // "ascii minimal" — conjunction keeps only simple_mode.
     let conjunction = reg.search("ascii minimal");
     assert_eq!(conjunction.len(), 1);
     assert_eq!(conjunction[0].key, "simple_mode");
@@ -1797,6 +1863,7 @@ fn registry_kind_membership_through_pr_14() {
         bool_keys,
         vec![
             "compact_mode",
+            "hide_header",
             "group_tool_verbs",
             "collapsed_edit_blocks",
             "invert_scroll",
@@ -1806,10 +1873,12 @@ fn registry_kind_membership_through_pr_14() {
             "auto_run_implement",
             "economic_mode",
             "respect_manual_folds",
+            "bubble_copy_buttons",
             "show_thinking_blocks",
             "show_timeline",
             "show_timestamps",
             "page_flip_on_send",
+            "scrub_ascii_punct",
             "combine_queued_prompts",
             "simple_mode",
             "vim_mode",
@@ -1817,6 +1886,9 @@ fn registry_kind_membership_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             "auto_update",
             "show_tips",
+            "voice_keybind_enabled",
+            "notifications.session_recap",
+            "features.session_recap",
             // Per-tip contextual-hint children (hidden from the top-level list,
             // toggled inside the group sub-sheet) are still Bool settings.
             "contextual_hints.undo",
@@ -1841,11 +1913,13 @@ fn registry_kind_membership_through_pr_14() {
             "auto_compact_threshold_percent",
             "auto_dark_theme",
             "auto_light_theme",
+            "cancel_subagents_on_turn_cancel",
             "coding_data_sharing",
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
             "permission_mode",
+            "plan_approval_park",
             "plan_mode",
             "render_mermaid",
             "screen_mode",
@@ -1876,7 +1950,12 @@ fn registry_kind_membership_through_pr_14() {
     sorted_int.sort();
     assert_eq!(
         sorted_int,
-        vec!["max_thoughts_width", "scroll_lines", "scroll_speed"],
+        vec![
+            "max_thoughts_width",
+            "notifications.session_recap_threshold_secs",
+            "scroll_lines",
+            "scroll_speed",
+        ],
         "Int kind membership drift (PR 8)",
     );
 
@@ -1911,11 +1990,13 @@ fn enum_settings_membership_through_pr_14() {
             "auto_compact_threshold_percent",
             "auto_dark_theme",
             "auto_light_theme",
+            "cancel_subagents_on_turn_cancel",
             "coding_data_sharing",
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
             "permission_mode",
+            "plan_approval_park",
             "plan_mode",
             "render_mermaid",
             "screen_mode",
@@ -1946,6 +2027,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_auto_run_implement(true);
     xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
     xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
+    xai_grok_pager::appearance::cache::set_scrub_ascii_punct(true);
     xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
     xai_grok_pager::appearance::cache::set_scroll_mode(
         xai_grok_pager::appearance::ScrollMode::Auto,
@@ -1961,18 +2043,20 @@ fn defaults_round_trip_through_registry() {
     let expected = |key: &str| -> SettingValue {
         match key {
             "compact_mode" => SettingValue::Bool(false),
+            "hide_header" => SettingValue::Bool(false),
             "screen_mode" => SettingValue::Enum("fullscreen"),
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),
+            "scrub_ascii_punct" => SettingValue::Bool(true),
             "combine_queued_prompts" => SettingValue::Bool(false),
             "simple_mode" => SettingValue::Bool(true),
             "vim_mode" => SettingValue::Bool(false),
             "remember_tool_approvals" => SettingValue::Bool(false),
             "toolset.ask_user_question.timeout_enabled" => SettingValue::Bool(true),
             "keep_text_selection" => SettingValue::Enum("flash"),
-            "theme" => SettingValue::Enum("groknight"),
-            "auto_dark_theme" => SettingValue::Enum("groknight"),
+            "theme" => SettingValue::Enum("doge"),
+            "auto_dark_theme" => SettingValue::Enum("doge"),
             "auto_light_theme" => SettingValue::Enum("grokday"),
             "render_mermaid" => SettingValue::Enum("auto"),
             "multiline_mode" => SettingValue::Bool(false),
@@ -1983,13 +2067,15 @@ fn defaults_round_trip_through_registry() {
             "scroll_mode" => SettingValue::Enum("auto"),
             "scroll_lines" => SettingValue::Int(3),
             "invert_scroll" => SettingValue::Bool(false),
-            "display_refresh_auto_cadence" => SettingValue::Bool(true),
+            "display_refresh_auto_cadence" => SettingValue::Bool(false),
             "coding_data_sharing" => SettingValue::Enum("opt-out"),
             "default_selected_permission" => SettingValue::Enum("always_allow_all_sessions"),
             "hunk_tracker_mode" => SettingValue::Enum("agent_only"),
+            "voice_keybind_enabled" => SettingValue::Bool(true),
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
             "plan_mode" => SettingValue::Enum("off"),
+            "plan_approval_park" => SettingValue::Enum("soft"),
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
             "fork_secondary_model" => SettingValue::String(String::new()),
@@ -2001,6 +2087,11 @@ fn defaults_round_trip_through_registry() {
             "group_tool_verbs" => SettingValue::Bool(true),
             "collapsed_edit_blocks" => SettingValue::Bool(false),
             "respect_manual_folds" => SettingValue::Bool(false),
+            "bubble_copy_buttons" => SettingValue::Bool(true),
+            "notifications.session_recap" => SettingValue::Bool(true),
+            "notifications.session_recap_threshold_secs" => SettingValue::Int(30),
+            "features.session_recap" => SettingValue::Bool(true),
+            "cancel_subagents_on_turn_cancel" => SettingValue::Enum("ask"),
             // Per-tip contextual-hint children default ON (inherit → true).
             "contextual_hints.undo" => SettingValue::Bool(true),
             "contextual_hints.plan_mode" => SettingValue::Bool(true),
@@ -2064,9 +2155,11 @@ fn settings_value_payload_matches_kind() {
         let outcome = handle_settings_key(&mut state, &press(KeyCode::Char(' ')));
         match outcome {
             SettingsKeyOutcome::Action(Action::SetCompactMode(_))
+            | SettingsKeyOutcome::Action(Action::SetHideHeader(_))
             | SettingsKeyOutcome::Action(Action::SetTimestamps(_))
             | SettingsKeyOutcome::Action(Action::SetTimeline(_))
             | SettingsKeyOutcome::Action(Action::SetPageFlipOnSend(_))
+            | SettingsKeyOutcome::Action(Action::SetScrubAsciiPunct(_))
             | SettingsKeyOutcome::Action(Action::SetCombineQueuedPrompts(_))
             | SettingsKeyOutcome::Action(Action::SetSimpleMode(_))
             | SettingsKeyOutcome::Action(Action::SetMultilineMode(_))
@@ -2083,7 +2176,11 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
-            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_)) => {}
+            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
+            | SettingsKeyOutcome::Action(Action::SetVoiceKeybindEnabled(_))
+            | SettingsKeyOutcome::Action(Action::SetBubbleCopyButtons(_))
+            | SettingsKeyOutcome::Action(Action::SetNotificationsSessionRecap(_))
+            | SettingsKeyOutcome::Action(Action::SetFeaturesSessionRecap(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
                 meta.key, other
@@ -2170,10 +2267,10 @@ fn repeat_j_navigation_is_processed() {
     };
     let outcome = handle_settings_key(&mut s, &key);
     // From the initial state (compact_mode), Repeat j advances to the next
-    // Appearance row: screen_mode.
+    // Appearance row: hide_header.
     assert!(matches!(outcome, SettingsKeyOutcome::Changed));
     match &s.rows[s.selected] {
-        RowEntry::Setting { key, .. } => assert_eq!(*key, "screen_mode"),
+        RowEntry::Setting { key, .. } => assert_eq!(*key, "hide_header"),
         _ => panic!("expected setting row after Repeat j"),
     }
 }
@@ -2467,24 +2564,47 @@ fn pr4_theme_preview_and_commit_e2e() {
     let theme_meta = reg
         .find("theme")
         .expect("registry must contain `theme` for PR 4");
-    let (default_canonical, default_idx, choices_count, next_canonical, next_idx) =
-        match &theme_meta.kind {
-            SettingKind::Enum {
-                default, choices, ..
-            } => {
-                let default_idx = choices
-                    .iter()
-                    .position(|c| c.canonical == *default)
-                    .expect("theme default must exist in choices");
-                assert!(
-                    default_idx + 1 < choices.len(),
-                    "test requires at least one choice AFTER the default; reorder?"
-                );
-                let next = choices[default_idx + 1].canonical;
-                (*default, default_idx, choices.len(), next, default_idx + 1)
-            }
-            other => panic!("expected Enum kind for `theme`, got {other:?}"),
-        };
+    // Neighbor of the default: prefer the next choice; if default is last
+    // (e.g. doge), use the previous choice and navigate Up instead of Down.
+    let (
+        default_canonical,
+        default_idx,
+        choices_count,
+        neighbor_canonical,
+        neighbor_idx,
+        step_away,
+    ) = match &theme_meta.kind {
+        SettingKind::Enum {
+            default, choices, ..
+        } => {
+            let default_idx = choices
+                .iter()
+                .position(|c| c.canonical == *default)
+                .expect("theme default must exist in choices");
+            let (neighbor_idx, step_away) = if default_idx + 1 < choices.len() {
+                (default_idx + 1, KeyCode::Down)
+            } else if default_idx > 0 {
+                (default_idx - 1, KeyCode::Up)
+            } else {
+                panic!("test requires a neighbor choice beside the default");
+            };
+            let neighbor = choices[neighbor_idx].canonical;
+            (
+                *default,
+                default_idx,
+                choices.len(),
+                neighbor,
+                neighbor_idx,
+                step_away,
+            )
+        }
+        other => panic!("expected Enum kind for `theme`, got {other:?}"),
+    };
+    let step_back = match step_away {
+        KeyCode::Down => KeyCode::Up,
+        KeyCode::Up => KeyCode::Down,
+        other => panic!("unexpected step key {other:?}"),
+    };
     assert!(
         choices_count >= 3,
         "PR 4 test requires ≥3 theme choices, got {choices_count}",
@@ -2512,7 +2632,7 @@ fn pr4_theme_preview_and_commit_e2e() {
         } => {
             assert_eq!(*key, "theme");
             // choices_idx points at the registry's default (derived
-            // dynamically — no hardcoded "1").
+            // dynamically — no hardcoded index).
             assert_eq!(*choices_idx, default_idx);
             match original_value {
                 SettingValue::Enum(s) => *s,
@@ -2523,25 +2643,25 @@ fn pr4_theme_preview_and_commit_e2e() {
     };
     assert_eq!(original_canonical, default_canonical);
 
-    // Down → preview-navigate to next choice. The dispatched Action
+    // Step away → preview-navigate to neighbor. The dispatched Action
     // is now a PREVIEW (no persist).
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Down));
+    let outcome = handle_settings_key(&mut s, &press(step_away));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(
-                name, next_canonical,
+                name, neighbor_canonical,
                 "preview dispatch must carry the canonical of the new focused choice",
             );
         }
-        other => panic!("expected Action::PreviewTheme(\"{next_canonical}\"), got {other:?}"),
+        other => panic!("expected Action::PreviewTheme(\"{neighbor_canonical}\"), got {other:?}"),
     }
     match s.mode() {
-        SettingsModalMode::PickingEnum { choices_idx, .. } => assert_eq!(choices_idx, next_idx),
-        ref other => panic!("expected PickingEnum after Down, got {other:?}"),
+        SettingsModalMode::PickingEnum { choices_idx, .. } => assert_eq!(choices_idx, neighbor_idx),
+        ref other => panic!("expected PickingEnum after step away, got {other:?}"),
     }
 
-    // Up → preview-revert to default.
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Up));
+    // Step back → preview-revert to default.
+    let outcome = handle_settings_key(&mut s, &press(step_back));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(name, default_canonical);
@@ -2549,8 +2669,8 @@ fn pr4_theme_preview_and_commit_e2e() {
         other => panic!("expected Action::PreviewTheme(\"{default_canonical}\"), got {other:?}"),
     }
 
-    // Down again so commit lands on a non-default canonical.
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    // Step away again so commit lands on a non-default canonical.
+    let _ = handle_settings_key(&mut s, &press(step_away));
 
     // Enter → COMMIT. Dispatches `Action::SetTheme(current_canonical)`
     // — a typed Action variant carrying the current preview value.
@@ -2560,11 +2680,13 @@ fn pr4_theme_preview_and_commit_e2e() {
     match outcome {
         SettingsKeyOutcome::Action(Action::SetTheme(name)) => {
             assert_eq!(
-                name, next_canonical,
+                name, neighbor_canonical,
                 "Enter must commit the current preview, not the original"
             );
         }
-        other => panic!("expected Action::SetTheme(\"{next_canonical}\") commit, got {other:?}"),
+        other => {
+            panic!("expected Action::SetTheme(\"{neighbor_canonical}\") commit, got {other:?}")
+        }
     }
     assert!(
         matches!(s.mode(), SettingsModalMode::Browse),
@@ -4720,8 +4842,8 @@ fn pr9_enter_on_coding_data_sharing_row_enters_picking_enum() {
             assert_eq!(*key, "coding_data_sharing");
             assert_eq!(
                 original_value,
-                &SettingValue::Enum("opt-in"),
-                "default snapshot opt_out=false → original 'opt-in'"
+                &SettingValue::Enum("opt-out"),
+                "default snapshot opt_out=true → original 'opt-out'"
             );
         }
         other => panic!("expected PickingEnum mode, got {other:?}"),
@@ -6308,6 +6430,31 @@ fn voice_stt_language_picker_enter_dispatches_set_commit() {
     );
 }
 
+/// Space-toggle on `voice_keybind_enabled` dispatches the typed setter.
+/// Default is ON (the chord works out of the box), so toggling flips it off.
+#[test]
+fn space_on_voice_keybind_enabled_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "voice_keybind_enabled");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "voice_keybind_enabled", false);
+}
+
+/// Value-column click toggles `voice_keybind_enabled` in one click.
+#[test]
+fn mouse_click_on_voice_keybind_enabled_indicator_toggles_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "voice_keybind_enabled") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "voice_keybind_enabled", false);
+}
+
 /// Value-column click on the voice_stt_language row opens the picker in ONE
 /// click (mouse ↔ keyboard parity).
 #[test]
@@ -7207,23 +7354,22 @@ fn invert_scroll_renders_under_mouse_shell_owned_default_false() {
 }
 
 // ---------------------------------------------------------------------------
-// display_refresh_auto_cadence — SHELL-owned Bool (Appearance, default ON)
+// display_refresh_auto_cadence — SHELL-owned Bool (Appearance, default false)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn display_refresh_auto_cadence_space_dispatches_typed_setter() {
-    // Default is on; space toggles off.
     let mut s = make_state();
     navigate_to(&mut s, "display_refresh_auto_cadence");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "display_refresh_auto_cadence", false);
+    assert_set_bool_action(outcome, "display_refresh_auto_cadence", true);
 }
 
 #[test]
 fn display_refresh_auto_cadence_enter_dispatches_typed_setter() {
-    // Seed off so Enter toggles on.
+    // Seed on so Enter toggles off.
     let mut ui = UiConfig::default();
-    ui.display_refresh.auto_cadence_enabled = Some(false);
+    ui.display_refresh.auto_cadence_enabled = Some(true);
     let mut s = SettingsModalState::new(
         Arc::new(SettingsRegistry::defaults()),
         ui,
@@ -7234,12 +7380,11 @@ fn display_refresh_auto_cadence_enter_dispatches_typed_setter() {
     );
     navigate_to(&mut s, "display_refresh_auto_cadence");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    assert_set_bool_action(outcome, "display_refresh_auto_cadence", true);
+    assert_set_bool_action(outcome, "display_refresh_auto_cadence", false);
 }
 
 #[test]
 fn display_refresh_auto_cadence_mouse_click_two_stage_toggles() {
-    // Default is on; second body-click toggles off.
     let mut s = make_state();
     synth_rects(&mut s);
     let row_y = row_idx_for(&s, "display_refresh_auto_cadence") as u16;
@@ -7259,7 +7404,7 @@ fn display_refresh_auto_cadence_mouse_click_two_stage_toggles() {
         10,
         row_y,
     );
-    assert_set_bool_action(outcome, "display_refresh_auto_cadence", false);
+    assert_set_bool_action(outcome, "display_refresh_auto_cadence", true);
 }
 
 #[test]
@@ -7275,7 +7420,7 @@ fn display_refresh_auto_cadence_meta_appearance_shell_restart_hidden_minimal() {
     assert_eq!(meta.label, "Match display refresh rate");
     match &meta.kind {
         SettingKind::Bool { default } => {
-            assert!(*default, "display_refresh_auto_cadence must default ON")
+            assert!(!default, "display_refresh_auto_cadence must default OFF")
         }
         other => panic!("expected Bool kind for display_refresh_auto_cadence, got {other:?}"),
     }
@@ -7288,13 +7433,13 @@ fn display_refresh_auto_cadence_defaults_roundtrip_via_current_value_for() {
     let pager = PagerLocalSnapshot::default();
     let value = current_value_for("display_refresh_auto_cadence", &ui, &pager)
         .expect("current_value_for(display_refresh_auto_cadence) must resolve");
-    assert_eq!(value, SettingValue::Bool(true));
-
-    let mut ui_off = UiConfig::default();
-    ui_off.display_refresh.auto_cadence_enabled = Some(false);
-    let value = current_value_for("display_refresh_auto_cadence", &ui_off, &pager)
-        .expect("current_value_for(display_refresh_auto_cadence) must resolve");
     assert_eq!(value, SettingValue::Bool(false));
+
+    let mut ui_on = UiConfig::default();
+    ui_on.display_refresh.auto_cadence_enabled = Some(true);
+    let value = current_value_for("display_refresh_auto_cadence", &ui_on, &pager)
+        .expect("current_value_for(display_refresh_auto_cadence) must resolve");
+    assert_eq!(value, SettingValue::Bool(true));
 }
 
 // ---------------------------------------------------------------------------
@@ -7692,8 +7837,8 @@ fn auto_compact_threshold_renders_under_session_category_shell_owned() {
         other => panic!("expected Enum kind for auto_compact_threshold_percent, got {other:?}"),
     }
     assert!(
-        meta.restart_required,
-        "auto-compact threshold is resolved at session build time"
+        !meta.restart_required,
+        "auto-compact threshold live-applies to open sessions (restart_required: false)"
     );
 }
 
@@ -7945,7 +8090,7 @@ fn group_tool_verbs_renders_under_appearance_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for group_tool_verbs, got {other:?}"),
     }
-    // Must sit immediately below respect_manual_folds in the registry order.
+    // Appearance order: respect_manual_folds → bubble_copy_buttons → group_tool_verbs.
     let keys: Vec<&str> = reg
         .all()
         .iter()
@@ -7956,14 +8101,24 @@ fn group_tool_verbs_renders_under_appearance_category_shell_owned() {
         .iter()
         .position(|k| *k == "respect_manual_folds")
         .expect("respect_manual_folds in Appearance");
+    let bubble_idx = keys
+        .iter()
+        .position(|k| *k == "bubble_copy_buttons")
+        .expect("bubble_copy_buttons in Appearance");
     let group_idx = keys
         .iter()
         .position(|k| *k == "group_tool_verbs")
         .expect("group_tool_verbs in Appearance");
     assert_eq!(
         respect_idx + 1,
+        bubble_idx,
+        "bubble_copy_buttons must sit immediately below respect_manual_folds; \
+         Appearance order: {keys:?}"
+    );
+    assert_eq!(
+        bubble_idx + 1,
         group_idx,
-        "group_tool_verbs must be immediately below respect_manual_folds; \
+        "group_tool_verbs must sit immediately below bubble_copy_buttons; \
          Appearance order: {keys:?}"
     );
 }
@@ -8072,4 +8227,234 @@ fn collapsed_edit_blocks_renders_under_appearance_category_shell_owned() {
         "collapsed_edit_blocks must be immediately below group_tool_verbs; \
          Appearance order: {keys:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// hide_header — SHARED Bool (Appearance, default false)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hide_header_space_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "hide_header");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "hide_header", true);
+}
+
+#[test]
+fn hide_header_enter_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "hide_header");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert_set_bool_action(outcome, "hide_header", true);
+}
+
+#[test]
+fn hide_header_mouse_click_two_stage_toggles() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "hide_header") as u16;
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click on a different row body should only select, got: {outcome:?}"
+    );
+    assert_eq!(s.selected, row_y as usize);
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "hide_header", true);
+}
+
+#[test]
+fn hide_header_renders_under_appearance_category_shared() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("hide_header")
+        .expect("hide_header must be registered");
+    assert_eq!(meta.category, SettingCategory::Appearance);
+    assert_eq!(meta.owner, SettingOwner::Shared);
+    match &meta.kind {
+        SettingKind::Bool { default } => assert!(!*default, "default must be false"),
+        other => panic!("expected Bool kind for hide_header, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session recap Settings rows (operator-requested Settings gaps)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn search_recap_finds_session_recap_settings() {
+    let reg = SettingsRegistry::defaults();
+    let hits = reg.search("recap");
+    let keys: Vec<&str> = hits.iter().map(|m| m.key).collect();
+    assert!(
+        keys.contains(&"notifications.session_recap"),
+        "search(recap) must find auto recap; got {keys:?}"
+    );
+    assert!(
+        keys.contains(&"features.session_recap"),
+        "search(recap) must find master recap; got {keys:?}"
+    );
+    assert!(
+        keys.contains(&"notifications.session_recap_threshold_secs"),
+        "search(recap) must find threshold; got {keys:?}"
+    );
+}
+
+#[test]
+fn notifications_session_recap_space_dispatches_typed_setter() {
+    // Default ON → toggle to false.
+    let mut s = make_state();
+    navigate_to(&mut s, "notifications.session_recap");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "notifications.session_recap", false);
+}
+
+#[test]
+fn notifications_session_recap_enter_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "notifications.session_recap");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert_set_bool_action(outcome, "notifications.session_recap", false);
+}
+
+#[test]
+fn features_session_recap_space_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "features.session_recap");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "features.session_recap", false);
+}
+
+#[test]
+fn features_session_recap_is_session_shell_restart_required() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("features.session_recap")
+        .expect("features.session_recap must be registered");
+    assert_eq!(meta.category, SettingCategory::Session);
+    assert_eq!(meta.owner, SettingOwner::Shell);
+    assert!(meta.restart_required);
+}
+
+#[test]
+fn bubble_copy_buttons_space_dispatches_typed_setter() {
+    // Default ON → toggle to false.
+    let mut s = make_state();
+    navigate_to(&mut s, "bubble_copy_buttons");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
+}
+
+#[test]
+fn bubble_copy_buttons_enter_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "bubble_copy_buttons");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
+}
+
+#[test]
+fn bubble_copy_buttons_mouse_click_two_stage_toggles() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "bubble_copy_buttons") as u16;
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click on a different row body should only select, got: {outcome:?}"
+    );
+    assert_eq!(s.selected, row_y as usize);
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "bubble_copy_buttons", false);
+}
+
+#[test]
+fn bubble_copy_buttons_renders_under_appearance_pager_owned() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("bubble_copy_buttons")
+        .expect("bubble_copy_buttons must be registered");
+    assert_eq!(meta.category, SettingCategory::Appearance);
+    assert_eq!(meta.owner, SettingOwner::Pager);
+    match &meta.kind {
+        SettingKind::Bool { default } => assert!(*default),
+        other => panic!("expected Bool kind for bubble_copy_buttons, got {other:?}"),
+    }
+}
+
+#[test]
+fn cancel_subagents_on_turn_cancel_enter_opens_picker_and_commits() {
+    let mut s = make_state();
+    navigate_to(&mut s, "cancel_subagents_on_turn_cancel");
+    // Enter opens enum picker.
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter should open enum picker, got {outcome:?}"
+    );
+    // Move to always_stop (index 1) and commit.
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetCancelSubagentsOnTurnCancel(s)) => {
+            assert_eq!(s, "always_stop");
+        }
+        other => panic!("expected SetCancelSubagentsOnTurnCancel, got {other:?}"),
+    }
+}
+
+#[test]
+fn cancel_subagents_registered_under_agent() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("cancel_subagents_on_turn_cancel")
+        .expect("cancel_subagents_on_turn_cancel must be registered");
+    assert_eq!(meta.category, SettingCategory::Agent);
+    assert_eq!(meta.owner, SettingOwner::Shared);
+}
+
+#[test]
+fn session_recap_threshold_int_stepper_commits() {
+    let mut s = make_state();
+    navigate_to(&mut s, "notifications.session_recap_threshold_secs");
+    // Enter opens int stepper.
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter should open int stepper, got {outcome:?}"
+    );
+    // Bump up then commit.
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Right));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetNotificationsSessionRecapThresholdSecs(v)) => {
+            assert!(v > 30, "stepper should bump above default 30, got {v}");
+        }
+        other => panic!("expected SetNotificationsSessionRecapThresholdSecs, got {other:?}"),
+    }
 }

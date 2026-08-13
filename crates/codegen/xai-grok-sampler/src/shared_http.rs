@@ -8,6 +8,15 @@
 //! first-retry HTTP/1.1 rebuild escape hatch (that client never pools, so
 //! every use opens a fresh connection).
 //!
+//! Timeouts on these builders:
+//! - **`GROK_CONNECT_TIMEOUT_SECS`** (default 10): TCP/TLS connect only.
+//! - **No client-wide request `.timeout()`** — long successful SSE streams
+//!   must not be killed mid-body.
+//! - **Headers / first-byte** for streaming `execute` is separate:
+//!   `GROK_STREAM_HEADERS_TIMEOUT_SECS` (default 120) in `client.rs`, wrapped
+//!   around the headers await only. Per-chunk idle after headers is
+//!   `idle_timeout_secs` (default 300) on the L2 stream.
+//!
 //! Wire-level behavior (connection reuse, header isolation, pool-less http1
 //! fallback, kill switch) is pinned by the `shared_http_wire` and
 //! `shared_http_kill_switch` integration binaries, which own their process

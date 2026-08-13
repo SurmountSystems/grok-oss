@@ -25,6 +25,9 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         sampling_config: xai_grok_sampler::SamplerConfig {
             api_key: None,
             failover_api_keys: Vec::new(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
             base_url: String::new(),
             model: String::new(),
             max_completion_tokens: None,
@@ -49,6 +52,8 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             origin_client: None,
             attribution_callback: None,
             bearer_resolver: None,
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,

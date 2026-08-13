@@ -54,7 +54,8 @@ Usage:${%- if tools.by_kind.read %}
 - The edit will FAIL if `${{ params.edit.oldString }}` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `${{ params.edit.replaceAll }}` to change every instance of `${{ params.edit.oldString }}`.
 - Use `${{ params.edit.replaceAll }}` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
 - To create a new file, set ${{ params.edit.oldString }} to an empty string.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked."#;
+- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
+- Trailing spaces/tabs on each line are stripped by default (disable with env `GROK_STRIP_TRAILING_WHITESPACE=0`)."#;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Input
@@ -210,6 +211,29 @@ impl xai_tool_runtime::Tool for EditTool {
                 "Old string and new string are the same".to_owned(),
             ));
         }
+        // In-process bulk-edit policy (A3 port on OpenCode `edit`). Deny
+        // reckless replace_all when GROK_DENY_REPLACE_ALL=1 and multi-file
+        // same-hunk storms. Fail-open. Missing OwnerSessionId → storm skipped.
+        // New-file create (empty old_string) still hits replace_all gate only
+        // when that env is set; storm needs non-empty old_string.
+        {
+            let session_id = {
+                let res = resources.lock().await;
+                res.get::<crate::types::resources::OwnerSessionId>()
+                    .map(|s| s.0.clone())
+            };
+            if let Some(deny) = crate::util::bulk_edit_policy::evaluate(
+                &crate::util::bulk_edit_policy::BulkEditRequest {
+                    session_id: session_id.as_deref(),
+                    file_path: &input.file_path,
+                    old_string: &input.old_string,
+                    new_string: &input.new_string,
+                    replace_all: input.replace_all,
+                },
+            ) {
+                return Ok(SearchReplaceOutput::InvalidInput(deny.reason));
+            }
+        }
 
         // ── Route to creation or replacement ────────────────────────
         if input.old_string.is_empty() {
@@ -271,8 +295,9 @@ async fn handle_new_file_creation(
     // Create parent directories if needed.
     ensure_parent_dirs(path).await?;
 
-    // Write the new file.
-    fs.write_file(path, input.new_string.as_bytes())
+    // Write the new file (post-edit trailing-ws strip, default ON).
+    let write_content = crate::util::trailing_ws::prepare_for_write(input.new_string.clone());
+    fs.write_file(path, write_content.as_bytes())
         .await
         .map_err(|e| {
             xai_tool_runtime::ToolError::execution(
@@ -285,14 +310,13 @@ async fn handle_new_file_creation(
     notification_handle.send_file_written(FileWritten {
         tool_call_id: tool_call_id.to_string(),
         absolute_path: path.to_path_buf(),
-        content: input.new_string.clone(),
+        content: write_content.clone(),
         previous_content: None,
         is_new_file: true,
     });
 
     // Build output.
-    let snippet = input
-        .new_string
+    let snippet = write_content
         .split_inclusive('\n')
         .enumerate()
         .map(|(i, s)| format!("{}→{}", i + 1, s))
@@ -306,7 +330,7 @@ async fn handle_new_file_creation(
     let edits = vec![SearchReplaceEditDetail {
         old_string: input.old_string.clone(),
         old_line: 1,
-        new_string: input.new_string.clone(),
+        new_string: write_content.clone(),
         new_line: 1,
         context_before: String::new(),
         context_after: String::new(),
@@ -316,7 +340,7 @@ async fn handle_new_file_creation(
     Ok(SearchReplaceOutput::EditsApplied(
         SearchReplaceEditsApplied {
             old_string: input.old_string.clone(),
-            new_string: input.new_string.clone(),
+            new_string: write_content,
             tool_output_for_prompt,
             tool_output_for_prompt_concise: Some(format!(
                 "The file {} has been created.",
@@ -402,26 +426,7 @@ async fn handle_replacement(
         &input.new_string,
     );
 
-    // Write the updated file.
-    fs.write_file(path, new_text.as_bytes())
-        .await
-        .map_err(|e| {
-            xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("edit").expect("valid"),
-                e.to_string(),
-            )
-        })?;
-
-    // Emit FileWritten notification.
-    notification_handle.send_file_written(FileWritten {
-        tool_call_id: tool_call_id.to_string(),
-        absolute_path: path.to_path_buf(),
-        content: new_text.clone(),
-        previous_content: Some(old_text.clone()),
-        is_new_file: false,
-    });
-
-    // Build edit details using shared helpers.
+    // Build edit details / snippets from pre-strip content (byte positions).
     let edits = build_edit_details(
         &new_text,
         &input.old_string,
@@ -456,6 +461,26 @@ async fn handle_replacement(
         );
         (default_msg, concise_msg)
     };
+
+    // Write the updated file (post-edit trailing-ws strip, default ON).
+    let write_text = crate::util::trailing_ws::prepare_for_write(new_text);
+    fs.write_file(path, write_text.as_bytes())
+        .await
+        .map_err(|e| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("edit").expect("valid"),
+                e.to_string(),
+            )
+        })?;
+
+    // Emit FileWritten notification (must match bytes on disk).
+    notification_handle.send_file_written(FileWritten {
+        tool_call_id: tool_call_id.to_string(),
+        absolute_path: path.to_path_buf(),
+        content: write_text,
+        previous_content: Some(old_text.clone()),
+        is_new_file: false,
+    });
 
     Ok(SearchReplaceOutput::EditsApplied(
         SearchReplaceEditsApplied {
@@ -990,6 +1015,92 @@ mod tests {
                 );
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
+        }
+    }
+
+    /// A3 gate: `GROK_DENY_REPLACE_ALL=1` → InvalidInput, file unchanged.
+    #[tokio::test]
+    async fn bulk_policy_denies_replace_all_when_env_set() {
+        use crate::types::resources::OwnerSessionId;
+        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
+        use crate::util::bulk_edit_policy::{ENV_BULK_EDIT_DIR, ENV_DENY_REPLACE_ALL};
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let state = TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            (ENV_BULK_EDIT_DIR, Some(state.path().to_str().unwrap())),
+            (ENV_DENY_REPLACE_ALL, Some("1")),
+        ]);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ra.txt");
+        std::fs::write(&path, "foo foo\n").unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(OwnerSessionId("oc-deny-ra".into()));
+        let input = EditInput {
+            file_path: "ra.txt".to_string(),
+            old_string: "foo".to_string(),
+            new_string: "bar".to_string(),
+            replace_all: true,
+        };
+        let result =
+            xai_tool_runtime::Tool::run(&EditTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("replace_all"), "msg={msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "foo foo\n");
+    }
+
+    /// A3 gate: same old→new storm across N files → InvalidInput on Nth; last file unchanged.
+    #[tokio::test]
+    async fn bulk_policy_storm_denies_and_leaves_file_unchanged() {
+        use crate::types::resources::OwnerSessionId;
+        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
+        use crate::util::bulk_edit_policy::{
+            ENV_BULK_EDIT_DIR, ENV_BULK_EDIT_N, ENV_DENY_REPLACE_ALL,
+        };
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let state = TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            (ENV_BULK_EDIT_DIR, Some(state.path().to_str().unwrap())),
+            (ENV_BULK_EDIT_N, Some("3")),
+            (ENV_DENY_REPLACE_ALL, None),
+        ]);
+        let tmp = TempDir::new().unwrap();
+        for i in 0..3 {
+            let name = format!("s{i}.txt");
+            let p = tmp.path().join(&name);
+            std::fs::write(&p, "FOO_RENAME here\n").unwrap();
+            let mut resources = test_resources(tmp.path());
+            resources.insert(OwnerSessionId("oc-storm".into()));
+            let input = make_input(&name, "FOO_RENAME", "BAR_RENAME");
+            let result =
+                xai_tool_runtime::Tool::run(&EditTool, test_ctx(resources.into_shared()), input)
+                    .await
+                    .unwrap();
+            if i < 2 {
+                assert!(
+                    matches!(result, SearchReplaceOutput::EditsApplied(_)),
+                    "path {i} should apply: {result:?}"
+                );
+            } else {
+                match result {
+                    SearchReplaceOutput::InvalidInput(msg) => {
+                        assert!(msg.contains("storm"), "msg={msg}");
+                    }
+                    other => panic!("expected storm InvalidInput, got {other:?}"),
+                }
+                assert_eq!(
+                    std::fs::read_to_string(&p).unwrap(),
+                    "FOO_RENAME here\n",
+                    "denied path must not be modified"
+                );
+            }
         }
     }
 

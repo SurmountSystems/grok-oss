@@ -503,6 +503,13 @@ pub(super) async fn run_session(
                                 s.resume_plan_approval(completion_tx).await;
                             });
                         }
+                        SessionCommand::RestoreTodoBoard { plan_state } => {
+                            session.restore_todo_board(plan_state).await;
+                        }
+                        SessionCommand::ClearCompletedTodos { respond_to } => {
+                            let n = session.clear_completed_todos().await;
+                            let _ = respond_to.send(n);
+                        }
                         SessionCommand::GetToolOverrides { respond_to } => {
                             let _ = respond_to.send(session.effective_tool_overrides());
                         }
@@ -612,6 +619,15 @@ pub(super) async fn run_session(
                             let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
                             let _ = responds_to.send(updated_model_id);
                         }
+                        SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent,
+                            auto_compact_threshold_tokens,
+                        } => {
+                            session.apply_auto_compact_threshold(
+                                auto_compact_threshold_percent,
+                                auto_compact_threshold_tokens,
+                            );
+                        }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;
                             let _ = responds_to.send(outcome);
@@ -650,6 +666,9 @@ pub(super) async fn run_session(
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
+                                        failover_base_url: r.failover_base_url,
+                                        session_base_url: r.session_base_url,
+                                        session_identity_key: r.session_identity_key,
                                     });
                                 }
                                 // Credentials changed under a possibly-unchanged model id.
@@ -891,11 +910,20 @@ pub(super) async fn run_session(
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::InterjectQueuedPrompt { id, expected_version, owner, new_text } => {
-                            // Send-now: the handler promoted the row; cancel the running turn and start it.
-                            let cancel_for_send_now = session.handle_interject_queued_prompt(&id, expected_version, owner.as_deref(), new_text.as_deref()).await;
-                            if cancel_for_send_now {
-                                session.cancel_turn_for_send_now(&mut replay_buffer).await;
-                            }
+                            // Soft interject only: buffers into the running turn
+                            // (or no-ops). Never cancels — cancel is Esc/stop.
+                            let _never_cancels = session
+                                .handle_interject_queued_prompt(
+                                    &id,
+                                    expected_version,
+                                    owner.as_deref(),
+                                    new_text.as_deref(),
+                                )
+                                .await;
+                            debug_assert!(
+                                !_never_cancels,
+                                "queue soft-interject must never request cancel"
+                            );
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::Cancel(options) => {
@@ -1819,10 +1847,21 @@ pub(super) async fn run_session(
                             let agent_type = session.active_agent_type.lock().clone();
                             let _ = responds_to.send(agent_type);
                         }
-                        SessionCommand::SideQuestion { question, respond_to } => {
+                        SessionCommand::SideQuestion {
+                            question,
+                            btw_session_id,
+                            prior_turns,
+                            respond_to,
+                        } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s.handle_side_question(&question).await;
+                                let result = s
+                                    .handle_side_question(
+                                        &question,
+                                        btw_session_id,
+                                        prior_turns,
+                                    )
+                                    .await;
                                 let _ = respond_to.send(result);
                             });
                         }

@@ -1176,6 +1176,10 @@ pub enum RetryState {
         /// Human-readable reason for the retry
         reason: String,
     },
+    /// Next sample stream is open after a retry (or any live stream start).
+    /// Clears sticky yellow `Retrying` chrome so the footer returns to
+    /// Thinking/Responding/connecting instead of freezing on attempt N.
+    StreamResumed,
     /// All retries have been exhausted
     Exhausted {
         /// Total number of attempts made

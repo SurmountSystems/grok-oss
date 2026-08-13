@@ -704,6 +704,10 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::ReferenceToVideoTool>();
         b.register::<grok_build::EnterPlanModeTool>();
         b.register::<grok_build::ExitPlanModeTool>();
+        b.register::<grok_build::DisableAsciiScrubTool>();
+        b.register::<grok_build::JsonToToonTool>();
+        b.register::<grok_build::ImplementMemoryTool>();
+        b.register::<grok_build::PlanValidateTool>();
         b.register_with_params::<
                 grok_build::AskUserQuestionTool,
                 grok_build::ask_user_question::AskUserQuestionParams,
@@ -998,6 +1002,12 @@ impl ToolRegistryBuilder {
         resources.insert(crate::types::resources::FileSystem(ctx.fs));
         let cwd = ctx.cwd;
         resources.insert(crate::types::resources::Cwd(cwd.clone()));
+        // Session work join key: prefer file under session folder (subagent spawn
+        // writes it) so cleared_todos / tools share usage.jsonl work_ulid.
+        // Read before moving session_folder into SessionFolder.
+        if let Some(wu) = crate::util::ulid::read_work_ulid_file(&ctx.session_folder) {
+            resources.insert(crate::types::resources::SessionWorkUlid(wu));
+        }
         resources.insert(crate::types::resources::SessionFolder(ctx.session_folder));
         resources.insert(crate::types::resources::SessionEnv(ctx.session_env));
         if let Some(owner_session_id) = ctx.owner_session_id.clone() {

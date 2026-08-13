@@ -529,11 +529,22 @@ pub(crate) async fn run_read_file(
         let limit_param = invoking_param_names.resolve("limit");
         let single_content_line = extracted.raw_output.lines().count() <= 1;
         let single_line_hint = if single_content_line && !execute_name.is_empty() {
+            // Prefer lightweight shell utilities when present; never recommend
+            // python3 for dump/recovery steers (native tools preferred for
+            // normal edits/reads).
+            use crate::util::query_tools::{QueryTools, examples_clause};
+            let examples = {
+                let qt = QueryTools::detect();
+                let mut tools = qt.json_tools();
+                if let Some(cut) = qt.cut {
+                    tools.push(format!("`{cut} -c`"));
+                }
+                examples_clause(&tools)
+            };
             format!(
                 "\nNote: the requested read is a single very long line, so \
                  line-based {offset_param}/{limit_param} cannot narrow it further. Use the \
-                 '{execute_name}' tool to extract the parts you need (e.g. \
-                 `jq`, `python3`, or `cut -c`)."
+                 '{execute_name}' tool to extract the parts you need{examples}."
             )
         } else {
             String::new()

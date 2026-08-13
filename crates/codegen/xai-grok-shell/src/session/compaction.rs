@@ -1699,12 +1699,25 @@ impl SessionActor {
         if self.memory.is_enabled() {
             tracing::info!(target: xai_grok_telemetry::memory_log::TARGET, "MEMORY_COMPACT: post-compaction reset, next turn re-checks injection (search only if no block persisted)");
         }
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::PlanState(
-                crate::tools::todo::TodoState::default(),
-            ));
+        // Persist the live todo board to plan.json (honest snapshot). Historical
+        // bug: always wrote empty TodoState, so session dirs lied after compact.
+        // Real SoT remains Resources + resources_state.json; plan.json is a mirror.
+        {
+            use crate::tools::todo::{TodoState, plan_json_snapshot_after_compact};
+            use xai_grok_tools::types::resources::State;
+            let live = self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .read_resource::<State<TodoState>>()
+                .await
+                .map(|s| s.0);
+            let snapshot = plan_json_snapshot_after_compact(live.as_ref());
+            let _ = self
+                .notifications
+                .persistence_tx
+                .send(PersistenceMsg::PlanState(snapshot));
+        }
         self.agent
             .borrow()
             .tool_bridge()

@@ -506,6 +506,10 @@ pub struct PromptWidget {
     textarea_state: TextAreaState,
     /// Cached textarea render area from last draw (for mouse coordinate mapping).
     textarea_area: Rect,
+    /// Cached top-bar ⧉ copy button rect from last draw (None when chrome off).
+    copy_button_area: Option<Rect>,
+    /// Whether the draft-copy button is hovered.
+    copy_hovered: bool,
     /// @-completion file search state.
     pub file_search: FileSearchState,
     /// Pending request to open the line viewer.
@@ -610,6 +614,8 @@ impl PromptWidget {
             textarea,
             textarea_state: TextAreaState::default(),
             textarea_area: Rect::default(),
+            copy_button_area: None,
+            copy_hovered: false,
             file_search: FileSearchState::new(cwd),
             pending_viewer_request: None,
             history_search: HistorySearchState::new(),
@@ -1535,6 +1541,38 @@ impl PromptWidget {
     /// Last rendered textarea area for mouse hit-testing.
     pub fn textarea_area(&self) -> Rect {
         self.textarea_area
+    }
+
+    /// Top-bar draft-copy (`⧉`) hit target from the last draw, if painted.
+    pub fn copy_button_area(&self) -> Option<Rect> {
+        self.copy_button_area
+    }
+
+    /// Whether the draft-copy (`⧉`) button is currently hovered.
+    pub fn copy_hovered(&self) -> bool {
+        self.copy_hovered
+    }
+
+    /// Update hover for the draft-copy button. Returns `true` if changed.
+    pub fn update_copy_hover(&mut self, col: u16, row: u16) -> bool {
+        let new = self
+            .copy_button_area
+            .is_some_and(|r| r.contains((col, row).into()));
+        let changed = new != self.copy_hovered;
+        self.copy_hovered = new;
+        changed
+    }
+
+    /// Test helper: inject a top-bar ⧉ hit rect without a full prompt draw.
+    #[cfg(test)]
+    pub fn force_copy_button_area_for_test(&mut self, area: Rect) {
+        self.copy_button_area = Some(area);
+    }
+
+    /// Plain text of the current draft (includes multimodal chip labels like
+    /// `[Image #1]` as they appear in the composer). Empty when nothing typed.
+    pub fn draft_plain_text(&self) -> &str {
+        self.text()
     }
 
     /// Compute the content width inside the chrome (if any).
@@ -2873,6 +2911,93 @@ impl PromptWidget {
     }
 }
 
+/// Paint the Human-green composer caret as a slow solid↔empty block blink.
+///
+/// Uses wall-clock millis so any redraw cadence (including Slow ticks) advances
+/// the phase. Colour is `theme.accent_user` (green under DOGE: Human chrome —
+/// same family as user rails / pointer / OSC 12). **Not** agent
+/// `accent_running` magenta. Prior mistake: caret was painted magenta because
+/// "agent chrome"; the composer is the human input surface → green.
+///
+/// Blank insertion cell blinks **classic terminal block on/off** of the **same
+/// full-cell rectangle** (the terminal cell itself — not a dimmed solid `█`,
+/// not a short mid-cell outline, not an accent plate with a dark hole):
+///
+/// - **Silhouette** for both phases is the terminal cell. Solid half fills it
+///   with an accent **background plate** (cell bg always paints full height).
+///   Empty half is a true empty cell (canvas bg, no accent plate).
+/// - **Solid (full):** [`cursor_box_filled`] (`█`) with `fg=accent`,
+///   `bg=accent` — solid Human green block filling the cell (DOGE).
+/// - **Empty (off):** [`cursor_box_hollow`] (space) with `fg=canvas`,
+///   `bg=canvas` — pure empty cell, **no** accent plate. **No**
+///   [`Modifier::DIM`]. Rejected: `■`/`fg=canvas bg=accent` hole-punch
+///   (reads as a mini-badge with a void).
+///
+/// On a cell that already has a visible grapheme (typed text, ghost body, slash
+/// inline suffix) the grapheme is kept and only restyled so the block caret
+/// never eats characters under the cursor: solid = reverse plate; empty =
+/// accent ink on canvas (still no dim-as-blink).
+fn paint_composer_box_cursor(
+    buf: &mut Buffer,
+    cx: u16,
+    cy: u16,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let filled_phase = crate::glyphs::cursor_box_filled_phase(now_ms);
+    paint_composer_box_cursor_phase(buf, cx, cy, theme, bg, filled_phase);
+}
+
+/// Phase-injected paint path (wall-clock wrapper + unit tests).
+fn paint_composer_box_cursor_phase(
+    buf: &mut Buffer,
+    cx: u16,
+    cy: u16,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+    filled_phase: bool,
+) {
+    // Human input surface → `accent_user` (green under DOGE). Never agent
+    // `accent_running` magenta.
+    let accent = match theme.accent_user {
+        // Reset→Cyan so NO_COLOR still shows a visible caret.
+        ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
+        c => c,
+    };
+
+    let Some(cell) = buf.cell_mut((cx, cy)) else {
+        return;
+    };
+    // Treat blank / empty cells as the insertion-point affordance (block on/off).
+    // Any other grapheme stays readable under the block caret.
+    let blank = {
+        let sym = cell.symbol();
+        sym.is_empty() || sym == " " || sym == "\u{00a0}"
+    };
+    if blank {
+        if filled_phase {
+            // Solid filled rectangle: full-cell Human accent plate (+ block ink).
+            cell.set_symbol(crate::glyphs::cursor_box_filled());
+            cell.set_style(Style::default().fg(accent).bg(accent));
+        } else {
+            // Classic block off: true empty cell (space on canvas). No accent
+            // plate, no hole-punch square — silhouette is the cell itself.
+            cell.set_symbol(crate::glyphs::cursor_box_hollow());
+            cell.set_style(Style::default().fg(bg).bg(bg));
+        }
+    } else if filled_phase {
+        // Classic block: invert — Human accent plate, canvas-coloured ink.
+        cell.set_style(Style::default().fg(bg).bg(accent));
+    } else {
+        // Empty half on a grapheme: keep canvas bg, Human accent ink (no DIM).
+        cell.set_style(Style::default().fg(accent).bg(bg));
+    }
+}
+
 /// Paint slash/skill accent color on a byte range, using textarea screen coords
 /// so highlighting works on any visual row — including the continuation rows
 /// of a token that soft-wraps at the line end.
@@ -2914,6 +3039,8 @@ impl PromptWidget {
         voice: Option<VoicePromptOverlay>,
     ) -> PromptRenderResult {
         if area.height == 0 || area.width < 4 {
+            // Drop stale hit targets from a wider prior frame.
+            self.copy_button_area = None;
             return PromptRenderResult {
                 cursor_pos: None,
                 post_flush_escapes: None,
@@ -2968,7 +3095,8 @@ impl PromptWidget {
 
         let text_area_rect = chunks[1];
 
-        // Top divider: ╭──────────╮
+        // Top divider: ╭──────────╮  (optional session title + ⧉ draft copy)
+        self.copy_button_area = None;
         if vpad_top > 0 && style.chrome && style.show_borders {
             let div_style = Style::default().fg(border_color).bg(bg);
             let div_y = chunks[0].y;
@@ -2988,22 +3116,47 @@ impl PromptWidget {
                 }
             }
 
+            // Draft-copy chrome on the top border, right-aligned before ╮:
+            // `…[⧉] ╮` — always painted when borders are on so the hit target
+            // is discoverable; click no-ops on empty draft (caller checks).
+            let copy_icon = crate::glyphs::copy_icon();
+            let copy_label = format!("[{copy_icon}]");
+            let copy_w: u16 = 3; // [ + icon + ]
+            // One cell pad before the corner glyph.
+            if area.width > copy_w + 4 {
+                let copy_x = right_x.saturating_sub(copy_w + 1);
+                let copy_style = if self.copy_hovered {
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .bg(bg)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.gray).bg(bg)
+                };
+                buf.set_string(copy_x, div_y, &copy_label, copy_style);
+                self.copy_button_area = Some(Rect::new(copy_x, div_y, copy_w, 1));
+            }
+
             // Session title inlined in the divider (` title `, right-aligned
-            // ending 2 cells before ╮) in the shared chrome-caption style;
-            // the pad spaces blank the adjacent `─`.
+            // ending left of the copy button) in the shared chrome-caption
+            // style; the pad spaces blank the adjacent `─`.
             if let Some(title) = style
                 .title
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
             {
-                // Corners plus 2-cell insets on both sides stay plain border.
-                let max_w = area.width.saturating_sub(6);
+                // Reserve copy chrome + corner inset (or plain 3-cell inset).
+                let right_reserve = self
+                    .copy_button_area
+                    .map(|r| (area.x + area.width).saturating_sub(r.x) + 1)
+                    .unwrap_or(3);
+                let max_w = area.width.saturating_sub(3 + right_reserve);
                 if max_w >= 6 {
                     let label = format!(" {title} ");
                     let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
                     let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
-                    let x = area.x + area.width.saturating_sub(3 + label_w);
+                    let x = area.x + area.width.saturating_sub(right_reserve + label_w);
                     buf.set_string(
                         x,
                         div_y,
@@ -3045,6 +3198,23 @@ impl PromptWidget {
             height: text_area_rect.height,
         };
         self.textarea_area = ta_area;
+
+        // Full-line dirty wipe before textarea paint. The software box caret
+        // restyles the insertion cell (and on blank cells may replace the
+        // symbol with solid `█`). TextArea only writes cells that still have
+        // draft text, so blanks beyond the draft would keep a previous
+        // frame's caret glyph / Human-green plate if we only set_style.
+        // Wipe every cell in the textarea rect so a moved caret never leaves
+        // residual green or a solid block on letters/spaces it has left.
+        let text_cell_style = Style::default().fg(theme.text_primary).bg(bg);
+        for y in ta_area.y..ta_area.y.saturating_add(ta_area.height) {
+            for x in ta_area.x..ta_area.x.saturating_add(ta_area.width) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.reset();
+                    cell.set_style(text_cell_style);
+                }
+            }
+        }
 
         (&self.textarea).render_ref(ta_area, buf, &mut self.textarea_state);
 
@@ -3290,7 +3460,7 @@ impl PromptWidget {
         // the box is empty and interim is standing in for it.
         let hide_caret_for_empty_interim = self.textarea.text().is_empty()
             && voice.is_some_and(|v| v.interim.is_some_and(|t| !t.trim().is_empty()));
-        let cursor_pos = if style.focused && !hide_caret_for_empty_interim {
+        let layout_cursor_pos = if style.focused && !hide_caret_for_empty_interim {
             self.textarea
                 .cursor_pos_with_state(ta_area, self.textarea_state)
         } else {
@@ -3304,7 +3474,7 @@ impl PromptWidget {
                 && self.textarea.cursor() == self.textarea.text().len()
                 && !slash_active
                 && !slash_has_inline_ghost
-                && let Some((cx, cy)) = cursor_pos
+                && let Some((cx, cy)) = layout_cursor_pos
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3314,7 +3484,7 @@ impl PromptWidget {
             }
 
             if let Some(ghost) = self.prompt_suggestion_ghost()
-                && let Some((cx, cy)) = cursor_pos
+                && let Some((cx, cy)) = layout_cursor_pos
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3323,6 +3493,18 @@ impl PromptWidget {
                 }
             }
         }
+
+        // Software Human-green caret: slow solid↔empty block blink
+        // (`accent_user`, not agent `accent_running` magenta). Terminal hardware
+        // cursor stays hidden so we do not stack two carets; phase is wall-clock
+        // so Slow redraw ticks are enough.
+        let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {
+            paint_composer_box_cursor(buf, cx, cy, &theme, bg);
+            // Hide the terminal caret — the painted box *is* the cursor.
+            None
+        } else {
+            None
+        };
 
         // Paste preview overlay: show when cursor is on or right after a paste element
         if style.focused
@@ -3403,12 +3585,19 @@ impl PromptWidget {
 
         // When the prompt is unfocused, fade info-line content further toward
         // bg so it follows the same focused/unfocused dimming as the prompt
-        // border. Model name and flag color use a higher opacity than the
-        // separator so they remain readable.
+        // border. Model name stays on `accent_model` (full when focused; soft
+        // blend of accent when unfocused) so it never reads as gray chrome.
+        // Flags still dim via gray / flag color.
         let sep_opacity = if focused { 1.0 } else { 0.6 };
         let flag_opacity = if focused { 0.75 } else { 0.5 };
 
-        let model_style = Self::chrome_caption_style(bg, theme, focused);
+        let model_fg = if focused {
+            theme.accent_model
+        } else {
+            crate::render::color::blend_color(bg, theme.accent_model, 0.75)
+                .unwrap_or(theme.accent_model)
+        };
+        let model_style = Style::default().fg(model_fg).bg(bg);
         let sep_fg = if focused {
             theme.gray_dim
         } else {

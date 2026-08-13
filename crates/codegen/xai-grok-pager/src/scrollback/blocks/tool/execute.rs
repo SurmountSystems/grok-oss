@@ -700,11 +700,19 @@ impl BlockContent for ExecuteToolCallBlock {
         if self.error.is_some() {
             Some(AccentStyle::static_color(theme.accent_error))
         } else if ctx.is_running {
-            Some(AccentStyle::animated(
-                ctx.appearance.scrollback.blocks.execute.running_accent,
-            ))
-        } else {
+            // Agent tool-run left stripe: live `accent_running` (magenta under
+            // DOGE). Same agent chrome as active agent rails / activity. Never
+            // Human green (`accent_user` / `accent_success`) — dogfood saw a
+            // green rail next to "Run …" agent lines.
+            Some(AccentStyle::animated(theme.accent_running))
+        } else if self.bash_mode {
+            // User `!` bash finished: success green (Human-adjacent).
             Some(AccentStyle::static_color(theme.accent_success))
+        } else {
+            // Agent execute finished: neutral tool chrome (white under DOGE),
+            // not Human/success green. Permanent green rails next to every
+            // finished "Run …" read as Human gutters in dogfood.
+            Some(AccentStyle::static_color(theme.accent_tool))
         }
     }
 
@@ -1064,5 +1072,103 @@ mod tests {
     fn test_with_output() {
         let block = ExecuteToolCallBlock::new("echo test").with_output("plain text output");
         assert_eq!(block.output, Some("plain text output".to_string()));
+    }
+
+    fn accent_ctx(is_running: bool) -> BlockContext {
+        BlockContext {
+            width: 80,
+            mode: DisplayMode::Expanded,
+            is_running,
+            raw: false,
+            max_lines: None,
+            appearance: Default::default(),
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    /// Agent tool-run left stripe is `accent_running` (magenta under DOGE), not
+    /// Human green (`accent_user` / `accent_success`). Locks the dogfood fix
+    /// for green rails next to "Run …" agent lines.
+    #[test]
+    fn execute_running_accent_is_agent_magenta_not_human_green() {
+        use crate::scrollback::block::BlockContent;
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let magenta = Color::Rgb(255, 0, 255);
+        let green = Color::Rgb(0, 255, 0);
+        assert_eq!(theme.accent_running, magenta);
+        assert_eq!(theme.accent_user, green);
+        assert_eq!(theme.accent_success, green);
+
+        let block = ExecuteToolCallBlock::new("just light-check")
+            .with_description("Light check skills tree vs AGENTS pins");
+        let accent = block
+            .accent(&accent_ctx(true))
+            .expect("running execute must paint a left stripe");
+        assert!(accent.animated, "running stripe is animated");
+        assert_eq!(
+            accent.color, theme.accent_running,
+            "tool-run stripe must be agent magenta"
+        );
+        assert_ne!(
+            accent.color, theme.accent_user,
+            "tool-run stripe must not be Human green"
+        );
+        assert_ne!(
+            accent.color, theme.accent_success,
+            "tool-run stripe must not be success green"
+        );
+    }
+
+    /// Finished agent execute: neutral tool chrome, not Human/success green.
+    #[test]
+    fn execute_finished_agent_accent_is_not_human_green() {
+        use crate::scrollback::block::BlockContent;
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let green = Color::Rgb(0, 255, 0);
+        assert_eq!(theme.accent_user, green);
+        assert_eq!(theme.accent_success, green);
+
+        let block = ExecuteToolCallBlock::new("just light-check")
+            .with_description("Light check skills tree vs AGENTS pins");
+        let accent = block
+            .accent(&accent_ctx(false))
+            .expect("finished agent execute keeps a neutral rail");
+        assert!(!accent.animated);
+        assert_eq!(
+            accent.color, theme.accent_tool,
+            "finished agent Run rail is tool chrome, not success green"
+        );
+        assert_ne!(accent.color, green, "must not read as Human green gutter");
+    }
+
+    /// User `!` bash finished success keeps green (Human-adjacent).
+    #[test]
+    fn execute_finished_bash_mode_keeps_success_green() {
+        use crate::scrollback::block::BlockContent;
+        use crate::theme::cache;
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+
+        let mut block = ExecuteToolCallBlock::new("ls");
+        block.bash_mode = true;
+        let accent = block
+            .accent(&accent_ctx(false))
+            .expect("finished user bash paints success rail");
+        assert_eq!(accent.color, theme.accent_success);
+        assert_eq!(accent.color, Color::Rgb(0, 255, 0));
     }
 }
