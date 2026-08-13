@@ -12,7 +12,7 @@ dhat-heap = ["dep:dhat"]
 # it via `required-features`.
 test-support = []
 test-util = []
-# Local Computer Hub workspace_server (own/attach + crash-restart). Requires
+# Local Computer Hub workspace_server (own/attach + crash-restart).
 local-workspace = []
 unstable = []
 default-bazel = [
