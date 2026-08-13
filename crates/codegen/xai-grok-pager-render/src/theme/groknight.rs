@@ -101,6 +101,8 @@ impl Theme {
 
             accent_verify: rgb(187, 154, 247), // #bb9af7 — violet
 
+            accent_feedback: GREEN1, // #73daca
+
             accent_remember: Color::Rgb(139, 195, 74), // #8BC34A — Material Design light green
 
             selection_border: rgb(60, 60, 65),

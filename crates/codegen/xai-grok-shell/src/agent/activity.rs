@@ -131,7 +131,7 @@ impl AgentActivity {
         self.lock_live_sessions().len()
     }
 
-    /// Send [`SessionCommand::Shutdown`] to every live session actor
+    /// Send [`SessionCommand::Shutdown(crate::session::commands::ShutdownKind::Graceful)`] to every live session actor
     /// (replay-buffer flush → hooks → memory save → actor returns) and wait
     /// up to `grace` for the actors to exit, observed via
     /// `cmd_tx.is_closed()`.

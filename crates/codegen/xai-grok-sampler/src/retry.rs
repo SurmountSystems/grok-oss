@@ -281,10 +281,10 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
     };
 
     match err {
-        SamplingError::Auth(msg) => {
+        SamplingError::Auth { message, .. } => {
             format!(
                 "{}Authentication failed: {}. Please check your API key configuration.",
-                retry_prefix, msg
+                retry_prefix, message
             )
         }
         SamplingError::InvalidConfiguration(msg) => {
@@ -413,7 +413,13 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
 /// retry budget re-generating a response that fails the same way.
 pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
     match err {
-        SamplingError::Auth(msg) => SamplingError::Auth(msg.clone()),
+        SamplingError::Auth {
+            message,
+            credential,
+        } => SamplingError::Auth {
+            message: message.clone(),
+            credential: *credential,
+        },
         SamplingError::InvalidConfiguration(msg) => SamplingError::InvalidConfiguration(msg),
         SamplingError::Http(e) => {
             // reqwest::Error is not Clone; preserve the rendered message
@@ -605,9 +611,9 @@ mod tests {
 
     #[test]
     fn classify_auth_error_emits_to_session() {
-        let err = SamplingError::Auth("bad token".into());
+        let err = SamplingError::auth_unknown("bad token");
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::EmitToSession(SamplingError::Auth(_)) => {}
+            RetryDecision::EmitToSession(SamplingError::Auth { .. }) => {}
             other => panic!("expected EmitToSession(Auth), got {other:?}"),
         }
     }
@@ -1089,14 +1095,14 @@ mod tests {
 
     #[test]
     fn format_includes_retry_prefix_when_count_present() {
-        let err = SamplingError::Auth("bad".into());
+        let err = SamplingError::auth_unknown("bad");
         let s = format_sampling_error(&err, Some(3));
         assert!(s.starts_with("Request failed after 3 retries."));
     }
 
     #[test]
     fn format_omits_retry_prefix_when_count_absent() {
-        let err = SamplingError::Auth("bad".into());
+        let err = SamplingError::auth_unknown("bad");
         let s = format_sampling_error(&err, None);
         assert!(!s.starts_with("Request failed after"));
         assert!(s.starts_with("Authentication failed:"));

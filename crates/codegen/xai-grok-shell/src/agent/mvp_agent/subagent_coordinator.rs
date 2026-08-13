@@ -3,40 +3,59 @@
 //! its `!Send` local-session runner into `spawn_local`.
 use super::*;
 use crate::session::repo_changes::UploadMethod;
-use xai_grok_tools::implementations::grok_build::task::coordinator;
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
 }
-impl coordinator::ChildRunner for ShellChildRunner {
+impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
+    for ShellChildRunner
+{
     type Control = crate::agent::subagent::ShellChildRuntime;
     type CompletionData = crate::agent::subagent::ShellCompletionData;
-    type RunFuture = coordinator::LocalBoxFuture<coordinator::ChildRunOutput<Self::CompletionData>>;
-    type ValidateFuture = coordinator::LocalBoxFuture<
-        xai_grok_tools::implementations::grok_build::task::types::SubagentValidateTypeOutcome,
+    type RunFuture = xai_grok_tools::implementations::grok_build::task::coordinator::LocalBoxFuture<
+        xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunOutput<
+            Self::CompletionData,
+        >,
     >;
-    type DescribeFuture = coordinator::LocalBoxFuture<
-        xai_grok_tools::implementations::grok_build::task::types::SubagentDescribeOutcome,
-    >;
-    fn run(&self, run: coordinator::ChildRunRequest<Self::Control>) -> Self::RunFuture {
+    type ValidateFuture =
+        xai_grok_tools::implementations::grok_build::task::coordinator::LocalBoxFuture<
+            xai_grok_tools::implementations::grok_build::task::types::SubagentValidateTypeOutcome,
+        >;
+    type DescribeFuture =
+        xai_grok_tools::implementations::grok_build::task::coordinator::LocalBoxFuture<
+            xai_grok_tools::implementations::grok_build::task::types::SubagentDescribeOutcome,
+        >;
+    fn run(
+        &self,
+        run: xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunRequest<
+            Self::Control,
+        >,
+    ) -> Self::RunFuture {
         let agent_ref = self.agent_ref.clone();
         Box::pin(async move {
+            let xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunRequest {
+                request,
+                cancellation,
+                reporter,
+                queued_for: _,
+                session_running: _,
+            } = run;
             let this = agent_ref.get();
-            let parent_sid = run.request.parent_session_id.clone();
+            let parent_sid = request.parent_session_id.clone();
             let Some(mut ctx) = this.try_build_subagent_spawn_context(&parent_sid) else {
                 tracing::warn!(
                     parent_session_id = %parent_sid,
-                    subagent_id = %run.request.id,
+                    subagent_id = %request.id,
                     "Spawn for unknown or evicted parent session"
                 );
-                return coordinator::ChildRunOutput {
+                return xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunOutput {
                     result: xai_grok_tools::implementations::grok_build::task::types::SubagentResult {
                         success: false,
                         error: Some(
                             "Parent session not found (evicted or torn down); cannot spawn subagent."
                                 .to_owned(),
                         ),
-                        subagent_id: run.request.id.clone(),
-                        child_session_id: run.request.id,
+                        subagent_id: request.id.clone(),
+                        child_session_id: request.id,
                         ..Default::default()
                     },
                     completion_data: Default::default(),
@@ -45,7 +64,7 @@ impl coordinator::ChildRunner for ShellChildRunner {
             };
             let parent_handle = {
                 let parent_sid = acp::SessionId::new(parent_sid);
-                this.resident_handle(&parent_sid)
+                this.sessions.borrow().get(&parent_sid).cloned()
             };
             if let Some(handle) = parent_handle {
                 ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
@@ -53,7 +72,14 @@ impl coordinator::ChildRunner for ShellChildRunner {
                 let definitions = handle.snapshot_tool_definitions().await;
                 ctx.parent_tool_definitions = (!definitions.is_empty()).then_some(definitions);
             }
-            crate::agent::subagent::run_shell_child(run, ctx, &this.gateway).await
+            crate::agent::subagent::run_shell_child(
+                request,
+                ctx,
+                cancellation,
+                reporter,
+                &this.gateway,
+            )
+            .await
         })
     }
     fn validate_type(
@@ -94,7 +120,12 @@ impl coordinator::ChildRunner for ShellChildRunner {
             }
         })
     }
-    fn on_completed(&self, completion: coordinator::ChildCompletion<Self::CompletionData>) {
+    fn on_completed(
+        &self,
+        completion: xai_grok_tools::implementations::grok_build::task::coordinator::ChildCompletion<
+            Self::CompletionData,
+        >,
+    ) {
         let gateway = self.agent_ref.get().gateway.clone();
         crate::agent::subagent::present_child_completion(completion, &gateway);
     }
@@ -114,33 +145,6 @@ impl coordinator::ChildRunner for ShellChildRunner {
         crate::agent::subagent::read_subagent_output(std::path::Path::new(reference))
             .map(std::sync::Arc::from)
     }
-}
-/// Injected as the coordinator's limit sink: it cannot link the telemetry
-/// crate (dependency cycle through the sampling types).
-fn log_limit_notice(notice: coordinator::SubagentLimitNotice) {
-    use coordinator::{LimitedSpawnOrigin, SubagentLimitDecision};
-    use xai_grok_telemetry::events::{
-        SubagentLimitDisposition, SubagentLimitHit, SubagentOwnerKind,
-    };
-    let (disposition, limit) = match notice.decision {
-        SubagentLimitDecision::QueuedAtConcurrentLimit { limit } => {
-            (SubagentLimitDisposition::Queued, limit as u64)
-        }
-        SubagentLimitDecision::RejectedAtConcurrentLimit { limit } => {
-            (SubagentLimitDisposition::Failed, limit as u64)
-        }
-    };
-    xai_grok_telemetry::session_ctx::log_event(SubagentLimitHit::session_concurrent(
-        notice.parent_session_id,
-        disposition,
-        limit,
-        u32::try_from(notice.running).unwrap_or(u32::MAX),
-        u32::try_from(notice.queue_depth).unwrap_or(u32::MAX),
-        match notice.origin {
-            LimitedSpawnOrigin::SchedulerLoop => SubagentOwnerKind::SchedulerLoop,
-            LimitedSpawnOrigin::Task => SubagentOwnerKind::Task,
-        },
-    ));
 }
 impl MvpAgent {
     /// Start the shared subagent coordinator actor.
@@ -162,22 +166,26 @@ impl MvpAgent {
         let runner = ShellChildRunner {
             agent_ref: agent_ref.clone(),
         };
-        let limit_sink: coordinator::SubagentLimitSink = std::sync::Arc::new(log_limit_notice);
-        let config = coordinator::CoordinatorConfig {
-            foreground_budget:
-                xai_grok_tools::implementations::grok_build::task::backend::env_duration_or(
-                    "GROK_SUBAGENT_AWAIT_BUDGET_MS",
-                    std::time::Duration::from_secs(600),
-                ),
-            limits: xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits {
-                max_concurrent: self.cfg.borrow().subagents_max_concurrent,
-                behavior: self.cfg.borrow().subagents_limit_behavior,
-            },
-            limit_sink: Some(limit_sink),
-            buffer_completions: true,
-            buffered_completion_output_cap: None,
-        };
-        tokio::task::spawn_local(coordinator::SubagentCoordinator::new(rx, runner, config).run());
+        let config =
+            xai_grok_tools::implementations::grok_build::task::coordinator::CoordinatorConfig {
+                foreground_budget:
+                    xai_grok_tools::implementations::grok_build::task::backend::env_duration_or(
+                        "GROK_SUBAGENT_AWAIT_BUDGET_MS",
+                        std::time::Duration::from_secs(600),
+                    ),
+                limits: Default::default(),
+                limit_sink: None,
+                buffer_completions: true,
+                buffered_completion_output_cap: None,
+            };
+        tokio::task::spawn_local(
+            xai_grok_tools::implementations::grok_build::task::coordinator::SubagentCoordinator::new(
+                    rx,
+                    runner,
+                    config,
+                )
+                .run(),
+        );
         let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<
             crate::upload::turn::SyntheticTurnTraceRequest,
         >();
@@ -204,13 +212,13 @@ impl MvpAgent {
     ) -> crate::agent::subagent::SubagentValidationContext {
         let parent_sid = acp::SessionId::new(parent_session_id);
         let (parent_cwd, allowed_subagent_types) = {
-            let ps = self.resident_handle(&parent_sid);
+            let sessions = self.sessions.borrow();
+            let ps = sessions.get(&parent_sid);
             warn_on_missing_parent_session_for_validate_type(parent_session_id, ps.is_some());
             (
-                ps.as_ref()
-                    .map(|h| std::path::PathBuf::from(&h.info.cwd))
+                ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
                     .unwrap_or_default(),
-                ps.as_ref().and_then(|h| h.allowed_subagent_types.clone()),
+                ps.and_then(|h| h.allowed_subagent_types.clone()),
             )
         };
         let (cli_agent_names, subagent_toggle) = {
@@ -253,7 +261,6 @@ impl MvpAgent {
         parent_session_id: &str,
     ) -> Option<crate::agent::subagent::SubagentSpawnContext> {
         let parent_sid = acp::SessionId::new(parent_session_id);
-        let parent_handle = self.resident_handle(&parent_sid);
         let (
             parent_model_id,
             parent_chat_state,
@@ -270,51 +277,40 @@ impl MvpAgent {
             parent_agent_name,
             parent_managed_mcp_proxy_base_url,
         ) = {
-            let ps = parent_handle.as_ref();
+            let sessions = self.sessions.borrow();
+            let ps = sessions.get(&parent_sid);
             (
-                ps.as_ref()
-                    .map(|h| h.model_id.clone())
+                ps.map(|h| h.model_id.clone())
                     .unwrap_or_else(|| self.models_manager.current_model_id()),
-                ps.as_ref().map(|h| h.chat_state_handle.clone()),
-                ps.as_ref().map(|h| h.cmd_tx.clone()),
-                ps.as_ref()
-                    .map(|h| std::path::PathBuf::from(&h.info.cwd))
+                ps.map(|h| h.chat_state_handle.clone()),
+                ps.map(|h| h.cmd_tx.clone()),
+                ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
                     .unwrap_or_default(),
-                ps.as_ref()
-                    .map(|h| h.yolo_mode)
-                    .unwrap_or(self.default_yolo_mode),
-                ps.as_ref()
-                    .map(|h| h.tool_context.subagent_depth)
-                    .unwrap_or(0),
-                ps.as_ref()
-                    .map(|h| h.tool_context.hunk_tracker_handle.clone())
+                ps.map(|h| h.yolo_mode).unwrap_or(self.default_yolo_mode),
+                ps.map(|h| h.tool_context.subagent_depth).unwrap_or(0),
+                ps.map(|h| h.tool_context.hunk_tracker_handle.clone())
                     .unwrap_or_else(xai_hunk_tracker::HunkTrackerHandle::noop),
-                ps.as_ref()
-                    .map(|h| h.tool_context.hunk_tracking_enabled)
+                ps.map(|h| h.tool_context.hunk_tracking_enabled)
                     .unwrap_or(false),
-                ps.as_ref()
-                    .map(|h| h.tool_context.fs.inner().clone())
+                ps.map(|h| h.tool_context.fs.inner().clone())
                     .unwrap_or_else(|| {
                         let cwd = ps
-                            .as_ref()
                             .map(|h| std::path::PathBuf::from(&h.info.cwd))
                             .unwrap_or_default();
                         std::sync::Arc::new(xai_grok_workspace::file_system::LocalFs::new(cwd))
                     }),
-                ps.as_ref()
-                    .map(|h| h.tool_context.terminal.clone())
+                ps.map(|h| h.tool_context.terminal.clone())
                     .unwrap_or_else(|| {
                         std::sync::Arc::new(crate::terminal::TerminalRunner::new(
                             std::sync::Arc::new(self.gateway.clone()),
                             parent_sid.clone(),
                         ))
                     }),
-                ps.as_ref()
-                    .map(|h| h.tool_context.session_env.clone())
+                ps.map(|h| h.tool_context.session_env.clone())
                     .unwrap_or_else(|| std::sync::Arc::new(std::collections::HashMap::new())),
-                ps.as_ref().and_then(|h| h.attribution_callback.clone()),
-                ps.as_ref().map(|h| h.agent_name.clone()),
-                ps.as_ref().map(|h| h.managed_mcp_proxy_base_url.clone()),
+                ps.and_then(|h| h.attribution_callback.clone()),
+                ps.map(|h| h.agent_name.clone()),
+                ps.map(|h| h.managed_mcp_proxy_base_url.clone()),
             )
         };
         let (
@@ -322,23 +318,23 @@ impl MvpAgent {
             parent_terminal_backend,
             parent_notification_handle,
             parent_scheduler_handle,
-        ) = parent_handle.as_ref().map(|ps| {
-            (
-                ps.workspace_ops.clone(),
-                ps.terminal_backend.clone(),
-                ps.tools_notification_handle.clone(),
-                ps.scheduler_handle.clone(),
-            )
-        })?;
+        ) = {
+            let sessions = self.sessions.borrow();
+            sessions.get(&parent_sid).map(|ps| {
+                (
+                    ps.workspace_ops.clone(),
+                    ps.terminal_backend.clone(),
+                    ps.tools_notification_handle.clone(),
+                    ps.scheduler_handle.clone(),
+                )
+            })
+        }?;
         let available_models = self.models_manager.models();
-        let (parent_lsp, parent_process_scope) = {
-            let parent = parent_handle.as_ref();
-            (
-                parent.as_ref().and_then(|h| h.tool_context.lsp.clone()),
-                parent
-                    .as_ref()
-                    .and_then(|h| h.tool_context.process_scope.clone()),
-            )
+        let parent_lsp = {
+            let sessions = self.sessions.borrow();
+            sessions
+                .get(&parent_sid)
+                .and_then(|h| h.tool_context.lsp.clone())
         };
         let am = self.auth_manager.clone();
         let inference_idle_timeout_secs = {
@@ -351,19 +347,26 @@ impl MvpAgent {
                 .and_then(|s| s.inference_idle_timeout_secs);
             per_model.or(remote).unwrap_or(600).max(10)
         };
-        let parent_hook_registry = parent_handle.as_ref().and_then(|h| h.hook_registry.clone());
-        let parent_max_turns = parent_handle.as_ref().and_then(|h| h.max_turns);
+        let parent_hook_registry = {
+            let sessions = self.sessions.borrow();
+            sessions
+                .get(&parent_sid)
+                .and_then(|h| h.hook_registry.clone())
+        };
+        let parent_max_turns = {
+            let sessions = self.sessions.borrow();
+            sessions.get(&parent_sid).and_then(|h| h.max_turns)
+        };
         let parent_model_agent_type =
             config::find_model_by_id(&available_models, parent_model_id.0.as_ref())
                 .map(|e| e.info.agent_type.clone());
-        let ask_user_question_enabled = parent_handle
-            .as_ref()
-            .map(|h| h.ask_user_question_enabled)
-            .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value);
-        let parent_non_interactive = parent_handle
-            .as_ref()
-            .map(|h| h.non_interactive)
-            .unwrap_or(false);
+        let ask_user_question_enabled = {
+            let sessions = self.sessions.borrow();
+            sessions
+                .get(&parent_sid)
+                .map(|h| h.ask_user_question_enabled)
+                .unwrap_or_else(|| self.cfg.borrow().resolve_ask_user_question().value)
+        };
         let (gcs_upload_method, gcs_bucket_url) = match self.trace_upload_config_snapshot() {
             Some(method) => {
                 let bucket = match &method {
@@ -384,13 +387,20 @@ impl MvpAgent {
             None => (None, None),
         };
         let project_trusted = crate::agent::folder_trust::project_scope_allowed(&parent_cwd);
-        let (base_roles, base_personas, subagent_model_overrides, subagent_toggle) = {
+        let (
+            base_roles,
+            base_personas,
+            subagent_model_overrides,
+            subagent_toggle,
+            subagent_allow_worktree,
+        ) = {
             let cfg = self.cfg.borrow();
             (
                 cfg.subagent_roles.clone(),
                 cfg.subagent_personas.clone(),
                 cfg.subagent_model_overrides.clone(),
                 cfg.subagent_toggle.clone(),
+                cfg.subagent_allow_worktree,
             )
         };
         let (subagent_roles, subagent_personas) =
@@ -400,12 +410,14 @@ impl MvpAgent {
                 &parent_cwd,
                 project_trusted,
             );
-        let inherited_tool_overrides = parent_handle
-            .as_ref()
-            .and_then(|ps| ps.resolved_tool_overrides.load_full().map(|o| (*o).clone()));
+        let inherited_tool_overrides = {
+            let sessions = self.sessions.borrow();
+            sessions
+                .get(&parent_sid)
+                .and_then(|ps| ps.resolved_tool_overrides.load_full().map(|o| (*o).clone()))
+        };
         Some(crate::agent::subagent::SubagentSpawnContext {
             lsp: parent_lsp,
-            process_scope: parent_process_scope,
             client_hooks: Default::default(),
             sampling_config: self.sampling_config.borrow().clone(),
             managed_mcp_proxy_base_url: parent_managed_mcp_proxy_base_url
@@ -425,8 +437,6 @@ impl MvpAgent {
             yolo_mode,
             subagent_event_tx: self.subagent_event_tx.clone(),
             parent_depth,
-            subagents_max_depth: self.cfg.borrow().subagents_max_depth,
-            workflow_max_concurrent_agents: self.cfg.borrow().workflow_max_concurrent_agents,
             inference_idle_timeout_secs,
             auto_compact_threshold_tiers:
                 crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),
@@ -445,17 +455,22 @@ impl MvpAgent {
             goal_enabled: self.cfg.borrow().resolve_goal().value,
             background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
             ask_user_question_enabled,
-            parent_non_interactive,
             parent_cmd_tx: parent_cmd_tx.clone(),
-            parent_session_info: parent_handle.as_ref().map(|h| crate::session::info::Info {
-                id: parent_sid.clone(),
-                cwd: h.info.cwd.clone(),
-            }),
+            parent_session_info: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|h| crate::session::info::Info {
+                        id: parent_sid.clone(),
+                        cwd: h.info.cwd.clone(),
+                    })
+            },
             parent_chat_state,
             parent_max_turns,
             available_models,
             subagent_model_overrides,
             subagent_toggle,
+            subagent_allow_worktree,
             subagent_roles,
             subagent_personas,
             disable_web_search: self.cfg.borrow().disable_web_search,
@@ -482,7 +497,12 @@ impl MvpAgent {
             agent_config: Some(self.cfg.borrow().clone()),
             gcs_upload_method,
             hook_registry: parent_hook_registry,
-            permission_handle: parent_handle.as_ref().map(|h| h.permission_handle.clone()),
+            permission_handle: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|h| h.permission_handle.clone())
+            },
             worktree_type: self.worktree_type,
             api_key_provider: Some(Arc::new(crate::auth::manager::SharedAuthKeyProvider(
                 am.clone(),
@@ -493,36 +513,57 @@ impl MvpAgent {
             attribution_callback: parent_attribution_callback,
             parent_agent_name,
             parent_model_agent_type,
-            allowed_subagent_types: parent_handle
-                .as_ref()
-                .and_then(|h| h.allowed_subagent_types.clone()),
-            parent_mcp_configs: parent_handle
-                .as_ref()
-                .map(|h| h.mcp_servers.clone())
-                .unwrap_or_default(),
+            allowed_subagent_types: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .and_then(|h| h.allowed_subagent_types.clone())
+            },
+            parent_mcp_configs: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|h| h.mcp_servers.clone())
+                    .unwrap_or_default()
+            },
             managed_mcp_state: self.managed_mcp_cache.clone(),
             parent_mcp_pool: None,
             parent_tool_definitions: None,
             parent_skills: None,
             parent_skills_config: self.cfg.borrow().skills.clone(),
             parent_compat: self.cfg.borrow().compat_resolved,
-            task_completion_reservations: parent_handle
-                .as_ref()
-                .and_then(|h| h.tool_context.task_completion_reservations.clone()),
-            synthetic_trace_tx: parent_handle
-                .as_ref()
-                .and_then(|h| h.tool_context.synthetic_trace_tx.clone()),
-            task_output_tool_name: parent_handle
-                .as_ref()
-                .map(|h| h.tool_context.task_output_tool_name.clone())
-                .unwrap_or_else(|| {
-                    xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string()
-                }),
+            task_completion_reservations: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .and_then(|h| h.tool_context.task_completion_reservations.clone())
+            },
+            synthetic_trace_tx: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .and_then(|h| h.tool_context.synthetic_trace_tx.clone())
+            },
+            task_output_tool_name: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|h| h.tool_context.task_output_tool_name.clone())
+                    .unwrap_or_else(|| {
+                        xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
+                            .to_string()
+                    })
+            },
             auto_wake_enabled: self.cfg.borrow().auto_wake_enabled,
-            goal_loop_active: parent_handle
-                .as_ref()
-                .map(|h| h.tool_context.goal_loop_active_gate.clone())
-                .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))),
+            goal_loop_active: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|h| h.tool_context.goal_loop_active_gate.clone())
+                    .unwrap_or_else(|| {
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+                    })
+            },
             parent_terminal_backend: parent_terminal_backend.clone(),
             parent_notification_handle: parent_notification_handle.clone(),
             parent_scheduler_handle: parent_scheduler_handle.clone(),

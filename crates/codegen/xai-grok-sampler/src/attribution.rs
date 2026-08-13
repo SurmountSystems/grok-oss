@@ -13,6 +13,11 @@ use std::sync::Arc;
 
 pub use xai_grok_auth::bearer_fragment::BEARER_SUFFIX_LEN;
 
+/// Historical name used by client truncation sites that keep the first N
+/// characters of a bearer for attribution logs (same length as
+/// [`BEARER_SUFFIX_LEN`]).
+pub const SENT_BEARER_PREFIX_LEN: usize = BEARER_SUFFIX_LEN;
+
 /// A 401-emitting site in [`crate::SamplingClient`]; its string identifier
 /// becomes the `consumer` field so queries can break 401s down by API path.
 /// Sampler endpoints only — tool clients use `xai_grok_tools::ToolConsumer`.

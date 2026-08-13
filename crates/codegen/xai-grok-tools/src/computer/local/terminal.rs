@@ -160,6 +160,11 @@ enum TerminalCommand {
         reply: oneshot::Sender<Option<PathBuf>>,
     },
 
+    /// Warm static login-shell / login-env capture for the non-persistent path.
+    WarmShell {
+        cwd: PathBuf,
+    },
+
     /// Kill all running foreground processes owned by a specific session.
     KillForegroundCommandsByOwner { owner_session_id: String },
 
@@ -770,7 +775,7 @@ impl LocalTerminalActor {
 
         if self.shell_state.is_none() {
             let shell = shell_state::ShellKind::detect();
-            match shell_state::ShellState::init(shell, cwd).await {
+            match shell_state::ShellState::init(shell, cwd, self.shell_env_policy.as_ref()).await {
                 Ok(state) => self.shell_state = Some(state),
                 Err(e) => {
                     tracing::warn!("persistent shell init failed, using empty state: {e}");

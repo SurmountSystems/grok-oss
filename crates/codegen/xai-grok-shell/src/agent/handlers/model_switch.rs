@@ -227,12 +227,12 @@ pub(crate) async fn apply(
     let updated_model = rx
         .await
         .map_err(|_| acp::Error::internal_error().data("failed to set session model"))?;
-    agent.with_resident_mut(&session_id, |handle| {
+    if let Some(handle) = agent.sessions.borrow_mut().get_mut(&session_id) {
         handle.model_id = model_id.clone();
         handle.reasoning_effort = applied_effort;
         handle.agent_name =
             agent_name_after_model_switch(did_rebuild, &required_agent_type, &handle.agent_name);
-    });
+    }
     broadcast_model_changed(
         agent,
         &session_id,

@@ -10,7 +10,7 @@
 //! - Pending/active/completed, waiters, deadlines, and cancellation are actor-owned.
 //! - Child sessions share the parent's hunk tracker, filesystem, terminal, and env
 //!   so that edits, bash commands, and file reads go through the same backends.
-use crate::agent::config::{resolve_credentials_preferring_with_rank, sampling_config_for_model};
+use crate::agent::config::{resolve_credentials, sampling_config_for_model};
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::{
     self, SessionCommand, SessionHandle, SessionThread,
@@ -439,13 +439,16 @@ impl ChildControl for ShellChildRuntime {
         })
     }
     fn cancel(&self) {
-        let _ = self.child_handle.cmd_tx.send(SessionCommand::Cancel {
-            cancel_subagents: true,
-            kill_background_tasks: true,
-            rewind_if_pristine: false,
-            trigger: None,
-        });
-        let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        let _ = self.child_handle.cmd_tx.send(SessionCommand::Cancel(
+            crate::session::CancelOptions {
+                cancel_subagents: true,
+                kill_background_tasks: true,
+                ..Default::default()
+            },
+        ));
+        let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown(
+            crate::session::ShutdownKind::Graceful,
+        ));
     }
 }
 #[derive(Default)]
@@ -774,10 +777,9 @@ async fn read_parent_sampling_config(
             );
             let inherited = xai_grok_sampler::SamplerConfig {
                 api_key: creds.api_key,
-                // Keep dual-auth failover list so prefer_live can switch to the
-                // console key after SuperGrok is out of allowance (stripping the
-                // list left subagents on SuperGrok $ extras after the parent
-                // already moved to console).
+                // Keep dual-auth failover so prefer_live / mid-request hop can
+                // leave SuperGrok for the console key (was stripped → subagents
+                // stayed on SuperGrok extras while the parent had already hopped).
                 failover_api_keys: creds.failover_api_keys,
                 failover_base_url: creds.failover_base_url,
                 session_base_url: creds.session_base_url,
@@ -893,44 +895,6 @@ fn subagent_auth_type(
         xai_chat_state::AuthType::ApiKey
     }
 }
-/// True when parent sampling is SuperGrok session primary with no console keys
-/// in the failover list (limits-before-credits chain the child should not undo).
-fn parent_sampling_is_supergrok_session_only(
-    parent: &xai_grok_sampler::SamplerConfig,
-    session_key: Option<&str>,
-) -> bool {
-    let Some(sess) = session_key.map(str::trim).filter(|s| !s.is_empty()) else {
-        return false;
-    };
-    parent.api_key.as_deref() == Some(sess) && parent.failover_api_keys.is_empty()
-}
-
-/// Dual-auth rank flags for subagent model override.
-///
-/// Prefer parent spawn `agent_config`, then disk effective config. When both are
-/// missing, **fail closed**: enable auto rank while a SuperGrok session is live
-/// so console keys are not re-queued while included weekly may still have
-/// headroom. When parent sampling is already SuperGrok-session-only, keep that
-/// shape even if disk has auto_use off (do not reintroduce console).
-fn subagent_override_auth_rank_flags(
-    agent_config: Option<&crate::agent::config::Config>,
-    disk_flags: Option<(Option<crate::auth::PreferredAuthMethod>, bool)>,
-    session_present: bool,
-    parent_supergrok_session_only: bool,
-) -> (Option<crate::auth::PreferredAuthMethod>, bool) {
-    if let Some(c) = agent_config {
-        return (
-            c.grok_com_config.preferred_method,
-            c.grok_com_config.auto_use_included_limits,
-        );
-    }
-    if let Some((preferred, auto_use)) = disk_flags {
-        return (preferred, auto_use || parent_supergrok_session_only);
-    }
-    // Config load fail / no flags: fail closed for SuperGrok.
-    (None, session_present || parent_supergrok_session_only)
-}
-
 /// Resolve a model override string (config key or model ID) to a
 /// `(SamplerConfig, ModelId)` pair.
 fn resolve_model_override_to_config(
@@ -945,36 +909,7 @@ fn resolve_model_override_to_config(
     };
     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
     let has_session_key = session_key.is_some();
-    // Same dual-auth rank as main sampling: preferred_method + auto_use_included_limits
-    // so a model override cannot re-introduce console keys while SuperGrok
-    // included weekly still has headroom (limits-before-credits).
-    // Prefer live parent `agent_config` (spawn snapshot) over re-loading disk
-    // config. When both are missing, fail closed (auto rank while a SuperGrok
-    // session is live). When parent sampling is already SuperGrok-session-only
-    // (no console keys in the list), do not re-queue console for the override.
-    let disk_flags = crate::config::load_effective_config()
-        .ok()
-        .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
-        .map(|c| {
-            (
-                c.grok_com_config.preferred_method,
-                c.grok_com_config.auto_use_included_limits,
-            )
-        });
-    let parent_supergrok_session_only =
-        parent_sampling_is_supergrok_session_only(&ctx.sampling_config, session_key);
-    let (preferred, auto_use_included_limits) = subagent_override_auth_rank_flags(
-        ctx.agent_config.as_ref(),
-        disk_flags,
-        has_session_key,
-        parent_supergrok_session_only,
-    );
-    let mut credentials = resolve_credentials_preferring_with_rank(
-        &entry,
-        session_key,
-        preferred,
-        auto_use_included_limits,
-    );
+    let mut credentials = resolve_credentials(&entry, session_key);
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;
     let mut config = sampling_config_for_model(
@@ -2084,7 +2019,9 @@ async fn cancel_pending_shell_child(
     duration_ms: u64,
     gcs_ctx: &GcsUploadContext,
 ) -> SubagentResult {
-    let _ = child_cmd_tx.send(SessionCommand::Shutdown);
+    let _ = child_cmd_tx.send(SessionCommand::Shutdown(
+        crate::session::commands::ShutdownKind::Graceful,
+    ));
     if worktree_freshly_created
         && let Some(wt_path) = worktree_path
         && let Err(e) = crate::session::worktree::remove_subagent_worktree(wt_path).await

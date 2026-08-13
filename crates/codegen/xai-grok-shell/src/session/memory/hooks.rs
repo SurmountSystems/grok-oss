@@ -21,7 +21,7 @@
 //!   or < 50 total query bytes (synthetic metadata-only prefixes and
 //!   auto-continue markers are excluded).
 //! - **`save_on_end` config gate:** Skipped when `[memory.session].save_on_end = false`.
-//! - **SIGTERM:** Triggered via `SessionCommand::Shutdown` handler
+//! - **SIGTERM:** Triggered via `SessionCommand::Shutdown(crate::session::commands::ShutdownKind::Graceful)` handler
 
 use crate::sampling::ConversationItem;
 use crate::session::memory::storage::{MemoryStorage, slugify};
@@ -86,7 +86,7 @@ pub(crate) fn queries_meeting_session_end_threshold(
 
 /// Run the session end hook — save a structured metadata summary to memory.
 ///
-/// This is called from the `SessionCommand::Shutdown` handler and the
+/// This is called from the `SessionCommand::Shutdown(crate::session::commands::ShutdownKind::Graceful)` handler and the
 /// channel-closed path. It is best-effort: errors are logged but do not
 /// prevent shutdown.
 ///

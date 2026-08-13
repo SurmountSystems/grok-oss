@@ -2056,7 +2056,7 @@ mod tests {
         actor.await.expect("actor should exit cleanly");
         assert!(
             got_shutdown.load(Ordering::Relaxed),
-            "session actor must receive SessionCommand::Shutdown before leader cancel"
+            "session actor must receive SessionCommand::Shutdown(crate::session::commands::ShutdownKind::Graceful) before leader cancel"
         );
     }
     /// Verify that when an update is installed and the agent is idle, the checker

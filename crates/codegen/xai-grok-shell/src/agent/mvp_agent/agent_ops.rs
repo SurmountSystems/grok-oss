@@ -1308,7 +1308,7 @@ impl MvpAgent {
             ))
             .await
         {
-            Ok(settings) => settings,
+            Ok(settings) => settings.into_option(),
             Err(e) => {
                 tracing::warn!(error = %e, "settings fetch task panicked");
                 None
@@ -1379,12 +1379,6 @@ impl MvpAgent {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
         let auto_use_included_limits =
             self.cfg.borrow().grok_com_config.auto_use_included_limits;
-        // Align sticky AuthManager base to free SuperGrok period ranked primary
-        // before SessionToken primary is read. Rank can prefer personal while
-        // base stays Team after a business login; sampling must follow rank.
-        if auto_use_included_limits {
-            let _ = self.auth_manager.align_to_ranked_free_period_primary();
-        }
         // Always surface a live/expired session when present so dual-auth
         // resolve can place console keys in failover (or session in failover
         // under preferred_method=api_key). Exclusive api_key pin with *no*
@@ -1870,7 +1864,7 @@ impl MvpAgent {
             subagent_presentation: RefCell::new(
                 crate::agent::subagent::SubagentPresentation::new(),
             ),
-            monitor_event_buffer: xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer::default(),
+            monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             post_unblock_jwt_retry_in_flight: Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
@@ -2616,9 +2610,14 @@ impl MvpAgent {
         &self,
         session_id: Option<&acp::SessionId>,
     ) -> acp::SessionModelState {
+        let session_model = session_id.and_then(|sid| {
+            self.sessions
+                .borrow()
+                .get(sid)
+                .map(|h| h.model_id.clone())
+        });
         let model_id = lookup_session_model(
-            &self.sessions.borrow(),
-            session_id,
+            session_model,
             &self.models_manager.current_model_id(),
         );
         let mut available_models: Vec<acp::ModelInfo> = self
@@ -3242,6 +3241,7 @@ impl MvpAgent {
             session_yolo_mode,
             session_auto_mode,
             prompt_display_cwd,
+            is_chat_kind,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
         reject_direct_hub_cloud_meta(session_meta)?;
@@ -3905,7 +3905,6 @@ impl MvpAgent {
                     startup_hints,
                     client_type,
                     auto_compact_threshold_percent,
-                    auto_compact_threshold_tokens,
                     system_prompt_label,
                     compaction_mode,
                     compaction_verbatim_input,
@@ -3938,7 +3937,6 @@ impl MvpAgent {
                     loc_tracking_enabled,
                     feedback_flags,
                     self.managed_mcp_cache.clone(),
-                    managed_mcp_expires_at,
                     managed_mcp_proxy_url,
                     session_model_id,
                     session_yolo_mode,
@@ -3955,6 +3953,28 @@ impl MvpAgent {
                     goal_enabled,
                     background_workflows_enabled,
                     subagents_enabled,
+                    {
+                        let cfg = self.cfg.borrow();
+                        crate::config::SubagentsConfig::resolve_max_depth(
+                            std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH)
+                                .ok()
+                                .as_deref(),
+                            cfg.subagents.max_depth,
+                            None,
+                        )
+                    },
+                    {
+                        let cfg = self.cfg.borrow();
+                        crate::config::SubagentsConfig::resolve_workflow_max_concurrent(
+                            std::env::var(
+                                crate::config::SubagentsConfig::ENV_WORKFLOW_MAX_CONCURRENT,
+                            )
+                            .ok()
+                            .as_deref(),
+                            cfg.subagents.workflow_max_concurrent,
+                            None,
+                        )
+                    },
                     ask_user_question_enabled,
                     client_hooks,
                     prompt_display_cwd,
@@ -4006,6 +4026,7 @@ impl MvpAgent {
                     None,
                     max_turns,
                     None,
+                    is_chat_kind,
                 )
                 .await?
         };

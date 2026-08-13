@@ -421,12 +421,51 @@ fn annotations(bash: &BashOutput) -> String {
     s
 }
 
+const NOOP_END_TURN_REMINDER: &str = "<system-reminder>\n\
+    You appear to be running empty commands to stay active while waiting for background work. \
+    End your turn — you will be woken automatically when there is something to do.\n\
+    </system-reminder>";
+
+fn is_noop_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    trimmed.is_empty() || trimmed == "true" || trimmed == ":" || is_pure_status_print(trimmed)
+}
+
+fn is_pure_status_print(trimmed: &str) -> bool {
+    if !(matches!(trimmed, "echo" | "printf")
+        || trimmed.starts_with("echo ")
+        || trimmed.starts_with("printf "))
+    {
+        return false;
+    }
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = trimmed.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                chars.next();
+            }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '$' | '`' if !in_single => return false,
+            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '\n' if !in_single && !in_double => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Build the full DEFAULT prompt text from a `BashOutput`.
 ///
 /// - Normal: `exit: N [annotations]\n<stripped_output>`
 /// - Killed by harness/signal: `exit: killed (reason) [annotations]\n<stripped_output>`
 /// - Backgrounded: verbose `[Command moved to background]...` format.
-pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
+/// - When `append_noop_reminder` is true and the command is a pure wait/noop,
+///   appends a system reminder to end the turn.
+pub(crate) fn format_default_prompt(bash: &BashOutput, append_noop_reminder: bool) -> String {
     let output_str = if bash.output_for_prompt.is_empty() {
         let raw = String::from_utf8_lossy(&bash.output);
         strip_ansi_escapes::strip_str(&raw).to_string()
@@ -456,7 +495,12 @@ pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
             Some(reason) => format!("exit: killed ({}){}", reason, annotations(bash)),
             None => format!("exit: {}{}", bash.exit_code, annotations(bash)),
         };
-        format!("{}\n{}", header, output_str)
+        let prompt = format!("{}\n{}", header, output_str);
+        if append_noop_reminder && bash.signal.is_none() && is_noop_command(&bash.command) {
+            format!("{}\n\n{}", prompt.trim_end(), NOOP_END_TURN_REMINDER)
+        } else {
+            prompt
+        }
     }
 }
 
@@ -2297,7 +2341,12 @@ impl xai_tool_runtime::Tool for BashTool {
                 output_delta: None,
                 was_bare_echo: false,
             };
-            bash.output_for_prompt = format_default_prompt(&bash);
+            let append_noop_reminder = resources
+                .lock()
+                .await
+                .get::<crate::types::resources::SystemRemindersEnabled>()
+                .is_none_or(|e| e.0);
+            bash.output_for_prompt = format_default_prompt(&bash, append_noop_reminder);
 
             // Bare `echo "<msg>"` usage (common model anti-pattern for "just output something").
             // We tag it for statistics (grok_build backend) and can surface an educational
@@ -3504,7 +3553,7 @@ mod tests {
             output_delta: None,
             was_bare_echo: false,
         };
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ false);
         bash
     }
 
@@ -3557,7 +3606,7 @@ mod tests {
         let mut bash = make_bash_output(-1, "partial\n");
         bash.signal = Some("timeout".to_string());
         bash.timed_out = true;
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ false);
         // Synthetic kill reasons render as `exit: killed (reason)` — no
         // redundant `[signal=…]` / `[timeout]` annotation.
         assert!(
@@ -3602,7 +3651,7 @@ mod tests {
         for reason in ["timeout", "max_runtime", "cancelled", "killed", "signal 15"] {
             let mut bash = make_bash_output(-1, "partial\n");
             bash.signal = Some(reason.to_string());
-            bash.output_for_prompt = format_default_prompt(&bash);
+            bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ false);
             let expected = format!("exit: killed ({})", reason);
             assert!(
                 bash.output_for_prompt.starts_with(&expected),
@@ -3622,7 +3671,7 @@ mod tests {
 
         let mut oom = make_bash_output(137, "killed\n");
         oom.signal = Some("oom".to_string());
-        oom.output_for_prompt = format_default_prompt(&oom);
+        oom.output_for_prompt = format_default_prompt(&oom, /* append_noop_reminder */ false);
         assert!(oom.output_for_prompt.starts_with("exit: 137 [signal=oom]"));
     }
 
@@ -3632,7 +3681,7 @@ mod tests {
         bash.signal = Some("backgrounded".to_string());
         bash.output_file = "/tmp/bg.log".to_string();
         bash.total_bytes = 10000;
-        bash.output_for_prompt = format_default_prompt(&bash);
+        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ false);
         assert!(
             bash.output_for_prompt
                 .starts_with("[Command moved to background]")

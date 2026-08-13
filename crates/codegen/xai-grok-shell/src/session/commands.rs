@@ -141,7 +141,7 @@ pub enum ShutdownKind {
     Graceful,
     CancelRunningTurn,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CancelTrigger {
     Esc,
     CtrlC,
@@ -188,7 +188,21 @@ pub struct CancelOptions {
     /// Drives the cancel-rate metric.
     pub user_initiated: bool,
 }
+
 pub enum SessionCommand {
+    SetAutoCompactThreshold {
+        auto_compact_threshold_percent: u8,
+        auto_compact_threshold_tokens: Option<u64>,
+    },
+
+    RestoreTodoBoard {
+        plan_state: Option<crate::tools::todo::TodoState>,
+    },
+
+    ClearCompletedTodos {
+        respond_to: oneshot::Sender<usize>,
+    },
+
     Initialize {
         system_prompt: String,
     },
@@ -731,7 +745,13 @@ pub enum SessionCommand {
     /// tool-free model call, and returns the response text.
     SideQuestion {
         question: String,
-        respond_to: oneshot::Sender<Result<String, SideQuestionError>>,
+        /// When set, continue this btw thread (same id for telemetry + history).
+        btw_session_id: Option<String>,
+        /// Completed prior Q/A turns in this btw thread (oldest first).
+        prior_turns: Vec<crate::session::helpers::side_question::BtwPriorTurn>,
+        respond_to: oneshot::Sender<
+            Result<crate::session::helpers::side_question::SideQuestionResult, String>,
+        >,
     },
     /// Generate a session recap (a short "where was I" summary) and broadcast
     /// it to clients via `SessionUpdate::SessionRecap`.

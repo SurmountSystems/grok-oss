@@ -952,6 +952,15 @@ fn truncate_for_prompt_by<T>(
     items.len()
 }
 
+
+/// Calculate how many updates to keep for a given target prompt index (0-based, inclusive).
+///
+/// Progressive: unmarked user runs before the first `_meta.promptIndex` count
+/// as turns; after the first marker only marked runs count (phantoms omit it).
+pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_index: usize) -> usize {
+    truncate_for_prompt_by(updates, target_prompt_index, rewind_step_for_update)
+}
+
 #[derive(Debug)]
 pub enum AppendUpdateError {
     NotCommitted(io::Error),

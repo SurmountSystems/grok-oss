@@ -105,7 +105,7 @@ async fn session_end_hook_fires_on_headless_exit() {
     );
 
     // `reason` is an already-shipped part of the hook payload that user scripts
-    // match on: `shutdown` is emitted by the `SessionCommand::Shutdown` arm
+    // match on: `shutdown` is emitted by the `SessionCommand::Shutdown(crate::session::commands::ShutdownKind::Graceful)` arm
     // (leader auto-update / relaunch today), `channel_closed` by the actor's
     // channel-closed arm. This change adds no new value — it routes non-leader
     // exits through the existing Shutdown command — so renaming `shutdown` to

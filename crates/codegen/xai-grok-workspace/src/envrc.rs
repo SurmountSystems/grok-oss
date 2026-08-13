@@ -141,6 +141,15 @@ pub fn load_envrc_or_empty(dir: &Path) -> HashMap<String, String> {
     load_envrc(dir).unwrap_or_default()
 }
 
+/// Load `.envrc` only when the folder is trusted; otherwise empty.
+pub fn load_envrc_or_empty_when_trusted(dir: &Path, trusted: bool) -> HashMap<String, String> {
+    if trusted {
+        load_envrc_or_empty(dir)
+    } else {
+        HashMap::new()
+    }
+}
+
 fn load_envrc_with_timeout(dir: &Path, timeout: Duration) -> Option<HashMap<String, String>> {
     if timeout.is_zero() {
         tracing::info!(".envrc evaluation disabled by zero {ENVRC_TIMEOUT_ENV}");

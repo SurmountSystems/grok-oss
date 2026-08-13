@@ -197,9 +197,29 @@ fn sanitized_stem(call_id: &str) -> String {
         .collect()
 }
 
+/// If `text` is structured JSON (object or array), re-encode for the model under
+/// the same TOON policy as [`crate::util::toon::maybe_encode_for_llm_from_env`].
+///
+/// Free text, bare scalars, and invalid JSON are left unchanged. Call this
+/// **before** the MCP byte cap so denser TOON can avoid truncation.
+///
+/// Delegates to [`crate::util::toon::densify_structured_text_in_place`] (single
+/// policy parser; no second independent densify path).
+pub fn densify_mcp_result_text_in_place(text: &mut String) {
+    crate::util::toon::densify_structured_text_in_place(text);
+}
+
+/// Convenience: densify a borrowed slice (allocates only when rewriting).
+pub fn densify_mcp_result_text(text: &str) -> String {
+    crate::util::toon::densify_structured_text(text)
+}
+
 /// Truncate `text` in place when over the limit, dumping the full payload to
 /// the session `mcp/` dir (when available) with a pointer appended.
 async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
+    // Encode structured→text under TOON policy before the byte cap (UDAX densify).
+    densify_mcp_result_text_in_place(text);
+
     if text.len() <= trunc_ctx.max_output_bytes {
         return;
     }

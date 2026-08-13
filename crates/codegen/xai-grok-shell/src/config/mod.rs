@@ -224,6 +224,9 @@ impl MemoryConfig {
 pub struct SubagentsConfig {
     /// Whether subagent support is enabled.
     pub enabled: bool,
+    /// When true, subagents may use git worktree isolation (default false).
+    #[serde(default)]
+    pub allow_worktree: bool,
     /// Raw `[subagents] max_depth` (i64 so out-of-range parses; clamped ≥1 at resolve).
     #[serde(default)]
     pub max_depth: Option<i64>,

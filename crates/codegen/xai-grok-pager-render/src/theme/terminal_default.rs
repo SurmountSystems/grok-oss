@@ -72,6 +72,7 @@ impl Theme {
 
             accent_plan: Color::Yellow,
             accent_verify: Color::Magenta,
+            accent_feedback: Color::Cyan,
             accent_remember: Color::Green,
 
             selection_border: MUTED,

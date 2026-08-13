@@ -1,17 +1,19 @@
 //! Theming for the pager.
 //!
 //! All colors come from the `Theme` struct. No hardcoded colors elsewhere.
-//! The default theme is GrokNight (neutral gray base with TokyoNight accents).
+//! The default theme is DOGE (pure black/white + classic 8 ANSI primaries).
 //!
 //! ## Color support
 //!
-//! GrokNight is defined in `Color::Rgb` (truecolor). At startup,
+//! Most themes are defined in `Color::Rgb` (truecolor). At startup,
 //! [`Theme::current()`] quantizes every color to the terminal's detected
 //! capability level via [`Theme::quantized`]. Runtime-generated colors (syntax
 //! highlighting, blending) are also quantized via [`color_support::quantize`].
+//! DOGE is pure 8-colour and does not require truecolor.
 
 pub mod cache;
 pub mod color_support;
+pub mod doge;
 pub mod env_appearance;
 mod grokday;
 mod groknight;
@@ -24,6 +26,10 @@ mod terminal_default;
 pub mod tokyonight;
 
 pub use color_support::quantize;
+pub use doge::{
+    PALETTE as DOGE_PALETTE, PALETTE_HEX as DOGE_PALETTE_HEX, floyd_steinberg_quantise,
+    hard_threshold_channel, index_of_rgb, nearest_rgb, quantise_color, quantise_rgb,
+};
 pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
 
 /// Available theme variants.
@@ -34,6 +40,11 @@ pub enum ThemeKind {
     TokyoNight = 2,
     RosePineMoon = 3,
     OscuraMidnight = 5,
+    /// DOGE: pure `#000`/`#fff` + classic 8 pure ANSI primaries
+    /// (OLED-friendly design intent; no power claims).
+    /// Canonical id `"doge"` only. Discriminant 6 — keep existing
+    /// Auto/Oscura values stable.
+    Doge = 6,
     /// Meta-variant: follow system dark/light appearance.
     ///
     /// Never stored in `cache::CURRENT` — resolved to a concrete
@@ -52,6 +63,7 @@ impl ThemeKind {
         ThemeKind::TokyoNight,
         ThemeKind::RosePineMoon,
         ThemeKind::OscuraMidnight,
+        ThemeKind::Doge,
     ];
 
     /// Theme kinds available on the current terminal.
@@ -62,7 +74,8 @@ impl ThemeKind {
         // Two possible results — pick the right const slice based on
         // the detected color level. No heap allocation needed.
         const ALL: &[ThemeKind] = ThemeKind::ALL;
-        const NO_TRUECOLOR: &[ThemeKind] = &[ThemeKind::GrokNight, ThemeKind::GrokDay];
+        const NO_TRUECOLOR: &[ThemeKind] =
+            &[ThemeKind::GrokNight, ThemeKind::GrokDay, ThemeKind::Doge];
 
         if color_support::detect().has_truecolor() {
             ALL
@@ -79,6 +92,7 @@ impl ThemeKind {
             Self::GrokDay => "grokday",
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
+            Self::Doge => "doge",
             Self::Auto => "auto",
         }
     }
@@ -87,7 +101,8 @@ impl ThemeKind {
     ///
     /// TokyoNight uses blue-tinted backgrounds that lose their character
     /// when quantized to 256 or 16 colors. GrokNight uses neutral grays
-    /// that survive quantization cleanly.
+    /// that survive quantization cleanly. DOGE uses pure 8-colour
+    /// primaries that quantize cleanly to ANSI16.
     pub fn requires_truecolor(self) -> bool {
         match self {
             Self::GrokNight => false,
@@ -95,6 +110,7 @@ impl ThemeKind {
             Self::GrokDay => false,
             Self::RosePineMoon => true,
             Self::OscuraMidnight => true,
+            Self::Doge => false,
             // Auto is resolved to a concrete theme before rendering.
             Self::Auto => false,
         }
@@ -113,6 +129,8 @@ impl ThemeKind {
                 Some(Self::RosePineMoon)
             }
             "oscura" | "oscura-midnight" => Some(Self::OscuraMidnight),
+            // DOGE only — no ansi-8 / tty / oled / ecma-doge / rgbcmykw aliases.
+            "doge" => Some(Self::Doge),
             _ => None,
         }
     }
@@ -204,6 +222,8 @@ impl Theme {
 
             accent_verify: q(self.accent_verify),
 
+            accent_feedback: q(self.accent_feedback),
+
             accent_remember: q(self.accent_remember),
 
             selection_border: q(self.selection_border),
@@ -268,12 +288,14 @@ impl Theme {
         if cache::terminal_native_locked() {
             return Self::terminal_default().quantized(level);
         }
-        let base = match cache::current_kind() {
+        let kind = cache::current_kind();
+        let base = match kind {
             ThemeKind::GrokNight => Self::groknight(),
             ThemeKind::TokyoNight => Self::tokyonight(),
             ThemeKind::GrokDay => Self::grokday(),
             ThemeKind::RosePineMoon => Self::rosepine_moon(),
             ThemeKind::OscuraMidnight => Self::oscura_midnight(),
+            ThemeKind::Doge => Self::doge(),
             // Auto is resolved to a concrete theme before being stored;
             // if reached, fall back to GrokNight.
             ThemeKind::Auto => Self::groknight(),
@@ -282,12 +304,20 @@ impl Theme {
         // land on a named/indexed entry whose luminance is host-palette-
         // dependent.
         let dark = base.is_dark();
-        let adapted = if cfg!(target_os = "windows") {
+        // DOGE is a flat pure-black canvas: Windows contrast boost would
+        // invent charcoal elevation from black==black slots, and ANSI16
+        // chrome overrides pin elevated surfaces to DarkGray — both read
+        // as LCD-style light-bleed on true black. Skip both for DOGE.
+        let is_doge = matches!(kind, ThemeKind::Doge);
+        let adapted = if cfg!(target_os = "windows") && !is_doge {
             base.windows_contrast_boost(dark)
         } else {
             base
         };
         let adapted = adapted.quantized(level);
+        if is_doge {
+            return adapted;
+        }
         // ANSI16 chrome fallback — fires in two cases:
         //   1. Any terminal that only advertises 16-color support
         //      (e.g., `TERM=xterm`, `TERM=ansi`, or `GROK_FORCE_COLOR_LEVEL=basic`),
@@ -598,9 +628,12 @@ impl Theme {
             accent_system: blue,
             accent_skill: blue,
             fuzzy_accent: blue,
-            // Cyan family: model name and the legacy `running` indicator (distinct from the magenta `accent_running` used for subagents).
-            // ANSI16 has no separate teal slot, so the truecolor teal model accent folds onto cyan here.
+            // Cyan family: model name, feedback mode, and the legacy `running`
+            // indicator (distinct from the magenta `accent_running` used for
+            // subagents). ANSI16 has no separate teal slot, so the truecolor
+            // teal model accent folds onto cyan here.
             accent_model: cyan,
+            accent_feedback: cyan,
             running: cyan,
             // Yellow family — warning text, plan-mode gold, shell
             // commands, file paths. ANSI16 has no orange or gold slot,
@@ -1063,6 +1096,7 @@ mod tests {
                 ThemeKind::TokyoNight => Theme::tokyonight(),
                 ThemeKind::RosePineMoon => Theme::rosepine_moon(),
                 ThemeKind::OscuraMidnight => Theme::oscura_midnight(),
+                ThemeKind::Doge => Theme::doge(),
                 ThemeKind::Auto => unreachable!("ALL excludes Auto"),
             };
             let track = lum(theme.scrollbar_bg, "scrollbar_bg", kind);

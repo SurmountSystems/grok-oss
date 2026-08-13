@@ -503,6 +503,15 @@ pub(super) async fn run_session(
                                 s.resume_plan_approval(completion_tx).await;
                             });
                         }
+                        SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent,
+                            auto_compact_threshold_tokens,
+                        } => {
+                            session.apply_auto_compact_threshold(
+                                auto_compact_threshold_percent,
+                                auto_compact_threshold_tokens,
+                            );
+                        }
                         SessionCommand::RestoreTodoBoard { plan_state } => {
                             session.restore_todo_board(plan_state).await;
                         }
@@ -615,18 +624,9 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, auto_compact_threshold_tokens, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, auto_compact_threshold_tokens).await;
                             let _ = responds_to.send(updated_model_id);
-                        }
-                        SessionCommand::SetAutoCompactThreshold {
-                            auto_compact_threshold_percent,
-                            auto_compact_threshold_tokens,
-                        } => {
-                            session.apply_auto_compact_threshold(
-                                auto_compact_threshold_percent,
-                                auto_compact_threshold_tokens,
-                            );
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;
@@ -663,12 +663,13 @@ pub(super) async fn run_session(
                                 if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str(), existing.api_key.as_deref()) {
                                     session.chat_state_handle.update_credentials(xai_chat_state::Credentials {
                                         api_key: r.api_key,
+                                        failover_api_keys: existing.failover_api_keys.clone(),
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
-                                        failover_base_url: r.failover_base_url,
-                                        session_base_url: r.session_base_url,
-                                        session_identity_key: r.session_identity_key,
+                                        failover_base_url: existing.failover_base_url.clone(),
+                                        session_base_url: existing.session_base_url.clone(),
+                                        session_identity_key: existing.session_identity_key.clone(),
                                     });
                                 }
                                 // Credentials changed under a possibly-unchanged model id.
@@ -910,20 +911,11 @@ pub(super) async fn run_session(
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::InterjectQueuedPrompt { id, expected_version, owner, new_text } => {
-                            // Soft interject only: buffers into the running turn
-                            // (or no-ops). Never cancels — cancel is Esc/stop.
-                            let _never_cancels = session
-                                .handle_interject_queued_prompt(
-                                    &id,
-                                    expected_version,
-                                    owner.as_deref(),
-                                    new_text.as_deref(),
-                                )
-                                .await;
-                            debug_assert!(
-                                !_never_cancels,
-                                "queue soft-interject must never request cancel"
-                            );
+                            // Send-now: the handler promoted the row; cancel the running turn and start it.
+                            let cancel_for_send_now = session.handle_interject_queued_prompt(&id, expected_version, owner.as_deref(), new_text.as_deref()).await;
+                            if cancel_for_send_now {
+                                session.cancel_turn_for_send_now(&mut replay_buffer).await;
+                            }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::Cancel(options) => {
@@ -1415,9 +1407,9 @@ pub(super) async fn run_session(
                             tokio::task::spawn_local(async move {
                                 session_for_mcp.ensure_mcp_tools_initialized().await;
                                 if let Err(e) = crate::util::config::save_mcp_server_enabled_in(
+                                    std::path::Path::new(&session_cwd),
                                     &sname,
                                     enabled,
-                                    std::path::Path::new(&session_cwd),
                                 )
                                 .await
                                 {

@@ -79,6 +79,65 @@ pub struct ResponseModelMetadata {
     pub models_etag: Option<String>,
 }
 
+/// Whether the rejected request actually carried a credential on the wire.
+///
+/// A 401 for a request that went out with **no** credential header (a
+/// fail-closed send while the bearer resolver had nothing wire-valid) is
+/// not evidence against the credential itself; retry policies use this to
+/// avoid charging credential-rejection budgets for such sends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SentCredential {
+    /// The request carried a credential; the server rejected it.
+    Sent,
+    /// The request went out with no credential header at all.
+    Missing,
+    /// Provenance unknown (synthesized or legacy errors). Retry policies
+    /// treat this like [`SentCredential::Sent`] — fail closed toward
+    /// terminating rather than retrying forever.
+    #[default]
+    Unknown,
+}
+
+/// Hand-written so an unrecognized value from a newer peer degrades to
+/// `Unknown` instead of failing the whole containing payload
+/// (`#[serde(other)]` is not available on externally-tagged enums).
+impl<'de> Deserialize<'de> for SentCredential {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Ok(
+            match std::borrow::Cow::<str>::deserialize(deserializer)?.as_ref() {
+                "sent" => Self::Sent,
+                "missing" => Self::Missing,
+                _ => Self::Unknown,
+            },
+        )
+    }
+}
+
+impl SentCredential {
+    /// Classify from the credential fragment captured when the request was
+    /// built (`None` = no credential header was stamped on the wire).
+    pub fn from_sent_fragment(fragment: Option<&str>) -> Self {
+        if fragment.is_some() {
+            Self::Sent
+        } else {
+            Self::Missing
+        }
+    }
+
+    pub fn is_missing(self) -> bool {
+        matches!(self, Self::Missing)
+    }
+
+    /// By reference so it can serve as a serde `skip_serializing_if`.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
 /// Display prefix of [`SamplingError::Serialization`]. Shared with the
 /// variant's `#[error(...)]` template so [`SamplingError::serialization_from_rendered`]
 /// can never drift from what Display actually emits.
@@ -86,8 +145,12 @@ const SERIALIZATION_DISPLAY_PREFIX: &str = "serialization error: ";
 
 #[derive(Debug, Error)]
 pub enum SamplingError {
-    #[error("{0}")]
-    Auth(String),
+    #[error("{message}")]
+    Auth {
+        message: String,
+        /// Whether the rejected request actually carried a credential.
+        credential: SentCredential,
+    },
     #[error("invalid client configuration: {0}")]
     InvalidConfiguration(&'static str),
     #[error("request error: {0}")]
@@ -195,6 +258,16 @@ impl<'de> Deserialize<'de> for ApiErrorCode {
 }
 
 impl SamplingError {
+    /// Auth error of unknown wire provenance — for paths that never sent a
+    /// request (config validation, cancellation, actor teardown) or that
+    /// lost the provenance (legacy round trips).
+    pub fn auth_unknown(message: impl Into<String>) -> Self {
+        Self::Auth {
+            message: message.into(),
+            credential: SentCredential::Unknown,
+        }
+    }
+
     /// Rebuild a `Serialization` error from a rendered message for non-`Clone`
     /// contexts; it must stay `Serialization` so it remains non-retryable.
     pub fn serialization_message(msg: impl fmt::Display) -> Self {
@@ -222,7 +295,7 @@ impl SamplingError {
         // class as 401 and must refresh / re-auth, not Internal error.
         // Credit-exhausted 403 wording is not auth (failover / plain credits).
         match self {
-            SamplingError::Auth(_) => true,
+            SamplingError::Auth { .. } => true,
             SamplingError::Api {
                 status, message, ..
             } => {
@@ -326,7 +399,7 @@ impl SamplingError {
 
     pub fn is_retryable(&self) -> bool {
         match self {
-            SamplingError::Auth(_) => false,
+            SamplingError::Auth { .. } => false,
             SamplingError::InvalidConfiguration(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
@@ -339,6 +412,13 @@ impl SamplingError {
             SamplingError::DoomLoopDetected { .. } => true,
         }
     }
+
+    /// Whether retry is explicitly vetoed (auth/credentials failures).
+    /// Surmount product: do not auto-retry these as transport flakiness.
+    pub fn is_retry_vetoed(&self) -> bool {
+        matches!(self, Self::Auth { .. }) || self.is_credit_exhausted()
+    }
+
 
     pub fn model_metadata(&self) -> Option<&ResponseModelMetadata> {
         match self {
@@ -387,7 +467,7 @@ impl SamplingError {
                 status, message, ..
             } => is_credit_exhausted_status_and_message(status.as_u16(), message),
             SamplingError::StreamError { message, .. } => is_credit_exhausted_message(message),
-            SamplingError::Auth(message) => is_credit_exhausted_message(message),
+            SamplingError::Auth { message, .. } => is_credit_exhausted_message(message),
             _ => false,
         }
     }
@@ -999,7 +1079,7 @@ mod tests {
             }
             .is_context_length_error()
         );
-        assert!(!SamplingError::Auth("nope".into()).is_context_length_error());
+        assert!(!SamplingError::auth_unknown("nope").is_context_length_error());
     }
 
     #[test]
@@ -1334,7 +1414,7 @@ mod tests {
 
     #[test]
     fn auth_variant_is_auth_error() {
-        let err = SamplingError::Auth("bad key".into());
+        let err = SamplingError::auth_unknown("bad key");
         assert!(err.is_auth_error());
     }
 
@@ -1551,7 +1631,7 @@ mod tests {
         };
         assert!(!server_error.is_rate_limited());
 
-        let auth_error = SamplingError::Auth("bad key".into());
+        let auth_error = SamplingError::auth_unknown("bad key");
         assert!(!auth_error.is_rate_limited());
 
         let timeout = SamplingError::IdleTimeout { elapsed_secs: 30 };
@@ -1617,7 +1697,7 @@ mod tests {
 
     #[test]
     fn retry_after_returns_none_for_non_api_errors() {
-        assert_eq!(SamplingError::Auth("x".into()).retry_after(), None);
+        assert_eq!(SamplingError::auth_unknown("x").retry_after(), None);
         assert_eq!(
             SamplingError::IdleTimeout { elapsed_secs: 10 }.retry_after(),
             None

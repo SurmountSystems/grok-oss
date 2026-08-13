@@ -61,7 +61,7 @@ pub(crate) fn git_bin() -> OsString {
 /// `C:\corp\auth.exe`. `cmd /C` runs `.exe` / `.cmd` / `.bat` directly and
 /// propagates the child's exit code, which the auth providers' "exit 0 =
 /// success" contract depends on (PowerShell's `-Command` does not).
-pub(crate) fn shell_c(script: &str) -> Command {
+pub(crate) fn sh_c(script: &str) -> Command {
     let (shell, flag) = if cfg!(windows) {
         ("cmd", "/C")
     } else {
@@ -391,4 +391,9 @@ mod tests {
             start.elapsed()
         );
     }
+}
+
+/// Alias kept for call sites still using the old name.
+pub(crate) fn shell_c(script: &str) -> Command {
+    sh_c(script)
 }

@@ -57,6 +57,9 @@ pub struct UiConfig {
     /// (ops kill-switch; see `xai_grok_tools::util::ascii_scrub`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrub_ascii_punct: Option<bool>,
+    /// Confirm before `/rewind` applies. `None` = on (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_before_rewind: Option<bool>,
     /// Theme to use when the OS is in dark mode. Written by the pager's theme persist module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_dark_theme: Option<String>,
@@ -336,6 +339,7 @@ impl Default for UiConfig {
             show_timeline: None,
             page_flip_on_send: None,
             scrub_ascii_punct: None,
+            confirm_before_rewind: None,
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,

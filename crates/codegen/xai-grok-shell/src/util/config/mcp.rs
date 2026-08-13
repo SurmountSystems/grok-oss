@@ -2073,3 +2073,39 @@ enabled = false
 
     // === merge_section tests ===
 }
+
+
+/// Tip-shaped wrapper: persist MCP enabled flag (path argument ignored; uses config_path).
+pub async fn save_mcp_server_enabled_in(
+    _config_path: &std::path::Path,
+    server_name: &str,
+    enabled: bool,
+) -> Result<()> {
+    save_mcp_server_enabled(server_name, enabled).await
+}
+
+
+/// Product inspect: severity of a loaded MCP server config issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum McpServerProblemSeverity {
+    Error,
+    Warning,
+}
+
+/// Product inspect: one invalid/ignored `[mcp_servers.*]` entry.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfigProblem {
+    pub server_name: String,
+    pub message: String,
+    pub severity: McpServerProblemSeverity,
+}
+
+/// Load MCP config problems for inspect (project-aware). Empty until full
+/// product discovery is re-wired on this onto tip.
+pub fn load_mcp_server_problems_with_project(
+    _project_cwd: &std::path::Path,
+) -> Vec<McpServerConfigProblem> {
+    Vec::new()
+}

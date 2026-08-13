@@ -848,6 +848,39 @@ impl ModelsManager {
         });
     }
 
+    /// One-shot background catalog refresh after readiness; no-op when a
+    /// fresh disk cache already loaded a real catalog.
+    pub fn spawn_background_refresh(&self) {
+        if *self.inner.has_fetched_real_catalog.read() {
+            tracing::debug!(
+                "skipping startup background model refresh: fresh cache already loaded"
+            );
+            return;
+        }
+        self.spawn_catalog_retry();
+    }
+
+    /// Wait briefly for the first catalog fetch if one is already in flight.
+    /// Hybrid models path has no catalog_progress channel; treat real-catalog
+    /// flag as ready and otherwise return after a short spin/yield.
+    pub(crate) async fn wait_for_first_catalog(&self) {
+        if *self.inner.has_fetched_real_catalog.read() {
+            return;
+        }
+        if !crate::util::config::resolve_remote_fetch_enabled() {
+            return;
+        }
+        // Bounded wait while a retry/fetch may still land.
+        const BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+        let start = std::time::Instant::now();
+        while start.elapsed() < BUDGET {
+            if *self.inner.has_fetched_real_catalog.read() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// Refresh the model catalog on every auth token refresh.
     ///
     /// Listens for [`AuthManager::refresh_notifier`] signals directly,
@@ -1454,6 +1487,7 @@ pub(crate) fn prefetch_models_and_settings_blocking(
                 auth,
                 endpoints.alpha_test_key.as_deref(),
             )
+            .into_option()
         }
         _ => None,
     };
@@ -1607,6 +1641,14 @@ pub fn start_early_prefetch_with_auth(auth: Option<GrokAuth>) -> Option<EarlyPre
 pub fn start_early_prefetch(grok_com_config: Option<GrokComConfig>) -> Option<EarlyPrefetchHandle> {
     let env = resolve_prefetch_env(grok_com_config)?;
     Some(spawn_prefetch_thread(env))
+}
+
+/// Settings-only early prefetch path (product). Alias to full prefetch when
+/// the hybrid models module has no separate settings-only pipeline.
+pub fn start_early_prefetch_settings_only(
+    grok_com_config: Option<GrokComConfig>,
+) -> Option<EarlyPrefetchHandle> {
+    start_early_prefetch(grok_com_config)
 }
 
 fn spawn_prefetch_thread(env: PrefetchEnv) -> EarlyPrefetchHandle {

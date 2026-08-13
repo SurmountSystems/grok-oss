@@ -343,7 +343,7 @@ impl UnauthorizedRecovery {
                         && self.auth_manager.is_devbox_environment()
                         && let Ok(auth) = self
                             .auth_manager
-                            .try_devbox_recovery(Some(&self.rejected_token))
+                            .try_devbox_recovery()
                             .await
                     {
                         return Ok(auth);

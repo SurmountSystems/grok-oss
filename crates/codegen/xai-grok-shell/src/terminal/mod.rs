@@ -32,7 +32,11 @@ pub const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 30_000; // 30k characters
 pub(crate) fn default_shell_path() -> &'static str {
     #[cfg(unix)]
     {
-        xai_grok_config::shell::unix_shell_path(xai_grok_config::shell::UnixShellKind::Bash)
+        {
+            let s = xai_grok_config::shell::unix_shell_path(xai_grok_config::shell::UnixShellKind::Bash);
+            // Stable &str for process lifetime of the shell binary path.
+            Box::leak(s.to_string().into_boxed_str())
+        }
     }
     #[cfg(not(unix))]
     {

@@ -709,7 +709,7 @@ pub async fn ensure_fresh_access_token_for_supergrok_billing_poll(
             );
             Some((auth.key.clone(), auth.user_id.clone()))
         }
-        super::oidc::OidcRefreshResult::Failed => {
+        super::oidc::OidcRefreshResult::Failed { .. } => {
             tracing::debug!(
                 identity_id = %identity_id,
                 "sibling SuperGrok billing: OIDC refresh failed; polling with stored token"

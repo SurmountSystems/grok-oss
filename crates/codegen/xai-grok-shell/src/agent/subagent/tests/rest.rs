@@ -2306,8 +2306,7 @@ async fn read_parent_sampling_config_live_never_strips_a_fallback_key() {
     chat.update_credentials(xai_chat_state::Credentials {
         api_key: Some("xai-env-fallback".to_string()),
         auth_type: xai_chat_state::AuthType::SessionToken,
-        alpha_test_key: None,
-        client_version: None,
+        ..Default::default()
     });
     ctx.parent_chat_state = Some(chat);
     let (config, _) = read_parent_sampling_config(&ctx).await;

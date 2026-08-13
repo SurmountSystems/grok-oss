@@ -1493,8 +1493,11 @@ pub(crate) async fn spawn_session_actor(
         forked_tool_override,
         compaction: super::compaction_config::CompactionConfig {
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
+            threshold_tokens: std::cell::Cell::new(None),
             force_compact: force_compact.clone(),
             context_window_override,
+            economic_mode: std::cell::Cell::new(crate::util::config::economic_mode_from_disk()),
+            model_context_window: std::cell::Cell::new(baseline_context_window.get()),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
@@ -1665,7 +1668,8 @@ pub(crate) async fn spawn_session_actor(
         recap_epoch: std::cell::Cell::new(0),
         turn_summary_task: std::cell::RefCell::new(None),
         turn_summary_generation: std::cell::Cell::new(0),
-        turn_summary_enabled: effective_config.is_turn_summary_enabled(),
+        // Product default: generate turn summaries unless config later adds a kill switch.
+        turn_summary_enabled: true,
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
