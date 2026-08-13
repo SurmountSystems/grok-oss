@@ -2305,7 +2305,13 @@ async fn run_update_command(
         return Ok(());
     }
 
-    let _ = (force_reinstall, version, channel_switch, trigger, base_update_config);
+    let _ = (
+        force_reinstall,
+        version,
+        channel_switch,
+        trigger,
+        base_update_config,
+    );
     println!(
         "Grok OSS  {}",
         xai_grok_update::format_build_id(env!("CARGO_PKG_VERSION"), env!("GROK_GIT_SHA"))
