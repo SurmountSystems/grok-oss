@@ -5219,11 +5219,13 @@ pub(crate) fn sampling_config_for_model(
 /// * cli-chat-proxy bases get `X-XAI-Token-Auth` and
 ///   `x-authenticateresponse` headers (mirrors the inline match in the legacy
 ///   `sampling::Client::new` on `is_cli_chat_proxy_url`).
+/// * OpenRouter bases get Surmount Grok OSS app-attribution headers
+///   (`HTTP-Referer`, `X-OpenRouter-Title`, `X-Title`, `X-OpenRouter-Categories`).
 /// * With the optional non-production feature, matching first-party hosts may
 ///   get an extra access header from the corresponding key argument.
 ///
 /// Existing entries are never overwritten so callers can pre-set a value.
-pub(crate) fn inject_url_derived_headers(
+pub fn inject_url_derived_headers(
     headers: &mut IndexMap<String, String>,
     alpha_test_key: Option<&str>,
     base_url: &str,
@@ -5239,7 +5241,21 @@ pub(crate) fn inject_url_derived_headers(
             .entry(crate::http::CLIENT_MODE_HEADER.to_string())
             .or_insert_with(|| crate::http::process_client_mode().to_string());
     }
-    let _ = (alpha_test_key, base_url);
+    if crate::auth::openrouter::is_openrouter_base_url(base_url) {
+        headers
+            .entry("HTTP-Referer".to_string())
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_HTTP_REFERER.to_string());
+        headers
+            .entry(crate::auth::openrouter::OPENROUTER_X_OPENROUTER_TITLE_HEADER.to_string())
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_X_TITLE.to_string());
+        headers
+            .entry(crate::auth::openrouter::OPENROUTER_X_TITLE_HEADER.to_string())
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_X_TITLE.to_string());
+        headers
+            .entry("X-OpenRouter-Categories".to_string())
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_CATEGORIES.to_string());
+    }
+    let _ = alpha_test_key;
 }
 fn resolve_hidden_default_web_search_sampling_config(
     model_id: &str,
