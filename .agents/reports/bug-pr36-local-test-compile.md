@@ -98,7 +98,13 @@ Left other untracked `.agents/reports/*` alone.
 
 ## New tip + push
 
-Filled after land.
+| Item | Value |
+|------|--------|
+| New tip | `c06c7e805c245ec34f427212b9fb82450a78d0bf` |
+| Tree | `6814478ef18a083b236fa2df69e1c8e9c5f9a8ed` |
+| Parent | `82fa1794a8f1751045da6eb85b3e43d902972a69` |
+| Commit path | `git add` product files + this report, `git write-tree`, `git commit-tree`, `git update-ref HEAD`. No `commit.gpgsign=false`, no `--no-gpg-sign`, no fake `gpg.program`. |
+| Push | `git push origin onto-xai/b13fa526f511` ff: `82fa1794..c06c7e80`. No force. No new branch. No new PR. |
 
 ## What this did not do
 
