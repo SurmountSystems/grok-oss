@@ -294,11 +294,16 @@ fn fail_closed_401_is_uncharged_and_turn_survives() {
 /// Real credential rejections must still terminate: when every request
 /// carries a bearer the server rejects, the escalating budget exhausts after
 /// `MAX_RETRIES` and the failure names authenticated rejections — not a
-/// generic budget message. `start_paused` auto-advances the backoff ladder.
+/// generic budget message.
+///
+/// Live tokio clock, not `start_paused`. Auto-advance jumps any pending
+/// `tokio::time::timeout` (this helper's 60s bound, and the sampler's
+/// stream idle bound) the first time the mock HTTP server leaves the
+/// runtime idle, so a healthy turn dies in ~0.1s wall time.
 #[test]
 fn authenticated_401s_still_exhaust_after_three_retries() {
     run_on_large_stack("auth-401-exhaust", || {
-        block_on_local(true, async {
+        block_on_local(false, async {
             // The server only accepts a token the refresher never mints, so
             // every authenticated send is rejected.
             let server = MockInferenceServer::start_with_required_auth(
