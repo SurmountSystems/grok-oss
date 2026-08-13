@@ -106,9 +106,10 @@ cargo check -p xai-grok-pager --lib          # RED ~290
 
 ## Commit / stashes
 
-- Recon-unsigned commit of mop on tool branch when authorized (this report accompanies it).
+- **Committed:** `e60383d9` on `onto-xai/b13fa526f511` via recon `commit-tree` (unsigned intermediate; GPG TTY unavailable). Message: *recon: mop shell lib compile + product seams on onto tip*.
+- Working tree clean after commit (report body landed in tree; this SHA note may be unstaged if edited post-commit).
 - **No push.**
-- Stashes **not** dropped.
+- Stashes **not** dropped: `recon-resume-local-dirt-2026-08-10`, `recon-temp-work-b-wip-2026-08-10`.
 
 ---
 
