@@ -123,12 +123,27 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     // chrome markers over SETUP_SENTINEL, which may sit under the panel.
     // Without the shell re-park this times out.
     //
-    // Markers: card header always; CTA strip is either labeled (`a approve` /
-    // `s revise`) or key-only (`a  |  A  |  ?`) when the ~45% side panel is
-    // too narrow for compact labels (120-col CI default).
-    resumed
-        .wait_for_text("Plan ready for review", WELCOME_TIMEOUT)
-        .context("restored plan-ready card after resume")?;
+    // Markers, any of:
+    // - full TUI status (`Waiting on plan approval`)
+    // - minimal-mode card header (`Plan ready for review`)
+    // - CTA strip: labeled (`a approve` / `s revise`) or key-only
+    //   (`a  |  A  |  ?`) when the ~45% side panel is too narrow for compact
+    //   labels (120-col CI default).
+    // Default spawn is fullscreen TUI, not `--minimal`, so the first wait
+    // must accept the fullscreen status line. Waiting only for the minimal
+    // card header times out even when the side-panel CTAs are already up.
+    wait_for_any_text(
+        &mut resumed,
+        &[
+            "Waiting on plan approval",
+            "Plan ready for review",
+            LABELED_APPROVE_CTA,
+            "s revise",
+            KEY_ONLY_CTA_STRIP,
+        ],
+        WELCOME_TIMEOUT,
+    )
+    .context("restored plan-ready chrome after resume")?;
     wait_for_any_text(
         &mut resumed,
         &[LABELED_APPROVE_CTA, "s revise", KEY_ONLY_CTA_STRIP],

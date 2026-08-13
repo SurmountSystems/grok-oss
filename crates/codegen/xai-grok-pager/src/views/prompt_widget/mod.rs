@@ -2958,7 +2958,30 @@ impl PromptWidget {
 
         // Top divider: ╭──────────╮
         if vpad_top > 0 && style.chrome && style.show_borders {
-            let div_style = Style::default().fg(border_color).bg(bg);
+            // Session title uses chrome-caption (0.6 blend). On DOGE that
+            // solid-step stays `text_secondary` (white), same as the focused
+            // rule. Shift the rule to a distinct chrome slot so the title
+            // still reads as caption-on-border, like the bottom info line.
+            let caption_fg = Self::chrome_caption_style(bg, &theme, style.focused).fg;
+            let title_will_paint = style
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .is_some()
+                && area.width.saturating_sub(6) >= 6;
+            let rule_fg = if title_will_paint && caption_fg == Some(border_color) {
+                if theme.gray != border_color {
+                    theme.gray
+                } else if theme.gray_dim != border_color {
+                    theme.gray_dim
+                } else {
+                    border_color
+                }
+            } else {
+                border_color
+            };
+            let div_style = Style::default().fg(rule_fg).bg(bg);
             let div_y = chunks[0].y;
             let left_x = area.x;
             let right_x = area.x + area.width.saturating_sub(1);

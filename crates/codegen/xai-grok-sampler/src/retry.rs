@@ -1007,7 +1007,11 @@ mod tests {
 
     #[test]
     fn cloudflare_edge_range_is_transient() {
-        for code in [520u16, 521, 522, 523, 524, 525, 526, 527, 530] {
+        // Transient edge outages rebuild the HTTP client. Origin-TLS 525/526
+        // stay Fatal via RetryPolicy::edge_client (a broken cert never clears).
+        // is_transient_api_status may still list 525/526; classify uses
+        // is_retryable, which does not treat those two as retryable.
+        for code in [520u16, 521, 522, 523, 524, 527, 530] {
             assert!(
                 is_transient_api_status(code),
                 "{code} should be transient for classify"
@@ -1020,6 +1024,15 @@ mod tests {
                 ),
                 "classify {code}"
             );
+        }
+        for code in [525u16, 526] {
+            let err = api_status_code(code, "edge");
+            match classify_error(&err, 0, 3, RATE_LIMIT_RETRY_THRESHOLD) {
+                RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                    assert_eq!(status.as_u16(), code);
+                }
+                other => panic!("expected Fatal for origin-TLS {code}, got {other:?}"),
+            }
         }
     }
 

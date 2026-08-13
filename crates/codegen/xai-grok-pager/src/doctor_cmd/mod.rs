@@ -61,7 +61,10 @@ fn run_report(json_output: bool, writer: &mut impl Write) -> Result<()> {
 
 pub fn collect_report() -> DiagnosticReport {
     let terminal = crate::terminal::standalone_terminal_context();
-    let report = collect_report_with(crate::diagnostics::probes::collect_standalone(&terminal));
+    let mut report = collect_report_with(crate::diagnostics::probes::collect_standalone(&terminal));
+    // Live mic lookup is host-dependent. Keep it on the real `grok doctor`
+    // path only so snapshot composition stays a pure function of the facts.
+    crate::diagnostics::apply_voice_probe(&mut report, true);
     configured_report_for_terminal(report, &terminal)
 }
 
@@ -81,9 +84,7 @@ fn configured_report_for_terminal(
 fn collect_report_with(
     snapshot: crate::diagnostics::probes::StandaloneDiagnosticSnapshot<'_>,
 ) -> DiagnosticReport {
-    let mut report = crate::diagnostics::view(snapshot.into());
-    crate::diagnostics::apply_voice_probe(&mut report, true);
-    report
+    crate::diagnostics::view(snapshot.into())
 }
 
 fn write_report(

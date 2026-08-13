@@ -10,16 +10,42 @@ use std::io::{Read, Write};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-/// Resolve the pager binary like the PTY harness: `PAGER_BINARY` under
-/// Bazel (runfiles-relative), else cargo's compile-time constant.
+/// Resolve the composition-root binary (`grok-oss`).
+///
+/// Order matches the PTY harness / test-support:
+/// 1. `PAGER_BINARY` (Bazel / CI override; runfiles-relative, so absolutize)
+/// 2. Cargo rustc-env for this package's `[[bin]]` (`grok-oss`; hyphens → `_`)
+/// 3. Runtime `CARGO_BIN_EXE_*` (hyphenated and underscored names)
 fn pager_binary() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("PAGER_BINARY") {
         return std::path::absolute(&p)
             .unwrap_or_else(|e| panic!("failed to absolutize PAGER_BINARY {p}: {e}"));
     }
-    option_env!("CARGO_BIN_EXE_xai-grok-pager")
-        .map(std::path::PathBuf::from)
-        .expect("PAGER_BINARY is unset and this build is not `cargo test`")
+    // Cargo injects `CARGO_BIN_EXE_<bin>` with hyphens replaced by underscores.
+    // See https://doc.rust-lang.org/cargo/reference/environment-variables.html
+    if let Some(p) = option_env!("CARGO_BIN_EXE_grok_oss") {
+        return std::path::PathBuf::from(p);
+    }
+    if let Some(p) = option_env!("CARGO_BIN_EXE_grok-oss") {
+        return std::path::PathBuf::from(p);
+    }
+    for key in [
+        "CARGO_BIN_EXE_grok-oss",
+        "CARGO_BIN_EXE_grok_oss",
+        "CARGO_BIN_EXE_xai-grok-pager",
+        "CARGO_BIN_EXE_xai_grok_pager",
+    ] {
+        if let Ok(p) = std::env::var(key) {
+            let path = std::path::PathBuf::from(&p);
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+    panic!(
+        "PAGER_BINARY is unset and cargo did not inject CARGO_BIN_EXE_grok_oss \
+         (this integration test must run against the grok-oss bin)"
+    );
 }
 
 /// Local base answering every request with the channel pointer body.

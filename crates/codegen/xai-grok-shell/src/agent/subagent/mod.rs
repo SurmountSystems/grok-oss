@@ -916,7 +916,6 @@ fn subagent_auth_type(
 
 /// True when parent sampling is SuperGrok session primary with no console keys
 /// in the failover list (limits-before-credits chain the child should not undo).
-#[cfg_attr(not(test), allow(dead_code))]
 fn parent_sampling_is_supergrok_session_only(
     parent: &xai_grok_sampler::SamplerConfig,
     session_key: Option<&str>,
@@ -934,7 +933,6 @@ fn parent_sampling_is_supergrok_session_only(
 /// so console keys are not re-queued while included SuperGrok period limits may
 /// still have headroom. When parent sampling is already SuperGrok-session-only,
 /// keep that shape even if disk has auto_use off (do not reintroduce console).
-#[cfg_attr(not(test), allow(dead_code))]
 fn subagent_override_auth_rank_flags(
     agent_config: Option<&crate::agent::config::Config>,
     disk_flags: Option<(Option<crate::auth::PreferredAuthMethod>, bool)>,
@@ -967,6 +965,22 @@ fn resolve_model_override_to_config(
     };
     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
     let has_session_key = session_key.is_some();
+    let parent_supergrok_session_only =
+        parent_sampling_is_supergrok_session_only(&ctx.sampling_config, session_key);
+    let (preferred, _auto_use) = subagent_override_auth_rank_flags(
+        ctx.agent_config.as_ref(),
+        None,
+        has_session_key,
+        parent_supergrok_session_only,
+    );
+    // preferred_method=api_key pin: console stays primary. Do not feed the
+    // SuperGrok session JWT into resolve_credentials (that would outrank
+    // XAI_API_KEY even when auto_use_included_limits is on).
+    let session_key = if crate::auth::preferred_is_console_primary(preferred) {
+        None
+    } else {
+        session_key
+    };
     let mut credentials = resolve_credentials(&entry, session_key);
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;

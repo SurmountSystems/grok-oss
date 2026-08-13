@@ -701,8 +701,11 @@ impl SessionActor {
                 .pending_inputs
                 .get(pos)
                 .is_some_and(|item| Self::extract_bash_command(&item.prompt_blocks).is_some());
-            if is_bash || !turn_running {
+            let front_uncommitted = Self::front_awaiting_commit(&state);
+            if is_bash || !turn_running || front_uncommitted {
                 // Stay queued. Keep a version-matching edit so it is not lost.
+                // An uncommitted front must not pull the next row into the
+                // running turn (send-now / interject would drop it).
                 if let Some(new_text) = new_text.filter(|t| !t.trim().is_empty())
                     && let Some(item) = state.pending_inputs.get_mut(pos)
                 {
@@ -711,6 +714,7 @@ impl SessionActor {
                         queued_id = %id,
                         is_bash,
                         turn_running,
+                        front_uncommitted,
                         "soft interject refused; saved the edit to the queued row"
                     );
                 } else {
@@ -718,7 +722,8 @@ impl SessionActor {
                         queued_id = %id,
                         is_bash,
                         turn_running,
-                        "soft interject no-op (bash / idle); rebroadcasting"
+                        front_uncommitted,
+                        "soft interject no-op (bash / idle / uncommitted front); rebroadcasting"
                     );
                 }
             } else if let Some(mut item) = state.pending_inputs.remove(pos) {

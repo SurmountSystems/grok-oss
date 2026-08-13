@@ -11,7 +11,10 @@ dhat-heap = ["dep:dhat"]
 # load, and bench tests. Off by default; the tests/benches that use it declare
 # it via `required-features`.
 # Cross-crate test seams for pager/dev-dependencies.
-test-support = ["xai-grok-shell-base/test-support"]
+test-support = [
+    "xai-grok-shell-base/test-support",
+    "xai-grok-config/test-support",
+]
 test-util = []
 # Local Computer Hub workspace_server (own/attach + crash-restart).
 local-workspace = []
@@ -163,7 +166,7 @@ xai-grok-foreign-sessions = { workspace = true }
 xai-grok-subagent-resolution = { path = "../xai-grok-subagent-resolution" }
 xai-grok-agent = { path = "../xai-grok-agent" }
 xai-grok-bundle = { workspace = true }
-xai-grok-config = { workspace = true }
+xai-grok-config = { workspace = true, features = ["test-support"] }
 xai-grok-config-types = { workspace = true }
 xai-grok-memory = { workspace = true, features = ["test-support"] }
 xai-grok-hooks = { path = "../xai-grok-hooks" }
@@ -227,7 +230,7 @@ tempfile = { workspace = true }
 xai-grok-bundle = { workspace = true, features = ["test-support"] }
 xai-grok-memory = { workspace = true, features = ["test-support"] }
 xai-grok-workspace = { workspace = true, features = ["test-support"] }
-xai-grok-config = { workspace = true, features = [] }
+xai-grok-config = { workspace = true, features = ["test-support"] }
 ring = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }

@@ -932,7 +932,14 @@ impl Renderable for EntryRenderer<'_> {
             };
             if let Some(line_bg) = line_bg {
                 let bg_x = content_area.x + line.bg_start_col;
-                let bg_width = content_area.width.saturating_sub(line.bg_start_col);
+                // Background blocks already own the timestamp gutter via the
+                // full-area fill. A per-line band (UserPrompt reads
+                // `Theme::current()`, which may not be the renderer theme)
+                // must not punch a different color into that gutter.
+                let bg_width = content_area
+                    .width
+                    .saturating_sub(line.bg_start_col)
+                    .saturating_sub(if bg_color.is_some() { ts_reserved } else { 0 });
                 if bg_width > 0 {
                     let line_rect = Rect::new(bg_x, row, bg_width, 1);
                     buf.set_style(line_rect, Style::default().bg(line_bg));

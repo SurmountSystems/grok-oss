@@ -4865,6 +4865,13 @@ pub(crate) fn resolve_credentials(
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
+    } else if crate::auth::openrouter::is_openrouter_base_url(&info.base_url) {
+        // OpenRouter is BYOK. Never send an xAI SuperGrok session JWT.
+        (
+            None,
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+        )
     } else if let Some(key) = session_key {
         (
             Some(key.to_owned()),

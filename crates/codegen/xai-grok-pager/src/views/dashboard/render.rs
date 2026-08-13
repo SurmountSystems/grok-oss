@@ -3817,7 +3817,10 @@ fn needs_input_bullet_color(tick: u64, theme: &Theme) -> Color {
     if bright {
         theme.warning
     } else {
-        crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5)
+        // Opacity must be strictly below 0.5 so DOGE's solid-step blend
+        // fades to `bg_base` instead of keeping full yellow (0.5 keeps
+        // `original`). Continuous themes still get a visible fade.
+        crate::render::color::blend_color(theme.bg_base, theme.warning, 0.4)
             .unwrap_or(theme.warning)
     }
 }
