@@ -3788,7 +3788,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
         count = entries.len(),
         "loaded default models from embedded JSON"
     );
-    entries
+    let mut map: IndexMap<String, ModelEntryConfig> = entries
         .into_iter()
         .map(|m| {
             assert!(
@@ -3836,7 +3836,75 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
             };
             (key, config)
         })
-        .collect()
+        .collect();
+    // Additive OpenRouter option (not the default). OpenRouter does not host
+    // Composer-class models — keep this separate from native xAI catalog entries.
+    let openrouter = openrouter_grok_45_default_entry();
+    map.entry(crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID.to_owned())
+        .or_insert(openrouter);
+    map
+}
+
+/// Built-in OpenRouter Grok 4.5 catalog entry (chat completions, BYOK).
+fn openrouter_grok_45_default_entry() -> ModelEntryConfig {
+    use crate::auth::openrouter::{
+        OPENROUTER_API_KEY_ENV, OPENROUTER_API_URL, OPENROUTER_CATEGORIES,
+        OPENROUTER_GROK_45_CATALOG_ID, OPENROUTER_GROK_45_CONTEXT_WINDOW, OPENROUTER_GROK_45_MODEL,
+        OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPENROUTER_TITLE_HEADER, OPENROUTER_X_TITLE,
+        OPENROUTER_X_TITLE_HEADER,
+    };
+    let mut extra_headers = IndexMap::new();
+    extra_headers.insert(
+        "HTTP-Referer".to_owned(),
+        OPENROUTER_HTTP_REFERER.to_owned(),
+    );
+    extra_headers.insert(
+        OPENROUTER_X_OPENROUTER_TITLE_HEADER.to_owned(),
+        OPENROUTER_X_TITLE.to_owned(),
+    );
+    extra_headers.insert(
+        OPENROUTER_X_TITLE_HEADER.to_owned(),
+        OPENROUTER_X_TITLE.to_owned(),
+    );
+    extra_headers.insert(
+        "X-OpenRouter-Categories".to_owned(),
+        OPENROUTER_CATEGORIES.to_owned(),
+    );
+    ModelEntryConfig {
+        id: Some(OPENROUTER_GROK_45_CATALOG_ID.to_owned()),
+        model: OPENROUTER_GROK_45_MODEL.to_owned(),
+        base_url: OPENROUTER_API_URL.to_owned(),
+        api_base_url: None,
+        name: Some("Grok 4.5 (OpenRouter)".to_owned()),
+        description: Some("Grok 4.5 via OpenRouter (bring your own OpenRouter API key)".to_owned()),
+        context_window: NonZeroU64::new(OPENROUTER_GROK_45_CONTEXT_WINDOW)
+            .expect("openrouter context window is non-zero"),
+        auto_compact_threshold_percent: None,
+        system_prompt_label: None,
+        temperature: Some(0.7),
+        top_p: Some(0.95),
+        max_completion_tokens: None,
+        api_backend: ApiBackend::ChatCompletions,
+        auth_scheme: None,
+        agent_type: default_agent_type(),
+        inference_idle_timeout_secs: None,
+        max_retries: None,
+        api_key: None,
+        env_key: Some(EnvKeys::single(OPENROUTER_API_KEY_ENV)),
+        extra_headers,
+        use_concise: false,
+        hidden: false,
+        supported_in_api: true,
+        reasoning_effort: None,
+        supports_reasoning_effort: false,
+        reasoning_efforts: Vec::new(),
+        supports_backend_search: false,
+        compactions_remaining: None,
+        compaction_at_tokens: None,
+        show_model_fingerprint: false,
+        stream_tool_calls: None,
+        laziness_detector: LazinessDetectorPerModelConfig::default(),
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntryConfig {

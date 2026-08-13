@@ -36,7 +36,8 @@ use xai_grok_telemetry::events::ManualAuthSurface;
 #[cfg(test)]
 use super::model::UserInfo;
 use super::model::{
-    AuthMode, GrokAuth, early_invalidation, is_expired, is_expired_with_buffer, lookup_auth,
+    AuthMode, GrokAuth, early_invalidation, is_expired, is_expired_with_buffer,
+    is_supergrok_session_mode, lookup_auth, upsert_supergrok_session,
 };
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
 use super::storage::{
@@ -421,6 +422,9 @@ impl AuthManager {
         // Clear a wrong-team session left on disk before the pin was deployed,
         // so the first launch forces a compliant login.
         manager.enforce_pin_on_loaded_token();
+        if manager.grok_com_config.auto_use_included_limits {
+            let _ = manager.align_to_ranked_free_period_primary();
+        }
         manager
     }
 
@@ -802,6 +806,106 @@ impl AuthManager {
             .filter(|a| !self.is_token_hard_expired(a))
             .cloned()?;
         self.vet_cached(auth)
+    }
+
+    /// Align the live SessionToken bearer to the ranked included SuperGrok
+    /// period primary when two SuperGrok identities are on disk. Used by
+    /// [`Self::new`] when `auto_use_included_limits` is on, and by tests that
+    /// call it explicitly with auto-use off.
+    ///
+    /// Returns `true` when the bearer was switched.
+    pub(crate) fn align_to_ranked_free_period_primary(&self) -> bool {
+        use super::allowance_exhaust_from_billing::load_supergrok_session_candidates;
+        use super::supergrok_identity_rank::{
+            ranked_free_period_primary_token,
+            session_bearer_should_align_to_ranked_free_period_primary,
+        };
+
+        let Some(home) = self.path.parent() else {
+            return false;
+        };
+        let candidates = load_supergrok_session_candidates(home);
+        if candidates.len() < 2 {
+            return false;
+        }
+        let ranked = ranked_free_period_primary_token(&candidates);
+        let current_key = self.current_wire_valid().map(|a| a.key);
+        if !session_bearer_should_align_to_ranked_free_period_primary(
+            current_key.as_deref(),
+            ranked.as_deref(),
+        ) {
+            return false;
+        }
+        let Some(ranked_tok) = ranked else {
+            return false;
+        };
+        let Ok(map) = read_auth_json(&self.path) else {
+            return false;
+        };
+        let Some(auth) = map
+            .values()
+            .find(|a| a.key.trim() == ranked_tok.trim())
+            .cloned()
+        else {
+            return false;
+        };
+        if !is_supergrok_session_mode(auth.auth_mode) {
+            return false;
+        }
+        let mut map = map;
+        upsert_supergrok_session(&mut map, &self.scope, auth.clone());
+        if let Err(e) = write_auth_json(&self.path, &map) {
+            tracing::warn!(
+                error = %e,
+                "auth: included SuperGrok period rank align disk write failed; hot_swap only"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth: included SuperGrok period rank align disk write failed",
+                None,
+                Some(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+        let from_suffix = current_key.as_deref().map(|k| bearer_suffix(k).to_owned());
+        let to_suffix = bearer_suffix(auth.key.as_str()).to_owned();
+        let principal_type = auth.principal_type.clone();
+        let team_id = auth.team_id.clone();
+        let principal_id = auth.principal_id.clone();
+        self.hot_swap(auth);
+        tracing::info!(
+            from_key_prefix = ?from_suffix,
+            to_key_prefix = %to_suffix,
+            principal_type = ?principal_type,
+            team_id = ?team_id,
+            "auth: aligned SessionToken bearer to included SuperGrok period ranked primary"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "auth: aligned SessionToken bearer to included SuperGrok period ranked primary",
+            None,
+            Some(serde_json::json!({
+                "from_key_prefix": from_suffix,
+                "to_key_prefix": to_suffix,
+                "principal_type": principal_type,
+                "team_id": team_id,
+                "principal_id": principal_id,
+            })),
+        );
+        true
+    }
+
+    /// Snapshot of the live SessionToken wire bearer for path-trace logs.
+    ///
+    /// Proves which SuperGrok principal (User/personal vs Team/business) is
+    /// on the wire after included SuperGrok period rank align, without dumping
+    /// the full JWT.
+    pub(crate) fn session_wire_bearer_trace(&self) -> Option<serde_json::Value> {
+        let auth = self.current_wire_valid()?;
+        Some(serde_json::json!({
+            "key_prefix": bearer_suffix(&auth.key),
+            "principal_type": auth.principal_type,
+            "team_id": auth.team_id,
+            "principal_id": auth.principal_id,
+            "auth_mode": format!("{:?}", auth.auth_mode),
+        }))
     }
 
     /// `true` when data collection must be suppressed — the team has ZDR or

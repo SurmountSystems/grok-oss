@@ -1321,6 +1321,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1343,6 +1344,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1418,6 +1420,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -2184,6 +2187,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(err.is_retryable(), "521 soft-retries same identity");
         assert!(

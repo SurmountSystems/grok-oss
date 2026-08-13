@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::auth::error::RefreshTokenError;
+use crate::auth::upsert_supergrok_session;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 

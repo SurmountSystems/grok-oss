@@ -941,6 +941,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(12),
             should_retry: None,
+            error_code: None,
         };
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithClientRebuild { backoff } => {

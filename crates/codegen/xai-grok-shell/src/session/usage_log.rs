@@ -409,6 +409,7 @@ mod tests {
             total_tokens: 12_000,
             reasoning_tokens: 10,
             cached_prompt_tokens: 200,
+            cache_creation_prompt_tokens: 0,
         }
     }
 

@@ -244,6 +244,8 @@ pretty_assertions = { workspace = true }
 # clock with auto-advance) so interval-driven loop tests in `auth::refresh`
 # can assert exact tick counts deterministically without real-time sleep.
 tokio = { workspace = true, features = ["test-util"] }
+# Pre-main unified-log redirect in `src/test_support/mod.rs` (`#[ctor::ctor]`).
+ctor = { workspace = true }
 
 [dependencies.tempfile]
 workspace = true

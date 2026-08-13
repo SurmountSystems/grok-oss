@@ -22,9 +22,27 @@ fn test_actor_with_remote_sync(
     storage: Arc<dyn StorageAdapter>,
     remote_sync: Option<RemoteSync>,
 ) -> ActorGuard {
+    test_actor_inner(info, storage, remote_sync, false)
+}
+
+fn test_actor_inner(
+    info: Info,
+    storage: Arc<dyn StorageAdapter>,
+    remote_sync: Option<RemoteSync>,
+    mark_summary_done: bool,
+) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
-    let summary_tx = tx.clone();
+    let (disk_full_tx, disk_full_rx) = tokio::sync::watch::channel(false);
     let sampling_client = OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap();
+    let mut summary =
+        crate::session::summary::SummaryGenerator::new(crate::session::summary::SummaryConfig {
+            sampling_client,
+            model: String::new(),
+            persistence_tx: tx.downgrade(),
+        });
+    if mark_summary_done {
+        summary.mark_done();
+    }
     let task = tokio::spawn(
         SessionPersistence {
             info,
@@ -32,21 +50,18 @@ fn test_actor_with_remote_sync(
             pending_notification: None,
             rx,
             remote_sync,
+            created_fresh: false,
             relay_sync: None,
-            summary: crate::session::summary::SummaryGenerator::new(
-                crate::session::summary::SummaryConfig {
-                    sampling_client,
-                    model: String::new(),
-                    persistence_tx: summary_tx,
-                },
-            ),
+            summary,
             registry_title_sync: None,
             gateway: None,
+            disk_full_tx,
+            disk_full_notified: false,
         }
         .run(),
     );
     ActorGuard {
-        handle: PersistenceHandle { tx, noop: false },
+        handle: PersistenceHandle::from_parts_for_test(tx, disk_full_rx),
         task,
     }
 }

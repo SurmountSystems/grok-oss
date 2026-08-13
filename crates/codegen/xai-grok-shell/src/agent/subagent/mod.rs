@@ -913,6 +913,46 @@ fn subagent_auth_type(
         xai_chat_state::AuthType::ApiKey
     }
 }
+
+/// True when parent sampling is SuperGrok session primary with no console keys
+/// in the failover list (limits-before-credits chain the child should not undo).
+#[cfg_attr(not(test), allow(dead_code))]
+fn parent_sampling_is_supergrok_session_only(
+    parent: &xai_grok_sampler::SamplerConfig,
+    session_key: Option<&str>,
+) -> bool {
+    let Some(sess) = session_key.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    parent.api_key.as_deref() == Some(sess) && parent.failover_api_keys.is_empty()
+}
+
+/// Dual-auth rank flags for subagent model override.
+///
+/// Prefer parent spawn `agent_config`, then disk effective config. When both are
+/// missing, fail closed: enable auto rank while a SuperGrok session is live
+/// so console keys are not re-queued while included SuperGrok period limits may
+/// still have headroom. When parent sampling is already SuperGrok-session-only,
+/// keep that shape even if disk has auto_use off (do not reintroduce console).
+#[cfg_attr(not(test), allow(dead_code))]
+fn subagent_override_auth_rank_flags(
+    agent_config: Option<&crate::agent::config::Config>,
+    disk_flags: Option<(Option<crate::auth::PreferredAuthMethod>, bool)>,
+    session_present: bool,
+    parent_supergrok_session_only: bool,
+) -> (Option<crate::auth::PreferredAuthMethod>, bool) {
+    if let Some(c) = agent_config {
+        return (
+            c.grok_com_config.preferred_method,
+            c.grok_com_config.auto_use_included_limits,
+        );
+    }
+    if let Some((preferred, auto_use)) = disk_flags {
+        return (preferred, auto_use || parent_supergrok_session_only);
+    }
+    (None, session_present || parent_supergrok_session_only)
+}
+
 /// Resolve a model override string (config key or model ID) to a
 /// `(SamplerConfig, ModelId)` pair.
 fn resolve_model_override_to_config(
@@ -2317,6 +2357,55 @@ pub(crate) struct SubagentMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model_id: Option<String>,
 }
+
+/// Filename next to `meta.json` and under the child session dir for the work
+/// join key (usage.jsonl / cleared_todos). Kept as a sibling file so resume
+/// can preserve identity without schema churn on [`SubagentMeta`].
+pub(crate) const WORK_ULID_SESSION_FILE: &str = xai_grok_tools::util::ulid::WORK_ULID_FILE;
+
+/// Resolve a work ULID for a subagent spawn: prefer source subagent dir on
+/// `resume_from`, else mint a new id.
+pub(crate) fn resolve_subagent_work_ulid(
+    resume_from: Option<&str>,
+    parent_session_dir: &Path,
+) -> String {
+    if let Some(src) = resume_from {
+        let src_dir = parent_session_dir.join("subagents").join(src);
+        if let Some(wu) = xai_grok_tools::util::ulid::read_work_ulid_file(&src_dir) {
+            return wu;
+        }
+        // Fallback: source child session dir via meta.json child_session_id.
+        let meta_path = src_dir.join("meta.json");
+        if let Ok(data) = std::fs::read_to_string(&meta_path)
+            && let Ok(meta) = serde_json::from_str::<SubagentMeta>(&data)
+        {
+            let src_info = SessionInfo {
+                id: acp::SessionId::new(meta.child_session_id),
+                cwd: meta
+                    .child_cwd
+                    .unwrap_or_else(|| parent_session_dir.to_string_lossy().into_owned()),
+            };
+            let child_dir = crate::session::persistence::session_dir(&src_info);
+            if let Some(wu) = xai_grok_tools::util::ulid::read_work_ulid_file(&child_dir) {
+                return wu;
+            }
+        }
+    }
+    xai_grok_tools::util::ulid::mint()
+}
+
+/// Persist work ULID next to subagent meta and under the child session dir.
+#[allow(dead_code)]
+pub(crate) fn persist_subagent_work_ulid(
+    subagent_meta_dir: &Path,
+    child_session_dir: &Path,
+    work_ulid: &str,
+) {
+    let _ = std::fs::create_dir_all(subagent_meta_dir);
+    let _ = std::fs::write(subagent_meta_dir.join(WORK_ULID_SESSION_FILE), work_ulid);
+    let _ = xai_grok_tools::util::ulid::write_work_ulid_file(child_session_dir, work_ulid);
+}
+
 /// Canonical subagent metadata for GCS persistence (`subagent.json`).
 ///
 /// Contains the full subagent identity, provenance, and execution state.

@@ -250,6 +250,7 @@ fn merge_section_session_explicit_value_does_not_drag_load_envrc() {
     table.insert("session".into(), TomlValue::Table(session));
     let cfg = crate::agent::config::SessionConfig {
         auto_compact_threshold_percent: Some(70),
+        auto_compact_threshold_tokens: None,
         load_envrc: None,
     };
     merge_section(&mut table, "session", &cfg);
@@ -737,6 +738,7 @@ fn merge_section_session_load_envrc_does_not_drag_auto_compact() {
     let cfg = crate::agent::config::SessionConfig {
         load_envrc: Some(true),
         auto_compact_threshold_percent: None,
+        auto_compact_threshold_tokens: None,
     };
     merge_section(&mut table, "session", &cfg);
     let s = table.get("session").unwrap().as_table().unwrap();

@@ -1005,6 +1005,30 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
+        let plan_active = self.plan_mode.lock().is_active();
+        if plan_active
+            && super::session_mode::is_plan_mode_blocked_ask_user_tool_name(
+                call.function.name.as_str(),
+            )
+        {
+            tracing::info_span!(
+                "tool.decision",
+                tool_name = %call.function.name,
+                tool_use_id = %call.id,
+                decision = "deny",
+                source = "plan_mode",
+                wait_ms = 0_i64,
+            )
+            .in_scope(|| {});
+            let msg = format!(
+                "Rejected: ask_user_question is not allowed in plan mode. \
+                 Put open questions in the plan file (plan.md) or call exit_plan_mode. \
+                 Do not open a multi-choice questionnaire."
+            );
+            self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
         let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(
@@ -1396,7 +1420,32 @@ impl SessionActor {
                 },
                 Err(err) => {
                     if ext_method_no_client(&err) {
-                        tracing::debug!(%err, "exit_plan_mode: no client wired; executing tool");
+                        tracing::debug!(
+                            %err,
+                            "exit_plan_mode: no client wired; honest no-panel leave"
+                        );
+                        self.leave_plan_mode_to_default();
+                        let plan_body = plan_content.clone().unwrap_or_default();
+                        let message = format!(
+                            "No interactive plan panel is available (headless / no UI client). \
+                             This is NOT a plan-panel Approve. Plan mode has been left so the \
+                             session is not stuck. The present-only exit_plan_mode tool body \
+                             was not run and must not be treated as operator approval.\n\n\
+                             {plan_body}"
+                        );
+                        let tool_update = acp::ToolCallUpdate::new(
+                            tool_call_id.clone(),
+                            acp::ToolCallUpdateFields::new()
+                                .status(Some(acp::ToolCallStatus::Completed))
+                                .content(Some(vec![acp::ToolCallContent::from(
+                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
+                                )])),
+                        );
+                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                            .await;
+                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                        self.chat_state_handle.push_tool_result(tool_chat);
+                        return Ok(Err(ToolLoop::Continue));
                     } else {
                         tracing::info!(
                             %err,

@@ -96,10 +96,21 @@ fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
     d.contains("grok.com/supergrok") || d.contains("upgrade to a grok subscription")
 }
 
+/// Capacity / overload copy for every surface. Message only; `data` stays
+/// unset because `Display` appends JSON-encoded `data` and this string is
+/// meant for direct display.
+pub const OVERLOADED_USER_MESSAGE: &str = "Model is temporarily overloaded. Try again in a moment.";
+
 /// Map a `SamplingError` to an ACP `Error` for client-facing responses.
 /// This stays in xai-grok-shell because it depends on `agent_client_protocol::Error`.
 pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
     use reqwest::StatusCode;
+    if err.is_overloaded() {
+        return acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            OVERLOADED_USER_MESSAGE,
+        );
+    }
     match err {
         SamplingError::Auth { message, .. } => acp::Error::auth_required().data(message),
         SamplingError::InvalidConfiguration(msg) => acp::Error::invalid_params().data(msg),
@@ -331,6 +342,7 @@ mod tests {
                 total_tokens: 4,
                 reasoning_tokens: 0,
                 cached_prompt_tokens: 0,
+                cache_creation_prompt_tokens: 0,
             },
             None,
             Some(10),
@@ -550,6 +562,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(err.is_credit_exhausted());
         let acp_err = map_sampling_err_to_acp(err);
@@ -575,6 +588,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         let bare_acp = map_sampling_err_to_acp(bare);
         assert_eq!(bare_acp.code, acp::Error::internal_error().code);
@@ -703,6 +717,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(

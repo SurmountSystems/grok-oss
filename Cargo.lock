@@ -14297,6 +14297,7 @@ dependencies = [
  "chrono",
  "clap",
  "criterion",
+ "ctor",
  "dashmap",
  "dbus-secret-service",
  "dhat",
