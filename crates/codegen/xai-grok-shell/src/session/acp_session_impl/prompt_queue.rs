@@ -656,7 +656,12 @@ impl SessionActor {
     /// Mirrors [`handle_remove_queued_prompt`]'s versioned/owner gate and
     /// [`SessionCommand::Interject`]'s broadcast-then-buffer. Soft interject
     /// never cancels the running turn. Idle (no `running_task`) is a benign
-    /// no-op: the row stays queued in place. Bash rows stay queued.
+    /// no-op: the row stays queued in place. Bash rows stay queued. An
+    /// uncommitted front without an active goal also stays queued (send-now
+    /// must not pull the next row into a turn whose user message is not
+    /// committed yet). During an active goal, a user prompt still buffers as
+    /// a mid-turn interjection / planner steer, the same kind split as
+    /// [`Self::queue_input`]'s `merge_into_goal`.
     /// Missing, stale, running, or foreign rows are benign no-ops.
     ///
     /// Always re-broadcasts `x.ai/queue/changed` so every client reconciles
@@ -702,10 +707,12 @@ impl SessionActor {
                 .get(pos)
                 .is_some_and(|item| Self::extract_bash_command(&item.prompt_blocks).is_some());
             let front_uncommitted = Self::front_awaiting_commit(&state);
-            if is_bash || !turn_running || front_uncommitted {
+            // Goal send-now still routes by kind even before the front
+            // commits: user prompts merge as interjections, bash stays queued.
+            // Without a goal, an uncommitted front must not pull the next row
+            // into the running turn.
+            if is_bash || !turn_running || (front_uncommitted && !goal_active) {
                 // Stay queued. Keep a version-matching edit so it is not lost.
-                // An uncommitted front must not pull the next row into the
-                // running turn (send-now / interject would drop it).
                 if let Some(new_text) = new_text.filter(|t| !t.trim().is_empty())
                     && let Some(item) = state.pending_inputs.get_mut(pos)
                 {
