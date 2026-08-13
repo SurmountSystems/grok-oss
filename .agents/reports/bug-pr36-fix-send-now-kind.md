@@ -83,4 +83,10 @@ Staged only:
 
 Product commit: `435546219c9500dc46e8d547df68d92054d6dfe1` (parent `71bca1a0c8b0ab3a7ef9eedcdf2a13ab5bd3c527`).
 
-Push result: pending fetch.
+Report pin: `75356b2060feaa0b78d59dce2368aeb5987e37bf` (branch tip).
+
+`git fetch origin`: `origin/onto-xai/b13fa526f511` was still `71bca1a0` and is an ancestor of the new HEAD.
+
+Push: `git push origin HEAD:onto-xai/b13fa526f511` exit 0, `71bca1a0..75356b20`, no force. No second PR. No GitHub writes.
+
+On-disk report after push has this section filled; the committed pin still says "pending fetch." Left unstaged on purpose. No second push.

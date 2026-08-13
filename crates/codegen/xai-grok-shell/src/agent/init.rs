@@ -29,7 +29,7 @@ pub fn bootstrap(
     let mut cfg = cfg.clone();
     {
         let _timer = crate::instrumentation_timer!("startup.bootstrap.remote_settings");
-        ensure_remote_settings_side_effects(&mut cfg, false);
+        ensure_remote_settings_side_effects(&mut cfg, auth_manager, false);
     }
     crate::managed_config::managed_policy_gate()?;
     let cfg = {
@@ -71,18 +71,25 @@ pub(crate) fn exit_on_config_error<T>(e: String) -> T {
 ///
 /// `sync_managed`: when true, missing-settings fallback may also refresh
 /// managed-config. Must be false before the managed-policy gate.
-fn ensure_remote_settings_side_effects(cfg: &mut AgentConfig, sync_managed: bool) {
+fn ensure_remote_settings_side_effects(
+    cfg: &mut AgentConfig,
+    auth_manager: &AuthManager,
+    sync_managed: bool,
+) {
     // Fallback: if the client didn't pre-supply remote settings, fetch them
     // now so remote-settings-gated features work regardless of which client
     // spawned us. Clients that already call `start_early_prefetch()` and
     // thread the result into `cfg.remote_settings` skip this entirely.
+    //
+    // Use this agent's live credential, not a second AuthManager on the
+    // process grok home. An isolated AuthManager (tests, a custom home)
+    // must not inherit the operator's disk session settings.
     if cfg.remote_settings.is_none() {
+        let auth = auth_manager.current();
         let handle = if sync_managed {
-            crate::agent::models::start_early_prefetch(Some(cfg.grok_com_config.clone()))
+            crate::agent::models::start_early_prefetch_with_auth(auth)
         } else {
-            crate::agent::models::start_early_prefetch_settings_only(Some(
-                cfg.grok_com_config.clone(),
-            ))
+            crate::agent::models::start_early_prefetch_with_auth_gated(auth, false)
         };
         if let Some(handle) = handle {
             match handle.join() {
@@ -130,7 +137,7 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
 
     // Idempotent: bootstrap may already have fetched + applied side effects for the gate.
     // Full prefetch (with managed-config sync when stale) is allowed after the gate.
-    ensure_remote_settings_side_effects(&mut cfg, true);
+    ensure_remote_settings_side_effects(&mut cfg, auth_manager, true);
     crate::util::config::sync_campaign_fields(&mut cfg);
 
     // env var > remote settings > Local. Skip remote settings for Generic (grok -p, subagents).

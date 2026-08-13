@@ -102,15 +102,16 @@ Super+Left/Right and Ctrl+A/E are unchanged.
 
 ## Git
 
-Parent at commit time is whatever `HEAD` is after other PR #36 slices
-(templates / nextest mop). Only the four paths above are staged.
+| Item | Value |
+|------|--------|
+| Parent | `a10f9aa7fa74d4a47e74518fbeba648aef2a3205` |
+| Tree | `71d99dc5b2c3456545a771e0ff9d688485c3ba5f` |
+| New tip | `2174fd75db9a814efbb704b0ae7cf0f7e9326073` |
+| Commit path | `git add` the four paths, `git write-tree`, `git commit-tree`, `git update-ref HEAD`. No `commit.gpgsign=false`, no `--no-gpg-sign`, no fake `gpg.program`. |
+| Fetch | origin still `a10f9aa7` (ancestor of new HEAD) |
+| Push | `git push origin HEAD:onto-xai/b13fa526f511` ff `a10f9aa7..2174fd75`. No force. No new branch. No new PR. |
 
-Commit path: `git add` those paths, `git write-tree`, `git commit-tree`,
-`git update-ref HEAD`. No `git commit`, no `commit.gpgsign=false`, no
-`--no-gpg-sign`, no fake `gpg.program`, no hook disable.
-
-Push only if `origin/onto-xai/b13fa526f511` is still an ancestor (fast-forward).
-No force. No GitHub writes. No second PR.
+No GitHub issue/PR writes. No `git commit`.
 
 ## SuperGrok copy
 

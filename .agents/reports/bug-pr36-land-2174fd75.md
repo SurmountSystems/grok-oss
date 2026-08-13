@@ -45,9 +45,17 @@ rustc / rustfmt: 1.97.1.
 
 - Branch: `onto-xai/b13fa526f511`
 - Old HEAD (pre-land): `2174fd75db9a814efbb704b0ae7cf0f7e9326073`
-- New HEAD / tree SHA / push: filled after land below.
+- New HEAD: `71bca1a0c8b0ab3a7ef9eedcdf2a13ab5bd3c527`
+- Tree: `219d95ee7484db5b07a4d044053669afc160accc`
+- Parent: `2174fd75db9a814efbb704b0ae7cf0f7e9326073`
+- `ALLOW_UNSIGNED_COMMIT=1 git commit` failed: GPG `NEED_PASSPHRASE`, no `/dev/tty` (exit 128). Did not disable signing.
+- Landed via `git write-tree` + `git commit-tree` + `git update-ref HEAD` (recon exception; unsigned `N`).
+- `git fetch origin`: remote still `2174fd75`. Old HEAD is ancestor of new HEAD.
+- Push: `git push origin HEAD:onto-xai/b13fa526f511` exit 0, `2174fd75..71bca1a0`, no force.
 
 Staged only listed product paths plus this report. Did not stage other `.agents/reports/*`. `Cargo.lock` was not dirty.
+
+On-disk report after land has this Git section filled; the committed copy still says "filled after land below." Left unstaged on purpose. No second push.
 
 ## Residual honesty
 

@@ -43,6 +43,23 @@ fn cancel_opts(
     }
 }
 
+/// Same gate as `SessionCommand::Cancel` in the actor run loop: bind the
+/// cancel outcome and drain queued notifications only when the barrier is
+/// `WakeBarrier::Clear`. An `Armed` stop-gesture barrier must outlive the
+/// cancel, so those sites skip the drain.
+async fn cancel_running_task_and_gate_drain(
+    actor: &Arc<SessionActor>,
+    options: crate::session::CancelOptions,
+) -> WakeBarrier {
+    let barrier = actor.cancel_running_task(options).await;
+    if barrier == WakeBarrier::Clear {
+        let (completion_tx, _completion_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+        SessionActor::maybe_drain_notifications(Arc::clone(actor), completion_tx).await;
+    }
+    barrier
+}
+
 #[async_trait::async_trait]
 impl AsyncTerminalRunner for DummyTerminal {
     async fn run(&self, _request: TerminalRunRequest) -> Result<TerminalRunResult, TerminalError> {
@@ -309,7 +326,10 @@ fn first_turn_memory_injection_persists_to_chat_history() {
                     respond_to: flush_tx,
                 })
                 .unwrap();
-            flush_rx.await.unwrap();
+            flush_rx
+                .await
+                .expect("flush ack should resolve")
+                .expect("persistence flush should succeed");
             let loaded = storage
                 .load_session_without_updates(&session_info)
                 .await
@@ -459,7 +479,10 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                     respond_to: flush_tx,
                 })
                 .unwrap();
-            flush_rx.await.unwrap();
+            flush_rx
+                .await
+                .expect("flush ack should resolve")
+                .expect("persistence flush should succeed");
             let storage = crate::session::storage::JsonlStorageAdapter::with_explicit_session_dir(
                 session_dir.path().to_path_buf(),
             );
@@ -559,9 +582,12 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         send_now: false,
                     });
             }
-            actor
-                .cancel_running_task(cancel_opts(true, true, false, None))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(&actor, cancel_opts(true, true, false, None))
+                    .await,
+                WakeBarrier::Clear,
+            );
             let scoped_prompt_id = bridge
                 .read_resource::<
                     xai_grok_tools::implementations::grok_build::task::types::CurrentPromptIdResource,
@@ -630,9 +656,15 @@ async fn cancel_records_mid_turn_abort_interrupt_marker() {
                 });
             }
             assert_eq!(actor.events.take_prior_interrupt_category(), None);
-            actor
-                .cancel_running_task(cancel_opts(true, false, false, Some("ctrl_c")))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(
+                    &actor,
+                    cancel_opts(true, false, false, Some("ctrl_c")),
+                )
+                .await,
+                WakeBarrier::Armed,
+            );
             assert_eq!(
                 actor.events.take_prior_interrupt_category(),
                 Some(crate::session::events::CancellationCategory::MidTurnAbort),
@@ -673,9 +705,15 @@ async fn cancel_without_active_tool_arms_interrupt_reminder() {
             }
             assert!(!actor.events.has_active_tool());
             assert!(!actor.events.take_pending_interrupt_reminder());
-            actor
-                .cancel_running_task(cancel_opts(true, false, false, Some("ctrl_c")))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(
+                    &actor,
+                    cancel_opts(true, false, false, Some("ctrl_c")),
+                )
+                .await,
+                WakeBarrier::Armed,
+            );
             assert!(
                 actor.events.take_pending_interrupt_reminder(),
                 "a no-active-tool abort must arm the interrupt reminder"
@@ -777,9 +815,15 @@ async fn cancel_with_dangling_tool_call_skips_interrupt_reminder() {
                 });
             }
             assert!(!actor.events.has_active_tool());
-            actor
-                .cancel_running_task(cancel_opts(true, false, false, Some("ctrl_c")))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(
+                    &actor,
+                    cancel_opts(true, false, false, Some("ctrl_c")),
+                )
+                .await,
+                WakeBarrier::Armed,
+            );
             assert!(
                 !actor.events.take_pending_interrupt_reminder(),
                 "an abort with a dangling tool call is already covered by the \
@@ -1108,9 +1152,12 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
                 state.pending_inputs.push_back(q1_item);
                 state.pending_inputs.push_back(q2_item);
             }
-            actor
-                .cancel_running_task(cancel_opts(true, false, false, None))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(&actor, cancel_opts(true, false, false, None))
+                    .await,
+                WakeBarrier::Clear,
+            );
             assert!(
                 actor
                     .current_prompt_id
@@ -1196,9 +1243,15 @@ async fn cancel_after_own_completion_sweep_preserves_queued_user_prompt() {
             actor
                 .drop_pending_items_for_consumed_completions(&["bg-1"])
                 .await;
-            actor
-                .cancel_running_task(cancel_opts(true, false, false, Some("ctrl_c")))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(
+                    &actor,
+                    cancel_opts(true, false, false, Some("ctrl_c")),
+                )
+                .await,
+                WakeBarrier::Armed,
+            );
             let state = actor.state.lock().await;
             let surviving: Vec<&str> = state
                 .pending_inputs
@@ -1299,9 +1352,12 @@ async fn cancel_resolves_front_when_running_task_is_none() {
                 state.pending_inputs.push_back(running_item);
                 state.pending_inputs.push_back(q2_item);
             }
-            actor
-                .cancel_running_task(cancel_opts(true, false, false, None))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(&actor, cancel_opts(true, false, false, None))
+                    .await,
+                WakeBarrier::Clear,
+            );
             assert!(
                 matches!(
                     running_rx.try_recv(),
@@ -1475,9 +1531,12 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     handle: task.abort_handle(),
                 });
             }
-            actor
-                .cancel_running_task(cancel_opts(true, false, false, None))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(&actor, cancel_opts(true, false, false, None))
+                    .await,
+                WakeBarrier::Clear,
+            );
             let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
             let mut still_active = true;
             while tokio::time::Instant::now() < deadline {
@@ -1628,9 +1687,12 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
                 state.pending_inputs.push_back(make_item("q1-pid", "q1"));
                 state.pending_inputs.push_back(make_item("q2-pid", "q2"));
             }
-            actor
-                .cancel_running_task(cancel_opts(true, false, false, None))
-                .await;
+            let actor = Arc::new(actor);
+            assert_eq!(
+                cancel_running_task_and_gate_drain(&actor, cancel_opts(true, false, false, None))
+                    .await,
+                WakeBarrier::Clear,
+            );
             let state = actor.state.lock().await;
             let wire = actor.build_queue_wire(&state);
             let wire_ids: Vec<&str> = wire.iter().map(|e| e.id.as_str()).collect();

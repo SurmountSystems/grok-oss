@@ -66,6 +66,58 @@ impl PipeReader {
     }
 }
 
+/// SIGKILL every process in `leader_pid`'s session except pid 1.
+///
+/// After `detach_command` (`setsid`), the shell is the session leader. A
+/// background job that got its own process group (job control) still shares
+/// that session, so `killpg` on the shell's group misses it.
+#[cfg(unix)]
+fn kill_unix_session_members(leader_pid: u32) {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid <= 1 {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some(session) = session_id_from_stat(&stat) else {
+            continue;
+        };
+        if session != leader_pid {
+            continue;
+        }
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
+/// `/proc/<pid>/stat` field 6 (session id). `comm` may contain spaces and
+/// parentheses, so parse from the last `)`.
+#[cfg(unix)]
+fn session_id_from_stat(stat: &str) -> Option<u32> {
+    let rest = stat.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let _ppid = fields.next()?;
+    let _pgrp = fields.next()?;
+    fields.next()?.parse().ok()
+}
+
 /// Truncate buffer to keep only the last `limit` bytes (drops oldest bytes).
 /// Returns true if truncation occurred.
 ///
@@ -100,7 +152,11 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
         #[cfg(unix)]
         let mut cmd = {
             let mut c = Command::new(crate::terminal::default_shell_path());
-            c.arg("-lc").arg(&request.command);
+            // Non-login (`-c`, same as streaming_local_terminal and the
+            // computer local runner). A login shell (`-l`) sources the
+            // operator profile before the command, so a short tool timeout
+            // races profile work instead of the command.
+            c.arg("-c").arg(&request.command);
             c
         };
         #[cfg(not(unix))]
@@ -181,6 +237,7 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
                 // `util/subprocess.rs`). The kills close the pipes, so the
                 // bounded joins below return immediately in the normal case;
                 // the abandoned child goes to tokio's orphan reaper.
+                let child_pid = child.id();
                 if let Err(e) = child.start_kill() {
                     tracing::warn!("Failed to kill timed-out process: {e}");
                 }
@@ -188,6 +245,14 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
                     && let Err(e) = group.kill()
                 {
                     tracing::warn!("Failed to kill timed-out process group: {e}");
+                }
+                // Job-control grandchildren (own process group, same session
+                // after setsid) are not in the shell's killpg set. Sweep the
+                // session so they cannot hold the output pipes open past the
+                // timeout or keep running after the runner returns.
+                #[cfg(unix)]
+                if let Some(pid) = child_pid {
+                    kill_unix_session_members(pid);
                 }
                 None
             }

@@ -1550,6 +1550,12 @@ impl MvpAgent {
         self.otel_gate.rearm_on_switch(&identity, channel);
         let outcome = self.fetch_settings_self_healing_401(auth).await;
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
+        if live.is_none() {
+            // Logout landed before this fetch resolved: drop any snapshot so
+            // settings for the now-dead identity cannot stay cached.
+            self.cfg.borrow_mut().remote_settings = None;
+            return None;
+        }
         self.otel_gate.resolve(&identity, outcome, live.as_deref())
     }
     /// Fetch settings; on a `401` try one self-healing background refresh

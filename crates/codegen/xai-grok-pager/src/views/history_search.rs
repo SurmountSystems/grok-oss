@@ -1,21 +1,24 @@
 //! Prompt history search with background-thread nucleo matching.
 //!
 //! Architecture mirrors the file search `FuzzyFileMatcherDaemon`:
-//! - A background `std::thread` owns the nucleo `Matcher` + `MultiPattern`.
+//! - One process-wide background `std::thread` owns the nucleo `Matcher`.
+//! - Each `HistorySearchState` is a client of that thread (own items + snapshot).
 //! - The UI thread sends queries via a channel (`set_query`) — never blocks.
 //! - The background thread scores items, computes indices, writes results
 //!   to `Arc<Mutex<…>>`.
 //! - The UI thread polls results on each tick via `poll()`.
-//! - The daemon spawns lazily on first activation and is kept for reuse:
-//!   every `PromptWidget` (one per agent view, including subagent child
-//!   views) owns a `HistorySearchState`, so an eager spawn leaks one parked
-//!   thread per subagent for the process lifetime.
+//! - The client handle is created lazily on first activation. Every
+//!   `PromptWidget` (one per agent view, including subagent child views)
+//!   owns a `HistorySearchState`; they share the one matcher thread so a
+//!   session with many composers cannot grow `history-search` workers.
 
+use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
-    mpsc::{SyncSender, sync_channel},
+    atomic::{AtomicU64, Ordering},
+    mpsc::{Receiver, SyncSender, sync_channel},
 };
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 use nucleo::{
     Config, Matcher, Utf32String,
@@ -66,108 +69,176 @@ enum Msg {
 
 struct Daemon {
     shared: Arc<Mutex<Snapshot>>,
-    tx: SyncSender<Msg>,
-    _handle: JoinHandle<()>,
+    tx: SyncSender<Work>,
+    id: u64,
 }
 
 const MAX_RESULTS: usize = 100;
 
-impl Daemon {
-    /// Spawn the matcher thread. `None` when the spawn fails — no
-    /// half-constructed daemon whose only effect on drop is a `Stop` into a
-    /// channel nobody reads.
-    fn spawn() -> Option<Self> {
-        let shared = Arc::new(Mutex::new(Snapshot::default()));
-        let (tx, rx) = sync_channel::<Msg>(256);
+/// Test-only count of OS `history-search` threads ever started in this process.
+/// The leak contract is: many live `HistorySearchState`s share one matcher
+/// thread, they do not each spawn another.
+#[cfg(test)]
+static HISTORY_SEARCH_THREADS_SPAWNED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
-        let out = shared.clone();
-        let worker = move || {
-            let mut pattern = MultiPattern::new(1);
-            let mut matcher = Matcher::new(Config::DEFAULT);
-            let mut items: Vec<(String, Utf32String)> = Vec::new();
-            let mut generation: usize = 0;
-            let mut prev_q = String::new();
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+static SHARED_TX: Mutex<Option<SyncSender<Work>>> = Mutex::new(None);
 
-            while let Ok(msg) = rx.recv() {
-                let msg = drain_to_latest(msg, &rx);
+/// Work for the process-wide matcher thread. `Stop` forgets one client; the
+/// thread stays up for the next composer.
+enum Work {
+    Client {
+        id: u64,
+        msg: Msg,
+        out: Arc<Mutex<Snapshot>>,
+    },
+}
 
-                match msg {
-                    Msg::SetItems(new) => {
-                        items = build_items(new);
-                        prev_q.clear();
-                        generation += 1;
-                        publish_matches(&items, "", &mut pattern, &mut matcher, &out, generation);
-                    }
-                    Msg::SetItemsAndQuery(new, query) => {
-                        items = build_items(new);
-                        prev_q.clear();
-                        generation += 1;
-                        let trimmed = query.trim().to_string();
-                        publish_matches(
-                            &items,
-                            &trimmed,
-                            &mut pattern,
-                            &mut matcher,
-                            &out,
-                            generation,
-                        );
-                        prev_q = trimmed;
-                    }
-                    Msg::SetQuery(query) => {
-                        generation += 1;
-                        let trimmed = query.trim().to_string();
+struct ClientCtx {
+    items: Vec<(String, Utf32String)>,
+    pattern: MultiPattern,
+    prev_q: String,
+    generation: usize,
+}
 
-                        if trimmed.is_empty() {
-                            publish_matches(
-                                &items,
-                                "",
-                                &mut pattern,
-                                &mut matcher,
-                                &out,
-                                generation,
-                            );
-                            prev_q.clear();
-                        } else {
-                            let append = !prev_q.is_empty()
-                                && trimmed.as_bytes().starts_with(prev_q.as_bytes())
-                                && !trimmed.ends_with('\\')
-                                && !trimmed
-                                    .as_bytes()
-                                    .last()
-                                    .is_some_and(|b| b.is_ascii_whitespace());
-                            publish_query_matches(
-                                &items,
-                                &trimmed,
-                                append,
-                                &mut pattern,
-                                &mut matcher,
-                                &out,
-                                generation,
-                            );
-                            prev_q = trimmed;
-                        }
-                    }
-                    Msg::Stop => break,
-                }
+fn shared_sender() -> Option<SyncSender<Work>> {
+    let mut guard = SHARED_TX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = guard.as_ref() {
+        return Some(tx.clone());
+    }
+    let (tx, rx) = sync_channel::<Work>(256);
+    #[cfg(test)]
+    HISTORY_SEARCH_THREADS_SPAWNED.fetch_add(1, Ordering::Relaxed);
+    match thread::Builder::new()
+        .name("history-search".into())
+        .spawn(move || shared_worker(rx))
+    {
+        Ok(_) => {
+            *guard = Some(tx.clone());
+            Some(tx)
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "history search daemon thread spawn failed; history search disabled"
+            );
+            None
+        }
+    }
+}
+
+fn shared_worker(rx: Receiver<Work>) {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut clients: HashMap<u64, ClientCtx> = HashMap::new();
+    let mut peeked: Option<Work> = None;
+
+    loop {
+        let first = if let Some(p) = peeked.take() {
+            p
+        } else {
+            match rx.recv() {
+                Ok(w) => w,
+                Err(_) => break,
             }
         };
-        match thread::Builder::new()
-            .name("history-search".into())
-            .spawn(worker)
-        {
-            Ok(handle) => Some(Self {
-                shared,
-                tx,
-                _handle: handle,
-            }),
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "history search daemon thread spawn failed; history search disabled"
+        let work = drain_same_client(first, &rx, &mut peeked);
+        let Work::Client { id, msg, out } = work;
+        if matches!(msg, Msg::Stop) {
+            clients.remove(&id);
+            continue;
+        }
+        let ctx = clients.entry(id).or_insert_with(|| ClientCtx {
+            items: Vec::new(),
+            pattern: MultiPattern::new(1),
+            prev_q: String::new(),
+            generation: 0,
+        });
+        apply_client_msg(ctx, &mut matcher, msg, &out);
+    }
+}
+
+fn apply_client_msg(
+    ctx: &mut ClientCtx,
+    matcher: &mut Matcher,
+    msg: Msg,
+    out: &Arc<Mutex<Snapshot>>,
+) {
+    match msg {
+        Msg::SetItems(new) => {
+            ctx.items = build_items(new);
+            ctx.prev_q.clear();
+            ctx.generation += 1;
+            publish_matches(
+                &ctx.items,
+                "",
+                &mut ctx.pattern,
+                matcher,
+                out,
+                ctx.generation,
+            );
+        }
+        Msg::SetItemsAndQuery(new, query) => {
+            ctx.items = build_items(new);
+            ctx.prev_q.clear();
+            ctx.generation += 1;
+            let trimmed = query.trim().to_string();
+            publish_matches(
+                &ctx.items,
+                &trimmed,
+                &mut ctx.pattern,
+                matcher,
+                out,
+                ctx.generation,
+            );
+            ctx.prev_q = trimmed;
+        }
+        Msg::SetQuery(query) => {
+            ctx.generation += 1;
+            let trimmed = query.trim().to_string();
+
+            if trimmed.is_empty() {
+                publish_matches(
+                    &ctx.items,
+                    "",
+                    &mut ctx.pattern,
+                    matcher,
+                    out,
+                    ctx.generation,
                 );
-                None
+                ctx.prev_q.clear();
+            } else {
+                let append = !ctx.prev_q.is_empty()
+                    && trimmed.as_bytes().starts_with(ctx.prev_q.as_bytes())
+                    && !trimmed.ends_with('\\')
+                    && !trimmed
+                        .as_bytes()
+                        .last()
+                        .is_some_and(|b| b.is_ascii_whitespace());
+                publish_query_matches(
+                    &ctx.items,
+                    &trimmed,
+                    append,
+                    &mut ctx.pattern,
+                    matcher,
+                    out,
+                    ctx.generation,
+                );
+                ctx.prev_q = trimmed;
             }
         }
+        Msg::Stop => {}
+    }
+}
+
+impl Daemon {
+    /// Attach to the process-wide matcher thread. `None` when the spawn fails
+    /// — that attempt is not cached, so a later activation retries.
+    fn spawn() -> Option<Self> {
+        let tx = shared_sender()?;
+        let shared = Arc::new(Mutex::new(Snapshot::default()));
+        let id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+        Some(Self { shared, tx, id })
     }
 }
 
@@ -255,30 +326,59 @@ fn publish_query_matches(
     };
 }
 
-/// Drain the channel to the most recent message, coalescing queries.
-fn drain_to_latest(first: Msg, rx: &std::sync::mpsc::Receiver<Msg>) -> Msg {
-    let mut current = first;
-    while let Ok(next) = rx.try_recv() {
-        current = match (current, next) {
-            // Coalesce consecutive SetQuery — keep latest.
+/// Drain same-client messages, coalescing queries. A different client's work
+/// is peeked and left for the next loop so two composers cannot drop each
+/// other's updates.
+fn drain_same_client(first: Work, rx: &Receiver<Work>, peeked: &mut Option<Work>) -> Work {
+    let Work::Client { id, mut msg, out } = first;
+    loop {
+        let next = if let Some(Work::Client { id: nid, .. }) = peeked.as_ref() {
+            if *nid == id {
+                peeked.take().expect("peeked same-id work")
+            } else {
+                break;
+            }
+        } else {
+            match rx.try_recv() {
+                Ok(Work::Client {
+                    id: nid,
+                    msg: next_msg,
+                    out: next_out,
+                }) if nid == id => Work::Client {
+                    id: nid,
+                    msg: next_msg,
+                    out: next_out,
+                },
+                Ok(other) => {
+                    *peeked = Some(other);
+                    break;
+                }
+                Err(_) => break,
+            }
+        };
+        let Work::Client { msg: next_msg, .. } = next;
+        msg = match (msg, next_msg) {
             (Msg::SetQuery(_), next @ Msg::SetQuery(_)) => next,
-            // Preserve the item refresh and latest query as one atomic update.
             (Msg::SetItems(items), Msg::SetQuery(query)) => Msg::SetItemsAndQuery(items, query),
             (Msg::SetItemsAndQuery(items, _), Msg::SetQuery(query)) => {
                 Msg::SetItemsAndQuery(items, query)
             }
-            // Stop always wins.
-            (_, stop @ Msg::Stop) => return stop,
-            // SetItems after SetQuery — keep SetItems (reset).
-            (_, next) => next,
+            (_, stop @ Msg::Stop) => {
+                return Work::Client { id, msg: stop, out };
+            }
+            (_, next_msg) => next_msg,
         };
     }
-    current
+    Work::Client { id, msg, out }
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.tx.send(Msg::Stop);
+        let _ = self.tx.send(Work::Client {
+            id: self.id,
+            msg: Msg::Stop,
+            out: self.shared.clone(),
+        });
     }
 }
 
@@ -301,9 +401,9 @@ enum Mode {
 }
 
 pub struct HistorySearchState {
-    /// Matcher daemon, built lazily on first activation (see module docs
-    /// for why eager spawning leaks) and kept until the widget drops
-    /// (`Daemon::drop` stops the thread). Its copy of the history is
+    /// Client handle for the process-wide matcher, built lazily on first
+    /// activation (see module docs) and kept until the widget drops
+    /// (`Daemon::drop` forgets this client). Its copy of the history is
     /// released on `deactivate`, so retained memory is bounded by the time
     /// the overlay is open. Mirrors `FileSearchState::daemon`.
     daemon: Option<Daemon>,
@@ -372,14 +472,21 @@ impl HistorySearchState {
         self.daemon.is_some()
     }
 
-    /// Send to the daemon. A disconnected channel means the matcher thread
-    /// is gone (panicked); drop the daemon so the next activation respawns
-    /// it instead of serving an overlay that never updates.
+    /// Send to the shared matcher. A disconnected channel means the matcher
+    /// thread is gone (panicked); drop the client handle and forget the
+    /// sender so the next activation respawns instead of serving an overlay
+    /// that never updates.
     fn send(&mut self, msg: Msg) {
         let Some(daemon) = &self.daemon else {
             return;
         };
-        if daemon.tx.send(msg).is_err() {
+        let work = Work::Client {
+            id: daemon.id,
+            msg,
+            out: daemon.shared.clone(),
+        };
+        if daemon.tx.send(work).is_err() {
+            *SHARED_TX.lock().unwrap_or_else(|e| e.into_inner()) = None;
             self.daemon = None;
         }
     }
@@ -841,5 +948,51 @@ mod tests {
         let state = HistorySearchState::default();
         assert!(!state.is_active());
         assert_eq!(state.result_count(), 0);
+    }
+
+    /// Named contract: a second (and twentieth) history search must reuse the
+    /// matcher thread. Many live `HistorySearchState`s must not grow
+    /// `history-search` workers without bound (the dragon-npu / iso leak).
+    #[test]
+    fn many_live_states_share_one_history_search_thread() {
+        let spawned_before =
+            HISTORY_SEARCH_THREADS_SPAWNED.load(std::sync::atomic::Ordering::Relaxed);
+        let live_before = count_threads_named("history-search");
+        let mut states: Vec<HistorySearchState> =
+            (0..20).map(|_| HistorySearchState::new()).collect();
+        for (i, state) in states.iter_mut().enumerate() {
+            let unique = format!("unique-item-{i}");
+            let history = entries(&[&unique, "shared-other"]);
+            activate_and_poll(state, &history, "");
+            query_and_poll(state, &unique);
+            assert_eq!(
+                state.result_count(),
+                1,
+                "state {i} must match only its own item"
+            );
+            assert_eq!(state.selected_text(), Some(unique.as_str()));
+        }
+        let spawned = HISTORY_SEARCH_THREADS_SPAWNED.load(std::sync::atomic::Ordering::Relaxed)
+            - spawned_before;
+        let live_grown = count_threads_named("history-search").saturating_sub(live_before);
+        assert!(
+            spawned <= 1,
+            "20 live history searches must reuse one matcher thread, spawned {spawned}"
+        );
+        assert!(
+            live_grown <= 1,
+            "OS history-search threads must stay bounded; this burst grew {live_grown}"
+        );
+    }
+
+    fn count_threads_named(name: &str) -> usize {
+        let dir = std::fs::read_dir("/proc/self/task")
+            .expect("need /proc/self/task to count history-search workers");
+        dir.filter_map(|entry| {
+            let entry = entry.ok()?;
+            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+            (comm.trim() == name).then_some(())
+        })
+        .count()
     }
 }

@@ -74,11 +74,17 @@ Both clean.
 
 ## Land
 
-Product commit (this report is a follow-up tree):
+Product commit:
 
-- HEAD: `f1dbf925025e786c551214dbd5a45a2d50ac30c4`
+- SHA: `f1dbf925025e786c551214dbd5a45a2d50ac30c4`
 - Tree: `c9b6d1489ceb2a4e99d9558e1df2007b9b546e33`
 - Parent: `75356b2060feaa0b78d59dce2368aeb5987e37bf`
-- Ancestors: `e5fd4816`, `origin/main`, previous tip, and `origin/onto-xai/b13fa526f511` all still ancestors.
 
-Push: `git push origin HEAD:onto-xai/b13fa526f511` (no force) after the report pin.
+Report pin (current HEAD):
+
+- SHA: `e592640e17367e467b3ed8464bc7d3520fe9b7a9`
+- Tree: `473ca4120739ac04fd88f53a9e8e460a47a7f26a`
+
+Ancestors still hold: `e5fd4816`, `origin/main`, `75356b20`.
+
+Push (no force): `75356b20..e592640e  HEAD -> onto-xai/b13fa526f511`

@@ -165,7 +165,7 @@ pub fn start_early_prefetch_with_auth(auth: Option<GrokAuth>) -> Option<EarlyPre
 /// `sync_managed = false` skips the managed-config sync, so a remote kill-switch
 /// can apply on cold start before the fail-closed managed-policy gate without an
 /// online sync healing a tampered on-disk policy first.
-fn start_early_prefetch_with_auth_gated(
+pub(crate) fn start_early_prefetch_with_auth_gated(
     auth: Option<GrokAuth>,
     sync_managed: bool,
 ) -> Option<EarlyPrefetchHandle> {
