@@ -218,6 +218,21 @@ pub async fn set_always_expand_thinking(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.always_expand_thinking = Some(value)).await
 }
 
+/// Persist `[ui].hide_header` via `update_config`.
+pub async fn set_hide_header(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.hide_header = value).await
+}
+
+/// Persist `[ui].plan_approval_park` (`soft` | `modal`) via `update_config`.
+pub async fn set_plan_approval_park(value: String) -> Result<()> {
+    update_config(|cfg| cfg.ui.plan_approval_park = Some(value)).await
+}
+
+/// Persist `[subagents].allow_worktree` without merging the rest of the table.
+pub async fn set_allow_worktree(value: bool) -> Result<()> {
+    super::persist::update_subagents_allow_worktree(value).await
+}
+
 /// Persist `[ui].prompt_suggestions` via `update_config`.
 pub async fn set_prompt_suggestions(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.prompt_suggestions = Some(value)).await
@@ -410,6 +425,28 @@ pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
     .await
 }
 
+/// Persist `[ui.notifications].session_recap` (auto return-from-away recap).
+/// Does not gate manual `/recap` (that is `[features] session_recap`).
+pub async fn set_notifications_session_recap(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.notifications.session_recap = Some(value)).await
+}
+
+/// Persist `[ui.notifications].session_recap_threshold_secs` (debounce).
+/// Clamped to a sane range at the shell boundary.
+pub async fn set_notifications_session_recap_threshold_secs(value: i64) -> Result<()> {
+    let clamped = value.clamp(5, 3600) as u64;
+    update_config(|cfg| cfg.ui.notifications.session_recap_threshold_secs = Some(clamped)).await
+}
+
+/// Persist `[features].session_recap` (master kill for `/recap` + auto).
+///
+/// Only this key is written under `[features]` so other feature flags are
+/// not splatted from `Features` defaults. Restart / new session so the shell
+/// re-advertises `sessionRecap` on ACP initialize.
+pub async fn set_features_session_recap(value: bool) -> Result<()> {
+    super::persist::update_features_session_recap(value).await
+}
+
 /// Persist `[ui].screen_mode` (`fullscreen` | `minimal`). Empty clears the key.
 pub async fn set_screen_mode(value: String) -> Result<()> {
     update_config(|cfg| {
@@ -433,9 +470,9 @@ pub async fn set_auto_update(value: bool) -> Result<()> {
 /// Persist `[session].auto_compact_threshold_percent` via `update_config`.
 ///
 /// Clears any absolute-token preference so percent mode is active.
-/// Restart-required: sessions resolve the threshold once at build time.
-/// Callers should pass a value in `0..=100` (the settings modal uses discrete
-/// choices 85/90/95/98).
+/// After a successful disk write, the pager live-applies open sessions via ACP
+/// `x.ai/auto_compact_threshold_changed` (no restart). Callers should pass a
+/// value in `0..=100` (settings modal: 85/90/95/98).
 pub async fn set_auto_compact_threshold_percent(value: u8) -> Result<()> {
     update_config(|cfg| {
         cfg.session.auto_compact_threshold_percent = Some(value);
@@ -447,9 +484,10 @@ pub async fn set_auto_compact_threshold_percent(value: u8) -> Result<()> {
 /// Persist `[session].auto_compact_threshold_tokens` via `update_config`.
 ///
 /// Clears the session percent field so absolute-token mode wins the resolver
-/// (still below env overrides). Restart-required for open sessions.
-/// Grok 4.5 card presets: 200_000 (long-context price cliff) and 475_000
-/// (95% of the 500k window).
+/// (still below env overrides on full resolve). Open sessions pick up the
+/// committed tokens value live after successful persist (same ACP path as
+/// percent mode). Grok 4.5 card presets: 200_000 (long-context price cliff)
+/// and 475_000 (95% of the 500k window).
 pub async fn set_auto_compact_threshold_tokens(value: u64) -> Result<()> {
     update_config(|cfg| {
         cfg.session.auto_compact_threshold_tokens = Some(value);

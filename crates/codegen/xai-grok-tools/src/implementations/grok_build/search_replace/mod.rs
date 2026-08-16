@@ -211,6 +211,13 @@ pub(crate) async fn run_search_replace(
             "Old string and new string are the same".to_owned(),
         ));
     }
+    let _write_lock = crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+        &path,
+        ctx,
+        &resources,
+        "search_replace",
+    )
+    .await?;
     let (empty_old_string_does_not_override, include_user_edit_hint);
     {
         let res = resources.lock().await;
@@ -357,6 +364,17 @@ async fn handle_new_file_creation(
             )),
         });
     }
+    let written =
+        crate::util::rust_edit_verify::after_structured_rust_write(path, &input.new_string);
+    if written != input.new_string
+        && let Err(e) = fs.write_file(path, written.as_bytes()).await
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %e,
+            "ACP filesystem sync of rustfmt output failed; disk already formatted"
+        );
+    }
     if let Some(old_text) = old_text
         && file_exists
         && !empty_old_string_does_not_override
@@ -364,7 +382,7 @@ async fn handle_new_file_creation(
         notification_handle.send_file_written(FileWritten {
             tool_call_id: tool_call_id.to_string(),
             absolute_path: path.to_path_buf(),
-            content: input.new_string.clone(),
+            content: written,
             previous_content: Some(old_text.clone()),
             is_new_file: false,
         });
@@ -372,7 +390,7 @@ async fn handle_new_file_creation(
         notification_handle.send_file_written(FileWritten {
             tool_call_id: tool_call_id.to_string(),
             absolute_path: path.to_path_buf(),
-            content: input.new_string.clone(),
+            content: written,
             previous_content: None,
             is_new_file: true,
         });
@@ -714,10 +732,20 @@ async fn handle_replacement(
             )),
         });
     }
+    let written = crate::util::rust_edit_verify::after_structured_rust_write(path, &write_text);
+    if written != write_text
+        && let Err(e) = fs.write_file(path, written.as_bytes()).await
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %e,
+            "ACP filesystem sync of rustfmt output failed; disk already formatted"
+        );
+    }
     notification_handle.send_file_written(FileWritten {
         tool_call_id: tool_call_id.to_string(),
         absolute_path: path.to_path_buf(),
-        content: write_text.clone(),
+        content: written,
         previous_content: Some(old_text.clone()),
         is_new_file: false,
     });
@@ -1656,6 +1684,139 @@ mod tests {
             other => panic!("Expected FileWritten notification, got {:?}", other),
         }
     }
+
+    /// Legal but unformatted Rust must be rustfmt'd before the tool returns.
+    /// FileWritten.content must be the formatted bytes on disk.
+    #[tokio::test]
+    async fn search_replace_formats_rust_file_after_write() {
+        let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
+        crate::util::rust_edit_verify::clear_test_command_runner();
+        crate::util::rust_edit_verify::clear_pending_verify_paths();
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"edit_verify_fmt\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("rustfmt.toml"),
+            "use_field_init_shorthand = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let unformatted = "fn  foo( ){1+2}\n";
+        let (handle, mut rx) = ToolNotificationHandle::channel();
+        let tool = SearchReplaceTool;
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        resources.insert(FileSystem(Arc::new(LocalFs)));
+        resources.insert(NotificationHandle(handle));
+        let input = make_input("src/lib.rs", "", unformatted);
+        xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx_with_call_id(resources.into_shared(), "call-fmt"),
+            input,
+        )
+        .await
+        .unwrap();
+        let on_disk = std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap();
+        assert_ne!(
+            on_disk, unformatted,
+            "structured edit of a .rs file must rustfmt the file before return"
+        );
+        assert_eq!(
+            on_disk, "fn foo() {\n    1 + 2\n}\n",
+            "rustfmt edition 2024 output"
+        );
+        let notification = rx.try_recv().unwrap();
+        match notification {
+            crate::notification::types::ToolNotification::FileWritten(fw) => {
+                assert_eq!(
+                    fw.content, on_disk,
+                    "FileWritten.content must be the formatted bytes"
+                );
+                assert!(fw.is_new_file);
+            }
+            other => panic!("Expected FileWritten notification, got {:?}", other),
+        }
+    }
+
+    /// Clippy findings after a structured write stay in the verify report.
+    /// The write is not rolled back.
+    #[tokio::test]
+    async fn search_replace_clippy_findings_do_not_rollback_write() {
+        let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
+        crate::util::rust_edit_verify::clear_test_command_runner();
+        crate::util::rust_edit_verify::clear_pending_verify_paths();
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"edit_verify_lint\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("rustfmt.toml"),
+            "use_field_init_shorthand = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/lib.rs"), "pub fn n() {}\n").unwrap();
+        let status = std::process::Command::new("cargo")
+            .args(["generate-lockfile"])
+            .current_dir(tmp.path())
+            .status()
+            .expect("cargo generate-lockfile");
+        assert!(status.success(), "fixture lockfile");
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        let input = make_input(
+            "src/lib.rs",
+            "pub fn n() {}\n",
+            "pub fn n() { let dead = 1; }\n",
+        );
+        xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        let on_disk = std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap();
+        assert!(
+            on_disk.contains("dead"),
+            "write must remain on disk before clippy: {on_disk}"
+        );
+        let report = crate::util::rust_edit_verify::flush_batch_clippy_and_tests();
+        let after = std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap();
+        assert_eq!(after, on_disk, "clippy failure must not undo the write");
+        assert!(
+            report.contains("dead") || report.contains("unused"),
+            "clippy findings must appear in the verify block appended to tool output: {report}"
+        );
+        assert!(
+            report.contains("failed") || report.contains("clippy"),
+            "verify block must name clippy: {report}"
+        );
+    }
+
+    /// Session plan.md is not Rust. rustfmt / clippy must not run.
+    #[tokio::test]
+    async fn search_replace_skips_verify_on_session_plan_file() {
+        let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
+        crate::util::rust_edit_verify::clear_pending_verify_paths();
+        let tmp = TempDir::new().unwrap();
+        let plan_body = "# Plan\n\nDo the thing.\n";
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        let input = make_input("plan.md", "", plan_body);
+        xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        let on_disk = std::fs::read_to_string(tmp.path().join("plan.md")).unwrap();
+        assert_eq!(on_disk, plan_body);
+        let report = crate::util::rust_edit_verify::flush_batch_clippy_and_tests();
+        assert!(
+            report.is_empty(),
+            "plan.md must not queue clippy or tests: {report}"
+        );
+    }
+
     fn build_gitignore(root: &std::path::Path, patterns: &[&str]) -> ignore::gitignore::Gitignore {
         let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
         for pattern in patterns {

@@ -75,6 +75,10 @@ impl ModelsCacheManager {
             tracing::debug!("models cache is stale");
             return None;
         }
+        if cache.models.is_empty() {
+            tracing::debug!("models cache is empty; treating as a miss");
+            return None;
+        }
         tracing::debug!(count = cache.models.len(), "loaded models from disk cache");
         Some(CacheResult {
             models: cache.models,

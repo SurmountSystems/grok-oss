@@ -103,6 +103,14 @@ fn two_manual_renames_stay_ambiguous() {
         msg.contains("man1") && msg.contains("man2"),
         "both manual ids must be listed: {msg}"
     );
+    assert!(
+        msg.contains("grok-oss --resume <session-id>"),
+        "ambiguous title hint must use grok-oss --resume: {msg}"
+    );
+    assert!(
+        !msg.contains("grok --resume"),
+        "must not tell operators to run upstream grok --resume: {msg}"
+    );
 }
 
 #[test]
@@ -269,6 +277,7 @@ fn pinned_local_ctx() -> crate::app::session_startup::MaterializeCtx {
         title_resolution: crate::app::session_startup::TitleResolution::PinnedPreSandbox,
         restore_code: false,
         restore_progress_on_stdout: false,
+        open_last_session_on_start: false,
     }
 }
 

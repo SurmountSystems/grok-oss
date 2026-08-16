@@ -61,6 +61,7 @@ pub(crate) struct RenderOutputWithSelectionBoundaries {
 struct StickyHeaderSelection {
     lines: Vec<ResolvedSelectableLine>,
     block: VisibleBlockGeometry,
+    copy_hits: Vec<(Rect, usize)>,
 }
 
 /// Header rows precede every content entry, keeping `visible_blocks` sorted by `entry_idx` as drag autoscroll expects.
@@ -592,7 +593,13 @@ impl ScrollbackPane {
                 ..Default::default()
             }
         };
+        let mut header_copy_hits: Vec<(Rect, usize)> = header_selection
+            .iter()
+            .flat_map(|h| h.copy_hits.iter().copied())
+            .collect();
         prepend_header_selection(&mut output.output.selection_model, header_selection);
+        header_copy_hits.append(&mut output.output.bubble_copy_hits);
+        output.output.bubble_copy_hits = header_copy_hits;
         // A header-only viewport skips the content renderer, so publish the (zero-height, pane-bottom) content
         // rect here; drag autoscroll reads it to tell "all chrome" apart from "no frame yet".
         if output.output.selection_model.content_area == Rect::default() {
@@ -725,7 +732,7 @@ impl ScrollbackPane {
             "only max_lines-insensitive blocks (user prompts) may be sticky"
         );
 
-        let rendered_lines = if clip_top > 0 {
+        let (rendered_lines, copy_hits) = if clip_top > 0 {
             // For pushed headers being pushed OFF screen:
             // - The TOP rows disappear first (pushed up, out of view)
             // - The BOTTOM rows stay visible longest
@@ -744,7 +751,7 @@ impl ScrollbackPane {
             let scratch_area = Rect::new(0, 0, area.width, render_height);
 
             // Render full header to scratch using existing method
-            let mut lines = Self::render_entry_with_ctx_static(
+            let (mut lines, mut hits) = Self::render_entry_with_ctx_static(
                 entry,
                 &ctx,
                 theme,
@@ -776,7 +783,15 @@ impl ScrollbackPane {
                 line.screen_x = line.screen_x.saturating_add(area.x);
                 true
             });
-            lines
+            hits.retain_mut(|(rect, _)| {
+                if rect.y < clip_top {
+                    return false;
+                }
+                rect.y = area.y + (rect.y - clip_top);
+                rect.x = rect.x.saturating_add(area.x);
+                true
+            });
+            (lines, hits)
         } else {
             // No clipping needed - render directly with max_lines
             Self::render_entry_with_ctx_static(
@@ -808,6 +823,7 @@ impl ScrollbackPane {
                 drag_startable: false,
             },
             lines: rendered_lines,
+            copy_hits,
         })
     }
 
@@ -816,7 +832,7 @@ impl ScrollbackPane {
     ///
     /// `mouse_pos` is forwarded for timestamp hover expansion in sticky headers.
     ///
-    /// Returns a selectable line per painted row, in `area`/`buf` coordinates (a scratch render yields scratch rows for the caller to rebase).
+    /// Returns selectable lines and bubble-copy hits, in `area`/`buf` coordinates (a scratch render yields scratch rows for the caller to rebase).
     fn render_entry_with_ctx_static(
         entry: &ScrollbackEntry,
         ctx: &BlockContext,
@@ -825,7 +841,7 @@ impl ScrollbackPane {
         buf: &mut Buffer,
         mouse_pos: Option<(u16, u16)>,
         selection_entry_idx: usize,
-    ) -> Vec<ResolvedSelectableLine> {
+    ) -> (Vec<ResolvedSelectableLine>, Vec<(Rect, usize)>) {
         use crate::scrollback::types::BlockBackground;
 
         let layout = HorizontalLayout::new(area, &ctx.appearance.scrollback.layout);
@@ -895,12 +911,16 @@ impl ScrollbackPane {
 
         // `block_line_idx` counts every line, painted or not.
         let mut selection_lines = Vec::new();
+        let mut copy_hits = Vec::new();
         for (block_line_idx, line) in output.lines.iter().enumerate() {
             if y >= content_area.y + content_area.height {
                 break;
             }
             // Render line in the content area (not overlapping with accent)
             buf.set_line_safe(content_area.x, y, &line.content, content_area.width);
+            if let Some(rect) = line.bubble_copy_button_rect(content_area.x, y) {
+                copy_hits.push((rect, selection_entry_idx));
+            }
             if let (Some(range_id), Some(cols)) = (
                 line.selection_range,
                 selectable_cols(&line.content, &line.selectable),
@@ -953,6 +973,19 @@ impl ScrollbackPane {
             }
         }
 
+        // Always-on bubble copy: paint after the timestamp overlay so
+        // the glyph is not wiped by the gutter and is not wrap content.
+        let icon_style = theme.dim();
+        let paint_max = content_area.y + content_area.height;
+        for (paint_row, line) in
+            (content_area.y + if use_vpad { 1 } else { 0 }..).zip(output.lines.iter())
+        {
+            if paint_row >= paint_max {
+                break;
+            }
+            line.paint_bubble_copy_button(buf, content_area.x, paint_row, icon_style);
+        }
+
         // vpad bottom is just empty space - no need to track y further
 
         // Draw accent line if entry has one, otherwise clear the accent column
@@ -991,7 +1024,7 @@ impl ScrollbackPane {
             }
         }
 
-        selection_lines
+        (selection_lines, copy_hits)
     }
 
     // Shared Rendering Helpers
@@ -1091,6 +1124,7 @@ impl ScrollbackPane {
                 link_overlay: result.link_overlay,
                 inline_media: result.inline_media,
                 diagram_affordances: result.diagram_affordances,
+                bubble_copy_hits: result.bubble_copy_hits,
                 ..Default::default()
             },
             selection_boundaries,

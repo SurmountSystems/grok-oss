@@ -561,13 +561,10 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
     );
 }
 
-/// The default registry contains Appearance settings
-/// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
-/// `multiline_mode`, the Agent entries `permission_mode` and
-/// `plan_mode`, the Privacy entry `coding_data_sharing`, the
-/// Models entry `default_model`, and the Advanced entries
-/// `show_tips` and `auto_update`. `default_reasoning_effort` and
-/// `auto_compact_threshold_percent` are not exposed in the modal.
+/// The default registry contains Appearance settings, Editor, Agent
+/// (including leftover Token Economy / auto-run / cancel-subagents rows),
+/// Privacy, Models, Session (recap + auto-compact + continue-interrupted),
+/// and Advanced. Voice rows are hidden when the voice gate is off.
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
     let prev_voice = crate::app::voice_mode_enabled();
@@ -593,8 +590,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Agent,
             &SettingCategory::Privacy,
             &SettingCategory::Models,
-            // The Session category has no registered settings, so its
-            // header is not emitted.
+            &SettingCategory::Session,
             // Advanced category (first entries:
             // `show_tips`, `auto_update`).
             &SettingCategory::Advanced,
@@ -618,6 +614,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // Booleans.
             "compact_mode",
             "screen_mode",
+            "hide_header",
             "show_timestamps",
             "show_timeline",
             // PAGER-owned page_flip_on_send (Appearance).
@@ -645,9 +642,12 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // SHELL-owned collapsed_edit_blocks (Appearance; live cache,
             // default OFF rollout flag).
             "collapsed_edit_blocks",
+            "always_expand_thinking",
+            "scrub_ascii_punct",
+            "bubble_copy_buttons",
             // SHELL-owned display_refresh_auto_cadence (Appearance).
             "display_refresh_auto_cadence",
-            // Mouse — scroll + drag selection. The scroll
+            // Mouse: scroll + drag selection. The scroll
             // classification/lines/direction knobs follow scroll_speed.
             "scroll_speed",
             "scroll_mode",
@@ -671,11 +671,22 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // SHELL-owned remember_tool_approvals (Agent category,
             // registered right after permission_mode).
             "remember_tool_approvals",
-            // SHELL-owned default_selected_permission (Agent category,
-            // colocated with permission_mode / plan_mode).
+            "plan_approval_park",
+            "allow_worktree",
+            "cancel_subagents_on_turn_cancel",
+            "auto_run_implement",
+            "economic_mode",
+            "token_economy.cap_implement_effort_when_economic",
+            "token_economy.max_implement_effort",
+            "token_economy.min_implement_effort",
+            "token_economy.desired_implement_effort",
+            "token_economy.lock_implement_effort",
+            "token_economy.show_period_pacing",
+            "token_economy.local_spend_ledger",
+            "token_economy.reconcile_management_usage",
+            // SHELL-owned default_selected_permission (Agent category).
             "default_selected_permission",
-            // SHELL-owned ask_user_question timeout (Agent category,
-            // registered directly above plan_mode).
+            // SHELL-owned ask_user_question timeout (Agent category).
             "toolset.ask_user_question.timeout_enabled",
             // PAGER-owned plan_mode (Agent category).
             "plan_mode",
@@ -687,8 +698,12 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
-            // `auto_compact_threshold_percent` (Session category) is
-            // not exposed in the modal.
+            // Session category.
+            "resume_canceled_turn_on_restart",
+            "notifications.session_recap",
+            "notifications.session_recap_threshold_secs",
+            "features.session_recap",
+            "auto_compact_threshold_percent",
             // Advanced category.
             "show_tips",
             // Per-tip contextual-hints GROUP row, repositioned right after
@@ -6415,18 +6430,18 @@ fn click_settings_breadcrumb_collapses_picker_to_browse() {
     );
     // For preview-supporting enums (theme), the breadcrumb-
     // click revert dispatches `Action::PreviewTheme(original)`.
-    // The original canonical for the default theme is
-    // `"groknight"`. Tightened from the previous `Action(_) |
+    // The original canonical for the unset product default is
+    // `"doge"`. Tightened from the previous `Action(_) |
     // Changed` to lock in the revert contract.
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(orig)) => {
             assert_eq!(
-                orig, "groknight",
+                orig, "doge",
                 "breadcrumb-click revert must carry the original canonical",
             );
         }
         other => panic!(
-            "expected Action(PreviewTheme(\"groknight\")) — the keyboard \
+            "expected Action(PreviewTheme(\"doge\")) — the keyboard \
              Esc-equivalent revert — got {other:?}",
         ),
     }
@@ -6470,7 +6485,7 @@ fn click_settings_breadcrumb_ignores_close_on_picker_exit() {
     );
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(orig)) => {
-            assert_eq!(orig, "groknight");
+            assert_eq!(orig, "doge");
         }
         other => panic!("expected preview revert Action, got {other:?}"),
     }
@@ -6575,11 +6590,11 @@ fn d_key_in_picking_enum_dispatches_open_reset_confirm() {
                 key, "theme",
                 "OpenResetConfirm key must be the active picker setting",
             );
-            // Default theme is `groknight`; entering the picker
-            // captures `original_value = current value = groknight`,
+            // Unset product default is `doge`; entering the picker
+            // captures `original_value = current value = doge`,
             // so the revert dispatches with that canonical.
             assert_eq!(
-                orig, "groknight",
+                orig, "doge",
                 "PreviewTheme revert must carry the original canonical",
             );
         }

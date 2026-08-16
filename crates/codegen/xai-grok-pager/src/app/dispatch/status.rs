@@ -495,9 +495,87 @@ pub(super) fn dispatch_show_spend(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let body = xai_grok_shell::token_economy::format_double_entry_report(
-        &xai_grok_shell::token_economy::DoubleEntryReport::default(),
+    if !app.agents.contains_key(&id) {
+        return vec![];
+    }
+
+    let (balance, live) = {
+        let agent = app.agents.get(&id).expect("checked contains_key");
+        let balance = agent
+            .credit_balance
+            .clone()
+            .or_else(|| app.credit_balance.clone());
+        (balance, agent.sampling_identity)
+    };
+
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    let mut remote = xai_grok_shell::token_economy::RemoteBookSummary::default();
+    let has_mgmt = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
+    if !has_mgmt || !cfg.reconcile_management_usage {
+        remote.remote_unavailable = true;
+        if !has_mgmt {
+            remote.remote_setup_note = Some(
+                "No management key on file. Local book and included SuperGrok period context still work."
+                    .into(),
+            );
+        }
+    } else if let Some(store) = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg) {
+        if let Ok(Some(sample)) =
+            xai_grok_shell::token_economy::latest_remote_sample(&store, "management_usage_series")
+        {
+            remote.api_class_usd = sample.payload.get("api_class_usd").and_then(|v| v.as_f64());
+            remote.oauth_class_usd = sample
+                .payload
+                .get("oauth_class_usd")
+                .and_then(|v| v.as_f64());
+            if let (Some(s), Some(e)) = (sample.window_start, sample.window_end) {
+                remote.window_label = Some(format!("{s} → {e}"));
+            }
+        }
+        if let Some(cents) = xai_grok_shell::auth::cached_console_team_prepaid_cents_default() {
+            remote.prepaid_remaining_cents = Some(cents);
+            let payload = serde_json::json!({ "prepaid_remaining_cents": cents });
+            let _ = xai_grok_shell::token_economy::try_insert_remote_meter_sample(
+                &store,
+                "management_prepaid",
+                None,
+                None,
+                &payload,
+            );
+        }
+        if let Some(pp) = xai_grok_shell::auth::cached_console_team_postpaid_default() {
+            remote.postpaid_api_class_cents = Some(pp.api_class_cents);
+            remote.postpaid_oauth_class_cents = Some(pp.oauth_class_cents);
+            let payload = serde_json::json!({
+                "api_class_cents": pp.api_class_cents,
+                "oauth_class_cents": pp.oauth_class_cents,
+            });
+            let _ = xai_grok_shell::token_economy::try_insert_remote_meter_sample(
+                &store,
+                "management_postpaid",
+                None,
+                None,
+                &payload,
+            );
+        }
+    }
+
+    let mut supergrok = xai_grok_shell::token_economy::SuperGrokPeriodContext::default();
+    if let Some(bal) = &balance {
+        supergrok.usage_pct = Some(bal.usage_pct);
+        supergrok.period_label = Some(bal.usage_label().to_lowercase());
+        supergrok.pacing_sentence = bal.pacing_sentence(live, chrono::Utc::now());
+    }
+
+    // /spend: refresh local book from session usage.jsonl, then persist reconcile.
+    let report = xai_grok_shell::token_economy::run_spend_double_entry(
+        &cfg,
+        remote,
+        supergrok,
+        &xai_grok_config::grok_home(),
     );
+
+    let body = xai_grok_shell::token_economy::format_double_entry_report(&report);
     if let Some(agent) = app.agents.get_mut(&id) {
         agent.scrollback.push_block(RenderBlock::system(body));
     }

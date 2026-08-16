@@ -259,6 +259,7 @@ pub(super) fn plan_mode_edit_gate(
 pub(super) enum PlanApprovalOutcome {
     Approved,
     Cancelled,
+    Questions,
     Abandoned,
 }
 impl PlanApprovalOutcome {
@@ -268,6 +269,7 @@ impl PlanApprovalOutcome {
         match resp.outcome.as_str() {
             "approved" => Self::Approved,
             "abandoned" => Self::Abandoned,
+            "questions" => Self::Questions,
             _ => Self::Cancelled,
         }
     }
@@ -304,6 +306,22 @@ fn revise_plan_message(feedback: &str) -> String {
         format!("The user wants to revise the plan. The user said:\n{feedback}")
     }
 }
+/// Shared clarifying-question message for the Questions outcome (not a rewrite).
+/// Plan mode stays Active; the agent must answer read-only and call
+/// `exit_plan_mode` again to re-present approval.
+fn questions_plan_message(feedback: &str) -> String {
+    let feedback = feedback.trim();
+    let preamble = "The user has a clarifying question about the plan \
+         (not requesting a rewrite). Answer read-only from the plan and \
+         existing research. Do not rewrite plan.md unless the user explicitly \
+         asks to change it. End by calling exit_plan_mode again to re-present \
+         the plan for approval.";
+    if feedback.is_empty() {
+        format!("{preamble} Ask the user what they want to know about the plan.")
+    } else {
+        format!("{preamble}\n\nThe user asked:\n{feedback}")
+    }
+}
 /// What the resume re-park does with the user's decision. Extracted
 /// from `resume_plan_approval` so the branch logic is unit-testable without
 /// driving a real turn.
@@ -313,6 +331,8 @@ pub(super) enum ResumeAction {
     LeaveAndImplement,
     /// Request changes: stay in plan mode and start a revise turn (Plan mode).
     StayAndRevise(String),
+    /// Questions: stay in plan mode and start an answer-only turn (Plan mode).
+    StayAndAnswer(String),
     /// Abandoned: leave plan mode and wait for the user (no turn).
     LeaveOnly,
 }
@@ -321,6 +341,9 @@ fn resume_action_for(outcome: PlanApprovalOutcome, feedback: Option<String>) -> 
         PlanApprovalOutcome::Approved => ResumeAction::LeaveAndImplement,
         PlanApprovalOutcome::Cancelled => {
             ResumeAction::StayAndRevise(revise_plan_message(feedback.as_deref().unwrap_or("")))
+        }
+        PlanApprovalOutcome::Questions => {
+            ResumeAction::StayAndAnswer(questions_plan_message(feedback.as_deref().unwrap_or("")))
         }
         PlanApprovalOutcome::Abandoned => ResumeAction::LeaveOnly,
     }
@@ -634,7 +657,37 @@ impl SessionActor {
             .in_current_span(),
         );
         let _drainer_guard = crate::util::AbortOnDrop(drainer);
-        while let Some((idx, result, duration_ms)) = dispatch_rx.recv().await {
+        let mut completed = Vec::new();
+        while let Some(item) = dispatch_rx.recv().await {
+            completed.push(item);
+        }
+        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
+        let verify_report = tokio::task::spawn_blocking(move || {
+            let paths = xai_grok_tools::util::rust_edit_verify::take_pending_verify_paths();
+            xai_grok_tools::util::rust_edit_verify::flush_batch_clippy_and_tests_for(
+                paths,
+                Some(plan_path.as_path()),
+            )
+        })
+        .await
+        .unwrap_or_default();
+        let last_ok_idx =
+            completed.iter().rev().find_map(
+                |(idx, result, _)| {
+                    if result.is_ok() { Some(*idx) } else { None }
+                },
+            );
+        for (idx, result, duration_ms) in completed {
+            let result = match result {
+                Ok(mut tool_result) if last_ok_idx == Some(idx) && !verify_report.is_empty() => {
+                    if !tool_result.prompt_text.is_empty() {
+                        tool_result.prompt_text.push_str("\n\n");
+                    }
+                    tool_result.prompt_text.push_str(&verify_report);
+                    Ok(tool_result)
+                }
+                other => other,
+            };
             let prepared = approved_slots[idx]
                 .take()
                 .expect("dispatch index should match an approved slot exactly once");
@@ -1414,6 +1467,26 @@ impl SessionActor {
                         self.chat_state_handle.push_tool_result(tool_chat);
                         return Ok(Err(ToolLoop::Continue));
                     }
+                    PlanApprovalOutcome::Questions => {
+                        tracing::info!(
+                            "[exit_plan_mode] user questions about plan — staying in plan mode"
+                        );
+                        let message =
+                            questions_plan_message(parsed.feedback.as_deref().unwrap_or(""));
+                        let tool_update = acp::ToolCallUpdate::new(
+                            tool_call_id.clone(),
+                            acp::ToolCallUpdateFields::new()
+                                .status(Some(acp::ToolCallStatus::Completed))
+                                .content(Some(vec![acp::ToolCallContent::from(
+                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
+                                )])),
+                        );
+                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                            .await;
+                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                        self.chat_state_handle.push_tool_result(tool_chat);
+                        return Ok(Err(ToolLoop::Continue));
+                    }
                     PlanApprovalOutcome::Approved => {
                         tracing::info!("[exit_plan_mode] user approved — executing tool");
                     }
@@ -1632,6 +1705,11 @@ impl SessionActor {
             }
             ResumeAction::StayAndRevise(text) => {
                 tracing::info!("[exit_plan_mode] resume: user requested changes");
+                self.start_resume_turn(text, PromptMode::Plan, completion_tx)
+                    .await;
+            }
+            ResumeAction::StayAndAnswer(text) => {
+                tracing::info!("[exit_plan_mode] resume: user has plan questions");
                 self.start_resume_turn(text, PromptMode::Plan, completion_tx)
                     .await;
             }
@@ -3216,8 +3294,8 @@ mod plan_mode_edit_gate_tests {
 #[cfg(test)]
 mod plan_approval_helper_tests {
     use super::{
-        PlanApprovalOutcome, ResumeAction, ext_method_no_client, resume_action_for,
-        revise_plan_message,
+        PlanApprovalOutcome, ResumeAction, ext_method_no_client, questions_plan_message,
+        resume_action_for, revise_plan_message,
     };
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
     fn resp(outcome: &str) -> ExitPlanModeExtResponse {
@@ -3239,6 +3317,10 @@ mod plan_approval_helper_tests {
         assert_eq!(
             PlanApprovalOutcome::from_response(&resp("cancelled")),
             PlanApprovalOutcome::Cancelled
+        );
+        assert_eq!(
+            PlanApprovalOutcome::from_response(&resp("questions")),
+            PlanApprovalOutcome::Questions
         );
         assert_eq!(
             PlanApprovalOutcome::from_response(&resp("approve")),
@@ -3277,6 +3359,32 @@ mod plan_approval_helper_tests {
             ResumeAction::StayAndRevise(text) => assert!(text.contains("tweak it")),
             other => panic!("expected StayAndRevise, got {other:?}"),
         }
+        match resume_action_for(PlanApprovalOutcome::Questions, Some("why Redis?".into())) {
+            ResumeAction::StayAndAnswer(text) => {
+                assert!(text.contains("why Redis?"));
+                assert!(text.contains("not requesting a rewrite"));
+            }
+            other => panic!("expected StayAndAnswer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn questions_plan_message_is_not_revise_and_forbids_rewrite() {
+        let empty = questions_plan_message("");
+        assert!(
+            empty.contains("clarifying question"),
+            "empty questions message must name clarifying intent: {empty}"
+        );
+        assert!(
+            !empty.contains("revise the plan"),
+            "questions must not use the revise framing: {empty}"
+        );
+        assert!(
+            empty.contains("Do not rewrite plan.md"),
+            "questions must forbid plan rewrite: {empty}"
+        );
+        let with = questions_plan_message("why Redis?");
+        assert!(with.contains("why Redis?"));
     }
 }
 #[cfg(test)]

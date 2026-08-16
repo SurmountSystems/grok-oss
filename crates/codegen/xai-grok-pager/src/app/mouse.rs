@@ -37,6 +37,16 @@ impl AgentView {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
+                // Tasks kill / open chrome first (before Clear finished) so a
+                // mis-placed Clear hit can never steal subagent open/close.
+                if let Some(out) = self.try_tasks_chrome_click(mouse.column, mouse.row) {
+                    return out;
+                }
+                // Clear finished: hit when open todo chrome painted it
+                // (finished rows + board visible). Slash / focused X remain.
+                if self.hit_todo_clear_done.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::ClearCompletedTodos);
+                }
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
                     self.todo.overlay.escape();
                     self.todo.on_state_change();
@@ -90,6 +100,9 @@ impl AgentView {
                     self.last_context_click_at = Some(now);
                     return InputOutcome::Action(Action::ShowContextInfo);
                 }
+                if self.hit_credits.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::ShowLimits);
+                }
                 if self.hit_plan_button.contains(mouse.column, mouse.row) {
                     if self.plan_approval_view.is_some() {
                         self.reopen_plan_approval();
@@ -129,6 +142,12 @@ impl AgentView {
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
                     return InputOutcome::Action(Action::DemoteToBackground);
+                }
+                if self.hit_pause_button.contains(mouse.column, mouse.row)
+                    && !self.pos_occluded(mouse.column, mouse.row)
+                {
+                    // Pause is never CancelTurn — always process-level global pause.
+                    return InputOutcome::Action(Action::ToggleGlobalPause);
                 }
                 if self.hit_cancel_button.contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
@@ -424,6 +443,16 @@ impl AgentView {
                     }
                     return InputOutcome::Unchanged;
                 }
+                if let Some((_, entry_idx)) = self
+                    .hit_bubble_copy
+                    .iter()
+                    .find(|(rect, _)| rect.contains((mouse.column, mouse.row).into()))
+                {
+                    let entry_idx = *entry_idx;
+                    self.set_active_pane(AgentPane::Scrollback, false);
+                    self.scrollback.set_selected(Some(entry_idx));
+                    return InputOutcome::Action(Action::CopyBlockContent);
+                }
                 if self.hit_sb_copy.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::CopyBlockContent);
                 }
@@ -548,104 +577,9 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     Some(AgentPane::Tasks) => {
-                        use crate::views::tasks_pane::TaskEntryId;
                         self.set_active_pane(AgentPane::Tasks, false);
-                        for (entry_id, rect) in &self.tasks.kill_button_rects {
-                            if rect.contains((mouse.column, mouse.row).into()) {
-                                match entry_id {
-                                    TaskEntryId::BgTask(tid) => {
-                                        return InputOutcome::Action(Action::KillBgTask(
-                                            tid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Agent(sid) => {
-                                        return InputOutcome::Action(Action::KillSubagent(
-                                            sid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Scheduled(tid) => {
-                                        return InputOutcome::Action(Action::CancelScheduledTask(
-                                            tid.clone(),
-                                        ));
-                                    }
-                                    TaskEntryId::Workflow(name) => {
-                                        return InputOutcome::Action(
-                                            Action::SendSlashCommandPreservingDraft(format!(
-                                                "/workflow stop {name}"
-                                            )),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        for (entry_id, rect) in &self.tasks.view_button_rects {
-                            if rect.contains((mouse.column, mouse.row).into()) {
-                                match entry_id {
-                                    TaskEntryId::BgTask(tid) => {
-                                        let already_open = self
-                                            .block_viewer
-                                            .as_ref()
-                                            .and_then(|v| v.bg_task_id.as_deref())
-                                            == Some(tid);
-                                        if already_open {
-                                            self.block_viewer = None;
-                                            return InputOutcome::Changed;
-                                        }
-                                        if let Some(task) = self.session.bg_tasks.get(tid) {
-                                            let entry_id =
-                                                task.scrollback_entry_id.unwrap_or_else(|| {
-                                                    crate::scrollback::entry::EntryId::new(0)
-                                                });
-                                            let is_running = task.status
-                                                == crate::app::agent::BgTaskStatus::Running;
-                                            self.block_viewer = Some(
-                                                crate::views::block_viewer::BlockViewerPane::for_bg_task(
-                                                    entry_id,
-                                                    tid,
-                                                    &task.stdout,
-                                                    is_running,
-                                                ),
-                                            );
-                                            self.set_active_pane(AgentPane::Scrollback, true);
-                                            return InputOutcome::Changed;
-                                        }
-                                    }
-                                    TaskEntryId::Agent(sid) => {
-                                        if let Some(child_sid) = self
-                                            .subagent_sessions
-                                            .iter()
-                                            .find(|(_, info)| {
-                                                info.subagent_id.as_ref() == sid.as_str()
-                                            })
-                                            .map(|(k, _)| k.clone())
-                                            && self.subagent_views.contains_key(&child_sid)
-                                        {
-                                            self.open_subagent_fullscreen(child_sid);
-                                            return InputOutcome::Changed;
-                                        }
-                                    }
-                                    TaskEntryId::Scheduled(tid) => {
-                                        if let Some(sid) = self
-                                            .session
-                                            .scheduled_tasks
-                                            .get(tid)
-                                            .and_then(|info| info.last_subagent_id.clone())
-                                            && let Some(child_sid) = self
-                                                .subagent_sessions
-                                                .iter()
-                                                .find(|(_, info)| {
-                                                    info.subagent_id.as_ref() == sid.as_str()
-                                                })
-                                                .map(|(k, _)| k.clone())
-                                            && self.subagent_views.contains_key(&child_sid)
-                                        {
-                                            self.open_subagent_fullscreen(child_sid);
-                                            return InputOutcome::Changed;
-                                        }
-                                    }
-                                    TaskEntryId::Workflow(_) => {}
-                                }
-                            }
+                        if let Some(out) = self.try_tasks_chrome_click(mouse.column, mouse.row) {
+                            return out;
                         }
                         self.tasks.handle_mouse(
                             mouse.kind,
@@ -1059,6 +993,9 @@ impl AgentView {
                 changed |= self.hit_context.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_credits.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_todo_close.update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .hit_todo_clear_done
+                    .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_queue_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_queue_badge.update_hover(mouse.column, mouse.row);
                 if matches!(
@@ -1086,6 +1023,7 @@ impl AgentView {
                     .hit_response_top_indicator
                     .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cancel_button.update_hover(mouse.column, mouse.row);
+                changed |= self.hit_pause_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_watching_cue.update_hover(mouse.column, mouse.row);
                 changed |= self
@@ -1151,6 +1089,14 @@ impl AgentView {
                 }
                 changed |= self.hit_sb_copy.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_sb_view.update_hover(mouse.column, mouse.row);
+                let bubble_hover = self
+                    .hit_bubble_copy
+                    .iter()
+                    .any(|(rect, _)| rect.contains((mouse.column, mouse.row).into()));
+                if bubble_hover != self.hovered_bubble_copy {
+                    self.hovered_bubble_copy = bubble_hover;
+                    changed = true;
+                }
                 if let Some(hd_area) = self.history_dropdown_area {
                     let hs_count = self.prompt.history_search.result_count();
                     let has_sb = hs_count > hd_area.height as usize;
@@ -1234,6 +1180,92 @@ impl AgentView {
             }
             _ => InputOutcome::Unchanged,
         }
+    }
+    /// Hit-test tasks-pane kill / open chrome (model+timer+[↗]) from last paint.
+    ///
+    /// Used both as early global z-order (before Clear finished) and from the
+    /// Tasks pane click path. Opens subagents via [`Self::open_subagent_fullscreen`].
+    fn try_tasks_chrome_click(&mut self, col: u16, row: u16) -> Option<InputOutcome> {
+        use crate::views::tasks_pane::TaskEntryId;
+        for (entry_id, rect) in &self.tasks.kill_button_rects {
+            if !rect.contains((col, row).into()) {
+                continue;
+            }
+            return Some(match entry_id {
+                TaskEntryId::BgTask(tid) => InputOutcome::Action(Action::KillBgTask(tid.clone())),
+                TaskEntryId::Agent(sid) => InputOutcome::Action(Action::KillSubagent(sid.clone())),
+                TaskEntryId::Scheduled(tid) => {
+                    InputOutcome::Action(Action::CancelScheduledTask(tid.clone()))
+                }
+                TaskEntryId::Workflow(name) => InputOutcome::Action(
+                    Action::SendSlashCommandPreservingDraft(format!("/workflow stop {name}")),
+                ),
+            });
+        }
+        for (entry_id, rect) in self.tasks.view_button_rects.clone() {
+            if !rect.contains((col, row).into()) {
+                continue;
+            }
+            match entry_id {
+                TaskEntryId::BgTask(tid) => {
+                    let already_open = self
+                        .block_viewer
+                        .as_ref()
+                        .and_then(|v| v.bg_task_id.as_deref())
+                        == Some(tid.as_str());
+                    if already_open {
+                        self.block_viewer = None;
+                        return Some(InputOutcome::Changed);
+                    }
+                    if let Some(task) = self.session.bg_tasks.get(&tid) {
+                        let entry_id = task
+                            .scrollback_entry_id
+                            .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
+                        let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
+                        self.block_viewer =
+                            Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
+                                entry_id,
+                                &tid,
+                                &task.stdout,
+                                is_running,
+                            ));
+                        self.set_active_pane(AgentPane::Scrollback, true);
+                        return Some(InputOutcome::Changed);
+                    }
+                }
+                TaskEntryId::Agent(sid) => {
+                    if let Some(child_sid) = self
+                        .subagent_sessions
+                        .iter()
+                        .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                        .map(|(k, _)| k.clone())
+                        && self.subagent_views.contains_key(&child_sid)
+                    {
+                        self.open_subagent_fullscreen(child_sid);
+                        return Some(InputOutcome::Changed);
+                    }
+                }
+                TaskEntryId::Scheduled(tid) => {
+                    if let Some(sid) = self
+                        .session
+                        .scheduled_tasks
+                        .get(&tid)
+                        .and_then(|info| info.last_subagent_id.clone())
+                        && let Some(child_sid) = self
+                            .subagent_sessions
+                            .iter()
+                            .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                            .map(|(k, _)| k.clone())
+                        && self.subagent_views.contains_key(&child_sid)
+                    {
+                        self.open_subagent_fullscreen(child_sid);
+                        return Some(InputOutcome::Changed);
+                    }
+                }
+                TaskEntryId::Workflow(_) => {}
+            }
+        }
+        None
     }
     /// Apply a scrollbar click/drag at the given screen row.
     ///
@@ -1704,5 +1736,230 @@ mod tests {
             "double-click must expand the chip"
         );
         assert_eq!(agent.prompt.textarea.text(), text);
+    }
+
+    /// Draw one 80x30 frame so scrollback pane areas and the bubble ⧉ exist.
+    fn draw_agent_frame(agent: &mut AgentView) -> Buffer {
+        use crate::actions::ActionRegistry;
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+        let registry = ActionRegistry::defaults();
+        let bundle = crate::app::bundle::BundleState::default();
+        agent.last_terminal_size = (80, 30);
+        agent.draw(
+            area,
+            &mut buf,
+            &registry,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &bundle,
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    fn find_copy_icon(buf: &Buffer, area: Rect) -> Option<(u16, u16)> {
+        let icon = crate::glyphs::copy_icon();
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.x.saturating_add(area.width) {
+                if buf.cell((x, y)).is_some_and(|c| c.symbol() == icon) {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    /// Clicking the always-on bubble copy control on a human message copies
+    /// that prompt's text through the existing block-copy action.
+    #[test]
+    fn clicking_human_bubble_copy_copies_the_prompt() {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::scrollback::block::RenderBlock;
+
+        crate::appearance::cache::set_bubble_copy_buttons(true);
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.scrollback.display.bubble_copy_buttons = true;
+        agent.scrollback.set_appearance(appearance);
+
+        const PROMPT: &str = "COPY-HUMAN-MSG-CONTRACT";
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(PROMPT));
+
+        let buf = draw_agent_frame(&mut agent);
+        let scrollback = agent.pane_areas.scrollback;
+        assert!(
+            scrollback.area() > 0,
+            "draw must publish a scrollback pane so the bubble copy control can paint"
+        );
+        let (col, row) = find_copy_icon(&buf, scrollback).unwrap_or_else(|| {
+            panic!(
+                "bubble copy icon must paint on the human message when bubble_copy_buttons is on"
+            )
+        });
+
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CopyBlockContent)),
+            "clicking the human-message copy control must copy via CopyBlockContent, got {outcome:?}"
+        );
+
+        let idx = agent
+            .scrollback
+            .selected()
+            .expect("the click must select the human message so block copy has a target");
+        let entry = agent
+            .scrollback
+            .entry(idx)
+            .expect("selected human message must exist");
+        let copied = entry
+            .block
+            .copy_text(entry.raw)
+            .expect("user prompts support copy");
+        assert_eq!(copied, PROMPT);
+        assert!(
+            !copied.contains(crate::glyphs::copy_icon()),
+            "copied payload is the prompt text, not the painted ⧉"
+        );
+    }
+
+    /// A user prompt whose first line already fills the content width must
+    /// still paint `copy_icon()` and still copy on click of that cell.
+    #[test]
+    fn clicking_wide_human_bubble_copy_still_paints_and_copies() {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::scrollback::block::RenderBlock;
+
+        crate::appearance::cache::set_bubble_copy_buttons(true);
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.scrollback.display.bubble_copy_buttons = true;
+        agent.scrollback.set_appearance(appearance);
+
+        // One unbreakable word so wrap fills the first line. Hyphens would
+        // wrap early and leave room for the icon (a false green).
+        let prompt = format!("WIDEFIRSTLINECOPYCONTRACT{}", "W".repeat(200));
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(prompt.clone()));
+
+        let buf = draw_agent_frame(&mut agent);
+        let scrollback = agent.pane_areas.scrollback;
+        assert!(
+            scrollback.area() > 0,
+            "draw must publish a scrollback pane so the bubble copy control can paint"
+        );
+        let (col, row) = find_copy_icon(&buf, scrollback).unwrap_or_else(|| {
+            panic!(
+                "a full-width first line must still paint the bubble copy icon when bubble_copy_buttons is on"
+            )
+        });
+
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CopyBlockContent)),
+            "clicking the copy control on a full-width first line must copy via CopyBlockContent, got {outcome:?}"
+        );
+
+        let idx = agent
+            .scrollback
+            .selected()
+            .expect("the click must select the human message so block copy has a target");
+        let entry = agent
+            .scrollback
+            .entry(idx)
+            .expect("selected human message must exist");
+        let copied = entry
+            .block
+            .copy_text(entry.raw)
+            .expect("user prompts support copy");
+        assert_eq!(copied, prompt);
+        assert!(
+            !copied.contains(crate::glyphs::copy_icon()),
+            "copied payload is the prompt text, not the painted ⧉"
+        );
+    }
+
+    /// Clicking the always-on bubble copy control on an assistant message
+    /// copies that message through the existing block-copy action.
+    #[test]
+    fn clicking_assistant_bubble_copy_copies_the_message() {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::scrollback::block::RenderBlock;
+
+        crate::appearance::cache::set_bubble_copy_buttons(true);
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.scrollback.display.bubble_copy_buttons = true;
+        agent.scrollback.set_appearance(appearance);
+
+        const MSG: &str = "COPY-ASSISTANT-MSG-CONTRACT";
+        agent.scrollback.push_block(RenderBlock::agent_message(MSG));
+
+        let buf = draw_agent_frame(&mut agent);
+        let scrollback = agent.pane_areas.scrollback;
+        assert!(
+            scrollback.area() > 0,
+            "draw must publish a scrollback pane so the bubble copy control can paint"
+        );
+        let (col, row) = find_copy_icon(&buf, scrollback).unwrap_or_else(|| {
+            panic!(
+                "bubble copy icon must paint on the assistant message when bubble_copy_buttons is on"
+            )
+        });
+
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CopyBlockContent)),
+            "clicking the assistant-message copy control must copy via CopyBlockContent, got {outcome:?}"
+        );
+
+        let idx = agent
+            .scrollback
+            .selected()
+            .expect("the click must select the assistant message so block copy has a target");
+        let entry = agent
+            .scrollback
+            .entry(idx)
+            .expect("selected assistant message must exist");
+        assert!(
+            matches!(entry.block, RenderBlock::AgentMessage(_)),
+            "the click must select the assistant entry, not a neighboring block"
+        );
+        let copied = entry
+            .block
+            .copy_text(entry.raw)
+            .expect("assistant messages support copy");
+        assert!(
+            copied.contains(MSG),
+            "payload is the assistant copy_text, got {copied:?}"
+        );
+        assert!(
+            !copied.contains(crate::glyphs::copy_icon()),
+            "copied payload is the assistant text, not the painted ⧉"
+        );
     }
 }

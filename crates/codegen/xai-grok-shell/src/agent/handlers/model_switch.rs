@@ -2,6 +2,7 @@
 //! enforces the `allowed_models` gate before delegating here; internal callers
 //! (`new_session`, `load_session`) call `apply` directly.
 use crate::agent::config;
+use crate::agent::models::keep_unverified_persisted_model;
 use crate::agent::mvp_agent::{
     MvpAgent, agent_name_after_model_switch, harnesses_are_compatible, resolve_required_agent_type,
 };
@@ -9,6 +10,36 @@ use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
 use tokio::sync::oneshot;
 use xai_grok_sampling_types::parse_reasoning_effort_meta;
+
+/// Catalog entry for [`apply`]. Known catalog keys win. Seeded custom slugs
+/// that are not in the catalog keep their id and Chat Completions. Vanished
+/// `grok-*` slugs stay errors so `session/load` can remap within family.
+/// This does not change grok-4.5's catalog Responses backend.
+pub(crate) fn model_entry_for_apply(
+    agent: &MvpAgent,
+    model_id: &acp::ModelId,
+) -> Result<config::ModelEntry, acp::Error> {
+    match agent.resolve_model_id(model_id) {
+        Ok(model) => Ok(model),
+        Err(err) => {
+            let models = agent.models_manager.models();
+            if keep_unverified_persisted_model(&models, model_id) {
+                tracing::info!(
+                    model_id = %model_id.0,
+                    "set_session_model: keeping seeded model not in catalog"
+                );
+                let endpoints = agent.cfg.borrow().endpoints.clone();
+                Ok(config::ModelEntry::fallback(
+                    model_id.0.as_ref(),
+                    &endpoints,
+                ))
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
 /// Apply a model switch to a session (no gate — `set_session_model` gates first).
 pub(crate) async fn apply(
     agent: &MvpAgent,
@@ -31,7 +62,7 @@ pub(crate) async fn apply(
         .session_handle_waiting_for_load(&session_id)
         .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
-    let model = agent.resolve_model_id(&model_id)?;
+    let model = model_entry_for_apply(agent, &model_id)?;
     let use_concise = model.info().use_concise;
     let session_default = handle
         .session_default_agent_profile
@@ -254,6 +285,7 @@ pub(crate) async fn apply(
         .cloned(),
     ))
 }
+
 /// Broadcast a `ModelChanged` to every client subscribed to this session so
 /// followers mirror the new model. The originating client ignores its own echo
 /// (gated by `model_switch_pending`). Broadcast-only — no eventId, not persisted.

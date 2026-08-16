@@ -987,6 +987,18 @@ impl Renderable for EntryRenderer<'_> {
             }
         }
 
+        // Always-on bubble copy: paint into slack / timestamp gutter / right
+        // pad. The glyph is not in BlockLine spans (those stay wrap geometry).
+        let icon_style = self.theme.dim();
+        for (paint_row, line) in (content_area.y + if vpad_top_visible { 1 } else { 0 }..)
+            .zip(output.lines.iter().skip(content_skip as usize))
+        {
+            if paint_row >= max_row {
+                break;
+            }
+            line.paint_bubble_copy_button(buf, content_area.x, paint_row, icon_style);
+        }
+
         // Post-pass: adjust bullet color based on block state.
         //
         // Three cases (in priority order):

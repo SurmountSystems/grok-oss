@@ -61,13 +61,16 @@ pub(crate) fn clear_quit_notify() {
 static TERMINAL_OWNED: AtomicBool = AtomicBool::new(false);
 
 /// Set when SIGUSR1 asks this TUI to re-exec onto a newly installed binary.
-#[allow(dead_code)] // setter/listener not wired on this restack tip
 static PEER_REBUILD_RELAUNCH: AtomicBool = AtomicBool::new(false);
 
 /// Consume the peer-rebuild flag (true once after SIGUSR1 until taken).
-#[allow(dead_code)] // consumed by rebuild.rs; SIGUSR1 setter not wired yet
 pub(crate) fn take_peer_rebuild_relaunch() -> bool {
     PEER_REBUILD_RELAUNCH.swap(false, Ordering::AcqRel)
+}
+
+/// Arm the peer-rebuild flag (Unix `SIGUSR1` listener and tests).
+pub(crate) fn mark_peer_rebuild_relaunch_from_sigusr1() {
+    PEER_REBUILD_RELAUNCH.store(true, Ordering::Release);
 }
 
 /// Install signal handlers for the TUI lifecycle. Call after `init_terminal`.
@@ -103,11 +106,22 @@ fn spawn_async_signal_task() {
             use tokio::signal::unix::{SignalKind, signal};
             let mut sigterm = signal(SignalKind::terminate()).ok();
             let mut sighup = signal(SignalKind::hangup()).ok();
-            // First signal requests the graceful quit; a second forces exit.
-            let code = next_signal_code(&mut sigterm, &mut sighup).await;
-            request_graceful_or_exit(code);
-            let code2 = next_signal_code(&mut sigterm, &mut sighup).await;
-            shutdown_with_terminal_restore(code2);
+            let mut sigusr1 = signal(SignalKind::user_defined1()).ok();
+            // SIGUSR1 is cooperative rebuild re-exec (not default terminate).
+            // SIGTERM/HUP/INT: first requests graceful quit; a second forces exit.
+            tokio::select! {
+                code = next_signal_code(&mut sigterm, &mut sighup) => {
+                    request_graceful_or_exit(code);
+                    let code2 = next_signal_code(&mut sigterm, &mut sighup).await;
+                    shutdown_with_terminal_restore(code2);
+                }
+                _ = recv_optional_unix_signal(&mut sigusr1) => {
+                    mark_peer_rebuild_relaunch_from_sigusr1();
+                    request_graceful_or_exit(0);
+                    let code2 = next_signal_code(&mut sigterm, &mut sighup).await;
+                    shutdown_with_terminal_restore(code2);
+                }
+            }
         }
         #[cfg(windows)]
         {
@@ -308,5 +322,21 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
             .await
             .expect("graceful branch notified the registered quit handle");
+    }
+
+    /// Contract: SIGUSR1 must set the peer-rebuild flag (not default terminate).
+    /// A failed `/rebuild` never sends the signal; this only arms the receiver.
+    #[test]
+    fn sigusr1_sets_peer_rebuild_flag_once() {
+        let _ = take_peer_rebuild_relaunch();
+        mark_peer_rebuild_relaunch_from_sigusr1();
+        assert!(
+            take_peer_rebuild_relaunch(),
+            "SIGUSR1 must set the cooperative re-exec flag"
+        );
+        assert!(
+            !take_peer_rebuild_relaunch(),
+            "flag is one-shot so a later /exit does not re-exec"
+        );
     }
 }

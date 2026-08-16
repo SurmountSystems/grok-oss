@@ -302,6 +302,11 @@ impl AgentView {
             }
             return overlay_action_to_outcome(action);
         }
+        // X = clear completed (same as chrome Clear finished). Optional and
+        // only when the todo pane is focused.
+        if !has_input && key!('X').matches(key) {
+            return InputOutcome::Action(Action::ClearCompletedTodos);
+        }
         if self.todo.handle_key(key) {
             InputOutcome::Changed
         } else {
@@ -877,5 +882,101 @@ mod paste_routing_tests {
             InputOutcome::ActionThenForward(crate::app::actions::Action::FocusPrompt)
         ));
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod clear_completed_todos_key_tests {
+    use super::super::{AgentPane, test_fixtures::make_agent};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::key;
+    use crossterm::event::Event;
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+
+    fn shift_x() -> Event {
+        Event::Key(key!('X').to_key_event())
+    }
+
+    /// Named contract: bare X / Shift+X only clears completed when the todo
+    /// pane is focused. Tasks (and other panes) must not fall through.
+    #[test]
+    fn clear_completed_todos_x_key_only_when_todo_pane_focused() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+
+        agent.tasks.overlay.visible = true;
+        agent.tasks.overlay.focused = true;
+        agent.set_active_pane(AgentPane::Tasks, true);
+        let tasks_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            !matches!(tasks_out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Tasks pane must not map X to ClearCompletedTodos, got {tasks_out:?}"
+        );
+
+        agent.tasks.overlay.visible = false;
+        agent.tasks.overlay.focused = false;
+        agent.set_active_pane(AgentPane::Catalog, true);
+        let catalog_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            !matches!(
+                catalog_out,
+                InputOutcome::Action(Action::ClearCompletedTodos)
+            ),
+            "Catalog pane must not map X to ClearCompletedTodos, got {catalog_out:?}"
+        );
+
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = true;
+        agent.set_active_pane(AgentPane::Todo, true);
+        let todo_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            matches!(todo_out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Todo pane focused must map X to ClearCompletedTodos, got {todo_out:?}"
+        );
+    }
+
+    /// Named contract: when a clear-finished hit rect is present, a mouse
+    /// click on that rect dispatches ClearCompletedTodos. Empty hit does not.
+    #[test]
+    fn clear_finished_click_dispatches_when_hit_rect_set() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Todo, false);
+        agent.hit_todo_clear_done.set(Some(Rect::new(10, 3, 3, 1)));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(mouse),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Clear finished click on hit rect must dispatch, got {out:?}"
+        );
+
+        agent.hit_todo_clear_done.clear();
+        let out_miss = agent.handle_input(
+            &crossterm::event::Event::Mouse(mouse),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            !matches!(out_miss, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "no clear hit must not dispatch ClearCompletedTodos, got {out_miss:?}"
+        );
     }
 }

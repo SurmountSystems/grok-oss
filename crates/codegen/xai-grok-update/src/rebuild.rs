@@ -21,7 +21,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::format_build_id;
 use xai_grok_active_sessions::{self as active_sessions, ActiveSession};
 use xai_grok_shell::leader::{self, LeaderRelaunchOutcome};
 
@@ -940,17 +939,54 @@ pub fn parse_version_output(stdout: &str) -> Option<String> {
     None
 }
 
-/// Pure helper for tests: build-fail path must not signal leaders.
+/// Whether `/rebuild` may replace the live fleet after install/verify.
 ///
-/// Returns `Err` without calling `signal` when install fails.
+/// Failed `just install` / `--version` verify must not SIGUSR1 peers or
+/// soft-signal leaders. Process-wide replace is success-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebuildFleetPlan {
+    /// Soft-signal reachable leaders (`RelaunchForUpdate`).
+    pub signal_leaders: bool,
+    /// Write `rebuild_relaunch_request.json` and `SIGUSR1` other live TUIs.
+    pub write_request_and_signal_peers: bool,
+}
+
+impl RebuildFleetPlan {
+    /// Plan after the install recipe (and optional `--version` verify).
+    pub fn after_install(install_succeeded: bool) -> Self {
+        if install_succeeded {
+            Self {
+                signal_leaders: true,
+                write_request_and_signal_peers: true,
+            }
+        } else {
+            Self {
+                signal_leaders: false,
+                write_request_and_signal_peers: false,
+            }
+        }
+    }
+
+    /// True when leaders and peer TUIs should be asked to pick up the new binary.
+    pub fn should_replace_fleet(self) -> bool {
+        self.signal_leaders && self.write_request_and_signal_peers
+    }
+}
+
+/// Pure helper for tests: build-fail path must not signal leaders or peers.
+///
+/// Returns `Err` without marking signals when install fails.
 pub fn orchestrate_order_on_install_result(
     install_ok: bool,
-    signal_called: &mut bool,
+    leader_signal_called: &mut bool,
+    peer_signal_called: &mut bool,
 ) -> Result<()> {
-    if !install_ok {
-        bail!("install failed; not signaling leaders");
+    let plan = RebuildFleetPlan::after_install(install_ok);
+    if !plan.should_replace_fleet() {
+        bail!("install failed; not signaling leaders or peers");
     }
-    *signal_called = true;
+    *leader_signal_called = plan.signal_leaders;
+    *peer_signal_called = plan.write_request_and_signal_peers;
     Ok(())
 }
 
@@ -1212,15 +1248,29 @@ where
         }
     };
     let (install_join, ()) = tokio::join!(install_task, drain_task);
-    let (backend, installed_path) = install_join.context("install task join")??;
+    let (backend, installed_path) = match install_join.context("install task join")? {
+        Ok(v) => v,
+        Err(e) => {
+            // Named contract: failed install must not replace the live fleet.
+            debug_assert!(!RebuildFleetPlan::after_install(false).should_replace_fleet());
+            return Err(e);
+        }
+    };
 
-    let installed_identity = verify_installed_identity(&installed_path).unwrap_or_else(|_| {
-        // Fallback identity from this process when --version parse fails.
-        format_build_id(
-            env!("CARGO_PKG_VERSION"),
-            option_env!("GROK_GIT_SHA").unwrap_or("unknown"),
-        )
-    });
+    // `--version` verify is a hard gate. Swallowing it used to SIGUSR1 peers
+    // onto a binary that cannot even print its identity (ENXIO / TUI start).
+    let installed_identity = match verify_installed_identity(&installed_path) {
+        Ok(id) => id,
+        Err(e) => {
+            debug_assert!(!RebuildFleetPlan::after_install(false).should_replace_fleet());
+            return Err(e.context(
+                "installed binary failed `--version` verify; not signaling peers or leaders",
+            ));
+        }
+    };
+
+    let plan = RebuildFleetPlan::after_install(true);
+    debug_assert!(plan.should_replace_fleet());
 
     {
         let mut engine = RebuildProgressEngine::new();
@@ -1232,15 +1282,24 @@ where
     // Optional hygiene: drop dead PIDs from the registry before inventory.
     let _ = active_sessions::collect_crashed();
 
-    let leader_outcomes = leader::signal_leaders_to_relaunch(&installed_identity).await;
+    let leader_outcomes = if plan.signal_leaders {
+        leader::signal_leaders_to_relaunch(&installed_identity).await
+    } else {
+        Vec::new()
+    };
 
     // Cooperative peer TUI relaunch: every other live product window, not only
     // the invoker. Writes request + SIGUSR1; peers re-exec with the same session.
-    let peer_outcomes = signal_active_sessions_to_relaunch(
-        &installed_path,
-        &installed_identity,
-        Some(std::process::id()),
-    );
+    // Only after a successful install + verify.
+    let peer_outcomes = if plan.write_request_and_signal_peers {
+        signal_active_sessions_to_relaunch(
+            &installed_path,
+            &installed_identity,
+            Some(std::process::id()),
+        )
+    } else {
+        Vec::new()
+    };
 
     let live_sessions = active_sessions::list()
         .unwrap_or_default()
@@ -1428,11 +1487,33 @@ mod tests {
     #[test]
     fn build_fail_does_not_signal_leaders() {
         let mut signaled = false;
-        let err = orchestrate_order_on_install_result(false, &mut signaled).unwrap_err();
+        let mut peers = false;
+        let err =
+            orchestrate_order_on_install_result(false, &mut signaled, &mut peers).unwrap_err();
         assert!(!signaled);
+        assert!(!peers);
         assert!(err.to_string().contains("not signaling"));
-        orchestrate_order_on_install_result(true, &mut signaled).unwrap();
+        orchestrate_order_on_install_result(true, &mut signaled, &mut peers).unwrap();
         assert!(signaled);
+        assert!(peers);
+    }
+
+    /// Contract: a failed `just install` / verify must not write the
+    /// cooperative request or SIGUSR1 peers. Fleet replace is success-only.
+    #[test]
+    fn failed_install_must_not_replace_or_signal_peers() {
+        let plan = RebuildFleetPlan::after_install(false);
+        assert!(
+            !plan.should_replace_fleet(),
+            "failed install must not replace the live fleet"
+        );
+        assert!(!plan.signal_leaders);
+        assert!(!plan.write_request_and_signal_peers);
+
+        let ok = RebuildFleetPlan::after_install(true);
+        assert!(ok.should_replace_fleet());
+        assert!(ok.signal_leaders);
+        assert!(ok.write_request_and_signal_peers);
     }
 
     /// Contract: product install must capture child stdio (never inherit TTY).

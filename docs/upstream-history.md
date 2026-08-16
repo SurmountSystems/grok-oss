@@ -156,7 +156,13 @@ git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
   -m "Join Surmount archive history so main is an ancestor of this tip." \
   -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
 
-just check
+# Land: files-only assert is not enough. Walk FORK seven product classes
+# and prove catalog named tests still exist (doc/dev/upstream-regression-filters.md).
+just upstream-assert-process-pins
+just upstream-land-filters
+# rg each Required-land identifier for a matching fn. Missing fn = failed land.
+# Chrome-only, paint-only bubble copy, or skills Python reintroduced is a failed land.
+just check   # quality only; cannot fail a deleted catalog test
 git push -u origin HEAD
 # PR: base=main head=onto-xai/<short>  — close related export issues
 # append docs/upstream-onto-log.md
@@ -297,7 +303,9 @@ chmod +x scripts/join-main-into-onto.sh
 git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
   -m "Join Surmount archive history so main is an ancestor of this tip." \
   -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
-just check
+just upstream-assert-process-pins
+just upstream-land-filters
+just check   # quality only; walk catalog named tests first
 git push -u origin HEAD
 # PR base=main head=onto-xai/6e386420825b ; close #11 #14 ; final onto-log row
 ```
@@ -353,9 +361,10 @@ with a clean tree.
   - [ ] `scripts/put-history-on-xai.sh` + other import/sync scripts already in `FORK_PATHS`
   - [ ] `docs/upstream-history.md` (+ import/onto logs)
   - [ ] Review `FORK_PATHS` in `scripts/import-upstream-export.sh` only if the assert failed or a new process path is needed
-- [ ] **Product regression filters** (assert is path-only; seams inside `xai-grok-*` need cargo). After process-pin assert, run the core block in [`doc/dev/upstream-regression-filters.md`](../doc/dev/upstream-regression-filters.md) (or FORK § *Upstream regression filters*), **or at least `just check` / `just ci`**. Smoke: DOGE default, window titles / `title.enabled`, stuck-retry / StreamResumed, `shell_collision`, dual-auth if those areas churned.
-- [ ] **User-guide conflict resolve** — shared path `crates/codegen/xai-grok-pager/docs/user-guide/` is **not** in `FORK_PATHS`. On onto, re-check DOGE default theme, window titles / `title.enabled` vs `hide_header`, and Grok OSS / `grok-oss` branding sections against xAI base; do not drop fork copy for a clean merge alone.
-- [ ] `just ci` or at least `just check` (prefer full gate before PR); if skipping full gate, the product filter block above is the minimum besides assert
+- [ ] **Product regression filters** (assert is path-only; seams inside `xai-grok-*` need cargo). After process-pin assert, walk the **seven product classes** in [`FORK.md`](../FORK.md) § *Land checklist* and [`doc/dev/upstream-regression-filters.md`](../doc/dev/upstream-regression-filters.md) § *Required land inventory*: CLI identity first token `grok-oss`; `/settings` plus unread-config readers plus DOGE picker; grok-oss ledger `/spend` ingest; DOGE/chrome paint; dual-auth hop after included SuperGrok period limits are full; last-session on start; product skills are not a Python runtime. Walk extra neighbors the catalog already lists (bubble click, plan present is not Approve, SHA-aware `/rebuild`, nucleo, `from_config` cold catalog, pause / Clear finished, always-three-layer product prompt, user-guide hop / spend-order). Do not invent a second numbered board. Then `rg` the catalog identifiers; a named filter with no matching `fn` is a failed land. **Helper-green is a failed land** (`contains("grok")` version tests, schema-without-`/spend`, serde-only `hide_header`, rank-without-hop, catalog-exists-without-paint, bundle-still-has-junk-`.py`). A chrome-only inventory is a failed land. Paint-only bubble copy is a failed land. Skills Python reintroduced is a failed land. `just check` / `just ci` cannot fail a deleted test. Optional reminder after assert: `just upstream-land-filters`.
+- [ ] **Paint / dogfood.** Operator check after the named paint `fn`s exist, not the only check: Human/agent rails, titled composer white frame with yellow title only, plan five CTAs (Approve / Notes / Clarify / Revise / Quit), included SuperGrok period limits compact meter (click opens `/limits`), SIGUSR1 fleet still alive after a **failed** install. Do not accept "compile mop re-applied seams" without the seven-class cargo list.
+- [ ] **User-guide conflict resolve** — shared path `crates/codegen/xai-grok-pager/docs/user-guide/` is **not** in `FORK_PATHS`. On onto, re-check `/limits`, DOGE default theme, window titles / `title.enabled` vs `hide_header`, and Grok OSS / `grok-oss` branding sections against xAI base; do not drop fork copy for a clean merge alone. A guide with zero `/limits` hits is a failed land.
+- [ ] `just ci` or at least `just check` (prefer full gate before PR); if skipping full gate, the product filter block plus name-existence check above is the minimum besides assert
 - [ ] `docs/upstream-import-log.md` updated
 - [ ] Signed commit on Surmount (no signing bypass)
 
@@ -374,6 +383,11 @@ project skill roots, and user-guide; operator skill packs live under
 | Product commits cherry-picked on onto | Onto tip missing a pin before join (`-s ours` cannot backfill) |
 
 Assert anytime: `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins`.
+That proves files exist, including the catalog file and its seven product
+class titles. It does not prove crate `fn` names. After assert, walk FORK
+§ *Land checklist* and `doc/dev/upstream-regression-filters.md` (name-check
+then cheat-sheet cargo). Reminder: `just upstream-land-filters`. `just check`
+is quality only.
 
 **Join does not restore content** — missing process files on the onto tip stay
 missing after `merge -s ours`. Chat-only pins do not survive compaction or recon.

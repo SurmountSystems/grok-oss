@@ -111,6 +111,32 @@ where
         result
     }
 }
+/// Rebuild primary + failover from ranked auto-use order.
+///
+/// `prepare_sampler_for_turn` / `reconstruct_full_config` must not keep a
+/// sticky personal JWT (or console-in-failover) when a sibling SuperGrok
+/// login still has included SuperGrok period limits. Hermetic: no network.
+pub(crate) fn apply_ranked_auto_turn_credentials(
+    grok_home: &Path,
+    api_key: &mut Option<String>,
+    failover_api_keys: &mut Vec<String>,
+    session_identity_key: &mut Option<String>,
+) {
+    let sessions = crate::auth::load_supergrok_session_candidates(grok_home);
+    if sessions.is_empty() {
+        return;
+    }
+    let console = crate::agent::config::collect_xai_console_api_keys();
+    let order = crate::auth::order_credentials_for_preferred_auto(&sessions, &console);
+    if let Some(primary) = order.primary {
+        *api_key = Some(primary);
+    }
+    *failover_api_keys = order.failover;
+    if let Some(sk) = order.session_identity_key {
+        *session_identity_key = Some(sk);
+    }
+}
+
 impl SessionActor {
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
         let mcp_wait_start = std::time::Instant::now();
@@ -439,6 +465,9 @@ impl SessionActor {
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
             let _ = am.auth().await;
+            if am.grok_com_config().auto_use_included_limits {
+                let _ = am.align_to_ranked_free_period_primary();
+            }
         }
         let api_key = if use_bearer_resolver {
             self.auth_manager
@@ -483,7 +512,7 @@ impl SessionActor {
             &cfg.api_backend,
             &cfg.base_url,
         );
-        SamplingConfig {
+        let mut sampling = SamplingConfig {
             api_key,
             base_url: cfg.base_url,
             model: cfg.model,
@@ -533,7 +562,20 @@ impl SessionActor {
             session_identity_key: creds.session_identity_key.clone(),
             stashed_bearer_resolver: None,
             session_bearer_resolver: None,
+        };
+        if use_bearer_resolver
+            && let Some(am) = self.auth_manager.as_ref()
+            && am.grok_com_config().auto_use_included_limits
+            && let Some(home) = am.auth_json_path().parent()
+        {
+            apply_ranked_auto_turn_credentials(
+                home,
+                &mut sampling.api_key,
+                &mut sampling.failover_api_keys,
+                &mut sampling.session_identity_key,
+            );
         }
+        sampling
     }
     /// Install auto-mode permission classifier with a live LLM side-query
     /// (laziness-classifier pattern: `prepare_chat_completion` +
@@ -755,6 +797,11 @@ impl SessionActor {
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
     pub(crate) async fn prepare_sampler_for_turn(&self) {
+        if let Some(am) = self.auth_manager.as_ref()
+            && am.grok_com_config().auto_use_included_limits
+        {
+            let _ = am.align_to_ranked_free_period_primary();
+        }
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
@@ -1591,5 +1638,100 @@ mod configured_cutoff_tests {
             let inherited = super::resolve_configured_cutoff(seed.clone(), base.as_ref());
             assert_eq!(wire_echo, inherited, "seed={seed:?} base={base:?}");
         }
+    }
+}
+
+/// Hermetic: per-turn reconstruct must align to ranked included SuperGrok
+/// period primary (Business sibling) before SuperGrok dollar credits on a
+/// full personal login. No live network.
+#[cfg(test)]
+mod ranked_auto_turn_tests {
+    use super::apply_ranked_auto_turn_credentials;
+    use crate::auth::credentials_store::{CredentialsStore, FORCE_FILE_ENV};
+    use crate::auth::xai_console::add_console_api_key;
+    use crate::auth::{
+        AuthMode, GrokAuth, clear_included_billing_cache, remember_supergrok_dollar_extras,
+        remember_supergrok_included_billing, upsert_supergrok_session,
+    };
+    use xai_grok_test_support::EnvGuard;
+
+    #[test]
+    #[serial_test::serial]
+    fn prepare_sampler_for_turn_aligns_to_ranked_included_primary() {
+        clear_included_billing_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", dir.path());
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+
+        let base = "https://auth.x.ai::test-client";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-business-included".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-biz".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-full-extras".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p".into(),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let store = CredentialsStore::at_grok_home(dir.path());
+        assert!(add_console_api_key(&store, "console-must-wait").unwrap());
+
+        remember_supergrok_included_billing(
+            "user-p",
+            100.0,
+            Some("2026-08-20T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_included_billing(
+            "team-biz",
+            40.0,
+            Some("2026-08-21T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+
+        let mut api_key = Some("tok-personal-full-extras".into());
+        let mut failover = vec!["console-must-wait".into()];
+        let mut session_identity = Some("tok-personal-full-extras".into());
+        apply_ranked_auto_turn_credentials(
+            dir.path(),
+            &mut api_key,
+            &mut failover,
+            &mut session_identity,
+        );
+        assert_eq!(
+            api_key.as_deref(),
+            Some("tok-business-included"),
+            "per-turn reconstruct must hop to Business included SuperGrok period limits"
+        );
+        assert!(
+            !failover
+                .iter()
+                .any(|k| k == "console-must-wait" || k == "tok-personal-full-extras"),
+            "console and personal extras stay off the hop list: {failover:?}"
+        );
+        assert_eq!(session_identity.as_deref(), Some("tok-business-included"));
+        clear_included_billing_cache();
     }
 }

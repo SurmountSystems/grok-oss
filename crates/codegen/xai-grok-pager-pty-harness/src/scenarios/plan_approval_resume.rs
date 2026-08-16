@@ -124,7 +124,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     // Without the shell re-park this times out.
     //
     // Markers, any of:
-    // - full TUI status (`Waiting on plan approval`)
+    // - full TUI status (`Plan ready. Side panel open`)
     // - minimal-mode card header (`Plan ready for review`)
     // - CTA strip: labeled (`a approve` / `s revise`) or key-only
     //   (`a  |  A  |  ?`) when the ~45% side panel is too narrow for compact
@@ -135,7 +135,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     wait_for_any_text(
         &mut resumed,
         &[
-            "Waiting on plan approval",
+            "Plan ready. Side panel open",
             "Plan ready for review",
             LABELED_APPROVE_CTA,
             "s revise",

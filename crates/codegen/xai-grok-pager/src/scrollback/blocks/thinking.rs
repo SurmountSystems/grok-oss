@@ -29,12 +29,13 @@ const EXPAND_HINT_GAP: &str = "  ";
 /// a lie. Skipping the hint when it does not fit keeps the header out of
 /// truncation and off a second row (K5).
 fn append_expand_hint(line: Line<'static>, ctx: &BlockContext) -> Line<'static> {
-    if !ctx
-        .appearance
-        .scrollback
-        .blocks
-        .thinking
-        .collapsed_expand_hint
+    if crate::appearance::cache::load_always_expand_thinking()
+        || !ctx
+            .appearance
+            .scrollback
+            .blocks
+            .thinking
+            .collapsed_expand_hint
         || ctx.mode != DisplayMode::Collapsed
     {
         return line;
@@ -496,7 +497,9 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn collapse_mode(&self, is_running: bool) -> DisplayMode {
-        if is_running {
+        if crate::appearance::cache::load_always_expand_thinking() {
+            DisplayMode::Expanded
+        } else if is_running {
             DisplayMode::Truncated
         } else {
             DisplayMode::Collapsed
@@ -504,11 +507,19 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn default_display_mode(&self) -> DisplayMode {
-        DisplayMode::Truncated
+        if crate::appearance::cache::load_always_expand_thinking() {
+            DisplayMode::Expanded
+        } else {
+            DisplayMode::Truncated
+        }
     }
 
     fn finished_display_mode(&self) -> Option<DisplayMode> {
-        Some(DisplayMode::Collapsed)
+        if crate::appearance::cache::load_always_expand_thinking() {
+            Some(DisplayMode::Expanded)
+        } else {
+            Some(DisplayMode::Collapsed)
+        }
     }
 
     fn has_bullet(&self, ctx: &BlockContext) -> bool {
@@ -624,6 +635,53 @@ mod tests {
         assert!(line_plain_text(&line.content).starts_with("│ "));
         assert!(matches!(line.selectable, Selectable::Spans(_)));
         assert_eq!(derive_selection_text(line), "QUOTE alpha");
+    }
+
+    #[test]
+    fn always_expand_thinking_keeps_blocks_expanded() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(true);
+            let block = ThinkingBlock::new("reason through this");
+            assert_eq!(
+                block.default_display_mode(),
+                DisplayMode::Expanded,
+                "[ui] always_expand_thinking must keep thinking expanded while streaming"
+            );
+            assert_eq!(
+                block.finished_display_mode(),
+                Some(DisplayMode::Expanded),
+                "[ui] always_expand_thinking must keep finished thinking expanded"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn always_expand_thinking_hides_ctrl_e_hint() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(true);
+            let mut appearance = AppearanceConfig::default();
+            appearance.scrollback.blocks.thinking.collapsed_expand_hint = true;
+            let ctx = BlockContext {
+                appearance,
+                mode: DisplayMode::Collapsed,
+                ..ctx(DisplayMode::Collapsed, 80)
+            };
+            let block = ThinkingBlock::new("short thought");
+            let out = block.output(&ctx);
+            let text: String = out
+                .lines
+                .iter()
+                .flat_map(|l| l.content.spans.iter().map(|s| s.content.as_ref()))
+                .collect();
+            assert!(
+                !text.contains("ctrl+e"),
+                "Ctrl+E hint must be hidden when always_expand_thinking is on: {text:?}"
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

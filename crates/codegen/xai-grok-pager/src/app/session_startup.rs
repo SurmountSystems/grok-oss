@@ -739,6 +739,10 @@ pub struct MaterializeCtx {
     /// Pre-TUI restore progress on stdout (interactive tty). Headless keeps
     /// stdout as JSON/NDJSON and uses stderr instead.
     pub restore_progress_on_stdout: bool,
+    /// Interactive TUI: a bare `grok-oss` start opens the most recent local
+    /// session for this working directory. Missing session stays welcome.
+    /// Headless stays false (fresh session unless `-c` / `--resume`).
+    pub open_last_session_on_start: bool,
 }
 impl MaterializeCtx {
     /// `--resume` miss bails fast.
@@ -757,6 +761,7 @@ impl MaterializeCtx {
             },
             restore_code: args.restore_code,
             restore_progress_on_stdout: false,
+            open_last_session_on_start: true,
         }
     }
 }
@@ -772,13 +777,25 @@ pub fn effective_fork_new_cwd(process_cwd: &str, parent_cwd: Option<&Path>) -> S
 /// Resolve most-recent session id for cwd, or error.
 async fn most_recent_session_id(cwd: &str) -> anyhow::Result<(String, Option<String>)> {
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
-    let first = summaries.first().ok_or_else(|| {
-        anyhow::anyhow!(
-            "No session found for current directory. \
+    summaries
+        .first()
+        .map(|first| (first.info.id.to_string(), first.display_title_opt()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No session found for current directory. \
              Use 'grok' to start a new session."
-        )
-    })?;
-    Ok((first.info.id.to_string(), first.display_title_opt()))
+            )
+        })
+}
+/// Most recent local session for `cwd`, if any. Missing or unlistable is `None`
+/// so interactive start can stay on welcome.
+async fn try_most_recent_session_id(cwd: &str) -> Option<(String, Option<String>)> {
+    let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd))
+        .await
+        .ok()?;
+    summaries
+        .first()
+        .map(|first| (first.info.id.to_string(), first.display_title_opt()))
 }
 /// `AuthManager` for direct grok.com calls made outside the agent (pre-ACP
 /// `--continue` conversation listing, the GCS restore effect). Wires the
@@ -840,7 +857,24 @@ pub async fn materialize_startup_for_cwd(
         anyhow::bail!("{CHAT_MODE_FORK_CONFLICT}");
     }
     match intent {
-        SessionStartupIntent::NewAuto => Ok(MaterializedStartup::NewAuto),
+        SessionStartupIntent::NewAuto => {
+            if ctx.open_last_session_on_start && !ctx.has_worktree && !ctx.chat_mode {
+                if let Some((id, title)) = try_most_recent_session_id(cwd).await {
+                    tracing::info!(
+                        session_id = %id,
+                        "startup.open_last_session"
+                    );
+                    return Ok(MaterializedStartup::Resume {
+                        session_id: id,
+                        original_cwd: None,
+                        title,
+                        deferred_local_miss: false,
+                        suppress_code_restore: false,
+                    });
+                }
+            }
+            Ok(MaterializedStartup::NewAuto)
+        }
         SessionStartupIntent::NewWithId { session_id } => {
             if !ctx.has_worktree {
                 ensure_session_id_available(&session_id, cwd)?;
@@ -1634,6 +1668,7 @@ mod tests {
             title_resolution: TitleResolution::Allowed,
             restore_code: false,
             restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
         }
     }
     #[test]
@@ -1660,16 +1695,20 @@ mod tests {
     /// hardcoded `false` here once disabled it everywhere.
     #[test]
     fn remote_restore_follows_compiled_restore_stack() {
-        assert_eq!(
-            MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore,
-            false
-        );
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore);
     }
     #[test]
     fn from_pager_args_does_not_probe_tty_for_progress() {
         assert!(
             !MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_progress_on_stdout,
             "stdout vs stderr is decided at the composition root, not from_pager_args"
+        );
+    }
+    #[test]
+    fn from_pager_args_opens_last_session_on_start() {
+        assert!(
+            MaterializeCtx::from_pager_args(&parse(&["grok"])).open_last_session_on_start,
+            "interactive grok-oss start must open the last session"
         );
     }
     #[test]
@@ -1698,6 +1737,7 @@ mod tests {
             title_resolution: TitleResolution::Allowed,
             restore_code,
             restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
         }
     }
     #[test]
@@ -2000,6 +2040,7 @@ mod tests {
             title_resolution: TitleResolution::Allowed,
             restore_code: false,
             restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
         };
         let err = materialize_startup_for_cwd(
             ctx,
@@ -2081,6 +2122,102 @@ mod tests {
             other => panic!("expected Resume, got {other:?}"),
         }
     }
+    /// Cold start of grok-oss: open the last session for this directory.
+    /// Not continue-interrupted-turn. Not the /resume picker.
+    mod open_last_session_on_start {
+        use super::*;
+        use crate::test_util::GrokHomeFixture;
+        fn tui_ctx() -> MaterializeCtx {
+            MaterializeCtx {
+                has_worktree: false,
+                allow_remote_restore: false,
+                chat_mode: false,
+                title_resolution: TitleResolution::Allowed,
+                restore_code: false,
+                restore_progress_on_stdout: false,
+                open_last_session_on_start: true,
+            }
+        }
+        fn headless_ctx() -> MaterializeCtx {
+            MaterializeCtx {
+                open_last_session_on_start: false,
+                ..tui_ctx()
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_opens_last_session_when_one_exists() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            let older = "aaaaaaaa-1111-2222-3333-444444444444";
+            let last = "bbbbbbbb-1111-2222-3333-555555555555";
+            fx.write_summary(
+                &cwd_str,
+                older,
+                serde_json::json!({
+                    "generated_title": "Older",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                    "last_active_at": "2026-07-01T00:00:00Z",
+                }),
+            );
+            fx.write_summary(
+                &cwd_str,
+                last,
+                serde_json::json!({
+                    "generated_title": "Last session",
+                    "updated_at": "2026-08-13T12:00:00Z",
+                    "last_active_at": "2026-08-13T12:00:00Z",
+                }),
+            );
+            match materialize_startup_for_cwd(tui_ctx(), SessionStartupIntent::NewAuto, &cwd_str)
+                .await
+                .unwrap()
+            {
+                MaterializedStartup::Resume {
+                    session_id, title, ..
+                } => {
+                    assert_eq!(session_id, last);
+                    assert_eq!(title.as_deref(), Some("Last session"));
+                }
+                other => panic!("expected last session to open, got {other:?}"),
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_stays_welcome_when_no_last_session() {
+            let fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            match materialize_startup_for_cwd(tui_ctx(), SessionStartupIntent::NewAuto, &cwd_str)
+                .await
+                .unwrap()
+            {
+                MaterializedStartup::NewAuto => {}
+                other => panic!("first-ever use must stay welcome, got {other:?}"),
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_does_not_open_last_when_headless() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            fx.write_summary(
+                &cwd_str,
+                "cccccccc-1111-2222-3333-666666666666",
+                serde_json::json!({ "generated_title": "Headless must not steal" }),
+            );
+            match materialize_startup_for_cwd(
+                headless_ctx(),
+                SessionStartupIntent::NewAuto,
+                &cwd_str,
+            )
+            .await
+            .unwrap()
+            {
+                MaterializedStartup::NewAuto => {}
+                other => panic!("headless -p stays a fresh session, got {other:?}"),
+            }
+        }
+    }
     mod resume_by_title {
         use super::*;
         use crate::test_util::GrokHomeFixture;
@@ -2092,6 +2229,7 @@ mod tests {
                 title_resolution: TitleResolution::Allowed,
                 restore_code: false,
                 restore_progress_on_stdout: false,
+                open_last_session_on_start: false,
             }
         }
         async fn resume(arg: &str, cwd: &str) -> anyhow::Result<MaterializedStartup> {

@@ -136,6 +136,10 @@ pub(crate) async fn run_shell_child(
         cwd,
         &definition,
     );
+    effective_runtime.isolation = crate::agent::subagent::apply_allow_worktree_policy(
+        effective_runtime.isolation,
+        ctx.allow_worktree,
+    );
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {
         tracing::error!(

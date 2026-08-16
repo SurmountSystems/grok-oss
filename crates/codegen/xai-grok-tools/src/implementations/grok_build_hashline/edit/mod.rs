@@ -358,6 +358,24 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                                 ),
                             });
                         }
+                        if let Some(ref mut new_content) = r.new_content {
+                            let formatted =
+                                crate::util::rust_edit_verify::after_structured_rust_write(
+                                    &joined_path,
+                                    new_content,
+                                );
+                            if formatted != *new_content
+                                && let Err(e) =
+                                    fs.write_file(&joined_path, formatted.as_bytes()).await
+                            {
+                                tracing::debug!(
+                                    path = %joined_path.display(),
+                                    error = %e,
+                                    "ACP filesystem sync of rustfmt output failed; disk already formatted"
+                                );
+                            }
+                            *new_content = formatted;
+                        }
                         // Only canonicalize after a successful write (file exists).
                         let abs = if r.new_content.is_some() {
                             crate::util::fs::canonicalize_with_timeout(joined_path).await
@@ -440,6 +458,20 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                 None,
                 vec![],
             ));
+        }
+        if let Some(ref mut new_content) = apply_result.new_content {
+            let formatted =
+                crate::util::rust_edit_verify::after_structured_rust_write(&path, new_content);
+            if formatted != *new_content
+                && let Err(e) = fs.write_file(&path, formatted.as_bytes()).await
+            {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "ACP filesystem sync of rustfmt output failed; disk already formatted"
+                );
+            }
+            *new_content = formatted;
         }
 
         let edit_details = apply_result.edit_details;

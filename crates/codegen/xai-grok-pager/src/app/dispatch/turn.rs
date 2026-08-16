@@ -670,6 +670,8 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         );
 
         agent.mark_turn_finished();
+        agent.dismiss_plan_approval_after_turn_if_stale();
+        agent.surface_idle_plan_review_if_needed();
         agent.activity_started_at = None;
         agent.last_activity = None;
         drain_permission_queue(agent);

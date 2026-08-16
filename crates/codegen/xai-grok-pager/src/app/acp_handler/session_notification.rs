@@ -214,7 +214,11 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             );
             if let XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
                 refresh_context_used(agent, *tokens_after);
-                agent.todo.update_todos(Vec::new());
+                // Keep the existing todo board. Compaction does not clear
+                // Resources TodoState; wiping the UI here made the list look
+                // empty after compact while the model still held the board.
+                // A later Plan / todo_write refresh still replaces via the
+                // normal ACP Plan path.
             }
             changed
         }

@@ -301,6 +301,71 @@ pub async fn update_features_session_recap(value: bool) -> Result<()> {
     Ok(())
 }
 
+/// Write only `[subagents].allow_worktree` so other `[subagents]` keys stay put.
+pub async fn update_subagents_allow_worktree(value: bool) -> Result<()> {
+    let _guard = SAVE_LOCK.lock().await;
+    let path = user_config_path();
+    let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => match toml::from_str::<TomlValue>(&s) {
+            Ok(v) => v,
+            Err(parse_err) => {
+                return Err(anyhow::anyhow!(
+                    "refusing to overwrite unparseable {}: {}; save a backup \
+                         and fix the syntax error before retrying",
+                    path.display(),
+                    parse_err,
+                ));
+            }
+        },
+        Err(_) => TomlValue::Table(TomlMap::new()),
+    };
+    if !matches!(root, TomlValue::Table(_)) {
+        root = TomlValue::Table(TomlMap::new());
+    }
+    let table = root.as_table_mut().expect("root must be a table");
+    let subagents = table
+        .entry("subagents".to_string())
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    if let TomlValue::Table(subagents_tbl) = subagents {
+        subagents_tbl.insert("allow_worktree".to_string(), TomlValue::Boolean(value));
+    } else {
+        let mut subagents_tbl = TomlMap::new();
+        subagents_tbl.insert("allow_worktree".to_string(), TomlValue::Boolean(value));
+        *subagents = TomlValue::Table(subagents_tbl);
+    }
+    let toml_str = toml::to_string_pretty(&root)?;
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    #[cfg(unix)]
+    let prior_mode: Option<u32> = match tokio::fs::metadata(&path).await {
+        Ok(m) => {
+            use std::os::unix::fs::PermissionsExt;
+            Some(m.permissions().mode())
+        }
+        Err(_) => None,
+    };
+    #[cfg(not(unix))]
+    let prior_mode: Option<u32> = None;
+    let suffix = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("toml.tmp.{}.{}", std::process::id(), nanos)
+    };
+    let tmp = path.with_extension(suffix);
+    tokio::fs::write(&tmp, toml_str).await?;
+    #[cfg(unix)]
+    if let Some(mode) = prior_mode {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await;
+    }
+    let _ = prior_mode;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
 /// Synchronously load just the management_api_key from the config file.
 ///
 /// This is the Management API key (billing / prepaid), not the inference

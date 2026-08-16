@@ -404,9 +404,33 @@ fn sanitize_relative_path(relative_path: &str) -> Option<String> {
                     return None;
                 }
             }
+            if relative_path.ends_with(".py") && !is_allowed_product_skill_python(relative_path) {
+                return None;
+            }
             Some(relative_path.to_string())
         }
     }
+}
+
+/// Skill-tree `.py` the product may install into `~/.grok/bundled/skills`.
+///
+/// Allowlisted: intercept CLI stubs (`memory.py`, `validate-plan.py`,
+/// `session_reader.py`) and pre-reviewed office/docx/pptx/xlsx/pdf scripts.
+/// Everything else is a restack regression. Agents must not add new helpers.
+fn is_allowed_product_skill_python(relative_path: &str) -> bool {
+    const INTERCEPT_CLI: &[&str] = &[
+        "skills/implement/scripts/memory.py",
+        "skills/execute-plan/scripts/validate-plan.py",
+        "skills/shared/resume-session/session_reader.py",
+    ];
+    if INTERCEPT_CLI.contains(&relative_path) {
+        return true;
+    }
+    let office = relative_path.starts_with("skills/docx/")
+        || relative_path.starts_with("skills/pptx/")
+        || relative_path.starts_with("skills/xlsx/")
+        || relative_path.starts_with("skills/pdf/");
+    office && relative_path.ends_with(".py")
 }
 
 fn map_archive_path_to_cache_path(archive_path: &str) -> Option<String> {
@@ -855,16 +879,107 @@ mod tests {
             Some("skills/implement/scripts/memory.py".to_string())
         );
         assert_eq!(
-            sanitize_relative_path("skills/implement/tests/test_memory.py"),
-            Some("skills/implement/tests/test_memory.py".to_string())
-        );
-        assert_eq!(
             sanitize_relative_path("skills/commit/README.md"),
             Some("skills/commit/README.md".to_string())
         );
         assert_eq!(
             sanitize_relative_path("skills/foo/a/b/c/d.txt"),
             Some("skills/foo/a/b/c/d.txt".to_string())
+        );
+    }
+
+    /// Named contract: this git tree must not grow non-excepted Python under
+    /// project skill roots. Host `~/.agents/skills` is out of scope.
+    #[test]
+    fn product_repo_skill_roots_have_no_non_excepted_python() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut bad = Vec::new();
+        for rel in [".agents/skills", ".grok/skills"] {
+            collect_non_excepted_skill_python(&repo.join(rel), &mut bad);
+        }
+        assert!(
+            bad.is_empty(),
+            "product skill roots must not contain non-excepted Python: {bad:?}"
+        );
+    }
+
+    fn collect_non_excepted_skill_python(root: &Path, bad: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_non_excepted_skill_python(&path, bad);
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == "py") {
+                let rel = path
+                    .strip_prefix(root)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let cache_rel = format!("skills/{rel}");
+                if !is_allowed_product_skill_python(&cache_rel) {
+                    bad.push(path);
+                }
+            }
+        }
+    }
+
+    /// Named contract: product bundle install must not ship non-excepted
+    /// Python under skills. Allowlisted intercept CLI stubs and
+    /// office/docx/pptx/xlsx/pdf scripts may stay. A restack that reintroduces
+    /// helper `.py` files (review JSON builders, invented uuid helpers, the
+    /// Python unit test for `memory.py`) is a failed land.
+    #[test]
+    fn sanitize_rejects_non_excepted_skill_python() {
+        assert_eq!(
+            sanitize_relative_path("skills/review/scripts/build_pending_review.py"),
+            None,
+            "review helper Python is not an allowlisted exception"
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/implement/scripts/uuid_helper.py"),
+            None,
+            "invented implement helpers are not an allowlisted exception"
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/implement/tests/test_memory.py"),
+            None,
+            "Python tests for the intercept stub are not an allowlisted exception"
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/create-skill/scripts/scaffold.py"),
+            None,
+            "create-skill must not ship a Python scaffold"
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/implement/scripts/memory.py"),
+            Some("skills/implement/scripts/memory.py".to_string())
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/execute-plan/scripts/validate-plan.py"),
+            Some("skills/execute-plan/scripts/validate-plan.py".to_string())
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/shared/resume-session/session_reader.py"),
+            Some("skills/shared/resume-session/session_reader.py".to_string())
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/docx/scripts/office/unpack.py"),
+            Some("skills/docx/scripts/office/unpack.py".to_string())
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/pptx/scripts/thumbnail.py"),
+            Some("skills/pptx/scripts/thumbnail.py".to_string())
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/xlsx/scripts/recalc.py"),
+            Some("skills/xlsx/scripts/recalc.py".to_string())
+        );
+        assert_eq!(
+            sanitize_relative_path("skills/pdf/scripts/extract_form_structure.py"),
+            Some("skills/pdf/scripts/extract_form_structure.py".to_string())
         );
     }
 
@@ -960,10 +1075,7 @@ mod tests {
             ("bundle.json", v.as_bytes()),
             ("skills/implement/SKILL.md", b"# Implement skill"),
             ("skills/implement/scripts/memory.py", b"print('memory')\n"),
-            (
-                "skills/implement/tests/test_memory.py",
-                b"def test_memory():\n    pass\n",
-            ),
+            ("skills/implement/references/notes.md", b"# notes\n"),
         ]);
 
         let manifest = extract_bundle_archive(&root, &archive).unwrap();
@@ -978,8 +1090,8 @@ mod tests {
             "print('memory')\n"
         );
         assert_eq!(
-            std::fs::read_to_string(root.join("skills/implement/tests/test_memory.py")).unwrap(),
-            "def test_memory():\n    pass\n"
+            std::fs::read_to_string(root.join("skills/implement/references/notes.md")).unwrap(),
+            "# notes\n"
         );
         assert!(manifest.checksums.contains_key("skills/implement/SKILL.md"));
         assert!(
@@ -990,7 +1102,60 @@ mod tests {
         assert!(
             manifest
                 .checksums
+                .contains_key("skills/implement/references/notes.md")
+        );
+    }
+
+    /// Named contract: a network restack archive that contains junk `.py`
+    /// under skills must not write those files into `~/.grok/bundled/skills`.
+    /// Allowlisted intercept CLI stubs still extract.
+    #[test]
+    fn extract_archive_skips_non_excepted_skill_python() {
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+        let v = bundle_json("v1");
+        let archive = make_test_archive(&[
+            ("bundle.json", v.as_bytes()),
+            ("skills/implement/SKILL.md", b"# Implement skill"),
+            ("skills/implement/scripts/memory.py", b"print('memory')\n"),
+            (
+                "skills/implement/tests/test_memory.py",
+                b"def test_memory():\n    pass\n",
+            ),
+            (
+                "skills/review/scripts/build_pending_review.py",
+                b"print('review')\n",
+            ),
+        ]);
+
+        let manifest = extract_bundle_archive(&root, &archive).unwrap();
+
+        assert!(root.join("skills/implement/SKILL.md").exists());
+        assert!(root.join("skills/implement/scripts/memory.py").exists());
+        assert!(
+            !root.join("skills/implement/tests/test_memory.py").exists(),
+            "non-excepted Python must not be installed into the bundled skill cache"
+        );
+        assert!(
+            !root
+                .join("skills/review/scripts/build_pending_review.py")
+                .exists(),
+            "review helper Python must not be installed into the bundled skill cache"
+        );
+        assert!(
+            !manifest
+                .checksums
                 .contains_key("skills/implement/tests/test_memory.py")
+        );
+        assert!(
+            !manifest
+                .checksums
+                .contains_key("skills/review/scripts/build_pending_review.py")
+        );
+        assert!(
+            manifest
+                .checksums
+                .contains_key("skills/implement/scripts/memory.py")
         );
     }
 
@@ -1437,8 +1602,12 @@ mod tests {
             Some("skills/implement/scripts/memory.py".to_string())
         );
         assert_eq!(
+            map_archive_path_to_cache_path("skills/implement/references/notes.md"),
+            Some("skills/implement/references/notes.md".to_string())
+        );
+        assert_eq!(
             map_archive_path_to_cache_path("skills/implement/tests/test_memory.py"),
-            Some("skills/implement/tests/test_memory.py".to_string())
+            None
         );
     }
 

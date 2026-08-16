@@ -1027,7 +1027,13 @@ pub async fn run(
     .await;
     signal_handler::clear_quit_notify();
     let forced_exit_code = match &result {
-        Ok(run_result) if run_result.quit_for_update || run_result.relaunch.is_some() => None,
+        Ok(run_result)
+            if run_result.quit_for_update
+                || run_result.relaunch.is_some()
+                || run_result.rebuild_relaunch.is_some() =>
+        {
+            None
+        }
         Ok(_) => Some(0),
         Err(_) => Some(1),
     };
@@ -1039,7 +1045,7 @@ pub async fn run(
     let restore_result = restore_terminal(terminal, writer_thread, screen_mode);
     drop(agent_guard);
     xai_tty_utils::global_process_scope().kill_all();
-    if let Err(cleanup_error) = restore_result {
+    if let Err(ref cleanup_error) = restore_result {
         match &result {
             Ok(_) => {
                 tracing::warn!(
@@ -1061,20 +1067,82 @@ pub async fn run(
             if run_result.quit_for_update {
                 return Ok(true);
             }
-            if let Some(relaunch) = run_result.relaunch.as_ref() {
-                if let Err(e) = screen_mode_relaunch::exec_screen_mode_relaunch(
-                    &relaunch.session_id,
-                    relaunch.minimal,
-                ) {
-                    tracing::error!(error = %e, "screen-mode relaunch failed");
+            let restore_ok = restore_result.is_ok();
+            match dispatch::rebuild::post_restore_relaunch_action(
+                restore_ok,
+                run_result.rebuild_relaunch.is_some(),
+                run_result.relaunch.is_some(),
+            ) {
+                dispatch::rebuild::PostRestoreRelaunch::ExecRebuild => {
+                    let relaunch = run_result
+                        .rebuild_relaunch
+                        .as_ref()
+                        .expect("ExecRebuild requires rebuild_relaunch");
+                    if let Err(e) = dispatch::rebuild::exec_rebuild_relaunch(relaunch) {
+                        tracing::error!(error = %e, "rebuild relaunch exec failed");
+                        dispatch::rebuild::print_rebuild_exec_failure_hint(
+                            relaunch,
+                            &e,
+                            &mut io::stderr(),
+                        );
+                    }
+                    return Ok(false);
+                }
+                dispatch::rebuild::PostRestoreRelaunch::BlockedRebuild => {
+                    let relaunch = run_result
+                        .rebuild_relaunch
+                        .as_ref()
+                        .expect("BlockedRebuild requires rebuild_relaunch");
+                    let cleanup_error = restore_result
+                        .as_ref()
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "terminal restore failed".into());
+                    dispatch::rebuild::print_rebuild_restore_blocked_hint(
+                        relaunch,
+                        &cleanup_error,
+                        &mut io::stderr(),
+                    );
+                    return Ok(false);
+                }
+                dispatch::rebuild::PostRestoreRelaunch::ExecScreenMode => {
+                    let relaunch = run_result
+                        .relaunch
+                        .as_ref()
+                        .expect("ExecScreenMode requires relaunch");
+                    if let Err(e) = screen_mode_relaunch::exec_screen_mode_relaunch(
+                        &relaunch.session_id,
+                        relaunch.minimal,
+                    ) {
+                        tracing::error!(error = %e, "screen-mode relaunch failed");
+                        print_relaunch_failure_hint(
+                            &e,
+                            &relaunch.session_id,
+                            relaunch.minimal,
+                            &mut io::stderr(),
+                        );
+                    }
+                    return Ok(false);
+                }
+                dispatch::rebuild::PostRestoreRelaunch::BlockedScreenMode => {
+                    let relaunch = run_result
+                        .relaunch
+                        .as_ref()
+                        .expect("BlockedScreenMode requires relaunch");
+                    let cleanup_error = restore_result
+                        .as_ref()
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "terminal restore failed".into());
                     print_relaunch_failure_hint(
-                        &e,
+                        &cleanup_error,
                         &relaunch.session_id,
                         relaunch.minimal,
                         &mut io::stderr(),
                     );
+                    return Ok(false);
                 }
-                return Ok(false);
+                dispatch::rebuild::PostRestoreRelaunch::None => {}
             }
             if let Some(info) = run_result.exit_info {
                 let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
@@ -1085,13 +1153,14 @@ pub async fn run(
         Err(run_error) => Err(run_error),
     }
 }
-/// Plain-quit "Resume this session with…" lines (after terminal restore).
+/// Plain-quit "Resume this session with:" lines (after terminal restore).
 ///
-/// A summary, when present — title, last prompt, last response, one line
-/// each, width-truncated — precedes the command so a glance at the pane
+/// A summary, when present (title, last prompt, last response, one line
+/// each, width-truncated) precedes the command so a glance at the pane
 /// shows which session lives there and where it left off.
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
 fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
+    use crate::client_identity::resume_session_command;
     use crate::render::line_utils::truncate_str;
     let _ = writeln!(w);
     if let Some(summary) = &info.summary {
@@ -1109,11 +1178,11 @@ fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write)
         let _ = writeln!(w);
     }
     let _ = writeln!(w, "Resume this session with:");
-    if info.minimal {
-        let _ = writeln!(w, "  grok --minimal --resume {}", info.session_id);
-    } else {
-        let _ = writeln!(w, "  grok --resume {}", info.session_id);
-    }
+    let _ = writeln!(
+        w,
+        "  {}",
+        resume_session_command(&info.session_id, info.minimal)
+    );
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).
 fn print_relaunch_failure_hint(
@@ -1694,13 +1763,20 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// BEL/ESC (titles can arrive from grok.com conversation metadata) would
 /// terminate the OSC early and let the remainder inject arbitrary escape
 /// sequences into the terminal.
+/// Empty or all-control titles fall back to the product binary name
+/// ([`crate::client_identity::PRODUCT_CLI_NAME`]); non-empty titles get
+/// `" - {product}"` appended (Surmount: `grok-oss`).
 fn terminal_title_string(title: &str) -> String {
+    use crate::client_identity::PRODUCT_CLI_NAME;
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
-        "grok".into()
+        PRODUCT_CLI_NAME.into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 6).collect();
-        format!("{} - grok", truncated)
+        // Reserve room for `" - "` + product brand within an 80-char budget.
+        let suffix_len = 3 + PRODUCT_CLI_NAME.len();
+        let body_budget = 80usize.saturating_sub(suffix_len);
+        let truncated: String = sanitized.chars().take(body_budget).collect();
+        format!("{truncated} - {PRODUCT_CLI_NAME}")
     }
 }
 fn set_panic_hook(mode: ScreenMode) {
@@ -1777,11 +1853,54 @@ mod tests {
     fn terminal_title_strips_control_characters() {
         assert_eq!(
             terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
-            "evil]52;c;payloadtitle - grok"
+            "evil]52;c;payloadtitle - grok-oss"
         );
-        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok");
-        assert_eq!(terminal_title_string(""), "grok");
-        assert_eq!(terminal_title_string("My chat"), "My chat - grok");
+        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok-oss");
+        assert_eq!(terminal_title_string(""), "grok-oss");
+        assert_eq!(terminal_title_string("My chat"), "My chat - grok-oss");
+    }
+
+    /// Named contract: product always manages the window/tab title (OSC 0)
+    /// on this path. Payloads are always non-empty and product-branded
+    /// (`... - grok-oss` or bare brand). Never raw process argv.
+    #[test]
+    fn window_title_always_manages_non_empty_branded_osc() {
+        assert_eq!(
+            terminal_title_string("session name"),
+            "session name - grok-oss"
+        );
+        assert_eq!(terminal_title_string(""), "grok-oss");
+        let s = terminal_title_string("my chat");
+        assert!(!s.contains("--resume"), "got {s}");
+        assert!(!s.contains("~/"), "got {s}");
+        assert!(s == "grok-oss" || s.ends_with(" - grok-oss"), "got {s}");
+    }
+
+    /// Named contract: every managed OSC 0 write carries a non-empty payload.
+    #[test]
+    fn window_title_osc_payload_never_empty_string() {
+        let seeds = ["", "   ", "my session", "agents busy", "\x07\x1b", "a\0b"];
+        for seed in seeds {
+            let payload = terminal_title_string(seed);
+            assert!(
+                !payload.is_empty(),
+                "empty OSC payload blanks DE switcher; seed={seed:?}"
+            );
+            assert!(
+                payload == "grok-oss" || payload.ends_with(" - grok-oss"),
+                "seed={seed:?} got {payload}"
+            );
+        }
+    }
+
+    /// Named contract: a session name becomes a non-empty branded OSC payload.
+    #[test]
+    fn titles_on_session_name_osc_is_non_empty_branded() {
+        let payload = terminal_title_string("dash session");
+        assert!(!payload.is_empty());
+        assert_eq!(payload, "dash session - grok-oss");
+        let idle = terminal_title_string("");
+        assert_eq!(idle, "grok-oss");
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {
@@ -2275,9 +2394,10 @@ mod tests {
         assert!(!args.no_alt_screen);
     }
     #[test]
-    fn cli_command_name_is_grok() {
+    fn cli_command_name_is_grok_oss() {
         use clap::CommandFactory;
-        assert_eq!(PagerArgs::command().get_name(), "grok");
+        assert_eq!(PagerArgs::command().get_name(), "grok-oss");
+        assert_ne!(PagerArgs::command().get_name(), "grok");
     }
     #[test]
     fn cli_help_output_header() {
@@ -2287,12 +2407,16 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "Grok Build TUI",
+                "Grok OSS TUI",
                 "",
-                "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
+                "Usage: grok-oss [OPTIONS] [PROMPT] [COMMAND]",
                 "",
                 "Arguments:",
             ]
+        );
+        assert!(
+            !help.contains("Usage: grok ["),
+            "help must not tell operators to run upstream grok:\n{help}"
         );
         assert!(help.find("Arguments:\n").unwrap() < help.find("Options:\n").unwrap());
         assert!(help.find("Options:\n").unwrap() < help.find("Commands:\n").unwrap());
@@ -2333,9 +2457,14 @@ mod tests {
     fn print_exit_resume_hint_writes_expected_lines() {
         let mut buf = Vec::new();
         print_exit_resume_hint(&bare_exit_info("sess-abc", false), 80, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok --resume sess-abc\n"
+            out,
+            "\nResume this session with:\n  grok-oss --resume sess-abc\n"
+        );
+        assert!(
+            !out.contains("grok --resume"),
+            "must not tell operators to run upstream grok --resume:\n{out}"
         );
     }
     #[test]
@@ -2344,7 +2473,7 @@ mod tests {
         print_exit_resume_hint(&bare_exit_info("sess-abc", true), 80, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok --minimal --resume sess-abc\n"
+            "\nResume this session with:\n  grok-oss --minimal --resume sess-abc\n"
         );
     }
     #[test]
@@ -2369,7 +2498,7 @@ mod tests {
                 "  Pinned the seed; 200 consecutive green runs.\n",
                 "\n",
                 "Resume this session with:\n",
-                "  grok --resume sess-abc\n",
+                "  grok-oss --resume sess-abc\n",
             )
         );
     }
@@ -2390,7 +2519,11 @@ mod tests {
         assert!(out.contains(&format!("\n{}…\n", "t".repeat(19))));
         assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));
         assert!(out.contains(&format!("\n  {}…\n", "r".repeat(17))));
-        assert!(out.contains("  grok --resume sess-abc\n"));
+        assert!(out.contains("  grok-oss --resume sess-abc\n"));
+        assert!(
+            !out.contains("  grok --resume "),
+            "must not tell operators to run upstream grok --resume:\n{out}"
+        );
     }
     #[test]
     fn print_relaunch_failure_hint_writes_expected_lines() {

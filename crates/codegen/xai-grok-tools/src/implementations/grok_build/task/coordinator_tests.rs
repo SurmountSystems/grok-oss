@@ -1465,6 +1465,76 @@ async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
     harness.actor.abort();
 }
 
+/// Nested spawn is reparented to the root session for limits and stop.
+/// The immediate spawner must still be able to wait on the id spawn returned
+/// while that child is live. A foreign session still cannot see it.
+#[tokio::test]
+async fn spawner_can_wait_on_the_id_it_just_received_while_the_task_is_live() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+
+    let l2 = request("l2", true);
+    let l2_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(l2).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|request| request.id.as_str()),
+        Some("l2")
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l2"));
+
+    // Production binds ChannelBackend::for_session to the child session.
+    let l2_backend = ChannelBackend::for_session(harness.backend.sender(), "l2");
+    let l3 = request("l3", true);
+    let l3_spawn = tokio::spawn({
+        let backend = l2_backend.clone();
+        async move { backend.spawn(l3).await }
+    });
+    let observed = harness.requests.recv().await.expect("l3 spawn observed");
+    assert_eq!(
+        observed.parent_session_id, "parent",
+        "nested spawn is reparented to the root session"
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l3"));
+
+    let snapshot = l2_backend
+        .query("l3", false, None)
+        .await
+        .expect("spawner must find its live child by the spawn id; not_found is wrong");
+    assert!(
+        matches!(
+            snapshot.status,
+            SubagentSnapshotStatus::Running { .. } | SubagentSnapshotStatus::Initializing
+        ),
+        "live child must report running or initializing, got {:?}",
+        snapshot.status
+    );
+
+    let root = ChannelBackend::for_session(harness.backend.sender(), "parent");
+    assert!(
+        root.query("l3", false, None).await.is_some(),
+        "root session must still see the reparented live child"
+    );
+
+    let foreign = ChannelBackend::for_session(harness.backend.sender(), "foreign");
+    assert!(
+        foreign.query("l3", false, None).await.is_none(),
+        "a session that did not spawn the child must not see it"
+    );
+
+    let _ = harness.finish.send(());
+    assert!(l3_spawn.await.unwrap().unwrap().success);
+    assert!(l2_spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
 #[tokio::test]
 async fn completion_buffer_caps_summary_without_mutating_result() {
     let mut harness = harness_with_config(

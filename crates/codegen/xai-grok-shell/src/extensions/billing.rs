@@ -241,11 +241,226 @@ pub fn included_usage_and_period_end(config: &BillingConfig) -> (Option<f64>, Op
     (usage_pct, period_end)
 }
 
+/// Refresh SuperGrok included billing through the flock snapshot hub.
+///
+/// Leader (exclusive flock) runs `fetch_all` once (active + siblings).
+/// Followers read `$GROK_HOME/limits_snapshot.json` and apply remember maps.
+/// Isolated tests set `GROK_DISABLE_SHARED_RATE_LIMIT` so each process fetches.
+pub async fn collect_billing_via_snapshot_hub<F, Fut>(
+    grok_home: &std::path::Path,
+    mode: crate::auth::LimitsSnapshotMode,
+    now_unix_ms: u64,
+    fetch_all: F,
+) -> Result<
+    (
+        crate::auth::LimitsSnapshotRole,
+        crate::auth::LimitsSnapshotDocument,
+    ),
+    String,
+>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = crate::auth::LimitsSnapshotDocument>,
+{
+    crate::auth::coordinate_limits_snapshot(grok_home, mode, now_unix_ms, fetch_all)
+        .await
+        .map_err(|e| format!("limits snapshot hub: {e}"))
+}
+
+fn poll_outcome_class_from_error(err: &str) -> &'static str {
+    use crate::auth::SupergrokBillingPollOutcomeKind;
+    match crate::auth::classify_supergrok_billing_poll_error(err) {
+        SupergrokBillingPollOutcomeKind::AuthFailed => crate::auth::POLL_OUTCOME_AUTH,
+        SupergrokBillingPollOutcomeKind::OtherFailed => {
+            let e = err.to_ascii_lowercase();
+            if e.contains("timeout")
+                || e.contains("connection")
+                || e.contains("dns")
+                || e.contains("network")
+                || e.contains("connect")
+            {
+                crate::auth::POLL_OUTCOME_NETWORK
+            } else {
+                crate::auth::POLL_OUTCOME_OTHER
+            }
+        }
+        SupergrokBillingPollOutcomeKind::Ok | SupergrokBillingPollOutcomeKind::Never => {
+            crate::auth::POLL_OUTCOME_OTHER
+        }
+    }
+}
+
+/// Build a snapshot identity row from a credits config (no tokens).
+pub fn limits_identity_from_credits_config(
+    identity_id: &str,
+    config: &BillingConfig,
+    poll_outcome: &str,
+) -> crate::auth::LimitsSnapshotIdentity {
+    let (usage_pct, period_end) = included_usage_and_period_end(config);
+    crate::auth::LimitsSnapshotIdentity {
+        identity_id: identity_id.trim().to_owned(),
+        usage_pct,
+        period_end,
+        period_type: config
+            .current_period
+            .as_ref()
+            .and_then(|p| p.period_type.clone()),
+        extras_cents: config.prepaid_balance.as_ref().map(|c| c.val),
+        grok_build_usage_pct: grok_build_usage_percent(config),
+        is_unified_billing_user: config.is_unified_billing_user,
+        poll_outcome: poll_outcome.to_owned(),
+    }
+}
+
+/// Reconstruct an ACP billing response from a hub snapshot (follower path).
+pub fn billing_response_from_limits_snapshot(
+    doc: &crate::auth::LimitsSnapshotDocument,
+    identity_id: &str,
+) -> BillingConfigResponse {
+    let wanted = identity_id.trim();
+    let row = doc
+        .identities
+        .iter()
+        .find(|i| i.identity_id == wanted)
+        .or_else(|| doc.identities.first());
+    let Some(row) = row else {
+        return BillingConfigResponse {
+            config: None,
+            on_demand_enabled: None,
+            subscription_tier: None,
+        };
+    };
+    BillingConfigResponse {
+        config: Some(BillingConfig {
+            credit_usage_percent: row.usage_pct,
+            current_period: Some(UsagePeriod {
+                period_type: row.period_type.clone(),
+                start: None,
+                end: row.period_end.clone(),
+            }),
+            monthly_limit: None,
+            used: None,
+            on_demand_cap: None,
+            on_demand_used: None,
+            prepaid_balance: row.extras_cents.map(|val| Cent { val }),
+            is_unified_billing_user: row.is_unified_billing_user,
+            product_usage: row
+                .grok_build_usage_pct
+                .map(|usage_percent| ProductUsageEntry {
+                    product: Some(PRODUCT_GROK_BUILD.into()),
+                    usage_percent: Some(usage_percent),
+                })
+                .into_iter()
+                .collect(),
+            billing_period_start: None,
+            billing_period_end: row.period_end.clone(),
+            history: vec![],
+        }),
+        on_demand_enabled: None,
+        subscription_tier: None,
+    }
+}
+
+/// Leader-only: poll stored SuperGrok JWTs plus optional active token into a snapshot.
+///
+/// Call only from a hub fetch callback. Does not remember (apply does that).
+pub async fn fetch_supergrok_credits_snapshot_document(
+    grok_home: &std::path::Path,
+    proxy_base: &str,
+    active: Option<(&str, &str, &str)>,
+    live_active: Option<&std::sync::Mutex<Option<BillingConfigResponse>>>,
+    live_active_err: Option<&std::sync::Mutex<Option<String>>>,
+) -> crate::auth::LimitsSnapshotDocument {
+    let now = crate::auth::limits_snapshot_hub::now_unix_ms();
+    let mut doc = crate::auth::LimitsSnapshotDocument::empty(now);
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    if let Some((token, user_id, identity_id)) = active {
+        match fetch_credits_config_with_session(proxy_base, token, user_id).await {
+            Ok(resp) => {
+                if let Some(config) = resp.config.as_ref() {
+                    doc.identities.push(limits_identity_from_credits_config(
+                        identity_id,
+                        config,
+                        crate::auth::POLL_OUTCOME_OK,
+                    ));
+                    seen.insert(identity_id.trim().to_owned());
+                }
+                if let Some(slot) = live_active {
+                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(resp);
+                }
+            }
+            Err(e) => {
+                doc.identities.push(crate::auth::LimitsSnapshotIdentity {
+                    identity_id: identity_id.trim().to_owned(),
+                    usage_pct: None,
+                    period_end: None,
+                    period_type: None,
+                    extras_cents: None,
+                    grok_build_usage_pct: None,
+                    is_unified_billing_user: None,
+                    poll_outcome: poll_outcome_class_from_error(&e).to_owned(),
+                });
+                seen.insert(identity_id.trim().to_owned());
+                if let Some(slot) = live_active_err {
+                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+                }
+            }
+        }
+    }
+
+    let targets = crate::auth::load_supergrok_billing_poll_targets(grok_home);
+    for target in targets {
+        if seen.contains(&target.identity_id) {
+            continue;
+        }
+        let (access_token, user_id) =
+            match crate::auth::ensure_fresh_access_token_for_supergrok_billing_poll(
+                grok_home,
+                &target.identity_id,
+            )
+            .await
+            {
+                Some((tok, uid)) => (tok, uid),
+                None => (target.access_token.clone(), target.user_id.clone()),
+            };
+        match fetch_credits_config_with_session(proxy_base, &access_token, &user_id).await {
+            Ok(resp) => {
+                if let Some(config) = resp.config.as_ref() {
+                    doc.identities.push(limits_identity_from_credits_config(
+                        &target.identity_id,
+                        config,
+                        crate::auth::POLL_OUTCOME_OK,
+                    ));
+                }
+            }
+            Err(e) => {
+                doc.identities.push(crate::auth::LimitsSnapshotIdentity {
+                    identity_id: target.identity_id.clone(),
+                    usage_pct: None,
+                    period_end: None,
+                    period_type: None,
+                    extras_cents: None,
+                    grok_build_usage_pct: None,
+                    is_unified_billing_user: None,
+                    poll_outcome: poll_outcome_class_from_error(&e).to_owned(),
+                });
+            }
+        }
+    }
+    doc.management = crate::auth::fetch_management_into_snapshot().await;
+    doc
+}
+
 /// Fetch `GetGrokCreditsConfig` for one SuperGrok session token (included-safe).
 ///
 /// Same CLI proxy path as the active `x.ai/billing` handler:
 /// `GET {proxy}/billing?format=credits`. Does not burn SuperGrok dollar extras
 /// (not an inference call). Used for non-active dual-principal polls.
+///
+/// Multi-principal / multi-process collect must go through
+/// [`collect_billing_via_snapshot_hub`] so only the flock leader calls this
+/// URL. Isolated tests set `GROK_DISABLE_SHARED_RATE_LIMIT`.
 ///
 /// Honors multi-process shared cooldowns ([`crate::shared_http_rate_limit`]) so
 /// concurrent `limits` / TUI polls do not stampede the proxy after a 429.
@@ -490,23 +705,85 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
 
     let proxy_base = agent.cli_chat_proxy_base_url();
     let base = proxy_base.trim_end_matches('/');
+    let grok_home = crate::util::grok_home::grok_home();
+    let (active_identity_id, _) = billing_log_identity_from_auth(&auth);
+    let now = crate::auth::limits_snapshot_hub::now_unix_ms();
+    let live_active: std::sync::Mutex<Option<BillingConfigResponse>> = std::sync::Mutex::new(None);
+    let live_active_err: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let token = auth.key.clone();
+    let user_id = auth.user_id.clone();
+    let identity_for_fetch = active_identity_id.clone();
+    let home_for_fetch = grok_home.clone();
+    let base_for_fetch = base.to_owned();
 
-    // Credits balance / usage (new billing system) via the CLI proxy, which
-    // forwards to the backend `GetGrokCreditsConfig`. Shared with non-active
-    // dual-principal polls via [`fetch_credits_config_with_session`].
-    let mut billing = match fetch_credits_config_with_session(base, &auth.key, &auth.user_id).await
+    // One flock leader fetches SuperGrok credits (active + siblings) and
+    // Management meters. Followers apply the snapshot into remember maps.
+    let (role, doc) = match collect_billing_via_snapshot_hub(
+        &grok_home,
+        crate::auth::LimitsSnapshotMode::HonorTtl,
+        now,
+        || {
+            let live_active = &live_active;
+            let live_active_err = &live_active_err;
+            let token = token.clone();
+            let user_id = user_id.clone();
+            let identity_for_fetch = identity_for_fetch.clone();
+            let home_for_fetch = home_for_fetch.clone();
+            let base_for_fetch = base_for_fetch.clone();
+            async move {
+                fetch_supergrok_credits_snapshot_document(
+                    &home_for_fetch,
+                    &base_for_fetch,
+                    Some((
+                        token.as_str(),
+                        user_id.as_str(),
+                        identity_for_fetch.as_str(),
+                    )),
+                    Some(live_active),
+                    Some(live_active_err),
+                )
+                .await
+            }
+        },
+    )
+    .await
     {
-        Ok(b) => b,
+        Ok(pair) => pair,
         Err(e) => {
-            tracing::error!(error = %e, "billing: upstream request failed");
+            tracing::error!(error = %e, "billing: limits snapshot hub failed");
             xai_grok_telemetry::unified_log::warn(
-                "billing: upstream request failed",
+                "billing: limits snapshot hub failed",
                 None,
                 Some(serde_json::json!({ "error": e })),
             );
             return Err(acp::Error::internal_error().data(e));
         }
     };
+
+    let active_err = live_active_err
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if matches!(
+        role,
+        crate::auth::LimitsSnapshotRole::LeaderFetched
+            | crate::auth::LimitsSnapshotRole::UncoordinatedFetch
+    ) && let Some(e) = active_err
+    {
+        tracing::error!(error = %e, "billing: upstream request failed");
+        xai_grok_telemetry::unified_log::warn(
+            "billing: upstream request failed",
+            None,
+            Some(serde_json::json!({ "error": e })),
+        );
+        return Err(acp::Error::internal_error().data(e));
+    }
+
+    let mut billing = live_active
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .unwrap_or_else(|| billing_response_from_limits_snapshot(&doc, &active_identity_id));
 
     // Enrich with fields from remote settings.
     let rs = agent.cfg.borrow().remote_settings.clone();
@@ -517,53 +794,24 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             .or_else(|| rs.subscription_tier.clone())
     });
 
-    // Feed active principal into process included-billing cache (ranking + dual
-    // /limits). Pager still remembers too; idempotent same values.
-    // Also sync credit-exhaust memo: period reset (used percent drops below 100)
-    // must clear so prefer_live and resolve put SuperGrok back — shell path
-    // used to remember % only and left a stale memo → stuck on console.
-    let grok_home = crate::util::grok_home::grok_home();
+    // Hub apply already filled remember maps. Re-apply exhaust + align so
+    // sibling included SuperGrok period remaining can hop the SessionToken.
     if let Some(ref config) = billing.config {
         let (usage_pct, period_end) = included_usage_and_period_end(config);
         if let Some(pct) = usage_pct {
-            let period_type = config
-                .current_period
-                .as_ref()
-                .and_then(|p| p.period_type.as_deref());
-            crate::auth::remember_active_supergrok_included_billing(
-                &grok_home,
-                pct,
-                period_end.as_deref(),
-                period_type,
-            );
-            // Mark / clear out-of-allowance memo from live free SuperGrok period %.
             let _ = crate::auth::apply_billing_usage_to_session_exhaust_with_period(
                 pct,
                 &grok_home,
                 period_end.as_deref(),
             );
         }
-        // Active principal Extra Usage Credits into process cache (sibling
-        // dual-/limits fill + ranking path share one remember map). Prefer the
-        // credential that just polled when disk active id is missing.
-        let poll_id = crate::auth::active_supergrok_identity_id(&grok_home)
-            .unwrap_or_else(|| billing_log_identity_from_auth(&auth).0);
-        if let Some(prepaid) = config.prepaid_balance.as_ref() {
-            crate::auth::remember_supergrok_dollar_extras(&poll_id, prepaid.val);
-        }
-        if let Some(build_pct) = grok_build_usage_percent(config) {
-            crate::auth::remember_supergrok_build_usage(&poll_id, build_pct);
-        }
-        // Process poll history for flat-poll honesty (C4 / F2).
-        record_included_poll_history_from_config(&poll_id, config);
     }
-    // Dual SuperGrok: also poll non-active principal(s) on the same
-    // included-safe credits endpoint so sibling /limits rows fill honestly.
-    // Best-effort; failures leave sibling as "no data yet".
-    poll_and_remember_non_active_supergrok_included_billing(&grok_home, base).await;
+    if agent.cfg.borrow().grok_com_config.auto_use_included_limits {
+        let _ = agent.auth_manager.align_to_ranked_free_period_primary();
+    }
 
-    // Every prompt / /usage / poll path hits `x.ai/billing`; log the fetched
-    // credits snapshot so support can correlate limit UX with real balances.
+    // Leader or follower: log the credits snapshot so support can correlate
+    // limit UX with real balances. HTTP only runs when this process is leader.
     // Prefer identity from the GrokAuth that just polled (not disk-only scan)
     // so success lines keep identity_id even when auth.json listing lags.
     // Include productUsage / Build % when present so flat top-level % cannot
@@ -668,6 +916,77 @@ mod tests {
             billing_period_end: None,
             history: vec![],
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // SharedSnapshotEnvGuard serializes GROK_HOME.
+    async fn billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http() {
+        use crate::auth::limits_snapshot_hub::SharedSnapshotEnvGuard;
+        use crate::auth::{
+            LimitsSnapshotDocument, LimitsSnapshotIdentity, LimitsSnapshotMode, LimitsSnapshotRole,
+            POLL_OUTCOME_OK, clear_included_billing_cache, included_billing_fields_snapshot,
+            write_limits_snapshot_file,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let tmp = tempfile::TempDir::new().expect("temp home");
+        let home = tmp.path();
+        let _env = SharedSnapshotEnvGuard::acquire(home);
+        clear_included_billing_cache();
+        let now = crate::auth::limits_snapshot_hub::now_unix_ms();
+        let mut fresh = LimitsSnapshotDocument::empty(now);
+        fresh.identities.push(LimitsSnapshotIdentity {
+            identity_id: "sibling-biz".into(),
+            usage_pct: Some(18.0),
+            period_end: Some("2026-09-01T00:00:00Z".into()),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            extras_cents: Some(0),
+            grok_build_usage_pct: None,
+            is_unified_billing_user: Some(false),
+            poll_outcome: POLL_OUTCOME_OK.into(),
+        });
+        write_limits_snapshot_file(home, &fresh).expect("seed fresh snapshot");
+
+        let http = Arc::new(AtomicU32::new(0));
+        let http_cb = Arc::clone(&http);
+        let (role, doc) = collect_billing_via_snapshot_hub(
+            home,
+            LimitsSnapshotMode::HonorTtl,
+            now.saturating_add(500),
+            || {
+                let http_cb = Arc::clone(&http_cb);
+                async move {
+                    http_cb.fetch_add(1, Ordering::SeqCst);
+                    let mut leaked = LimitsSnapshotDocument::empty(now);
+                    leaked.identities.push(LimitsSnapshotIdentity {
+                        identity_id: "sibling-biz".into(),
+                        usage_pct: Some(90.0),
+                        period_end: None,
+                        period_type: None,
+                        extras_cents: None,
+                        grok_build_usage_pct: None,
+                        is_unified_billing_user: None,
+                        poll_outcome: POLL_OUTCOME_OK.into(),
+                    });
+                    leaked
+                }
+            },
+        )
+        .await
+        .expect("hub collect");
+        assert_eq!(role, LimitsSnapshotRole::FollowerRead);
+        assert_eq!(
+            http.load(Ordering::SeqCst),
+            0,
+            "billing handler must not unconditionally HTTP siblings when a fresh snapshot exists"
+        );
+        assert_eq!(doc.identities[0].usage_pct, Some(18.0));
+        let remembered = included_billing_fields_snapshot();
+        assert_eq!(
+            remembered.get("sibling-biz").and_then(|f| f.usage_pct),
+            Some(18.0)
+        );
     }
 
     #[test]

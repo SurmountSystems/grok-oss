@@ -34,6 +34,17 @@ pub(crate) fn selectable_catalog_key_for_persisted(
     resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
 }
 
+/// Keep a persisted session model that is not in this catalog and is not a
+/// `grok-*` catalog slug. Those custom / seeded ids must not remap to the
+/// default Responses model on `session/load`. Vanished `grok-*` ids still
+/// use the same-family path.
+pub(crate) fn keep_unverified_persisted_model(
+    models: &IndexMap<String, ModelEntry>,
+    id: &acp::ModelId,
+) -> bool {
+    resolve_catalog_key(models, id).is_none() && !id.0.starts_with("grok-")
+}
+
 /// A "campaign-only" preferred flip: the default changed and either side's value
 pub(crate) fn is_campaign_only_flip(
     old_preferred: &Option<String>,

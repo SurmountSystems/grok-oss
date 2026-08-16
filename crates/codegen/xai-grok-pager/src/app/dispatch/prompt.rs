@@ -566,6 +566,14 @@ pub(super) fn dispatch_send_prompt_inner(
                     plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
                     show_tips: show_tips_from_app,
                     auto_update: auto_update_from_app,
+                    auto_compact_threshold_percent: app.auto_compact_threshold_percent,
+                    auto_compact_threshold_tokens: app.auto_compact_threshold_tokens,
+                    notifications_session_recap: app.notification_service.config().session_recap,
+                    notifications_session_recap_threshold_secs: app
+                        .notification_service
+                        .config()
+                        .session_recap_threshold_secs,
+                    features_session_recap: app.features_session_recap,
                     vim_mode: crate::appearance::cache::load_vim_mode(),
                     scroll_speed: crate::appearance::cache::load_scroll_speed(),
                     respect_manual_folds: respect_manual_folds_from_app,
@@ -882,6 +890,9 @@ pub(super) fn dispatch_send_prompt_inner(
             if queued_while_running && !parked_sendable_wait {
                 maybe_show_send_now_tip(app);
             }
+            if queued_while_running && let Some(agent) = app.agents.get_mut(&id) {
+                agent.maybe_toast_plan_feedback_queue();
+            }
             return vec![Effect::SendPrompt {
                 agent_id,
                 session_id,
@@ -913,6 +924,9 @@ pub(super) fn dispatch_send_prompt_inner(
             .is_some_and(|agent| agent.held_queue_count() > 0);
         if !inline_hint_shown {
             maybe_show_send_now_tip(app);
+        }
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.maybe_toast_plan_feedback_queue();
         }
     }
 
@@ -1383,14 +1397,10 @@ pub(super) fn handle_prompt_response(
         // so any pending permissions are stale. Send Cancelled to each.
         drain_permission_queue(agent);
 
-        // Dismiss any active plan approval or review — the turn
-        // that produced it has completed, so the state is stale.
-        if let Some(mut pav) = agent.plan_approval_view.take() {
-            pav.send_stale_cancel();
-            agent.plan_next_comment_id = pav.next_comment_id;
-            agent.prompt.restore(pav.stashed_prompt);
-            agent.line_viewer = None;
-        }
+        // Keep live soft-park. When plan mode is still on without a
+        // reverse-request, park the five-CTA panel.
+        agent.dismiss_plan_approval_after_turn_if_stale();
+        agent.surface_idle_plan_review_if_needed();
 
         agent.cancel_turn_view = None;
         agent.cancel_turn_buttons.clear();

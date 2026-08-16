@@ -36,7 +36,8 @@ use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInp
 pub const TASK_TOOL_NAME: &str = "task";
 
 /// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
-pub const MAX_SUBAGENT_DEPTH: u32 = 1;
+/// `2` is L1 → L2 → L3 (a first-level subagent may spawn specialists).
+pub const MAX_SUBAGENT_DEPTH: u32 = 2;
 
 pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
     resources
@@ -805,11 +806,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subagent_cannot_spawn_nested_subagent() {
-        let (backend, _rx) = make_backend();
+    async fn default_max_allows_l2_to_spawn_l3() {
+        let (backend, mut rx) = make_backend();
         let mut resources = Resources::new();
         resources.insert(backend);
-        resources.insert(SubagentDepthCounter(1)); // first-level subagent
+        resources.insert(SubagentDepthCounter(1));
         resources.insert(SessionIdResource("child-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-456".to_string()));
 
@@ -818,7 +819,42 @@ mod tests {
             test_ctx(resources.into_shared()),
             TaskToolInput {
                 description: "nested spawn".into(),
-                prompt: "should be rejected".into(),
+                prompt: "L2 must be able to spawn L3 at the default max".into(),
+                subagent_type: "explore".into(),
+                run_in_background: true,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                cwd: None,
+                model: None,
+                task_id: None,
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "default max must allow depth 1 to spawn L3: {result:?}"
+        );
+        let _ = rx.try_recv();
+    }
+
+    #[tokio::test]
+    async fn explicit_max_one_rejects_l2_spawn() {
+        let (backend, _rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(1));
+        resources.insert(MaxSubagentDepth(1));
+        resources.insert(SessionIdResource("child-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-456".to_string()));
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            TaskToolInput {
+                description: "nested spawn".into(),
+                prompt: "explicit max 1 still rejects L2 spawn".into(),
                 subagent_type: "explore".into(),
                 run_in_background: false,
                 capability_mode: None,
@@ -835,7 +871,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("depth limit exceeded"),
-            "subagent at depth 1 must not spawn: {err}"
+            "explicit max 1 must still reject L2 spawn: {err}"
         );
     }
 

@@ -137,18 +137,29 @@ async fn test_agent_from_config(
     use xai_grok_tools::registry::types::SessionContext;
     let builder = crate::tools::bridge::ToolBridge::get_builder();
     let fs: std::sync::Arc<dyn AsyncFileSystem> = std::sync::Arc::new(LocalFs);
+    // Unique resources_state.json per agent. A shared `/tmp/tool_state.json`
+    // loads leftover `ReportedTaskCompletions` and makes
+    // "must not report" probes (`get().is_none()`) fail even when admit/queue
+    // never marked an id.
+    static TEST_AGENT_STATE_SEQ: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let state_dir = std::env::temp_dir().join(format!(
+        "grok-test-agent-{}-{}",
+        std::process::id(),
+        TEST_AGENT_STATE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let ctx = SessionContext {
         backend,
         fs,
         cwd: std::path::PathBuf::from("/tmp"),
-        session_folder: std::env::temp_dir().join("grok-test"),
+        session_folder: state_dir.clone(),
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::path::PathBuf::from("/tmp/tool_state.json"),
+        state_path: state_dir.join("tool_state.json"),
         memory_backend: None,
         web_search_config: Default::default(),
         web_fetch_config: Default::default(),

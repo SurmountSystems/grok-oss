@@ -306,6 +306,19 @@ async fn handle_new_file_creation(
             )
         })?;
 
+    let formatted =
+        crate::util::rust_edit_verify::after_structured_rust_write(path, &write_content);
+    if formatted != write_content
+        && let Err(e) = fs.write_file(path, formatted.as_bytes()).await
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %e,
+            "ACP filesystem sync of rustfmt output failed; disk already formatted"
+        );
+    }
+    let write_content = formatted;
+
     // Emit FileWritten notification.
     notification_handle.send_file_written(FileWritten {
         tool_call_id: tool_call_id.to_string(),
@@ -473,11 +486,22 @@ async fn handle_replacement(
             )
         })?;
 
+    let formatted = crate::util::rust_edit_verify::after_structured_rust_write(path, &write_text);
+    if formatted != write_text
+        && let Err(e) = fs.write_file(path, formatted.as_bytes()).await
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %e,
+            "ACP filesystem sync of rustfmt output failed; disk already formatted"
+        );
+    }
+
     // Emit FileWritten notification (must match bytes on disk).
     notification_handle.send_file_written(FileWritten {
         tool_call_id: tool_call_id.to_string(),
         absolute_path: path.to_path_buf(),
-        content: write_text,
+        content: formatted,
         previous_content: Some(old_text.clone()),
         is_new_file: false,
     });
@@ -1191,7 +1215,9 @@ mod tests {
             SearchReplaceOutput::EditsApplied(applied) => {
                 assert_eq!(applied.absolute_path, subdir.join("lib.rs"));
                 let content = std::fs::read_to_string(subdir.join("lib.rs")).unwrap();
-                assert_eq!(content, "fn main() { /* edited */ }\n");
+                // `.rs` writes run rustfmt (file-level infer-from-path verify).
+                // edition 2024 keeps the comment on the `{` line and moves `}`.
+                assert_eq!(content, "fn main() { /* edited */\n}\n");
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }

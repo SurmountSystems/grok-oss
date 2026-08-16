@@ -200,8 +200,13 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
+        let status_h = if crate::appearance::cache::load_hide_header() {
+            0
+        } else {
+            1
+        };
         let mut constraints = vec![
-            Constraint::Length(1), // StatusBar
+            Constraint::Length(status_h), // StatusBar
         ];
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
@@ -216,7 +221,12 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(catalog_height));
         }
         if todo_height > 0 {
-            constraints.push(Constraint::Length(pane_gap));
+            // Always reserve one row above the todo body for Clear finished /
+            // focus top chrome (SelectionBox paints at body.y - 1). Compact and
+            // zero outer_vpad collapse `pane_gap` to 0, which previously let
+            // Clear paint into the tasks model/timer/[↗]/[x] row or status chips.
+            let todo_chrome_gap = pane_gap.max(1);
+            constraints.push(Constraint::Length(todo_chrome_gap));
             constraints.push(Constraint::Length(todo_height));
         }
         let status_gap = if top_vpad == 0 { 0u16 } else { 1 };
@@ -684,6 +694,9 @@ pub fn render_hook_hover_popup(
     }
 }
 /// Selection/hover chrome for a side pane (todo / queue / tasks). Focused panes get a dismiss control.
+///
+/// `focus_border` is the left/right rail colour while focused (role chrome).
+/// Hovered-but-unfocused uses `theme.hover_border`.
 pub fn render_todo_chrome(
     buf: &mut Buffer,
     todo_area: Rect,
@@ -692,6 +705,7 @@ pub fn render_todo_chrome(
     hovered: bool,
     close_hovered: bool,
     theme: &Theme,
+    focus_border: ratatui::style::Color,
 ) -> Option<SelectionBox> {
     render_todo_chrome_with_close_label(
         buf,
@@ -702,9 +716,20 @@ pub fn render_todo_chrome(
         close_hovered,
         theme,
         None,
+        None,
+        false,
+        true,
+        focus_border,
     )
 }
 /// Like [`render_todo_chrome`], with optional close label (queue uses `[close]`).
+///
+/// `action_label` is an optional chrome control left of close (todo
+/// clear-finished icon, e.g. `[−]`). Product clear-finished passes it when
+/// the todo board is open and finished rows exist (focused or not).
+/// `action_enabled` controls live hit vs dim paint when a label is supplied.
+/// Close and role-coloured rails stay focus/hover gated; action can paint
+/// without rails via the unfocused action-only path.
 #[allow(clippy::too_many_arguments)]
 pub fn render_todo_chrome_with_close_label(
     buf: &mut Buffer,
@@ -715,25 +740,43 @@ pub fn render_todo_chrome_with_close_label(
     close_hovered: bool,
     theme: &Theme,
     close_label: Option<&'static str>,
+    action_label: Option<&'static str>,
+    action_hovered: bool,
+    action_enabled: bool,
+    focus_border: ratatui::style::Color,
 ) -> Option<SelectionBox> {
     if todo_area.area() == 0 {
         return None;
     }
-    let color = if focused {
-        theme.selection_border
-    } else if hovered {
-        theme.hover_border
-    } else {
-        return None;
-    };
     let layout = HorizontalLayout::new(todo_area, layout_cfg);
-    let mut sel = SelectionBox::new(layout.selection_area(), Style::default().fg(color))
-        .with_closable(focused, close_hovered);
-    if focused && let Some(label) = close_label {
-        sel = sel.with_close_label(Some(label));
+    if focused || hovered {
+        let color = if focused {
+            focus_border
+        } else {
+            theme.hover_border
+        };
+        let mut sel = SelectionBox::new(layout.selection_area(), Style::default().fg(color))
+            .with_closable(focused, close_hovered);
+        if focused && let Some(label) = close_label {
+            sel = sel.with_close_label(Some(label));
+        }
+        sel = sel
+            .with_action_label(action_label, action_hovered)
+            .with_action_enabled(action_enabled);
+        sel.render(buf);
+        return Some(sel);
     }
-    sel.render(buf);
-    Some(sel)
+    if action_label.is_some() {
+        let sel = SelectionBox::new(
+            layout.selection_area(),
+            Style::default().fg(theme.text_secondary),
+        )
+        .with_action_label(action_label, action_hovered)
+        .with_action_enabled(action_enabled);
+        sel.render_action_only(buf);
+        return Some(sel);
+    }
+    None
 }
 /// Render the scrollbar track and thumb.
 ///
@@ -1136,7 +1179,9 @@ pub fn build_hints(
                         hints.push(HintItem::new(key, "expand"));
                     }
                 }
-                if let Some(key) = registry.key_for(ActionId::ExpandAllThinking) {
+                if !crate::appearance::cache::load_always_expand_thinking()
+                    && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
+                {
                     hints.push(HintItem::new(key, thinking_label));
                 }
                 if !user_collapsed {
@@ -1185,6 +1230,7 @@ pub fn build_hints(
                 hints.push(HintItem::paired(l, h, "turn").pinned());
             }
             if !selected_is_user_prompt
+                && !crate::appearance::cache::load_always_expand_thinking()
                 && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
             {
                 hints.push(HintItem::new(key, thinking_label));
@@ -2128,6 +2174,20 @@ mod tests {
     fn layout_with_cta(area: Rect, cta_height: u16) -> AgentViewLayout {
         layout_with_rows(area, 0, cta_height, 0)
     }
+    #[test]
+    fn hide_header_zeroes_status_bar_height() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_hide_header(true);
+            let area = Rect::new(0, 0, 80, 40);
+            let layout = layout_with_rows(area, 0, 0, 0);
+            assert_eq!(
+                layout.status_bar.height, 0,
+                "[ui] hide_header must zero the agent status bar"
+            );
+        })
+        .join()
+        .unwrap();
+    }
     /// Minimal layout with a timeline rail request — hides the cfg-dependent
     /// arity of `compute` like `layout_with_rows` does.
     fn layout_with_rail(
@@ -2401,5 +2461,170 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// Named contract: clear-finished label paints when supplied — focused
+    /// (next to close) and unfocused action-only (open board path).
+    #[test]
+    fn clear_finished_chrome_paints_when_label_supplied() {
+        let _pin = crate::theme::cache::pin_theme();
+        let theme = Theme::current();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        let area = Rect::new(2, 2, 40, 6);
+        let layout_cfg = LayoutConfig::default();
+        let chrome = crate::glyphs::clear_finished_button();
+
+        let unfocused_none = render_todo_chrome_with_close_label(
+            &mut buf,
+            area,
+            &layout_cfg,
+            false,
+            false,
+            false,
+            &theme,
+            None,
+            None,
+            false,
+            true,
+            theme.accent_running,
+        );
+        assert!(
+            unfocused_none.is_none(),
+            "unfocused without clear label must not paint chrome"
+        );
+
+        let mut buf_unf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        let unfocused = render_todo_chrome_with_close_label(
+            &mut buf_unf,
+            area,
+            &layout_cfg,
+            false,
+            false,
+            false,
+            &theme,
+            None,
+            Some(chrome),
+            false,
+            true,
+            theme.accent_running,
+        )
+        .expect("unfocused + clear label must yield action-only chrome");
+        let action_unf = unfocused
+            .action_button_rect()
+            .expect("clear-finished geometry when unfocused with label");
+        assert_eq!(action_unf.width, 3, "icon chrome is compact [−]");
+        let mut painted_unf = String::new();
+        for x in action_unf.x..action_unf.x + action_unf.width {
+            if let Some(cell) = buf_unf.cell((x, action_unf.y)) {
+                painted_unf.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(
+            painted_unf, chrome,
+            "unfocused must paint [−], got {painted_unf:?}"
+        );
+        assert!(!painted_unf.contains('\u{2205}'));
+
+        let mut buf2 = Buffer::empty(Rect::new(0, 0, 50, 12));
+        let focused = render_todo_chrome_with_close_label(
+            &mut buf2,
+            area,
+            &layout_cfg,
+            true,
+            false,
+            false,
+            &theme,
+            None,
+            Some(chrome),
+            false,
+            true,
+            theme.accent_running,
+        )
+        .expect("focused + clear label must yield chrome");
+        let action = focused
+            .action_button_rect()
+            .expect("clear-finished next to close when focused");
+        let close = focused.close_button_rect().expect("close when focused");
+        assert_eq!(action.width, 3, "icon chrome is compact [−]");
+        assert_eq!(action.x + action.width + 1, close.x);
+        let mut painted = String::new();
+        for x in action.x..action.x + action.width {
+            if let Some(cell) = buf2.cell((x, action.y)) {
+                painted.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(painted, chrome, "must paint [−], got {painted:?}");
+        assert!(!painted.contains('\u{2205}'), "empty-set dogfood-rejected");
+        assert!(!painted.contains("Clear finished"));
+    }
+
+    /// Named contract: when a clear label is supplied, action x is stable with
+    /// or without close reserved (focus paints close; geometry must not jump).
+    #[test]
+    fn clear_finished_action_x_stable_with_close_reserved() {
+        let theme = Theme::current();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        let area = Rect::new(2, 2, 40, 6);
+        let layout_cfg = LayoutConfig::default();
+        let label = Some(crate::glyphs::clear_finished_button());
+
+        let focused = render_todo_chrome_with_close_label(
+            &mut buf,
+            area,
+            &layout_cfg,
+            true,
+            false,
+            false,
+            &theme,
+            None,
+            label,
+            false,
+            true,
+            theme.accent_running,
+        )
+        .expect("focused");
+        let action_only = render_todo_chrome_with_close_label(
+            &mut buf,
+            area,
+            &layout_cfg,
+            false,
+            false,
+            false,
+            &theme,
+            None,
+            label,
+            false,
+            true,
+            theme.accent_running,
+        )
+        .expect("action-only path");
+
+        let a = focused.action_button_rect().expect("focused action");
+        let b = action_only.action_button_rect().expect("action-only");
+        assert_eq!(
+            a.x, b.x,
+            "action x must reserve close slot so focus does not jump control"
+        );
+        assert_eq!(a.width, b.width);
+        assert_eq!(a.width, 3);
+    }
+
+    /// Unfocused + no action label → no chrome (unchanged for other panes).
+    #[test]
+    fn unfocused_unhovered_without_action_yields_no_chrome() {
+        let theme = Theme::current();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
+        let area = Rect::new(2, 2, 30, 6);
+        let out = render_todo_chrome(
+            &mut buf,
+            area,
+            &LayoutConfig::default(),
+            false,
+            false,
+            false,
+            &theme,
+            theme.accent_running,
+        );
+        assert!(out.is_none(), "no chrome without focus/hover/action");
     }
 }

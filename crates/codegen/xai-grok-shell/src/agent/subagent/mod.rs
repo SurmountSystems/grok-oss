@@ -10,7 +10,7 @@
 //! - Pending/active/completed, waiters, deadlines, and cancellation are actor-owned.
 //! - Child sessions share the parent's hunk tracker, filesystem, terminal, and env
 //!   so that edits, bash commands, and file reads go through the same backends.
-use crate::agent::config::{resolve_credentials, sampling_config_for_model};
+use crate::agent::config::{resolve_credentials_preferring_with_rank, sampling_config_for_model};
 use crate::agent::models::resolve_catalog_key;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::{
@@ -322,6 +322,21 @@ pub(crate) struct SubagentSpawnContext {
     /// auto-wake synthetic prompt is suppressed so an async completion wake
     /// doesn't derail the parent mid-`/goal`; surfaces 2/3 still drain it.
     pub goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
+    /// `[subagents] allow_worktree`. Empty/false forces isolation none.
+    pub allow_worktree: bool,
+}
+
+/// Empty/false `allow_worktree` forces isolation none. `true` keeps the
+/// resolved isolation (worktree when the role asked for one).
+pub(crate) fn apply_allow_worktree_policy(
+    isolation: xai_tool_types::SubagentIsolationMode,
+    allow_worktree: bool,
+) -> xai_tool_types::SubagentIsolationMode {
+    if allow_worktree {
+        isolation
+    } else {
+        xai_tool_types::SubagentIsolationMode::None
+    }
 }
 impl SubagentSpawnContext {
     /// Would installing a live bearer resolver strip this subagent's only
@@ -965,23 +980,36 @@ fn resolve_model_override_to_config(
     };
     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
     let has_session_key = session_key.is_some();
+    // Same dual-auth rank as main sampling: preferred_method +
+    // auto_use_included_limits so a model override cannot re-introduce
+    // console keys while included SuperGrok period limits still have room.
+    // Prefer live parent `agent_config` (spawn snapshot) over re-loading disk
+    // config. When both are missing, fail closed (auto rank while a SuperGrok
+    // session is live). When parent sampling is already SuperGrok-session-only
+    // (no console keys in the list), do not re-queue console for the override.
+    let disk_flags = crate::config::load_effective_config()
+        .ok()
+        .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
+        .map(|c| {
+            (
+                c.grok_com_config.preferred_method,
+                c.grok_com_config.auto_use_included_limits,
+            )
+        });
     let parent_supergrok_session_only =
         parent_sampling_is_supergrok_session_only(&ctx.sampling_config, session_key);
-    let (preferred, _auto_use) = subagent_override_auth_rank_flags(
+    let (preferred, auto_use_included_limits) = subagent_override_auth_rank_flags(
         ctx.agent_config.as_ref(),
-        None,
+        disk_flags,
         has_session_key,
         parent_supergrok_session_only,
     );
-    // preferred_method=api_key pin: console stays primary. Do not feed the
-    // SuperGrok session JWT into resolve_credentials (that would outrank
-    // XAI_API_KEY even when auto_use_included_limits is on).
-    let session_key = if crate::auth::preferred_is_console_primary(preferred) {
-        None
-    } else {
-        session_key
-    };
-    let mut credentials = resolve_credentials(&entry, session_key);
+    let mut credentials = resolve_credentials_preferring_with_rank(
+        &entry,
+        session_key,
+        preferred,
+        auto_use_included_limits,
+    );
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;
     let mut config = sampling_config_for_model(

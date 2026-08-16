@@ -800,6 +800,10 @@ pub struct AppView {
     /// resolved by the shell and advertised on ACP initialize (`sessionRecap`).
     /// When false, the pager must not request recaps (zero `x.ai/recap` traffic).
     pub session_recap_available: bool,
+    /// User/config mirror for `[features] session_recap` (Settings master kill).
+    /// Seeded at connect from shell config; Settings toggles update this live
+    /// (toast still says restart so ACP re-advertises). Default true.
+    pub features_session_recap: bool,
     /// Stateful prompt widget rendered on the welcome screen (persists input across frames).
     pub welcome_prompt: PromptWidget,
     /// The single slash-command MRU/recency store. Owned here and injected
@@ -1130,6 +1134,13 @@ pub struct AppView {
     pub coding_data_write_seq: u64,
     /// Persisted `[cli].show_tips` mirror. `None` = no override (default `true`).
     pub show_tips: Option<bool>,
+    /// Persisted `[session].auto_compact_threshold_percent` mirror.
+    /// `None` = no override (default 95). Live-applied via PersistSetting then ACP.
+    /// Cleared when [`Self::auto_compact_threshold_tokens`] is set.
+    pub auto_compact_threshold_percent: Option<u8>,
+    /// Persisted `[session].auto_compact_threshold_tokens` mirror.
+    /// When set, absolute-token mode wins over percent. Live-applied.
+    pub auto_compact_threshold_tokens: Option<u64>,
     /// Persisted `[cli].auto_update` mirror. `None` = no override (default `true`).
     pub auto_update: Option<bool>,
     /// Persisted `[toolset.ask_user_question].timeout_enabled` mirror, seeded
@@ -1619,6 +1630,8 @@ impl AppView {
             privacy_banner_opt_in_inflight: false,
             coding_data_write_seq: 0,
             show_tips: None,
+            auto_compact_threshold_percent: None,
+            auto_compact_threshold_tokens: None,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
@@ -1664,6 +1677,7 @@ impl AppView {
             scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
             session_recap_available: false,
+            features_session_recap: true,
             tutorial: None,
             dashboard: None,
             dashboard_return: None,
@@ -3093,6 +3107,7 @@ impl AppView {
                 git_ref: None,
             },
             ActionId::OpenDashboard => Action::OpenDashboard,
+            ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
             ActionId::VoiceToggle => {
                 if !self.current_ui.voice_keybind_enabled.unwrap_or(true) {
                     return InputOutcome::Unchanged;
@@ -4898,6 +4913,7 @@ impl AppView {
                                     voice_listening,
                                     voice_interim: voice_interim.as_deref(),
                                     esc_owned_before_agent,
+                                    global_paused: self.global_work_pause.is_active(),
                                 },
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {
@@ -5016,6 +5032,9 @@ impl AppView {
                                                     link_spans,
                                                     AppRenderParams {
                                                         esc_owned_before_agent,
+                                                        global_paused: self
+                                                            .global_work_pause
+                                                            .is_active(),
                                                         ..Default::default()
                                                     },
                                                 )

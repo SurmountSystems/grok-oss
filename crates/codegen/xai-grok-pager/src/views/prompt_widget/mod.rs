@@ -394,9 +394,13 @@ fn wrap_voice_interim(text: &str, max_w: usize, max_rows: usize) -> Vec<String> 
 
 /// Result of rendering the prompt.
 pub struct PromptRenderResult {
-    /// Cursor position if the prompt wants a visible cursor.
-    /// `None` when unfocused.
+    /// Hardware terminal cursor. `None` when unfocused, or when the
+    /// software box caret is painted so the two do not stack.
     pub cursor_pos: Option<(u16, u16)>,
+    /// Insertion cell while focused (software box or the cell a hardware
+    /// cursor would occupy). Embedders such as the dashboard peek report
+    /// this even when [`Self::cursor_pos`] is `None`.
+    pub caret_cell: Option<(u16, u16)>,
     /// Terminal escape sequences to write after the ratatui cell flush
     /// (e.g. Kitty/iTerm2 inline image rendering for the image preview).
     pub post_flush_escapes: Option<crate::terminal::overlay::Escapes>,
@@ -2861,6 +2865,111 @@ impl PromptWidget {
     }
 }
 
+/// Paint the Human-green composer caret as a slow solid↔empty block blink.
+///
+/// Uses wall-clock millis so any redraw cadence (including Slow ticks) advances
+/// the phase. Colour is `theme.accent_user` (green under DOGE: Human chrome,
+/// same family as user rails / pointer / OSC 12). **Not** agent
+/// `accent_running` magenta. Prior mistake: caret was painted magenta because
+/// "agent chrome"; the composer is the human input surface, so green.
+///
+/// Blank insertion cell (cursor at buffer end, or a truly empty cell) blinks
+/// classic terminal block on/off of the same full-cell rectangle (the
+/// terminal cell itself, not a dimmed solid `█`, not a short mid-cell outline,
+/// not an accent plate with a dark hole):
+///
+/// - **Silhouette** for both phases is the terminal cell. Solid half fills it
+///   with an accent **background plate** (cell bg always paints full height).
+///   Empty half is a true empty cell (canvas bg, no accent plate).
+/// - **Solid (full):** [`cursor_box_filled`] (`█`) with `fg=accent`,
+///   `bg=accent` — solid Human green block filling the cell (DOGE).
+/// - **Empty (off):** [`cursor_box_hollow`] (space) with `fg=canvas`,
+///   `bg=canvas` — pure empty cell, **no** accent plate. **No**
+///   [`Modifier::DIM`]. Rejected: `■`/`fg=canvas bg=accent` hole-punch
+///   (reads as a mini-badge with a void).
+///
+/// On a cell that already has a visible grapheme (typed text including a
+/// mid-buffer space, ghost body, slash inline suffix) the grapheme is kept
+/// and only restyled so the block caret never eats characters under the
+/// cursor and never drops a solid `█` into the draft when arrowing left over
+/// spaces: solid = reverse plate (Human green bg, canvas ink); empty = normal
+/// text ink on canvas, **not** neon `accent_user` on the letter (that reads
+/// as a second green prompt glyph under DOGE). Mid-buffer spaces use this
+/// path (`allow_block_glyph=false`) so arrow navigation never paints a green
+/// control-looking block mid-line.
+fn paint_composer_box_cursor(
+    buf: &mut Buffer,
+    cx: u16,
+    cy: u16,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+    allow_block_glyph: bool,
+) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let filled_phase = crate::glyphs::cursor_box_filled_phase(now_ms);
+    paint_composer_box_cursor_phase(buf, cx, cy, theme, bg, filled_phase, allow_block_glyph);
+}
+
+/// Phase-injected paint path (wall-clock wrapper + unit tests).
+fn paint_composer_box_cursor_phase(
+    buf: &mut Buffer,
+    cx: u16,
+    cy: u16,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+    filled_phase: bool,
+    allow_block_glyph: bool,
+) {
+    // Human input surface → `accent_user` (green under DOGE). Never agent
+    // `accent_running` magenta.
+    let accent = match theme.accent_user {
+        // Reset→Cyan so NO_COLOR still shows a visible caret.
+        ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
+        c => c,
+    };
+
+    let Some(cell) = buf.cell_mut((cx, cy)) else {
+        return;
+    };
+    // Insertion-point block on/off only when the caller allows the solid `█`
+    // glyph (cursor at buffer end) or the cell is truly empty. Typed mid-
+    // buffer spaces keep their grapheme and take reverse-plate styling so
+    // Left-arrow never drops a green block character into the draft.
+    let blank = {
+        let sym = cell.symbol();
+        if allow_block_glyph {
+            sym.is_empty() || sym == " " || sym == "\u{00a0}"
+        } else {
+            sym.is_empty()
+        }
+    };
+    if blank {
+        if filled_phase {
+            // Solid filled rectangle: full-cell Human accent plate (+ block ink).
+            cell.set_symbol(crate::glyphs::cursor_box_filled());
+            cell.set_style(Style::default().fg(accent).bg(accent));
+        } else {
+            // Classic block off: true empty cell (space on canvas). No accent
+            // plate, no hole-punch square. Silhouette is the cell itself.
+            cell.set_symbol(crate::glyphs::cursor_box_hollow());
+            cell.set_style(Style::default().fg(bg).bg(bg));
+        }
+    } else if filled_phase {
+        // Classic block: invert, Human accent plate, canvas-coloured ink
+        // (readable punched-out letter, not neon green letter ink).
+        cell.set_style(Style::default().fg(bg).bg(accent));
+    } else {
+        // Empty half on a grapheme: normal text ink on canvas. Do **not**
+        // recolor the letter to accent_user. A neon green T under the caret
+        // reads as a second green prompt glyph (dogfood 2026-08-10). Blink is
+        // reverse plate (solid) vs normal text (empty). No DIM.
+        cell.set_style(Style::default().fg(theme.text_primary).bg(bg));
+    }
+}
+
 /// Paint slash/skill accent color on a byte range, using textarea screen coords
 /// so highlighting works on any visual row — including the continuation rows
 /// of a token that soft-wraps at the line end.
@@ -2904,6 +3013,7 @@ impl PromptWidget {
         if area.height == 0 || area.width < 4 {
             return PromptRenderResult {
                 cursor_pos: None,
+                caret_cell: None,
                 post_flush_escapes: None,
             };
         }
@@ -2960,9 +3070,11 @@ impl PromptWidget {
         if vpad_top > 0 && style.chrome && style.show_borders {
             // Session title uses chrome-caption (0.6 blend). On DOGE that
             // solid-step stays `text_secondary` (white), same as the focused
-            // rule. Shift the rule to a distinct chrome slot so the title
-            // still reads as caption-on-border, like the bottom info line.
-            let caption_fg = Self::chrome_caption_style(bg, &theme, style.focused).fg;
+            // rule. Keep the frame on `prompt_border` (white on DOGE). Paint
+            // the session name as context chrome (`theme.gray` / yellow) so
+            // the title still contrasts. Do not yellow the whole box.
+            let caption_style = Self::chrome_caption_style(bg, &theme, style.focused);
+            let caption_fg = caption_style.fg;
             let title_will_paint = style
                 .title
                 .as_deref()
@@ -2970,18 +3082,18 @@ impl PromptWidget {
                 .filter(|t| !t.is_empty())
                 .is_some()
                 && area.width.saturating_sub(6) >= 6;
-            let rule_fg = if title_will_paint && caption_fg == Some(border_color) {
+            let title_style = if title_will_paint && caption_fg == Some(border_color) {
                 if theme.gray != border_color {
-                    theme.gray
+                    Style::default().fg(theme.gray).bg(bg)
                 } else if theme.gray_dim != border_color {
-                    theme.gray_dim
+                    Style::default().fg(theme.gray_dim).bg(bg)
                 } else {
-                    border_color
+                    caption_style
                 }
             } else {
-                border_color
+                caption_style
             };
-            let div_style = Style::default().fg(rule_fg).bg(bg);
+            let div_style = Style::default().fg(border_color).bg(bg);
             let div_y = chunks[0].y;
             let left_x = area.x;
             let right_x = area.x + area.width.saturating_sub(1);
@@ -3000,8 +3112,9 @@ impl PromptWidget {
             }
 
             // Session title inlined in the divider (` title `, right-aligned
-            // ending 2 cells before ╮) in the shared chrome-caption style;
-            // the pad spaces blank the adjacent `─`.
+            // ending 2 cells before ╮). Caption style, or context `theme.gray`
+            // when caption would vanish into the white rule. Pad spaces blank
+            // the adjacent `─`.
             if let Some(title) = style
                 .title
                 .as_deref()
@@ -3015,12 +3128,7 @@ impl PromptWidget {
                     let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
                     let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
                     let x = area.x + area.width.saturating_sub(3 + label_w);
-                    buf.set_string(
-                        x,
-                        div_y,
-                        &trunc,
-                        Self::chrome_caption_style(bg, &theme, style.focused),
-                    );
+                    buf.set_string(x, div_y, &trunc, title_style);
                 }
             }
         }
@@ -3056,6 +3164,23 @@ impl PromptWidget {
             height: text_area_rect.height,
         };
         self.textarea_area = ta_area;
+
+        // Full-line dirty wipe before textarea paint. The software box caret
+        // restyles the insertion cell (and on blank cells may replace the
+        // symbol with solid `█`). TextArea only writes cells that still have
+        // draft text, so blanks beyond the draft would keep a previous
+        // frame's caret glyph / Human-green plate if we only set_style.
+        // Wipe every cell in the textarea rect so a moved caret never leaves
+        // residual green or a solid block on letters/spaces it has left.
+        let text_cell_style = Style::default().fg(theme.text_primary).bg(bg);
+        for y in ta_area.y..ta_area.y.saturating_add(ta_area.height) {
+            for x in ta_area.x..ta_area.x.saturating_add(ta_area.width) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.reset();
+                    cell.set_style(text_cell_style);
+                }
+            }
+        }
 
         (&self.textarea).render_ref(ta_area, buf, &mut self.textarea_state);
 
@@ -3301,7 +3426,7 @@ impl PromptWidget {
         // the box is empty and interim is standing in for it.
         let hide_caret_for_empty_interim = self.textarea.text().is_empty()
             && voice.is_some_and(|v| v.interim.is_some_and(|t| !t.trim().is_empty()));
-        let cursor_pos = if style.focused && !hide_caret_for_empty_interim {
+        let layout_cursor_pos = if style.focused && !hide_caret_for_empty_interim {
             self.textarea
                 .cursor_pos_with_state(ta_area, self.textarea_state)
         } else {
@@ -3310,12 +3435,59 @@ impl PromptWidget {
 
         // Ghost suffixes (shell completion / predicted prompt). Voice interim
         // owns the end-of-text cells when shown, so skip both ghosts then.
+        let ghost_owns_insertion = !voice_interim_shown
+            && layout_cursor_pos.is_some()
+            && ((self.textarea.cursor() == self.textarea.text().len()
+                && !slash_active
+                && !slash_has_inline_ghost
+                && self.suggestions.ghost_text().is_some_and(|g| !g.is_empty()))
+                || self
+                    .prompt_suggestion_ghost()
+                    .is_some_and(|g| !g.is_empty()));
+
+        // Software Human-green caret: slow solid↔empty block blink
+        // (`accent_user`, not agent `accent_running` magenta). Terminal hardware
+        // cursor stays hidden so we do not stack two carets; phase is wall-clock
+        // so Slow redraw ticks are enough. Solid `█` only at true buffer end
+        // (insertion blank); mid-draft spaces reverse-plate so Left never
+        // paints a green block glyph into the line.
+        //
+        // A painted ghost suffix already occupies the insertion cell (often a
+        // leading space). Skip the box caret then so the first ghost column
+        // keeps dim italic, matching `paint_composer_box_cursor`'s "keep the
+        // grapheme on ghost body" rule.
+        //
+        // Chromeless, prefix-less, default-surface draws are a raw textarea.
+        // They have no composer box, so they must not drop a blinking `█`
+        // into the columns after the draft (that reads as leftover ghost).
+        let paint_box_caret =
+            style.chrome || style.show_prefix || !matches!(style.bg, PromptBg::Default);
+        let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {
+            if paint_box_caret && !ghost_owns_insertion {
+                let allow_block_glyph = self.textarea.cursor() == self.textarea.text().len();
+                paint_composer_box_cursor(buf, cx, cy, &theme, bg, allow_block_glyph);
+                // Hide the terminal caret. The painted box *is* the cursor.
+                None
+            } else if paint_box_caret {
+                // Ghost owns the insertion cell; still hide hardware so it
+                // does not stack on the dim suffix.
+                None
+            } else {
+                // Raw textarea: park the hardware cursor (no box caret).
+                Some((cx, cy))
+            }
+        } else {
+            None
+        };
+
+        // Paint ghosts *after* the software caret so dim italic suffix cells
+        // are not replaced by a solid `█` / reverse plate.
         if !voice_interim_shown {
             if let Some(ghost) = self.suggestions.ghost_text()
                 && self.textarea.cursor() == self.textarea.text().len()
                 && !slash_active
                 && !slash_has_inline_ghost
-                && let Some((cx, cy)) = cursor_pos
+                && let Some((cx, cy)) = layout_cursor_pos
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3325,7 +3497,7 @@ impl PromptWidget {
             }
 
             if let Some(ghost) = self.prompt_suggestion_ghost()
-                && let Some((cx, cy)) = cursor_pos
+                && let Some((cx, cy)) = layout_cursor_pos
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3359,6 +3531,7 @@ impl PromptWidget {
             let Some(overlay) = overlay_area else {
                 return PromptRenderResult {
                     cursor_pos,
+                    caret_cell: layout_cursor_pos,
                     post_flush_escapes: None,
                 };
             };
@@ -3379,6 +3552,7 @@ impl PromptWidget {
 
         PromptRenderResult {
             cursor_pos,
+            caret_cell: layout_cursor_pos,
             post_flush_escapes,
         }
     }
@@ -3414,12 +3588,19 @@ impl PromptWidget {
 
         // When the prompt is unfocused, fade info-line content further toward
         // bg so it follows the same focused/unfocused dimming as the prompt
-        // border. Model name and flag color use a higher opacity than the
-        // separator so they remain readable.
+        // border. Model name stays on `accent_model` (full when focused; soft
+        // blend of accent when unfocused) so it never reads as gray chrome.
+        // Flags still dim via gray / flag color.
         let sep_opacity = if focused { 1.0 } else { 0.6 };
         let flag_opacity = if focused { 0.75 } else { 0.5 };
 
-        let model_style = Self::chrome_caption_style(bg, theme, focused);
+        let model_fg = if focused {
+            theme.accent_model
+        } else {
+            crate::render::color::blend_color(bg, theme.accent_model, 0.75)
+                .unwrap_or(theme.accent_model)
+        };
+        let model_style = Style::default().fg(model_fg).bg(bg);
         let sep_fg = if focused {
             theme.gray_dim
         } else {

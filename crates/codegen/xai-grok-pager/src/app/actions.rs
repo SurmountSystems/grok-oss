@@ -506,10 +506,64 @@ pub enum Action {
     /// cache mirror and persists to `[ui].prompt_suggestions` via
     /// `Effect::PersistSetting`.
     SetPromptSuggestions(bool),
+    /// Set whether a follow-up `/implement` in the prior prompt is auto-run
+    /// after a successful turn. SHELL-owned: updates the process-wide cache
+    /// mirror and persists to `[ui].auto_run_implement` via
+    /// `Effect::PersistSetting`.
+    SetAutoRunImplement(bool),
+    /// Set economic mode (200K context soft-cap for pricing). SHELL-owned:
+    /// process-wide cache + `[ui].economic_mode`. New sessions seed from this;
+    /// use `/economic-mode` for the current conversation.
+    SetEconomicMode(bool),
+    /// Resume an explicitly canceled turn once when reopening the session.
+    /// SHELL-owned: `[ui].resume_canceled_turn_on_restart` (default on).
+    SetResumeCanceledTurnOnRestart(bool),
+    /// Token Economy bool under `[token_economy]` (field name is the TOML key).
+    SetTokenEconomyBool {
+        field: &'static str,
+        value: bool,
+    },
+    /// Token Economy integer under `[token_economy]` (effort 0-5; lock 0 = unlocked).
+    SetTokenEconomyInt {
+        field: &'static str,
+        value: i64,
+    },
+    /// Set `[ui].cancel_subagents_on_turn_cancel` (`ask` | `always_stop` |
+    /// `always_continue`). Persists via `Effect::PersistSetting`.
+    SetCancelSubagentsOnTurnCancel(String),
+    /// Set auto return-from-away recap (`[ui.notifications] session_recap`).
+    SetNotificationsSessionRecap(bool),
+    /// Set auto recap debounce seconds.
+    SetNotificationsSessionRecapThresholdSecs(i64),
+    /// Set master `[features] session_recap` (restart-required for ACP gate).
+    SetFeaturesSessionRecap(bool),
+    /// Commit auto-compact threshold: percent of window or absolute tokens.
+    /// Persists `[session].auto_compact_threshold_percent` or
+    /// `[session].auto_compact_threshold_tokens` (clearing the sibling field).
+    /// Live-applied to open sessions via ACP after disk persist.
+    SetAutoCompactThreshold(crate::settings::AutoCompactThresholdChoice),
     /// Set `[scrollback.scroll].respect_manual_folds`. PAGER-owned:
     /// live-applied via `AppView::set_appearance` and persisted to
     /// pager.toml via `Effect::PersistSetting`.
     SetRespectManualFolds(bool),
+    /// Hide in-app status / welcome / dashboard headers. SHELL-owned:
+    /// cache + `[ui].hide_header`.
+    SetHideHeader(bool),
+    /// Keep thinking blocks expanded and hide Ctrl+E. SHELL-owned:
+    /// cache + `[ui].always_expand_thinking`.
+    SetAlwaysExpandThinking(bool),
+    /// Plan approval park (`soft` | `modal`). SHELL-owned:
+    /// cache + `[ui].plan_approval_park`.
+    SetPlanApprovalPark(String),
+    /// Opt in to subagent worktrees. SHELL-owned:
+    /// cache + `[subagents].allow_worktree`.
+    SetAllowWorktree(bool),
+    /// ASCII-scrub assistant punctuation. SHELL-owned:
+    /// cache + `[ui].scrub_ascii_punct`.
+    SetScrubAsciiPunct(bool),
+    /// Always-visible bubble copy buttons. PAGER-owned:
+    /// appearance + pager.toml `[scrollback.display].bubble_copy_buttons`.
+    SetBubbleCopyButtons(bool),
     /// Set the canonical for `[ui].default_selected_permission`. Persists
     /// via `Effect::PersistSetting`. Payload is the registry's canonical
     /// string (`default` | `allow_once` | `allow_always` | `reject`).

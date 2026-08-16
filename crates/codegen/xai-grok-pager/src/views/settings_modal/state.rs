@@ -901,7 +901,33 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
+        "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
+        "economic_mode" => Some(Action::SetEconomicMode(new)),
+        "resume_canceled_turn_on_restart" => Some(Action::SetResumeCanceledTurnOnRestart(new)),
+        "token_economy.cap_implement_effort_when_economic" => Some(Action::SetTokenEconomyBool {
+            field: "cap_implement_effort_when_economic",
+            value: new,
+        }),
+        "token_economy.show_period_pacing" => Some(Action::SetTokenEconomyBool {
+            field: "show_period_pacing",
+            value: new,
+        }),
+        "token_economy.local_spend_ledger" => Some(Action::SetTokenEconomyBool {
+            field: "local_spend_ledger",
+            value: new,
+        }),
+        "token_economy.reconcile_management_usage" => Some(Action::SetTokenEconomyBool {
+            field: "reconcile_management_usage",
+            value: new,
+        }),
+        "notifications.session_recap" => Some(Action::SetNotificationsSessionRecap(new)),
+        "features.session_recap" => Some(Action::SetFeaturesSessionRecap(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
+        "hide_header" => Some(Action::SetHideHeader(new)),
+        "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
+        "allow_worktree" => Some(Action::SetAllowWorktree(new)),
+        "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
+        "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
         "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
@@ -928,6 +954,9 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
+        "plan_approval_park" => None,
+        "cancel_subagents_on_turn_cancel" => None,
+        "auto_compact_threshold_percent" => None,
         _ => None,
     }
 }
@@ -982,8 +1011,19 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "scroll_mode" => {
             crate::appearance::ScrollMode::from_canonical(choice).map(Action::SetScrollMode)
         }
+        "plan_approval_park" => Some(Action::SetPlanApprovalPark(choice.to_string())),
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
+        }
+        "cancel_subagents_on_turn_cancel" => match choice {
+            "ask" | "always_stop" | "always_continue" => {
+                Some(Action::SetCancelSubagentsOnTurnCancel(choice.to_string()))
+            }
+            _ => None,
+        },
+        "auto_compact_threshold_percent" => {
+            crate::settings::parse_auto_compact_threshold_canonical(choice)
+                .map(Action::SetAutoCompactThreshold)
         }
         _ => None,
     }
@@ -1031,6 +1071,25 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "max_thoughts_width" => Some(Action::SetMaxThoughtsWidth(value)),
         "scroll_speed" => Some(Action::SetScrollSpeed(value)),
         "scroll_lines" => Some(Action::SetScrollLines(value)),
+        "notifications.session_recap_threshold_secs" => {
+            Some(Action::SetNotificationsSessionRecapThresholdSecs(value))
+        }
+        "token_economy.max_implement_effort" => Some(Action::SetTokenEconomyInt {
+            field: "max_implement_effort",
+            value,
+        }),
+        "token_economy.min_implement_effort" => Some(Action::SetTokenEconomyInt {
+            field: "min_implement_effort",
+            value,
+        }),
+        "token_economy.desired_implement_effort" => Some(Action::SetTokenEconomyInt {
+            field: "desired_implement_effort",
+            value,
+        }),
+        "token_economy.lock_implement_effort" => Some(Action::SetTokenEconomyInt {
+            field: "lock_implement_effort",
+            value,
+        }),
         _ => None,
     }
 }

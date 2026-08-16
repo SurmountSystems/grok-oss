@@ -1,6 +1,8 @@
 # Getting Started
 
-Grok Build is a terminal-based AI coding assistant from SpaceXAI. It runs as a TUI (Terminal User Interface) that understands your codebase, executes shell commands, edits files, searches the web, and manages tasks.
+**Grok OSS** (`grok-oss`) is a terminal-based AI coding assistant. It is Surmount's unofficial open-source fork of SpaceXAI Grok Build. It is not affiliated with or endorsed by xAI. Config and sessions still live under `~/.grok`.
+
+It runs as a TUI (Terminal User Interface) that understands your codebase, executes shell commands, edits files, searches the web, and manages tasks.
 
 You can use it interactively as a full-screen TUI, run it headlessly for scripting and CI/CD, or integrate it into editors via the Agent Client Protocol (ACP).
 
@@ -8,61 +10,66 @@ You can use it interactively as a full-screen TUI, run it headlessly for scripti
 
 ## Installation
 
-Install the latest stable release (macOS, Linux, or Windows via Git Bash):
+### Grok OSS (this product)
+
+From a clone of [SurmountSystems/grok-oss](https://github.com/SurmountSystems/grok-oss):
+
+```bash
+just install
+# or: cargo install --path crates/codegen/xai-grok-pager-bin --locked --force
+grok-oss --version
+```
+
+Arch users: see `packaging/aur/` for AUR PKGBUILDs (`grok-oss-git`). Nix: `nix build .#grok-oss`.
+
+Keep a local checkout current:
+
+```bash
+# In the TUI: rebuild, signal other live product windows, re-exec this session
+/rebuild
+
+# Same install from a shell (no self re-exec)
+grok-oss rebuild
+
+# Freshness only (compare this build to Surmount main; no install)
+grok-oss update --check
+```
+
+Grok OSS does not auto-download SpaceXAI binaries. Prefer `/rebuild` or `just install`. `curl https://x.ai/cli/install.sh` installs upstream **`grok`**, not this fork.
+
+### Official upstream (SpaceXAI)
+
+Installs the official **`grok`** binary, not Grok OSS:
 
 ```bash
 curl -fsSL https://x.ai/cli/install.sh | bash
 ```
 
-Install a specific version:
-
-```bash
-curl -fsSL https://x.ai/cli/install.sh | bash -s 0.1.42
-```
-
-On **Windows (PowerShell)**, use the native PowerShell installer:
+On **Windows (PowerShell)**:
 
 ```powershell
 irm https://x.ai/cli/install.ps1 | iex
-```
-
-Install a specific version:
-
-```powershell
-$env:GROK_VERSION="0.1.42"; irm https://x.ai/cli/install.ps1 | iex
-```
-
-The PowerShell installer automatically adds `%USERPROFILE%\.grok\bin` to your User PATH. Alternatively, install via [Git for Windows](https://gitforwindows.org/) (Git Bash) or MSYS2 using the bash script above. WSL users get the Linux binary automatically.
-
-Verify the installation:
-
-```bash
-grok --version
-```
-
-Update to the latest version at any time:
-
-```bash
-grok update
 ```
 
 ---
 
 ## First Launch
 
-Start Grok by running:
+Start Grok OSS by running:
 
 ```bash
-grok
+grok-oss
 ```
 
-On first launch, Grok opens your browser to authenticate with grok.com. After you sign in, Grok stores your credentials in `~/.grok/auth.json`, where they persist across sessions. Grok refreshes your credentials automatically and prompts you to sign in again when they can no longer be renewed.
+Bare `grok-oss` (no flags) opens the **last session for this working directory** when one exists. That is not the Welcome picker and not continue interrupted turn. First-ever use, or no last session here, stays on Welcome. Headless (`-p`) still starts fresh unless you pass `-c` / `--continue` or `--resume`. See [Session Management](17-sessions.md).
+
+On first launch, Grok OSS opens your browser to authenticate with grok.com. After you sign in, it stores your credentials in `~/.grok/auth.json`, where they persist across sessions. Credentials refresh automatically. The product prompts you to sign in again when they can no longer be renewed.
 
 If you prefer API key authentication (e.g., for CI/CD or environments without a browser), set the `XAI_API_KEY` environment variable instead:
 
 ```bash
 export XAI_API_KEY="xai-..."
-grok
+grok-oss
 ```
 
 See [Authentication](02-authentication.md) for the full set of auth options including OIDC, external auth providers, and device code flow.
@@ -102,7 +109,7 @@ The `@` operator opens a fuzzy file picker. By default it respects `.gitignore` 
 By default, Grok asks for permission before executing shell commands or editing files. You can approve individually or toggle always-approve mode:
 
 - Press `Ctrl+O` to toggle always-approve mode
-- Use the `--yolo` flag at launch: `grok --yolo`
+- Use the `--yolo` flag at launch: `grok-oss --yolo`
 - Type `/always-approve` in the prompt to toggle the mode
 
 ---
@@ -115,7 +122,7 @@ Every conversation is a **session**. Sessions are automatically saved to `~/.gro
 
 - Start a new session: `Ctrl+N` or `/new`
 - Resume a previous session: `/resume` in the TUI, or `--resume <ID>` from the CLI
-- Continue the most recent session: `grok -c`
+- Continue the most recent session from the CLI: `grok-oss -c` (headless or when you want `-c` explicitly). Interactive `grok-oss` already opens last session for this cwd.
 
 ### Scrollback
 
@@ -165,44 +172,45 @@ See [Slash Commands](04-slash-commands.md) for the complete reference.
 
 ```bash
 # Launch the interactive TUI and submit an initial prompt as the first turn
-grok "fix the failing auth test and run it"
+grok-oss "fix the failing auth test and run it"
 
 # Initial prompt in a new git worktree. Use --worktree=<name> (with `=`) so the
-# prompt isn't swallowed as the worktree name — `grok -w "refactor module X"`
+# prompt isn't swallowed as the worktree name. `grok-oss -w "refactor module X"`
 # would treat "refactor module X" as the worktree label, not the prompt.
-grok --worktree=feat "refactor module X"
+grok-oss --worktree=feat "refactor module X"
 
 # Base the worktree on a specific branch (e.g. main) instead of the current HEAD:
-grok -w --ref main "implement feature from main"
+grok-oss -w --ref main "implement feature from main"
 
 
 # Start in a specific project directory
-grok --cwd ~/projects/my-app
+grok-oss --cwd ~/projects/my-app
 
 # Add project-specific rules
-grok --rules "Always use TypeScript. Prefer functional components."
+grok-oss --rules "Always use TypeScript. Prefer functional components."
 
 # Auto-approve all tool executions
-grok --yolo
+grok-oss --yolo
 
 # Use a specific model
-grok -m grok-build
+grok-oss -m grok-build
 
 # Resume a previous session
-grok --resume <session-id>
+grok-oss --resume <session-id>
 
-# Continue the most recent session
-grok -c
+# Continue the most recent session (CLI). Bare interactive grok-oss already
+# opens last session for this cwd.
+grok-oss -c
 
-# Experimental scrollback-native render mode. Sticky: plain `grok` reopens in
-# the mode last chosen via --minimal/--fullscreen (or /minimal//fullscreen).
-grok --minimal
+# Experimental scrollback-native render mode. Sticky: plain `grok-oss` reopens
+# in the mode last chosen via --minimal/--fullscreen (or /minimal /fullscreen).
+grok-oss --minimal
 
 # Back to the standard fullscreen TUI (and make it sticky again)
-grok --fullscreen
+grok-oss --fullscreen
 
 # Headless mode (for scripts)
-grok -p "Explain this codebase"
+grok-oss -p "Explain this codebase"
 ```
 
 ---
@@ -212,7 +220,7 @@ grok -p "Explain this codebase"
 Run Grok non-interactively for scripting, CI/CD, and automation:
 
 ```bash
-grok -p "Your prompt here"
+grok-oss -p "Your prompt here"
 ```
 
 Output formats:
@@ -226,7 +234,7 @@ Output formats:
 Example CI/CD usage:
 
 ```bash
-grok -p "Review changes for bugs" --output-format json --yolo | jq -r '.text'
+grok-oss -p "Review changes for bugs" --output-format json --yolo | jq -r '.text'
 ```
 
 ---

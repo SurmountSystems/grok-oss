@@ -1071,6 +1071,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         agent_id,
         session_id,
     );
+    let resume_canceled_turn = app.current_ui.resume_canceled_turn_on_restart_enabled();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
             return vec![];
@@ -1140,6 +1141,11 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         if let Some(directive) = agent.pending_first_prompt.take() {
             agent.session.enqueue_prompt_front(directive);
         }
+        // Continue interrupted turn: marker on disk + setting on (default).
+        // Not `/resume` session pick. Skip when this load is adopting a live turn.
+        if !adopting {
+            apply_canceled_turn_resume_on_load(agent, resume_canceled_turn);
+        }
         let drain = maybe_drain_queue(agent);
         let page_flip_entry = drain.page_flip_entry;
         effects.extend(drain.effects);
@@ -1201,6 +1207,37 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     }
     vec![]
 }
+
+/// Re-queue a canceled mid-turn once when the session marker is present and
+/// continue-interrupted-turn is on. Toast is **Continuing interrupted turn**,
+/// not `/resume` session pick. One-shot: the marker is cleared after enqueue.
+fn apply_canceled_turn_resume_on_load(agent: &mut AgentView, resume_enabled: bool) {
+    use xai_grok_shell::session::canceled_turn_resume::{
+        auto_resume_toast, clear_canceled_turn_resume, load_canceled_turn_resume,
+        should_auto_resume_on_restart,
+    };
+    if !resume_enabled {
+        return;
+    }
+    let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+        return;
+    };
+    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+    let Ok(Some(marker)) = load_canceled_turn_resume(&cwd, &sid) else {
+        return;
+    };
+    if !should_auto_resume_on_restart(true, Some(&marker)) {
+        return;
+    }
+    let text = marker.prompt_text;
+    if text.trim().is_empty() {
+        return;
+    }
+    agent.show_toast(auto_resume_toast());
+    agent.session.enqueue_prompt_front(text);
+    let _ = clear_canceled_turn_resume(&cwd, &sid);
+}
+
 pub(in crate::app::dispatch) fn handle_session_load_failed(
     app: &mut AppView,
     agent_id: AgentId,

@@ -1309,6 +1309,55 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "always_expand_thinking" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("always_expand_thinking", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_always_expand_thinking(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "hide_header" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("hide_header", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_hide_header(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "scrub_ascii_punct" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("scrub_ascii_punct", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_scrub_ascii_punct(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "plan_approval_park" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("plan_approval_park", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_plan_approval_park(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "allow_worktree" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("allow_worktree", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_allow_worktree(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "bubble_copy_buttons" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("bubble_copy_buttons", "Bool", &value));
+            };
+            tokio::task::spawn_blocking(move || crate::appearance::persist_bubble_copy_buttons(b))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
         "group_tool_verbs" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("group_tool_verbs", "Bool", &value));
@@ -1330,6 +1379,161 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("prompt_suggestions", "Bool", &value));
             };
             xai_grok_shell::util::config::set_prompt_suggestions(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "notifications.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("notifications.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "notifications.session_recap_threshold_secs",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap_threshold_secs(i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "features.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("features.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_features_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "auto_run_implement" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("auto_run_implement", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_auto_run_implement(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "economic_mode" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("economic_mode", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_economic_mode(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "resume_canceled_turn_on_restart" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "resume_canceled_turn_on_restart",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_resume_canceled_turn_on_restart(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.cap_implement_effort_when_economic" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.cap_implement_effort_when_economic",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool(
+                "cap_implement_effort_when_economic",
+                b,
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+        "token_economy.show_period_pacing" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.show_period_pacing",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("show_period_pacing", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.local_spend_ledger" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.local_spend_ledger",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("local_spend_ledger", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.reconcile_management_usage" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.reconcile_management_usage",
+                    "Bool",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_bool("reconcile_management_usage", b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.max_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.max_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("max_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.min_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.min_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("min_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.desired_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.desired_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("desired_implement_effort", i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "token_economy.lock_implement_effort" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "token_economy.lock_implement_effort",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_token_economy_int("lock_implement_effort", i)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1424,6 +1628,31 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "auto_compact_threshold_percent" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch(
+                    "auto_compact_threshold_percent",
+                    "Enum",
+                    &value,
+                ));
+            };
+            use crate::settings::AutoCompactThresholdChoice;
+            match crate::settings::parse_auto_compact_threshold_canonical(s) {
+                Some(AutoCompactThresholdChoice::Percent(pct)) => {
+                    xai_grok_shell::util::config::set_auto_compact_threshold_percent(pct)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                Some(AutoCompactThresholdChoice::Tokens(t)) => {
+                    xai_grok_shell::util::config::set_auto_compact_threshold_tokens(t)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                None => Err(format!(
+                    "persist_setting(auto_compact_threshold_percent) invalid choice: {s:?}"
+                )),
+            }
+        }
         "fork_secondary_model" => {
             let SettingValue::String(s) = value else {
                 return Err(kind_mismatch("fork_secondary_model", "String", &value));
@@ -1433,6 +1662,51 @@ pub(crate) async fn persist_setting(
                 .map_err(|e| e.to_string())
         }
         other => Err(format!("unknown setting key for persist: `{other}`")),
+    }
+}
+/// Live-apply auto-compact threshold to open sessions after disk persist.
+///
+/// Reuses [`crate::settings::parse_auto_compact_threshold_canonical`]. A process
+/// env override can temporarily sit under this live-apply until the next spawn
+/// or model-switch re-resolve.
+pub(crate) async fn notify_auto_compact_threshold_changed(
+    tx: &AcpAgentTx,
+    value: &crate::settings::SettingValue,
+) {
+    let crate::settings::SettingValue::Enum(canonical) = value else {
+        tracing::warn!(
+            "auto_compact_threshold live-apply skipped: expected Enum value, got {value:?}"
+        );
+        return;
+    };
+    let Some(choice) = crate::settings::parse_auto_compact_threshold_canonical(canonical) else {
+        tracing::warn!(
+            canonical,
+            "auto_compact_threshold live-apply skipped: unparseable canonical"
+        );
+        return;
+    };
+    use crate::settings::AutoCompactThresholdChoice;
+    let params = match choice {
+        AutoCompactThresholdChoice::Percent(pct) => serde_json::json!({
+            "auto_compact_threshold_percent": pct,
+            "auto_compact_threshold_tokens": serde_json::Value::Null,
+        }),
+        AutoCompactThresholdChoice::Tokens(t) => serde_json::json!({
+            // Display % recomputed per session from model_context_window.
+            "auto_compact_threshold_percent":
+                xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+            "auto_compact_threshold_tokens": t,
+        }),
+    };
+    let notification = acp::ExtNotification::new(
+        "x.ai/auto_compact_threshold_changed",
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize auto_compact_threshold_changed params")
+            .into(),
+    );
+    if let Err(e) = acp_send(notification, tx).await {
+        tracing::warn!("Failed to send auto_compact_threshold_changed notification: {e}");
     }
 }
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.

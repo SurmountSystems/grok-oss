@@ -444,17 +444,20 @@ impl SubagentsConfig {
         self.discover_roles_in_dir(&roles_dir);
     }
     pub const ENV_MAX_DEPTH: &'static str = "GROK_SUBAGENTS_MAX_DEPTH";
-    pub const DEFAULT_MAX_DEPTH: u32 = 1;
+    /// Default is two so L2 can spawn L3. Floor stays 1 (L1-only spawn).
+    pub const DEFAULT_MAX_DEPTH: u32 = 2;
     /// Clamp to `1..=u32::MAX`. Values below 1 (including 0 / negatives) warn
-    /// and become 1 so nesting is never accidentally disabled.
+    /// and become 1 so nesting is never accidentally disabled. The floor is
+    /// literal 1, not [`Self::DEFAULT_MAX_DEPTH`], so an explicit
+    /// `max_depth = 1` is not forced up to the L1→L2→L3 default.
     pub(crate) fn clamp_max_depth(raw: i64, source: &str) -> u32 {
-        if raw < i64::from(Self::DEFAULT_MAX_DEPTH) {
+        if raw < 1 {
             tracing::warn!(
                 source,
                 value = raw,
                 "subagents max_depth < 1; clamping to 1"
             );
-            Self::DEFAULT_MAX_DEPTH
+            1
         } else if raw > i64::from(u32::MAX) {
             tracing::warn!(
                 source,

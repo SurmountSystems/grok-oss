@@ -111,6 +111,11 @@ impl xai_tool_runtime::Tool for WriteTool {
 
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        let _write_lock =
+            crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+                &path, &ctx, &resources, "write",
+            )
+            .await?;
 
         // ── Check if file exists and read old content ────────────
         let (existed, old_content) = match fs.read_file(&path).await {
@@ -141,17 +146,29 @@ impl xai_tool_runtime::Tool for WriteTool {
                 )
             })?;
 
+        let written =
+            crate::util::rust_edit_verify::after_structured_rust_write(&path, &input.content);
+        if written != input.content
+            && let Err(e) = fs.write_file(&path, written.as_bytes()).await
+        {
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "ACP filesystem sync of rustfmt output failed; disk already formatted"
+            );
+        }
+
         // ── Send FileWritten notification ────────────────────────
         notification_handle.send_file_written(FileWritten {
             tool_call_id,
             absolute_path: path.clone(),
-            content: input.content.clone(),
+            content: written.clone(),
             previous_content: old_content.clone(),
             is_new_file: !existed,
         });
 
         let old_string = old_content.unwrap_or_default();
-        let new_string = input.content;
+        let new_string = written;
 
         let edits = vec![SearchReplaceEditDetail {
             old_string: old_string.clone(),

@@ -745,7 +745,10 @@ pub fn render_peek_panel(
                         };
                         let res = reply.draw(buf, slot, overlay_area, &widget_style, None, None);
                         if selected && panel.focused {
-                            caret = res.cursor_pos;
+                            // Software box caret hides the terminal cursor
+                            // (`draw` returns `cursor_pos: None`). Peek still
+                            // reports the insertion cell for mouse routing.
+                            caret = res.caret_cell.or(res.cursor_pos);
                         }
                     }
                 }
@@ -890,16 +893,22 @@ pub fn render_peek_panel(
             color: theme.accent_running,
         },
     );
-    let caret = reply
-        .draw(
-            buf,
-            text_area,
-            overlay_area,
-            &widget_style,
-            None,
-            voice_overlay,
-        )
-        .cursor_pos;
+    let reply_draw = reply.draw(
+        buf,
+        text_area,
+        overlay_area,
+        &widget_style,
+        None,
+        voice_overlay,
+    );
+    // Software box caret hides the terminal cursor (`cursor_pos` is None).
+    // Peek still reports the insertion cell so a focused reply has a caret
+    // for mouse routing.
+    let caret = if panel.focused {
+        reply_draw.caret_cell.or(reply_draw.cursor_pos)
+    } else {
+        None
+    };
     // The clickable reply rect spans all reply rows and includes the
     // `❯ ` prefix column for a fatter mouse target; the widget maps
     // clicks left of its text area to position 0.

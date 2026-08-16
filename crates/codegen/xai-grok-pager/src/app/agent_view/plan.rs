@@ -10,12 +10,10 @@ use crate::app::app_view::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
 use crate::views::plan_approval_view::{
-    PlanApprovalFocus, PlanApprovalViewState, PlanComment, PlanReviewSource,
+    PlanApprovalFocus, PlanApprovalViewState, PlanComment, PlanPromptIntent, PlanReviewSource,
 };
 use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
-#[cfg(test)]
-use crossterm::event::KeyModifiers;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Telemetry for every way a plan review resolves ("build", "abandon",
 /// "revise").
 fn log_plan_submit(action: &str) {
@@ -25,7 +23,32 @@ fn log_plan_submit(action: &str) {
         action: action.to_string(),
     });
 }
+
+/// `A` and `?` arrive as the shifted char, with or without the SHIFT modifier
+/// depending on the terminal.
+fn matches_shifted_char(key: &KeyEvent, ch: char) -> bool {
+    key.code == KeyCode::Char(ch)
+        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+}
 impl AgentView {
+    /// When plan approval is open, attach a PNG path to the plan composer so
+    /// approve / revise / clarify can drain it on the same multimodal path as
+    /// a pasted screenshot. Returns true if a chip was inserted.
+    ///
+    /// No-op when plan approval is not open, the path is not a readable image,
+    /// or the prompt rejects the insert (policy / capacity). Callers still
+    /// keep the on-disk PNG and toast the path.
+    pub(crate) fn try_attach_tui_screenshot_for_plan(&mut self, path: &std::path::Path) -> bool {
+        if self.plan_approval_view.is_none() {
+            return false;
+        }
+        let Some(img) = crate::prompt_images::try_read_image_from_path(&path.to_string_lossy())
+        else {
+            return false;
+        };
+        self.prompt.insert_image(img).is_ok()
+    }
+
     /// Resolve the absolute path to the plan file for this session.
     fn plan_file_path(&self) -> Option<std::path::PathBuf> {
         let session_id = self.session.session_id.as_ref()?;
@@ -77,6 +100,64 @@ impl AgentView {
     ) -> bool {
         (self.plan_mode_active || appearance.show_plan_chip) && self.plan_preview_available()
     }
+
+    /// Effective plan-mode flag for UI decisions (approval park, idle CTAs).
+    ///
+    /// Matches Shift+Tab / mode dispatch: `plan_mode_pending` wins while a
+    /// mode change is in flight. `Some(false)` means leaving plan mode (after
+    /// Approve / Quit) even if `plan_mode_active` is still true until the shell
+    /// `CurrentModeUpdate` lands, so we must not re-park decision CTAs.
+    pub(crate) fn effectively_in_plan_mode(&self) -> bool {
+        self.plan_mode_pending.unwrap_or(self.plan_mode_active)
+    }
+
+    /// Whether idle / draw / `/view-plan` may arm decision CTAs (Approve strip,
+    /// "Plan ready", local idle park).
+    ///
+    /// Requires effective plan mode, no sticky post-decision suppress, and no
+    /// open Revise/Clarify rewrite. After Approve/Quit, `plan_decision_resolved`
+    /// stays true until a new `exit_plan_mode` present so `CurrentModeUpdate`
+    /// clearing pending while shell plan mode is still on cannot re-park the
+    /// same plan. After Revise/Clarify, `plan_feedback_in_flight` blocks idle
+    /// "Plan written" chrome until the agent re-presents.
+    pub(crate) fn should_arm_plan_decision_chrome(&self) -> bool {
+        self.effectively_in_plan_mode()
+            && !self.plan_decision_resolved
+            && self.plan_feedback_in_flight.is_none()
+    }
+
+    /// New `exit_plan_mode` present re-arms decision CTAs after Approve/Quit
+    /// and after Revise/Clarify in-flight.
+    pub(crate) fn clear_plan_loop_flags_for_new_present(&mut self) {
+        self.plan_decision_resolved = false;
+        self.plan_feedback_in_flight = None;
+    }
+
+    /// Status chrome for the plan decision loop.
+    ///
+    /// Parked present uses `plan_approval_status_label`. Idle Revise/Clarify
+    /// wait uses `PLAN_REVISING_STATUS` / `PLAN_WAITING_UPDATED_STATUS`.
+    /// Busy rewrite yields `None` so real turn status can paint. Never returns
+    /// `PLAN_IDLE_REVIEW_STATUS` while feedback is in flight.
+    pub(crate) fn plan_loop_status_label(&self) -> Option<&'static str> {
+        use crate::views::plan_approval_view::{
+            PLAN_IDLE_REVIEW_STATUS, plan_approval_status_label,
+        };
+        if let Some(ref pav) = self.plan_approval_view {
+            return Some(plan_approval_status_label(pav.has_plan));
+        }
+        if let Some(in_flight) = self.plan_feedback_in_flight {
+            if self.session.state.is_turn_running() {
+                return None;
+            }
+            return Some(in_flight.status_label());
+        }
+        if self.should_arm_plan_decision_chrome() && self.plan_preview_available() {
+            return Some(PLAN_IDLE_REVIEW_STATUS);
+        }
+        None
+    }
+
     fn inline_plan_content(&self) -> Option<&str> {
         self.plan_approval_view
             .as_ref()
@@ -123,6 +204,8 @@ impl AgentView {
     /// preview so the user always sees a decision surface (a/s/q) instead of
     /// a dead "Waiting on plan approval" line with a no-op Tab:plan.
     pub fn show_plan_preview(&mut self) {
+        // Park before open so feedback_active / footer CTAs arm on this open.
+        self.park_local_idle_plan_decision_if_needed();
         let body = self.plan_body_for_preview();
         let approval_empty = self
             .plan_approval_view
@@ -150,11 +233,17 @@ impl AgentView {
         } else {
             "plan.md".to_string()
         });
-        viewer.fullscreen = true;
+        viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
         {
             let plan = viewer.plan_mut();
             plan.show_action_buttons = self.plan_approval_view.is_none();
-            plan.feedback_active = self.plan_approval_view.is_some();
+            // Live park owns approval CTAs. After Approve/Quit or while
+            // Revising/Clarify is in flight, `/view-plan` stays view-only.
+            if self.plan_approval_view.is_none() && !self.should_arm_plan_decision_chrome() {
+                plan.feedback_active = false;
+            } else {
+                plan.feedback_active = self.plan_approval_view.is_some();
+            }
         }
         if let Some(ref pav) = self.plan_approval_view
             && !pav.comments.is_empty()
@@ -165,6 +254,74 @@ impl AgentView {
         }
         self.line_viewer = Some(viewer);
     }
+
+    /// Park a local idle decision when plan mode is on with a plan body and
+    /// there is no `plan_approval_view` yet. Does not invent a second park:
+    /// no-op when already parked, when chrome must not arm, or when no body.
+    pub(crate) fn park_local_idle_plan_decision_if_needed(&mut self) {
+        if self.plan_approval_view.is_some() {
+            return;
+        }
+        if !self.should_arm_plan_decision_chrome() {
+            return;
+        }
+        if !self.plan_preview_available() {
+            return;
+        }
+        let body = self.plan_body_for_preview();
+        self.plan_approval_view =
+            Some(crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(body));
+    }
+
+    /// Drop leftover plan-approval chrome after a turn ends, but never
+    /// stale-cancel a live reverse-request or a local idle park that still
+    /// needs a decision.
+    pub(crate) fn dismiss_plan_approval_after_turn_if_stale(&mut self) {
+        let still_awaiting = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| p.response_tx.is_some());
+        if still_awaiting {
+            return;
+        }
+        let keep_local_idle = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| p.is_local_idle_decision && self.should_arm_plan_decision_chrome());
+        if keep_local_idle {
+            return;
+        }
+        if let Some(mut pav) = self.plan_approval_view.take() {
+            let _ = pav.send_stale_cancel();
+            self.plan_next_comment_id = pav.next_comment_id;
+            self.prompt.restore(pav.stashed_prompt);
+            self.line_viewer = None;
+        }
+    }
+
+    /// After a turn ends in plan mode with no live reverse-request chrome,
+    /// park the five-CTA panel. Live soft-park is a no-op here.
+    pub(crate) fn surface_idle_plan_review_if_needed(&mut self) {
+        if self.plan_approval_view.is_some() {
+            return;
+        }
+        if !self.should_arm_plan_decision_chrome() {
+            return;
+        }
+        if !self.plan_preview_available() {
+            return;
+        }
+        self.park_local_idle_plan_decision_if_needed();
+        self.show_plan_preview_if_available();
+    }
+
+    /// Honest toast when a follow-up is queued while Revise/Clarify is in flight.
+    pub(crate) fn maybe_toast_plan_feedback_queue(&mut self) {
+        if self.plan_feedback_in_flight.is_some() {
+            self.show_toast(crate::views::plan_approval_view::PLAN_FEEDBACK_QUEUE_TOAST);
+        }
+    }
+
     /// Test fixture: drive the agent into casual-commenting state
     /// (line viewer open in plan-preview mode + `casual_commenting_range`
     /// armed) so the `Event::Paste` plan-feedback arm at ~1539 is
@@ -187,11 +344,13 @@ impl AgentView {
         self.casual_commenting_range = Some(0..1);
     }
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
+        let notes = self.prompt.text().to_string();
+        let notes = notes.trim();
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
-        let review_comments = if !pav.comments.is_empty() {
-            let formatted = pav.format_feedback(None);
+        let review_comments = if !pav.comments.is_empty() || !notes.is_empty() {
+            let formatted = pav.format_feedback((!notes.is_empty()).then_some(notes));
             if formatted.trim().is_empty() {
                 None
             } else {
@@ -233,6 +392,9 @@ impl AgentView {
     /// stays in plan mode there, so the indicator must stay on.
     fn close_plan_review(&mut self, pav: PlanApprovalViewState, action: &'static str) {
         self.plan_mode_pending = Some(false);
+        // Sticky until a new `exit_plan_mode` present: survives pending clear
+        // when the shell still reports plan mode.
+        self.plan_decision_resolved = true;
         self.latest_inline_plan_content = None;
         self.plan_next_comment_id = pav.next_comment_id;
         self.prompt.restore(pav.stashed_prompt);
@@ -251,13 +413,84 @@ impl AgentView {
         } else {
             Some(formatted)
         };
-        if crate::app::minimal_mode_active()
-            && let Some(msg) = to_send.as_deref().map(str::trim).filter(|s| !s.is_empty())
-        {
-            self.scrollback
-                .push_block(crate::scrollback::RenderBlock::user_prompt(msg.to_string()));
+        // Always push a human line so the transcript is not barren after
+        // decisive Revise (empty freeform still shows intent).
+        let human_line = to_send
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                crate::views::plan_approval_view::PLAN_REVISE_HUMAN_LINE.to_string()
+            });
+        self.scrollback
+            .push_block(crate::scrollback::RenderBlock::user_prompt(human_line));
+        let sent_acp = pav.send_cancelled(to_send.clone());
+        if pav.source == PlanReviewSource::Inline {
+            self.latest_inline_plan_content = None;
         }
-        pav.send_cancelled(to_send);
+        self.plan_next_comment_id = pav.next_comment_id;
+        // Drop pre-panel stash: do not restore ghost draft into the busy
+        // composer (Enter:queue with leftover text while rewrite runs).
+        let _ = pav.stashed_prompt;
+        self.prompt.set_text("");
+        self.line_viewer = None;
+        self.prompt.textarea.cancel_undo_group();
+        // Block idle "Plan written" / local idle re-park until re-present.
+        self.plan_feedback_in_flight =
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Revising);
+        tracing::info!(
+            status = self.plan_loop_status_label().unwrap_or(""),
+            "plan revise in flight"
+        );
+        self.show_toast("Plan revision sent.");
+        log_plan_submit("revise");
+
+        // Local idle or dead reverse-request channel: Interject so the agent
+        // rewrites plan.md and calls exit_plan_mode again (never barren wait).
+        if pav.is_local_idle_decision || !sent_acp {
+            let feedback_block = to_send
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("\n\nOperator feedback:\n{s}"))
+                .unwrap_or_default();
+            let text = format!(
+                "The user requested plan revisions. Update plan.md from the conversation\
+                 {feedback_block}\n\nWhen the plan is ready, call exit_plan_mode again to \
+                 present it for approval."
+            );
+            return InputOutcome::Action(Action::Interject {
+                text,
+                images: vec![],
+            });
+        }
+        InputOutcome::Changed
+    }
+
+    /// Decisive Revise: send ACP `"cancelled"` immediately (empty notes ok).
+    pub(crate) fn request_plan_revise(&mut self) -> InputOutcome {
+        let text = self.prompt.text().to_string();
+        let freeform = if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        };
+        self.send_plan_feedback(freeform)
+    }
+
+    /// Submit a clarifying question (ACP `"questions"`) — not a plan rewrite.
+    pub(crate) fn send_plan_questions(&mut self, feedback: Option<String>) -> InputOutcome {
+        let Some(mut pav) = self.plan_approval_view.take() else {
+            return InputOutcome::Changed;
+        };
+        let formatted = pav.format_feedback(feedback.as_deref());
+        let to_send = if formatted.trim().is_empty() {
+            feedback
+        } else {
+            Some(formatted)
+        };
+        pav.send_questions(to_send);
         if pav.source == PlanReviewSource::Inline {
             self.latest_inline_plan_content = None;
         }
@@ -265,16 +498,43 @@ impl AgentView {
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
-        self.show_toast("Plan revision sent.");
-        log_plan_submit("revise");
+        // Block idle decision chrome until re-present (same loop as revise).
+        self.plan_feedback_in_flight =
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Clarifying);
+        tracing::info!(
+            status = self.plan_loop_status_label().unwrap_or(""),
+            "plan clarify in flight"
+        );
+        self.show_toast("Clarify sent — answers without rewriting the plan.");
+        log_plan_submit("question");
         InputOutcome::Changed
     }
+
+    /// Focus the plan-approval prompt with a specific freeform intent.
+    pub(crate) fn focus_plan_prompt(&mut self, intent: PlanPromptIntent) -> InputOutcome {
+        if let Some(ref mut pav) = self.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = intent;
+        }
+        InputOutcome::Changed
+    }
+
     pub(crate) fn reopen_plan_approval(&mut self) {
+        let keep_draft = !self.prompt.text().trim().is_empty();
+        let live_cursor = self.prompt.cursor();
         if let Some(ref mut pav) = self.plan_approval_view {
             pav.stashed_prompt = self.prompt.stash();
-            pav.focus = PlanApprovalFocus::Preview;
+            pav.focus = if keep_draft {
+                PlanApprovalFocus::Prompt
+            } else {
+                PlanApprovalFocus::Preview
+            };
         }
-        self.prompt.set_text("");
+        if keep_draft {
+            self.prompt.set_cursor(live_cursor);
+        } else {
+            self.prompt.set_text("");
+        }
         self.show_plan_preview_if_available();
         if self.line_viewer.is_none() {
             if let Some(ref mut pav) = self.plan_approval_view {
@@ -353,17 +613,33 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        if !is_commenting
-            && key.code == KeyCode::Char('a')
-            && key.modifiers.is_empty()
-            && self.prompt.text().trim().is_empty()
-            && !self.prompt.file_search_visible()
-            && self
-                .plan_approval_view
-                .as_ref()
-                .is_some_and(|pav| pav.comments.is_empty())
+        // Empty-composer Ctrl+C quits plan approval (same outcome as panel `q`
+        // / mouse Quit). Non-empty falls through so the composer can clear
+        // the draft first; a second empty Ctrl+C then abandons.
+        if crate::key!('c', CONTROL).matches(key)
+            && self.prompt.text().is_empty()
+            && self.prompt.images.is_empty()
         {
-            return self.approve_plan();
+            return self.abandon_plan();
+        }
+        let empty_prompt =
+            self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
+        if !is_commenting && empty_prompt {
+            if key.code == KeyCode::Char('a') && key.modifiers.is_empty() {
+                return self.approve_plan();
+            }
+            if matches_shifted_char(key, 'A') {
+                return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
+            }
+            if key.code == KeyCode::Char('s') && key.modifiers.is_empty() {
+                return self.request_plan_revise();
+            }
+            if matches_shifted_char(key, '?') {
+                return self.focus_plan_prompt(PlanPromptIntent::Questions);
+            }
+            if key.code == KeyCode::Char('q') && key.modifiers.is_empty() {
+                return self.abandon_plan();
+            }
         }
         match self.prompt.route_enter(key) {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
@@ -380,9 +656,25 @@ impl AgentView {
                     .plan_approval_view
                     .as_ref()
                     .is_some_and(|pav| pav.focus == PlanApprovalFocus::Prompt);
+                let intent = self
+                    .plan_approval_view
+                    .as_ref()
+                    .map(|pav| pav.prompt_intent)
+                    .unwrap_or_default();
                 if prompt_focused {
                     if text.trim().is_empty() && !has_comments {
-                        self.show_toast("Type revision notes, or press a to approve.");
+                        let toast = match intent {
+                            PlanPromptIntent::Questions => {
+                                "Type a question, or press a to approve."
+                            }
+                            PlanPromptIntent::ApproveNotes => {
+                                "Type notes to send with approve, or press a to approve."
+                            }
+                            PlanPromptIntent::Revise => {
+                                "Type revision notes, or press a to approve."
+                            }
+                        };
+                        self.show_toast(toast);
                         return InputOutcome::Changed;
                     }
                     let freeform = if text.trim().is_empty() {
@@ -390,7 +682,11 @@ impl AgentView {
                     } else {
                         Some(text)
                     };
-                    return self.send_plan_feedback(freeform);
+                    return match intent {
+                        PlanPromptIntent::Questions => self.send_plan_questions(freeform),
+                        PlanPromptIntent::ApproveNotes => self.approve_plan(),
+                        PlanPromptIntent::Revise => self.send_plan_feedback(freeform),
+                    };
                 }
                 return InputOutcome::Changed;
             }
@@ -890,7 +1186,7 @@ mod plan_chip_tests {
 mod plan_approval_enter_tests {
     use super::test_fixtures::make_agent;
     use super::*;
-    use crate::views::plan_approval_view::PlanApprovalFocus;
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
     fn enter_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
     }
@@ -964,6 +1260,50 @@ mod plan_approval_enter_tests {
         );
     }
     #[test]
+    fn s_on_empty_prompt_decisively_revises() {
+        let mut agent = agent_with_revise_prompt();
+        let s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&s);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "`s` revise is decisive: must send cancelled and close the park"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent.")
+        );
+    }
+
+    #[test]
+    fn question_mark_on_empty_prompt_focuses_clarify() {
+        let mut agent = agent_with_revise_prompt();
+        let q = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&q);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("clarify stays parked for typed input");
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Questions);
+    }
+
+    #[test]
+    fn capital_a_on_empty_prompt_focuses_notes() {
+        let mut agent = agent_with_revise_prompt();
+        let a = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        let outcome = agent.handle_plan_feedback_key(&a);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("notes stays parked for typed input");
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::ApproveNotes);
+    }
+
+    #[test]
     fn a_on_empty_revise_prompt_approves() {
         let mut agent = agent_with_revise_prompt();
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
@@ -976,7 +1316,7 @@ mod plan_approval_enter_tests {
         );
     }
     #[test]
-    fn a_with_pending_comments_does_not_approve() {
+    fn a_with_pending_comments_still_approves() {
         let mut agent = agent_with_revise_prompt();
         if let Some(ref mut pav) = agent.plan_approval_view {
             pav.comments.push(PlanComment {
@@ -986,12 +1326,15 @@ mod plan_approval_enter_tests {
             });
         }
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        let _ = agent.handle_plan_feedback_key(&a);
+        let outcome = agent.handle_plan_feedback_key(&a);
         assert!(
-            agent.plan_approval_view.is_some(),
-            "`a` with pending comments must type, not approve"
+            agent.plan_approval_view.is_none(),
+            "`a` still Approves when comments exist (notes ride with the approval)"
         );
-        assert_eq!(agent.prompt.text(), "a");
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::Interject { .. }) | InputOutcome::Changed
+        ));
     }
 }
 /// The mode indicator renders
@@ -1073,5 +1416,736 @@ mod plan_approval_optimistic_mode_tests {
         agent.abandon_plan();
         assert_eq!(agent.plan_mode_pending, Some(false));
         assert!(!effective_plan_mode(&agent));
+    }
+}
+
+/// Empty-composer Ctrl+C abandons plan approval (same as panel `q` / Quit).
+/// Restored from origin/main catalog names after the 1.0.3 restack dropped them.
+#[cfg(test)]
+mod plan_approval_ctrl_c_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    use crate::views::prompt_widget::StashedPrompt;
+    use agent_client_protocol as acp;
+    use crossterm::event::Event;
+    use xai_acp_lib::AcpResult;
+
+    fn install_plan_approval(
+        agent: &mut AgentView,
+        plan_content: &str,
+    ) -> tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-ctrl-c-abandon".into(),
+            plan_content: Some(plan_content.into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            StashedPrompt {
+                text: "original chat".into(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        ));
+        rx
+    }
+
+    fn assert_abandoned(mut rx: tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>>) {
+        let resp = rx.try_recv().expect("abandon response");
+        let raw = resp.expect("Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(
+            parsed["outcome"], "abandoned",
+            "must abandon like panel q / Quit; got {parsed:?}"
+        );
+    }
+
+    /// Named contract: empty-composer Ctrl+C while plan approval is soft-parked
+    /// must quit plan approval (same outcome as soft-park mouse Quit / panel `q`),
+    /// not swallow as a no-op.
+    #[test]
+    fn soft_park_empty_ctrl_c_abandons_plan_approval() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Soft park Ctrl+C quit");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.stashed_prompt = StashedPrompt::default();
+        }
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+        agent.set_active_pane(ActivePane::Prompt, true);
+        assert!(agent.line_viewer.is_none(), "soft-park has no side panel");
+
+        let registry = ActionRegistry::defaults();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let outcome = agent.handle_input(&Event::Key(ctrl_c), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "empty Ctrl+C must be consumed as plan quit; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "empty Ctrl+C must clear plan_approval_view (not soft-park no-op)"
+        );
+        assert!(
+            agent.plan_decision_resolved,
+            "Ctrl+C abandon must set the same sticky as q / Quit"
+        );
+        assert_abandoned(rx);
+    }
+
+    /// Empty Ctrl+C with plan side panel open (Preview) must also abandon —
+    /// the panel path used to return Changed and swallow the chord.
+    #[test]
+    fn plan_panel_empty_ctrl_c_abandons_plan_approval() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Panel Ctrl+C quit");
+        agent.show_plan_preview();
+        assert!(agent.line_viewer.is_some(), "panel requires line_viewer");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+
+        let registry = ActionRegistry::defaults();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let outcome = agent.handle_input(&Event::Key(ctrl_c), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "panel empty Ctrl+C must abandon; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "panel empty Ctrl+C must clear plan approval"
+        );
+        assert!(
+            agent.plan_decision_resolved,
+            "panel Ctrl+C abandon must set the same sticky as q / Quit"
+        );
+        assert_abandoned(rx);
+    }
+
+    /// Non-empty plan composer: Ctrl+C clears draft first (composer contract),
+    /// keeps plan approval open. Second empty Ctrl+C then abandons.
+    #[test]
+    fn plan_approval_ctrl_c_clears_draft_then_second_abandons() {
+        let mut agent = make_agent();
+        let rx = install_plan_approval(&mut agent, "# Ctrl+C clear then quit");
+        {
+            let pav = agent.plan_approval_view.as_mut().unwrap();
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.stashed_prompt = StashedPrompt::default();
+        }
+        agent.prompt.set_text("draft notes");
+        agent.set_active_pane(ActivePane::Prompt, true);
+        assert!(agent.line_viewer.is_none());
+
+        let registry = ActionRegistry::defaults();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let first = agent.handle_input(&Event::Key(ctrl_c), &registry);
+        assert!(
+            matches!(first, InputOutcome::Changed),
+            "first Ctrl+C with draft must clear; got {first:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "first Ctrl+C must not abandon while draft existed"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "first Ctrl+C must not mark plan decided while draft existed"
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "first Ctrl+C must clear composer draft"
+        );
+
+        let second = agent.handle_input(&Event::Key(ctrl_c), &registry);
+        assert!(
+            matches!(second, InputOutcome::Changed | InputOutcome::Action(_)),
+            "second empty Ctrl+C must abandon; got {second:?}"
+        );
+        assert!(agent.plan_approval_view.is_none());
+        assert!(
+            agent.plan_decision_resolved,
+            "second Ctrl+C abandon must set the same sticky as q / Quit"
+        );
+        assert_abandoned(rx);
+    }
+}
+
+/// `/screenshot` / F9 capture auto-attaches the PNG into the plan composer
+/// when plan approval is open (same multimodal drain as paste).
+#[cfg(test)]
+mod tui_screenshot_plan_attach_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+
+    fn install_plan_approval(agent: &mut AgentView, plan_content: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-screenshot".into(),
+            plan_content: Some(plan_content.into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            agent.prompt.stash(),
+            tx,
+        ));
+    }
+
+    fn test_png_bytes() -> Vec<u8> {
+        let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+            image::ImageBuffer::from_pixel(8, 8, image::Rgba([128, 64, 32, 255]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode png");
+        buf
+    }
+
+    /// Soft follow-up: `/screenshot` / F9 capture auto-attaches the PNG into
+    /// the plan composer when plan approval is open (same multimodal drain as paste).
+    #[test]
+    fn try_attach_tui_screenshot_for_plan_when_approval_open() {
+        let mut agent = make_agent();
+        install_plan_approval(&mut agent, "# Plan\n\nAttach shot");
+        assert!(agent.plan_approval_view.is_some());
+        assert!(
+            agent.prompt.images.is_empty(),
+            "composer starts without images"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png_path = dir.path().join("tui-shot.png");
+        std::fs::write(&png_path, test_png_bytes()).unwrap();
+
+        assert!(
+            agent.try_attach_tui_screenshot_for_plan(&png_path),
+            "must attach readable PNG while plan approval is open"
+        );
+        assert_eq!(
+            agent.prompt.images.len(),
+            1,
+            "plan composer must hold one image chip for multimodal drain"
+        );
+        let attached = &agent.prompt.images[0];
+        assert_eq!(attached.mime_type, "image/png");
+        assert_eq!(
+            attached.source_path.as_deref(),
+            Some(png_path.as_path()),
+            "source_path must be the capture path for preview/display"
+        );
+    }
+
+    /// Named contract: outside plan approval, capture path is toast-only —
+    /// do not invent a chip on the normal chat composer.
+    #[test]
+    fn try_attach_tui_screenshot_skips_when_no_plan_approval() {
+        let mut agent = make_agent();
+        assert!(agent.plan_approval_view.is_none());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png_path = dir.path().join("tui-shot.png");
+        std::fs::write(&png_path, test_png_bytes()).unwrap();
+
+        assert!(
+            !agent.try_attach_tui_screenshot_for_plan(&png_path),
+            "must not attach when plan approval is closed"
+        );
+        assert!(
+            agent.prompt.images.is_empty(),
+            "chat composer must stay clean"
+        );
+    }
+}
+
+/// Sticky Approve/Quit + Revising/Clarify in-flight chrome after the 1.0.3
+/// restack dropped `plan_decision_resolved` and `plan_feedback_in_flight`.
+///
+/// These tests name the FORK contract. They do not draw `render.rs` (pause
+/// chips still own that file). Status copy is the helper
+/// [`AgentView::plan_loop_status_label`], not the live turn-row paint.
+#[cfg(test)]
+mod plan_sticky_and_revising_chrome_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    use crate::app::agent::AgentState;
+    use crate::views::plan_approval_view::{
+        PLAN_IDLE_REVIEW_STATUS, PLAN_REVISING_STATUS, PLAN_WAITING_UPDATED_STATUS,
+        PlanFeedbackInFlight,
+    };
+
+    fn park_exit_plan_mode(agent: &mut AgentView, body: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-1".into(),
+            plan_content: Some(body.into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            agent.prompt.stash(),
+            tx,
+        ));
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.show_plan_preview_if_available();
+    }
+
+    fn present_new_exit_plan_mode(agent: &mut AgentView, body: &str) {
+        // Same sticky clear as `handle_exit_plan_mode` on a new present.
+        agent.clear_plan_loop_flags_for_new_present();
+        park_exit_plan_mode(agent, body);
+    }
+
+    /// After Approve, `CurrentModeUpdate` clearing pending while plan mode
+    /// is still active must not re-arm decision chrome.
+    #[test]
+    fn after_approve_current_mode_clears_pending_still_in_plan_does_not_repark() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(
+            &mut agent,
+            "# Workflow\n\nWorkflow status: approved and implemented (2026-08-10)\n",
+        );
+        agent.latest_inline_plan_content =
+            Some("# Workflow\n\nWorkflow status: approved and implemented (2026-08-10)\n".into());
+
+        let _ = agent.approve_plan();
+        assert!(agent.plan_approval_view.is_none());
+        assert!(
+            agent.plan_decision_resolved,
+            "approve must set plan_decision_resolved"
+        );
+
+        // detect_plan_mode_change: every CurrentModeUpdate clears pending.
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+        assert!(
+            agent.effectively_in_plan_mode(),
+            "fixture: effective plan mode is true after pending clear"
+        );
+        assert!(
+            !agent.should_arm_plan_decision_chrome(),
+            "sticky resolved must block Approve / Plan ready re-arm"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_IDLE_REVIEW_STATUS),
+            "must not re-arm idle Plan written. Click or /view-plan after Approve"
+        );
+    }
+
+    /// Disk body that already says the plan was implemented must not re-arm.
+    #[test]
+    fn approved_and_implemented_plan_body_does_not_repark_after_decide() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(
+            &mut agent,
+            "# Done\n\nWorkflow status: approved and implemented\n",
+        );
+        agent.latest_inline_plan_content =
+            Some("# Done\n\nWorkflow status: approved and implemented\n".into());
+
+        let _ = agent.approve_plan();
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+
+        assert!(agent.plan_decision_resolved);
+        assert!(
+            !agent.should_arm_plan_decision_chrome(),
+            "approved-and-implemented body must not re-arm decision CTAs"
+        );
+    }
+
+    /// Quit is also a decisive close: same sticky, no re-arm.
+    #[test]
+    fn after_quit_current_mode_clears_pending_still_in_plan_does_not_repark() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Quit me\n\nBody\n");
+
+        let _ = agent.abandon_plan();
+        assert!(agent.plan_approval_view.is_none());
+        assert!(
+            agent.plan_decision_resolved,
+            "quit must set plan_decision_resolved"
+        );
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+        assert!(!agent.should_arm_plan_decision_chrome());
+    }
+
+    /// New `exit_plan_mode` present after a prior decide re-arms CTAs.
+    #[test]
+    fn new_exit_plan_mode_present_clears_decision_resolved_and_parks() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# First plan\n\nDo A\n");
+        let _ = agent.approve_plan();
+        assert!(agent.plan_decision_resolved);
+        assert!(agent.plan_approval_view.is_none());
+
+        present_new_exit_plan_mode(&mut agent, "# Second plan\n\nDo B\n");
+
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "new present must park decision chrome"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "new present must clear sticky resolved"
+        );
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "new present must clear revise/clarify in-flight"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "new present panel must arm approval CTAs"
+        );
+    }
+
+    /// After Revise unparks, do not re-arm idle decision chrome while
+    /// `plan_feedback_in_flight` is set.
+    #[test]
+    fn after_revise_in_flight_surface_does_not_rearm_idle_ctas() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Revise then re-present\n\nBody\n");
+        agent.latest_inline_plan_content = Some("# Revise then re-present\n\nBody\n".into());
+
+        let _ = agent.request_plan_revise();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "revise must clear park immediately"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Revising),
+            "revise must mark feedback in flight"
+        );
+        assert!(agent.effectively_in_plan_mode());
+        assert!(
+            !agent.should_arm_plan_decision_chrome(),
+            "in-flight revise must block decision chrome arming"
+        );
+    }
+
+    /// After Revise, idle status is Revising plan..., not Plan written.
+    #[test]
+    fn after_revise_status_is_revising_not_plan_written_click_or_view() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Rewrite in flight\n\nBody\n");
+
+        let _ = agent.request_plan_revise();
+        assert!(agent.plan_approval_view.is_none());
+        assert!(agent.plan_feedback_in_flight.is_some());
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_REVISING_STATUS),
+            "idle revise-in-flight status must be Revising plan..."
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_IDLE_REVIEW_STATUS)
+        );
+
+        // Busy rewrite: helper yields no exclusive Revising chip so real
+        // turn status can paint.
+        agent.session.state = AgentState::TurnRunning;
+        assert!(
+            agent.plan_loop_status_label().is_none()
+                || agent.plan_loop_status_label() != Some(PLAN_IDLE_REVIEW_STATUS),
+            "busy rewrite must not paint idle Plan written. Click or /view-plan"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_IDLE_REVIEW_STATUS)
+        );
+    }
+
+    /// After Clarify unparks, status is Waiting for updated plan...
+    #[test]
+    fn after_clarify_status_is_waiting_for_updated_plan() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Clarify me\n\nBody\n");
+
+        let _ = agent.send_plan_questions(Some("what about auth?".into()));
+        assert!(agent.plan_approval_view.is_none());
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Clarifying)
+        );
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_WAITING_UPDATED_STATUS)
+        );
+        assert!(!agent.should_arm_plan_decision_chrome());
+    }
+
+    /// New `exit_plan_mode` present after revise-in-flight clears the flag
+    /// and arms CTAs once.
+    #[test]
+    fn re_present_after_revise_clears_in_flight_and_arms_ctas() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# First draft\n\nA\n");
+        let _ = agent.request_plan_revise();
+        assert!(agent.plan_feedback_in_flight.is_some());
+        assert!(agent.plan_approval_view.is_none());
+
+        present_new_exit_plan_mode(&mut agent, "# Second draft\n\nB\n");
+
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "new present must clear revise-in-flight"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "new present must park decision chrome"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "new present panel must arm approval CTAs"
+        );
+        assert!(
+            agent.should_arm_plan_decision_chrome() || agent.plan_approval_view.is_some(),
+            "after re-present, decision surface is live"
+        );
+    }
+
+    /// `exit_plan_mode` present is review chrome, not an operator Approve.
+    #[test]
+    fn exit_plan_mode_present_is_not_operator_approve() {
+        let mut agent = make_agent();
+        present_new_exit_plan_mode(&mut agent, "# Review me\n\nBody\n");
+        assert!(
+            !agent.plan_decision_resolved,
+            "a present must not set plan_decision_resolved"
+        );
+        assert!(agent.plan_approval_view.is_some());
+        assert!(
+            agent.should_arm_plan_decision_chrome() || agent.plan_approval_view.is_some(),
+            "present arms review CTAs; it does not approve"
+        );
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+            "parked present status must be Plan ready. Side panel open"
+        );
+    }
+}
+
+/// Leftover plan-approval chrome after the 1.0.3 restack restore wave:
+/// idle local-decision park, honest queue toast, Revise barren-wait landing.
+#[cfg(test)]
+mod plan_remaining_chrome_leftover_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    use crate::views::plan_approval_view::{
+        PLAN_FEEDBACK_QUEUE_TOAST, PLAN_REVISE_HUMAN_LINE, PlanFeedbackInFlight,
+    };
+    use crate::views::prompt_widget::StashedPrompt;
+
+    fn park_exit_plan_mode(agent: &mut AgentView, body: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-leftover".into(),
+            plan_content: Some(body.into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            StashedPrompt {
+                text: "original chat".into(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        ));
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.show_plan_preview_if_available();
+    }
+
+    /// When plan mode is idle with a plan body and chrome is not already
+    /// armed, park the five-CTA panel (local idle decision, no ACP waiter).
+    #[test]
+    fn park_local_idle_plan_decision_parks_five_cta_panel() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.plan_feedback_in_flight = None;
+        agent.latest_inline_plan_content = Some("# Idle park\n\nBody\n".into());
+        assert!(agent.plan_approval_view.is_none());
+
+        agent.park_local_idle_plan_decision_if_needed();
+
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("idle local-decision park must set plan_approval_view");
+        assert!(
+            pav.is_local_idle_decision,
+            "idle park must be a local decision (no reverse-request waiter)"
+        );
+        assert!(
+            pav.has_plan,
+            "file-backed / inline body must count as a plan"
+        );
+        assert!(
+            pav.response_tx.is_none(),
+            "local idle park has no ACP response channel"
+        );
+
+        agent.show_plan_preview();
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "idle park must arm five-CTA approval chrome, not casual view-only"
+        );
+    }
+
+    /// Sticky Approve / in-flight Revise must not invent a second park.
+    #[test]
+    fn park_local_idle_plan_decision_skips_when_chrome_must_not_arm() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.latest_inline_plan_content = Some("# Already decided\n\nBody\n".into());
+
+        agent.park_local_idle_plan_decision_if_needed();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "must not re-park after a decisive Approve/Quit"
+        );
+
+        agent.plan_decision_resolved = false;
+        agent.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+        agent.park_local_idle_plan_decision_if_needed();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "must not re-park while Revise/Clarify is in flight"
+        );
+    }
+
+    /// Already-parked live present is a no-op (do not invent a second park).
+    #[test]
+    fn park_local_idle_plan_decision_skips_when_already_parked() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Already parked\n\nBody\n");
+        let before = agent
+            .plan_approval_view
+            .as_ref()
+            .map(|p| p.tool_call_id.clone());
+
+        agent.park_local_idle_plan_decision_if_needed();
+
+        let after = agent
+            .plan_approval_view
+            .as_ref()
+            .map(|p| p.tool_call_id.clone());
+        assert_eq!(
+            before, after,
+            "already-parked live present must keep the same park"
+        );
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|p| !p.is_local_idle_decision),
+            "must not replace a live reverse-request park with local idle"
+        );
+    }
+
+    /// Second note while rewrite is in flight uses the honest queue toast.
+    #[test]
+    fn in_flight_followup_shows_plan_feedback_queue_toast() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Queue toast\n\nBody\n");
+        let _ = agent.request_plan_revise();
+        assert!(agent.plan_feedback_in_flight.is_some());
+
+        agent.maybe_toast_plan_feedback_queue();
+
+        assert_eq!(
+            agent.active_toast_message(),
+            Some(PLAN_FEEDBACK_QUEUE_TOAST),
+            "in-flight follow-up must not pretend it was live Revise/Clarify"
+        );
+        assert!(
+            PLAN_FEEDBACK_QUEUE_TOAST.to_lowercase().contains("queue"),
+            "toast must say the note queues; got {PLAN_FEEDBACK_QUEUE_TOAST:?}"
+        );
+    }
+
+    /// Decisive empty Revise always leaves a human scrollback line.
+    #[test]
+    fn after_revise_empty_always_pushes_human_scrollback_line() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Empty revise line\n\nBody\n");
+        agent.prompt.set_text("");
+
+        let _ = agent.request_plan_revise();
+
+        let human_lines: Vec<String> = agent
+            .scrollback
+            .iter_entries()
+            .filter_map(|(_, e)| match &e.block {
+                crate::scrollback::RenderBlock::UserPrompt(u) => Some(u.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            human_lines
+                .iter()
+                .any(|t| t.contains(PLAN_REVISE_HUMAN_LINE) || t.to_lowercase().contains("revise")),
+            "empty Revise must push a human line; got {human_lines:?}"
+        );
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "composer must be empty after empty Revise (no Enter:queue ghost draft)"
+        );
+        assert!(
+            !agent.prompt.can_send(),
+            "empty composer after Revise must not be sendable (no Enter:queue)"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Revising)
+        );
+    }
+
+    /// Soft-park Revise with pre-panel stash must not restore ghost draft.
+    #[test]
+    fn after_revise_clears_composer_no_ghost_stash_draft() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Stash ghost\n\nBody\n");
+        agent.prompt.set_text("rewrite step 2");
+
+        let _ = agent.request_plan_revise();
+
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "must not restore pre-panel draft after Revise; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(!agent.prompt.can_send());
     }
 }

@@ -151,7 +151,7 @@ use crate::views::extensions_modal::ExtensionsModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
 use crate::views::permission_view::{PermissionViewState, SubagentInfo};
-use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment};
+use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment, PlanFeedbackInFlight};
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
 use crate::views::question_view::QuestionViewState;
 use crate::views::queue_pane::QueuePane;
@@ -1138,6 +1138,9 @@ pub struct AgentView {
     pub hit_context: HitArea,
     pub hit_credits: HitArea,
     pub hit_todo_close: HitArea,
+    /// Compact `[−]` Clear finished control in the todo header (open board +
+    /// finished rows). Empty when the board is hidden or nothing is finished.
+    pub hit_todo_clear_done: HitArea,
     pub hit_bg_close: HitArea,
     pub hit_subagent_close: HitArea,
     pub hit_catalog_close: HitArea,
@@ -1159,6 +1162,11 @@ pub struct AgentView {
     pub hit_cwd: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
+    /// Global pause / resume button in turn status line (`[pause]` / `[resume]`).
+    pub hit_pause_button: HitArea,
+    /// Snapshot of process-level global work pause for this frame (set by
+    /// [`AgentView::draw`] from [`AppRenderParams::global_paused`]).
+    pub(crate) global_work_paused: bool,
     /// Still-running watcher cue on the turn-status row (click opens the
     /// tasks pane, same as `Ctrl+G`).
     pub hit_watching_cue: HitArea,
@@ -1318,6 +1326,10 @@ pub struct AgentView {
     pub(crate) scrollback_search: Option<ScrollbackSearchState>,
     /// Hit area for scrollback selection box copy button.
     pub(crate) hit_sb_copy: HitArea,
+    /// Always-on bubble copy ⧉ hit rects from the last frame: `(rect, entry_idx)`.
+    pub(crate) hit_bubble_copy: Vec<(Rect, usize)>,
+    /// True when the pointer is over a bubble copy ⧉ (hover style + pointer cursor).
+    pub(crate) hovered_bubble_copy: bool,
     /// Hit area for scrollback selection box view button.
     pub(crate) hit_sb_view: HitArea,
     /// Active question view (from `AskUserQuestion` tool). When `Some`, the
@@ -1351,6 +1363,18 @@ pub struct AgentView {
     /// The cycle logic uses `plan_mode_pending.unwrap_or(plan_mode_active)`
     /// so rapid Shift+Tab presses advance correctly without waiting for ACP.
     pub(crate) plan_mode_pending: Option<bool>,
+    /// After a decisive Approve / Quit, suppress idle / draw / `/view-plan`
+    /// re-park of decision CTAs for the same plan. Cleared only on a new
+    /// `exit_plan_mode` soft-park present. Stops the case where
+    /// `CurrentModeUpdate` clears `plan_mode_pending` while plan mode is still
+    /// active and turn-end re-arms Approve for a plan the operator already
+    /// decided.
+    pub(crate) plan_decision_resolved: bool,
+    /// After decisive Revise / Clarify unparks, suppress idle "Plan written.
+    /// Click or /view-plan" status and local idle decision re-park until a new
+    /// `exit_plan_mode` present re-arms CTAs. Status paints "Revising plan..."
+    /// or "Waiting for updated plan..." instead.
+    pub(crate) plan_feedback_in_flight: Option<PlanFeedbackInFlight>,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).
@@ -2136,6 +2160,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         }
         ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
+        ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal

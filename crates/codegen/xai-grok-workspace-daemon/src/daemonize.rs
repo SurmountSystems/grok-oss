@@ -801,13 +801,35 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
     fn spawn_predecessor() -> Child {
-        Command::new("sleep")
+        let child = Command::new("sleep")
             .arg("300")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn sleep")
+            .expect("spawn sleep");
+        // /proc/<pid>/cmdline can be empty for a few milliseconds after
+        // spawn (fork has returned, exec has not published argv yet). The
+        // product identifies a predecessor by that cmdline; hand off a child
+        // that already matches "sleep" so takeover tests do not decline
+        // without signaling.
+        wait_until_process_name_matches(child.id(), "sleep");
+        child
+    }
+
+    /// Bounded wait until `/proc/<pid>/cmdline` matches `fragment`.
+    #[cfg(target_os = "linux")]
+    fn wait_until_process_name_matches(pid: u32, fragment: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if process_name_matches(pid, fragment) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("predecessor pid {pid} never matched {fragment:?} in /proc/pid/cmdline");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Wait (bounded) for a child to exit; returns true if it did.

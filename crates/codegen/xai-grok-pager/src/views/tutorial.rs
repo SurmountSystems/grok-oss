@@ -307,7 +307,7 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
 /// Intro copy shown above the topic list. No time promises — just what it
 /// is and how to leave.
 const INTRO_LINES: [&str; 2] = [
-    "Quick tips to get the most out of Grok Build.",
+    "Quick tips to get the most out of Grok OSS.",
     "Pick a topic. Esc when you're done.",
 ];
 
@@ -420,7 +420,7 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
         },
     ];
     let modal_config = ModalWindowConfig {
-        title: "Welcome to Grok Build",
+        title: "Welcome to Grok OSS",
         tabs: None,
         shortcuts: &shortcuts,
         sizing: ModalSizing {
@@ -666,6 +666,38 @@ mod tests {
         assert_eq!(outcome, TutorialOutcome::Consumed);
         assert!(st.picker.query().is_empty());
         assert_eq!(st.screen, TutorialScreen::List);
+    }
+
+    fn buf_plain(buf: &Buffer) -> String {
+        let area = buf.area;
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Named contract: tutorial list chrome says **Grok OSS**, not Grok Build.
+    #[test]
+    fn tutorial_list_title_brands_grok_oss() {
+        let mut st = TutorialState::new();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_tutorial(&mut buf, area, &mut st, false);
+        let text = buf_plain(&buf);
+        assert!(
+            text.contains("Welcome to Grok OSS"),
+            "tutorial title must say Grok OSS:\n{text}"
+        );
+        assert!(
+            !text.contains("Grok Build"),
+            "tutorial list must not say Grok Build:\n{text}"
+        );
     }
 
     #[test]

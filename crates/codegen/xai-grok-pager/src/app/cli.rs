@@ -409,9 +409,9 @@ pub struct LeaderArgs {
 }
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "grok",
+    name = crate::client_identity::PRODUCT_CLI_NAME,
     version = env!("VERSION_WITH_COMMIT"),
-    about = "Grok Build TUI",
+    about = "Grok OSS TUI",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
@@ -836,10 +836,22 @@ impl PagerArgs {
             .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
+            .filter(|n| *n == crate::client_identity::PRODUCT_CLI_NAME || *n == "agent")
+            .unwrap_or(crate::client_identity::PRODUCT_CLI_NAME)
             .to_owned();
         Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
+    }
+    /// When this invocation should print version and exit without a TUI.
+    ///
+    /// `Some(json)` means print version (JSON when `true`). `None` means this
+    /// is not a version-only run. `--version` / `-v` / `-V` and the `version`
+    /// subcommand are version-only. `update --version <semver>` is not.
+    pub fn version_only_json(&self) -> Option<bool> {
+        match self.command {
+            Some(Command::Version { json }) => Some(json),
+            _ if self.version => Some(false),
+            _ => None,
+        }
     }
     /// Apply launch-directory path anchoring and `--cwd` after early commands
     /// have been dispatched without filesystem or process initialization.
@@ -1047,11 +1059,38 @@ mod tests {
             let args = PagerArgs::try_parse_from(["grok", flag]).expect("version flag parses");
             assert!(args.version, "{flag} must set the early version intent");
             assert!(args.command.is_none());
+            assert_eq!(
+                args.version_only_json(),
+                Some(false),
+                "{flag} must be version-only (plain text, not JSON)"
+            );
         }
+    }
+    #[test]
+    fn version_subcommand_is_version_only() {
+        let plain = PagerArgs::try_parse_from(["grok", "version"]).unwrap();
+        assert_eq!(plain.version_only_json(), Some(false));
+        let json = PagerArgs::try_parse_from(["grok", "version", "--json"]).unwrap();
+        assert_eq!(json.version_only_json(), Some(true));
+    }
+    #[test]
+    fn update_semver_flag_is_not_version_only() {
+        let args = PagerArgs::try_parse_from(["grok", "update", "--version", "1.0.0"]).unwrap();
+        assert_eq!(
+            args.version_only_json(),
+            None,
+            "update --version <semver> installs that release; it is not `grok-oss --version`"
+        );
     }
     #[test]
     fn ordinary_and_doctor_parsing_do_not_set_version_intent() {
         assert!(!PagerArgs::try_parse_from(["grok"]).unwrap().version);
+        assert_eq!(
+            PagerArgs::try_parse_from(["grok"])
+                .unwrap()
+                .version_only_json(),
+            None
+        );
         assert!(
             !PagerArgs::try_parse_from(["grok", "doctor"])
                 .unwrap()

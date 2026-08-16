@@ -851,6 +851,24 @@ pub(super) fn default_actions(
             requires_confirmation: false,
             long_help: None,
         },
+        // TUI self-screenshot: F9 was free (not mouse-toggle / voice / settings).
+        // Always so welcome, dashboard, and agent screens can capture. Slash
+        // `/screenshot` remains the primary discoverable surface.
+        ActionDef {
+            id: ActionId::CaptureTuiScreenshot,
+            label: "screenshot",
+            description: "Capture the current TUI frame as a PNG",
+            default_key: key!(F(9)),
+            alt_keys: vec![],
+            category: Category::GettingStarted,
+            context: When::Always,
+            hint_priority: None,
+            hint_key_display: Some("F9"),
+            requires_confirmation: false,
+            long_help: Some(
+                "Writes the last rendered TUI frame to $GROK_HOME/screenshots/tui-*.png and toasts the path.\nDuring plan approval the PNG is also attached to the plan composer so approve/revise/clarify can send it multimodal (same path as pasting an image).\nSame action as /screenshot. Not an OS screenshot of other windows.",
+            ),
+        },
     ];
 
     // Toggle terminal mouse reporting (mouse capture). Opt-in via

@@ -965,7 +965,7 @@ fn deep_link_preview_esc_closes_modal_and_forwards_revert_action() {
     );
     match outcome {
         InputOutcome::Action(Action::PreviewTheme(name)) => {
-            assert_eq!(name, "groknight");
+            assert_eq!(name, "doge");
         }
         other => panic!("expected Action(PreviewTheme), got {other:?}"),
     }
@@ -1666,6 +1666,24 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "show_thinking_blocks" => {
             let _ = dispatch(Action::SetShowThinkingBlocks(true), app);
         }
+        "hide_header" => {
+            let _ = dispatch(Action::SetHideHeader(true), app);
+        }
+        "always_expand_thinking" => {
+            let _ = dispatch(Action::SetAlwaysExpandThinking(true), app);
+        }
+        "scrub_ascii_punct" => {
+            let _ = dispatch(Action::SetScrubAsciiPunct(false), app);
+        }
+        "allow_worktree" => {
+            let _ = dispatch(Action::SetAllowWorktree(true), app);
+        }
+        "bubble_copy_buttons" => {
+            let _ = dispatch(Action::SetBubbleCopyButtons(false), app);
+        }
+        "plan_approval_park" => {
+            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_string()), app);
+        }
         "group_tool_verbs" => {
             let _ = dispatch(Action::SetGroupToolVerbs(false), app);
         }
@@ -1674,6 +1692,110 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "prompt_suggestions" => {
             let _ = dispatch(Action::SetPromptSuggestions(false), app);
+        }
+        "auto_run_implement" => {
+            let _ = dispatch(Action::SetAutoRunImplement(false), app);
+        }
+        "economic_mode" => {
+            let _ = dispatch(Action::SetEconomicMode(false), app);
+        }
+        "resume_canceled_turn_on_restart" => {
+            let _ = dispatch(Action::SetResumeCanceledTurnOnRestart(false), app);
+        }
+        "token_economy.cap_implement_effort_when_economic" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "cap_implement_effort_when_economic",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.show_period_pacing" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "show_period_pacing",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.local_spend_ledger" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "local_spend_ledger",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.reconcile_management_usage" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyBool {
+                    field: "reconcile_management_usage",
+                    value: false,
+                },
+                app,
+            );
+        }
+        "token_economy.max_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "max_implement_effort",
+                    value: 5,
+                },
+                app,
+            );
+        }
+        "token_economy.min_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "min_implement_effort",
+                    value: 2,
+                },
+                app,
+            );
+        }
+        "token_economy.desired_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "desired_implement_effort",
+                    value: 3,
+                },
+                app,
+            );
+        }
+        "token_economy.lock_implement_effort" => {
+            let _ = dispatch(
+                Action::SetTokenEconomyInt {
+                    field: "lock_implement_effort",
+                    value: 2,
+                },
+                app,
+            );
+        }
+        "cancel_subagents_on_turn_cancel" => {
+            let _ = dispatch(
+                Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
+                app,
+            );
+        }
+        "notifications.session_recap" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecap(false), app);
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let _ = dispatch(Action::SetNotificationsSessionRecapThresholdSecs(90), app);
+        }
+        "features.session_recap" => {
+            let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
+        }
+        "auto_compact_threshold_percent" => {
+            let _ = dispatch(
+                Action::SetAutoCompactThreshold(
+                    crate::settings::AutoCompactThresholdChoice::Percent(90),
+                ),
+                app,
+            );
         }
         "respect_manual_folds" => {
             let _ = dispatch(
@@ -3150,7 +3272,7 @@ fn set_auto_dark_theme_emits_persist_setting_with_correct_payload() {
             } => {
                 assert_eq!(*key, "auto_dark_theme");
                 assert_eq!(*value, SettingValue::Enum("grokday"));
-                assert_eq!(*rollback_value, SettingValue::Enum("groknight"));
+                assert_eq!(*rollback_value, SettingValue::Enum("doge"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }

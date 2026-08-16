@@ -666,10 +666,10 @@ pub(super) async fn run_session(
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
-                                        failover_api_keys: Vec::new(),
-                                        failover_base_url: None,
-                                        session_base_url: None,
-                                        session_identity_key: None,
+                                        failover_api_keys: r.failover_api_keys,
+                                        failover_base_url: r.failover_base_url,
+                                        session_base_url: r.session_base_url,
+                                        session_identity_key: r.session_identity_key,
                                     });
                                 }
                                 // Credentials changed under a possibly-unchanged model id.

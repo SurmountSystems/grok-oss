@@ -1,22 +1,49 @@
 # Theming and Appearance Customization
 
-Grok Build draws all TUI colors from a central theme. You can switch themes while Grok is running, follow your operating system's light or dark appearance, and adjust scrollback layout, animations, and block styling through configuration files.
+Grok OSS (`grok-oss`) draws TUI colors from a central theme. You can switch themes while Grok OSS is running, follow your operating system's light or dark appearance, and adjust scrollback layout, animations, and block styling through configuration files.
+
+The product default theme is **DOGE**, not GrokNight.
 
 ---
 
 ## Available Themes
 
-Grok includes five built-in themes, plus an `auto` option that follows your system appearance:
+Grok OSS includes six built-in themes, plus an `auto` option that follows your system appearance:
 
 | Theme | Config Names | Description | Truecolor Required |
 |-------|-------------|-------------|--------------------|
-| **GrokNight** | `groknight`, `grok-night`, `dark` | Neutral dark base with a magenta accent. Default theme. Survives quantization cleanly on 256-color and 16-color terminals. | No |
+| **DOGE** | `doge` | Pure black canvas, white text, and the eight classic ANSI primaries. **Default theme** when `theme` is unset. | No |
+| **GrokNight** | `groknight`, `grok-night`, `dark` | Neutral dark base with a magenta accent. Previous default. Survives quantization cleanly on 256-color and 16-color terminals. | No |
 | **GrokDay** | `grokday`, `grok-day`, `light`, `day` | Light theme for bright terminal backgrounds. | No |
 | **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | Dark, blue-tinted backgrounds from the Tokyo Night palette. Loses its character when quantized. | Yes |
 | **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | Muted dark palette with mauve accents, from the Rosé Pine family. | Yes |
 | **OscuraMidnight** | `oscura`, `oscura-midnight` | Deep dark base with purple accents. | Yes |
 
 Theme names are case-insensitive. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
+
+### DOGE (default)
+
+**DOGE** uses a pure-black background and only the eight classic ANSI primaries (channels `0` or `255`). Config name is `doge` only (case-insensitive).
+
+On DOGE, Grok OSS uses these roles:
+
+| Colour | Role |
+|--------|------|
+| **Green** | Human: composer caret, user rails, success |
+| **Magenta** | Agent: running activity, tool spinner, model accent |
+| **Yellow** | Dates, timers, secondary context |
+| **Cyan** | System tags, included SuperGrok period limits, credits, paths |
+
+Do not confuse the composer caret (human green) with the lower-left activity throbber (agent magenta). Mid-draft letters under the caret use ordinary text colour on the empty blink half, not neon green ink on the letter.
+
+To switch back to the previous neutral dark default:
+
+```toml
+[ui]
+theme = "groknight"
+```
+
+Or pick **GrokNight** in `/theme` or under Appearance in `/settings`.
 
 ### Minimal Mode Has No Theming
 
@@ -49,6 +76,8 @@ Set the theme in `~/.grok/config.toml`:
 theme = "tokyonight"
 ```
 
+**Default theme is DOGE** when `theme` is unset (and when `theme = "auto"` maps to dark mode).
+
 ---
 
 ## Auto Theme (System Appearance)
@@ -60,7 +89,7 @@ Set `theme = "auto"` to have Grok follow your operating system's light/dark appe
 theme = "auto"
 ```
 
-By default, dark mode maps to **GrokNight** and light mode maps to **GrokDay**. Override either mapping with `auto_dark_theme` and `auto_light_theme`:
+By default, dark mode maps to **DOGE** and light mode maps to **GrokDay**. Override either mapping with `auto_dark_theme` and `auto_light_theme`:
 
 ```toml
 [ui]
@@ -78,7 +107,7 @@ auto_light_theme = "grokday"
 | **macOS** | Reads `AppleInterfaceStyle` system preference |
 | **Linux** | Queries XDG Desktop Portal (`org.freedesktop.appearance.color-scheme`) |
 | **Windows** | Reads the system personalization registry |
-| **SSH / tmux / headless** | `GROK_APPEARANCE` or `LC_GROK_APPEARANCE` (`dark`/`light`), then `COLORFGBG`, then a startup OSC 11 background query. `grok wrap ssh …` stamps `LC_GROK_APPEARANCE` from the local OS theme so it survives SSH into the login shell. New tmux sessions inherit it only if the tmux server/session was created with that env (or `update-environment` includes it). OSC 11 is DCS-wrapped for tmux ≥ 3.3 when tmux is the immediate terminal (not an editor `:terminal`); reaching the outer emulator also needs `allow-passthrough`, and replies are best-effort. |
+| **SSH / tmux / headless** | `GROK_APPEARANCE` or `LC_GROK_APPEARANCE` (`dark`/`light`), then `COLORFGBG`, then a startup OSC 11 background query. `grok-oss wrap ssh ...` stamps `LC_GROK_APPEARANCE` from the local OS theme so it survives SSH into the login shell. New tmux sessions inherit it only if the tmux server/session was created with that env (or `update-environment` includes it). OSC 11 is DCS-wrapped for tmux ≥ 3.3 when tmux is the immediate terminal (not an editor `:terminal`); reaching the outer emulator also needs `allow-passthrough`, and replies are best-effort. |
 
 Once running, Grok polls desktop APIs and env hints every 5 seconds. Toggling your OS between light and dark mode on a local desktop takes effect within seconds without restarting. Over SSH the wrap-stamped env is fixed for that hop.
 
@@ -112,7 +141,7 @@ Every theme is defined using full RGB values. At startup, Grok quantizes all col
 - On **256-color** terminals, each RGB value is mapped to the nearest indexed palette entry.
 - On **16-color** terminals, colors map to ANSI names.
 
-GrokNight and GrokDay use neutral grays that quantize cleanly. TokyoNight, RosePineMoon, and OscuraMidnight use distinctive tinted backgrounds that lose their character when quantized, which is why the theme picker hides them on non-truecolor terminals.
+DOGE, GrokNight, and GrokDay quantize cleanly. TokyoNight, RosePineMoon, and OscuraMidnight use distinctive tinted backgrounds that lose their character when quantized, which is why the theme picker hides them on non-truecolor terminals.
 
 ### Runtime-Generated Colors
 
@@ -145,10 +174,60 @@ Use compact mode on small screens to maximize content area.
 
 ---
 
+## Hide header
+
+Hide **in-app** chrome headers (status, welcome, dashboard) to reclaim vertical space. This is **not** the desktop or terminal **window title** (see [Window title](#window-title) below).
+
+```toml
+[ui]
+hide_header = true
+```
+
+Or toggle **Hide header** under Appearance in `/settings`. Default is off (headers visible).
+
+When enabled, the same knob zeros the agent status bar, the Welcome location top bar, and the dashboard location header. You lose those clicks and labels. Minimal mode has different chrome and ignores this setting.
+
+---
+
+## Window title
+
+Window titles are **on by default**. Grok OSS manages the desktop or terminal tab title (OSC SetTitle) when `[ui.notifications.title] enabled` is true. This is **not** the in-app status bar and **not** the same as [Hide header](#hide-header).
+
+Examples:
+
+| Situation | Example title |
+|-----------|----------------|
+| Idle single session | `my-session - grok-oss` |
+| Multi-agent busy | `Thinking - my-session - 2 agents - grok-oss` |
+
+Startup always writes a product-managed title (session or `grok-oss`). It never emits an empty title.
+
+### Turn dynamic titles off
+
+```toml
+[ui.notifications.title]
+enabled = false
+```
+
+There is no `hide_title_bar` key. Stale config with that name is ignored.
+
+### Customize title items
+
+```toml
+[ui.notifications.title]
+enabled = true
+items = ["action-required", "spinner", "activity", "session-name", "agents", "grok"]
+```
+
+The `grok` slot renders as **`grok-oss`**. Full options: [Configuration → Notifications](05-configuration.md#notifications).
+
+---
+
 ## Syntax Highlighting
 
-Grok bundles three `.tmTheme` files for code-block syntax highlighting and selects one based on the active theme:
+Grok OSS bundles four `.tmTheme` files for code-block syntax highlighting and selects one based on the active theme:
 
+- `doge.tmTheme` -- DOGE (pure primaries)
 - `grok-night.tmTheme` -- GrokNight, RosePineMoon, and OscuraMidnight
 - `grok-day.tmTheme` -- GrokDay
 - `tokyo-night.tmTheme` -- TokyoNight

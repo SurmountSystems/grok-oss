@@ -477,8 +477,8 @@ async fn team_login_then_personal_keeps_both_principals() {
     );
 }
 
-/// Dual SuperGrok sticky Team base (last business login) for free SuperGrok
-/// period rank tests. Personal user_id lex-wins on equal headroom.
+/// Dual SuperGrok sticky Team base (last business login) for included SuperGrok
+/// period rank tests. Rank now prefers Business included while both have remaining.
 fn dual_supergrok_sticky_team_store(base_scope: &str) -> (GrokAuth, GrokAuth, AuthStore) {
     let personal = GrokAuth {
         key: "tok-personal-free-period".into(),
@@ -504,9 +504,9 @@ fn dual_supergrok_sticky_team_store(base_scope: &str) -> (GrokAuth, GrokAuth, Au
     (personal, team, map)
 }
 
-/// Named contract: sticky Team base must align to free SuperGrok period ranked
-/// primary (personal wins on equal headroom + lex identity_id) so SessionToken
-/// sampling does not burn team OAuth while free SuperGrok period sits idle.
+/// Named contract: sticky personal base must align to Business included SuperGrok
+/// period limits when both stored logins still have remaining. Operator 2026-08-14:
+/// Team/Business class wins while it still has included remaining (not lex personal).
 #[test]
 fn align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal() {
     let dir = tempfile::tempdir().unwrap();
@@ -514,73 +514,140 @@ fn align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal() {
     let mut cfg = GrokComConfig::default();
     cfg.auto_use_included_limits = false;
     let base_scope = cfg.auth_scope();
-    let (_personal, _team, map) = dual_supergrok_sticky_team_store(&base_scope);
+    let (personal, team, _) = dual_supergrok_sticky_team_store(&base_scope);
+    let mut map = AuthStore::default();
+    upsert_supergrok_session(&mut map, &base_scope, team);
+    upsert_supergrok_session(&mut map, &base_scope, personal);
     write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
 
     let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
-        Some("tok-business-team-base".into()),
-        "precondition: sticky base is Team when auto_use_included_limits is false"
+        Some("tok-personal-free-period".into()),
+        "precondition: sticky base is personal when auto_use_included_limits is false"
     );
 
     let switched = mgr.align_to_ranked_free_period_primary();
     assert!(
         switched,
-        "equal free SuperGrok period headroom must realign sticky Team base"
+        "both logins with included remaining must realign sticky personal to Business"
     );
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
-        Some("tok-personal-free-period".into()),
-        "SessionToken bearer must be free SuperGrok period ranked personal primary"
+        Some("tok-business-team-base".into()),
+        "SessionToken bearer must be ranked Business included SuperGrok period primary"
     );
     let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
     assert_eq!(
         store.get(&base_scope).map(|a| a.key.as_str()),
-        Some("tok-personal-free-period"),
-        "disk base scope must match ranked free SuperGrok period primary"
+        Some("tok-business-team-base"),
+        "disk base scope must match ranked Business included SuperGrok period primary"
     );
     // No-op when already aligned.
     assert!(!mgr.align_to_ranked_free_period_primary());
     let trace = mgr
         .session_wire_bearer_trace()
         .expect("wire bearer after align");
-    assert_eq!(trace["principal_type"], "User");
-    assert_eq!(trace["team_id"], "58c5f686-4270-4d6d-9c3b-df44559f8457");
+    assert_eq!(trace["principal_type"], "Team");
+    assert_eq!(trace["team_id"], "61fab250-b2c1-40cf-b5b8-628e673a2eeb");
 }
 
 /// Named contract: with `[auth] auto_use_included_limits = true` (default),
-/// AuthManager::new must load free SuperGrok period ranked primary, not leave
-/// sticky Team base wire-active until the first SessionToken reconstruct.
+/// AuthManager::new must load ranked included SuperGrok period primary (Business
+/// when both stored logins still have remaining), not leave sticky personal.
 #[test]
 fn auth_manager_new_auto_use_aligns_sticky_team_base_to_ranked_free_period_primary() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     assert!(
         cfg.auto_use_included_limits,
-        "default must prefer free SuperGrok period limits"
+        "default must prefer included SuperGrok period limits"
     );
     let base_scope = cfg.auth_scope();
-    let (_personal, _team, map) = dual_supergrok_sticky_team_store(&base_scope);
+    let (personal, team, _) = dual_supergrok_sticky_team_store(&base_scope);
+    let mut map = AuthStore::default();
+    upsert_supergrok_session(&mut map, &base_scope, team);
+    upsert_supergrok_session(&mut map, &base_scope, personal);
+    write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
+    assert_eq!(
+        mgr.current_wire_valid().map(|a| a.key),
+        Some("tok-business-team-base".into()),
+        "AuthManager::new with auto_use must wire ranked Business included SuperGrok period primary, not sticky personal"
+    );
+    let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
+    assert_eq!(
+        store.get(&base_scope).map(|a| a.key.as_str()),
+        Some("tok-business-team-base"),
+        "disk base after new must match ranked Business included SuperGrok period primary"
+    );
+    let trace = mgr
+        .session_wire_bearer_trace()
+        .expect("wire bearer after new");
+    assert_eq!(trace["principal_type"], "Team");
+    assert_eq!(trace["team_id"], "61fab250-b2c1-40cf-b5b8-628e673a2eeb");
+}
+
+/// Named contract: after a billing refresh that shows personal included
+/// SuperGrok period limits full (with SuperGrok dollar credits) and Business
+/// included remaining, align the sticky personal SessionToken bearer to the
+/// Business JWT. Hermetic: no network. Align is what handle_get_billing must
+/// call after remember.
+#[test]
+fn align_after_billing_switches_sticky_personal_full_to_business_included() {
+    use crate::auth::{
+        clear_included_billing_cache, remember_supergrok_dollar_extras,
+        remember_supergrok_included_billing,
+    };
+
+    clear_included_billing_cache();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = GrokComConfig::default();
+    cfg.auto_use_included_limits = false;
+    let base_scope = cfg.auth_scope();
+    // dual_supergrok_sticky_team_store upserts personal then Team (sticky Team).
+    // Re-order so personal is the sticky base (last upsert).
+    let (personal, team, _) = dual_supergrok_sticky_team_store(&base_scope);
+    let mut map = AuthStore::default();
+    upsert_supergrok_session(&mut map, &base_scope, team);
+    upsert_supergrok_session(&mut map, &base_scope, personal);
     write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
 
     let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
         Some("tok-personal-free-period".into()),
-        "AuthManager::new with auto_use must wire free SuperGrok period ranked personal primary, not sticky Team"
+        "precondition: sticky base is personal"
     );
-    let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
+
+    // Personal included SuperGrok period limits full + SuperGrok dollar credits.
+    // Business sibling still has included remaining.
+    remember_supergrok_included_billing(
+        "58c5f686-4270-4d6d-9c3b-df44559f8457",
+        100.0,
+        Some("2026-08-20T00:00:00Z"),
+        Some("USAGE_PERIOD_TYPE_WEEKLY"),
+    );
+    remember_supergrok_dollar_extras("58c5f686-4270-4d6d-9c3b-df44559f8457", 10_029);
+    remember_supergrok_included_billing(
+        "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+        40.0,
+        Some("2026-08-21T00:00:00Z"),
+        Some("USAGE_PERIOD_TYPE_WEEKLY"),
+    );
+
+    let switched = mgr.align_to_ranked_free_period_primary();
+    assert!(
+        switched,
+        "billing that fills personal included and leaves Business included must realign"
+    );
     assert_eq!(
-        store.get(&base_scope).map(|a| a.key.as_str()),
-        Some("tok-personal-free-period"),
-        "disk base after new must match ranked free SuperGrok period primary"
+        mgr.current_wire_valid().map(|a| a.key),
+        Some("tok-business-team-base".into()),
+        "SessionToken bearer must hop to the Business sibling that still has included SuperGrok period limits"
     );
-    let trace = mgr
-        .session_wire_bearer_trace()
-        .expect("wire bearer after new");
-    assert_eq!(trace["principal_type"], "User");
-    assert_eq!(trace["team_id"], "58c5f686-4270-4d6d-9c3b-df44559f8457");
+    clear_included_billing_cache();
 }
 
 /// Regression test: clear() must only remove the current scope, not the

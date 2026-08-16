@@ -123,12 +123,12 @@ pub struct GrokComConfig {
     /// Not for SuperGrok multi-identity ranking — use [`Self::auto_use_included_limits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_method: Option<PreferredAuthMethod>,
-    /// Prefer the free SuperGrok allowance for the current billing period
+    /// Prefer included SuperGrok period limits for the current billing period
     /// (personal and/or Business) before SuperGrok dollar top-ups and the
     /// console API key. When multi-identity exists, rank SuperGrok logins by
-    /// free-period headroom (sooner reset is a ranking heuristic, not the
-    /// feature name). Exhausted free period on one login fails over to another
-    /// with free period left, then SuperGrok top-up dollars, then console.
+    /// included-period headroom (sooner reset is a ranking heuristic, not the
+    /// feature name). Exhausted included SuperGrok period limits on one login
+    /// fail over to another with room left, then SuperGrok top-up dollars, then console.
     /// Independent of [`Self::preferred_method`] so ordinary `oidc` /
     /// `api_key` pins stay compatible with stock grok. Config.toml only
     /// (`[auth] auto_use_included_limits`). **Default true** for new/empty
@@ -140,12 +140,12 @@ pub struct GrokComConfig {
         skip_serializing_if = "auto_use_included_limits_is_default_true"
     )]
     pub auto_use_included_limits: bool,
-    /// When free SuperGrok period limits still have room (used % below 100) but
-    /// multipoll / poll history marks free SuperGrok period debit **unproven**
+    /// When included SuperGrok period limits still have room (used % below 100) but
+    /// multipoll / poll history marks included SuperGrok period debit **unproven**
     /// (`flatPollUnprovenDebit`), the product still **allows** sampler turns by
     /// default so dogfood is not hard-stopped by unproven server debit (C4).
     /// Honesty notes on `/limits`, doctor dual-auth status, and multipoll still
-    /// name the flat free SuperGrok period and that team settlement can move.
+    /// name the flat included SuperGrok period limits and that team settlement can move.
     /// Set **false** only to **opt into a hard block** of new turns under that
     /// state. Config.toml: `[auth] allow_spend_when_free_period_debit_unproven`.
     /// Env: `GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN` (truthy = allow,
@@ -157,8 +157,8 @@ pub struct GrokComConfig {
     pub allow_spend_when_free_period_debit_unproven: bool,
 }
 
-/// Default for [`GrokComConfig::auto_use_included_limits`]: prefer free SuperGrok
-/// period allowance before the console API key on new/empty config.
+/// Default for [`GrokComConfig::auto_use_included_limits`]: prefer included SuperGrok
+/// period limits before the console API key on new/empty config.
 pub const fn default_auto_use_included_limits() -> bool {
     true
 }

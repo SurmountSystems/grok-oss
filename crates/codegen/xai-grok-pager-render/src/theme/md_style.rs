@@ -195,4 +195,47 @@ mod tests {
         assert_eq!(fg(theme.md_text).get_fg_color(), None);
         assert_eq!(bg(theme.md_code_bg).get_bg_color(), None);
     }
+
+    /// Same markdown role keeps one token: inline code is `md_code` (cyan
+    /// on DOGE), strong and plain body are `md_text` (white). Mixed cyan /
+    /// bold-white on one paragraph is role, not a random flip.
+    #[test]
+    fn doge_markdown_same_role_spans_share_one_token() {
+        let theme = super::super::Theme::doge();
+        let cyan = ratatui::style::Color::Rgb(0, 255, 255);
+        let white = ratatui::style::Color::Rgb(255, 255, 255);
+        assert_eq!(theme.md_code, cyan, "inline code token is cyan");
+        assert_eq!(theme.md_text, white, "body / strong token is white");
+        assert_ne!(
+            theme.md_code, theme.md_text,
+            "code and body stay distinct roles"
+        );
+
+        let _lock = super::super::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        super::super::cache::reset_for_test();
+        super::super::cache::set(super::super::ThemeKind::Doge);
+        let live = super::super::Theme::current();
+        let style = style();
+        // `style()` reads `Theme::current()` (quantized). Same-role spans
+        // must share that live token — do not compare to the unquantized
+        // `Theme::doge()` table (NO_COLOR makes current() Reset / None).
+        assert_eq!(
+            style.inline_code_inner.get_fg_color(),
+            to_anstyle(live.md_code),
+            "every inline-code inner span uses live md_code"
+        );
+        assert_eq!(
+            style.strong_inner.get_fg_color(),
+            to_anstyle(live.md_text),
+            "every strong inner span uses live md_text"
+        );
+        assert_eq!(
+            style.text.get_fg_color(),
+            to_anstyle(live.md_text),
+            "plain body uses live md_text"
+        );
+        super::super::cache::reset_for_test();
+    }
 }

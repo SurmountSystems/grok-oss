@@ -467,18 +467,26 @@ impl BlockContent for UserPromptBlock {
 
         let prompt_cfg = &ctx.appearance.scrollback.blocks.prompt;
         let compact = ctx.appearance.prompt.compact;
-        let lines = self.wrap_prompt_lines(
+        let mut lines = self.wrap_prompt_lines(
             ctx.width,
             max_lines,
             prompt_cfg.show_prefix && !compact,
             ctx.is_selected,
         );
+        super::append_bubble_copy_button(&mut lines, ctx);
 
         BlockOutput { lines }
     }
 
     fn accent(&self, _ctx: &BlockContext) -> Option<AccentStyle> {
-        None
+        let theme = Theme::current();
+        // Match prompt pointer: Reset (terminal-native / NO_COLOR) → Cyan so
+        // the rail stays visible without inventing a second token path.
+        let color = match theme.accent_user {
+            ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
+            c => c,
+        };
+        Some(AccentStyle::static_color(color))
     }
 
     fn accent_background(&self, _ctx: &BlockContext) -> bool {
@@ -541,6 +549,130 @@ mod tests {
     /// Helper to get line text content (excluding styles)
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn bubble_ctx(bubble_copy_buttons: bool) -> BlockContext {
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.display.bubble_copy_buttons = bubble_copy_buttons;
+        BlockContext {
+            mode: DisplayMode::Expanded,
+            is_running: false,
+            width: 80,
+            raw: false,
+            max_lines: None,
+            appearance,
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    fn output_text(block: &UserPromptBlock, ctx: &BlockContext) -> String {
+        block
+            .output(ctx)
+            .lines
+            .iter()
+            .flat_map(|l| l.content.spans.iter().map(|s| s.content.as_ref()))
+            .collect()
+    }
+
+    fn paints_copy_icon(line: &BlockLine) -> bool {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let Some(col) = line.copy_button_col else {
+            return false;
+        };
+        let width = col.saturating_add(4).max(8);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
+        line.paint_bubble_copy_button(&mut buf, 0, 0, Style::default());
+        buf.cell((col, 0))
+            .is_some_and(|c| c.symbol() == crate::glyphs::copy_icon())
+    }
+
+    #[test]
+    fn bubble_copy_buttons_on_paints_copy_icon() {
+        let block = UserPromptBlock::new("hello");
+        let out = block.output(&bubble_ctx(true));
+        assert!(
+            out.lines.iter().any(|line| line.copy_button_col.is_some()),
+            "bubble_copy_buttons on must mark a bubble-copy hit column on the user bubble"
+        );
+        let text = output_text(&block, &bubble_ctx(true));
+        assert!(
+            !text.contains(crate::glyphs::copy_icon()),
+            "the copy icon is paint, not wrap content: {text:?}"
+        );
+        assert!(
+            out.lines.iter().any(paints_copy_icon),
+            "bubble_copy_buttons on must paint the copy icon on the user bubble"
+        );
+    }
+
+    #[test]
+    fn bubble_copy_buttons_off_omits_copy_icon() {
+        let block = UserPromptBlock::new("hello");
+        let out = block.output(&bubble_ctx(false));
+        let text = output_text(&block, &bubble_ctx(false));
+        assert!(
+            !text.contains(crate::glyphs::copy_icon()),
+            "bubble_copy_buttons off must not paint the copy icon: {text:?}"
+        );
+        assert!(
+            out.lines.iter().all(|line| line.copy_button_col.is_none()),
+            "bubble_copy_buttons off must not mark a bubble-copy hit column"
+        );
+    }
+
+    /// A first line that already fills the content width must still paint
+    /// the always-on copy glyph and mark a hit column. Omitting the icon
+    /// when tight is not product behavior.
+    #[test]
+    fn bubble_copy_buttons_on_paints_copy_icon_when_first_line_is_full_width() {
+        // One unbreakable word so wrap fills the first line. Hyphens would
+        // wrap early and leave room for the icon (a false green).
+        let block = UserPromptBlock::new(format!("WIDEFIRSTLINECOPYCONTRACT{}", "W".repeat(200)));
+        let ctx = bubble_ctx(true);
+        let wrapped = block.wrap_prompt_lines(ctx.width, None, true, false);
+        let first_used: usize = wrapped
+            .first()
+            .map(|line| line.content.spans.iter().map(|s| s.content.width()).sum())
+            .unwrap_or(0);
+        assert!(
+            first_used + 1 + crate::glyphs::copy_icon().width() > ctx.content_width(),
+            "precondition: first line must be too wide for space plus icon under the old omit rule (used={first_used}, content_width={})",
+            ctx.content_width()
+        );
+        let out = block.output(&ctx);
+        assert_eq!(
+            out.lines.len(),
+            wrapped.len(),
+            "bubble copy must not insert a chrome line into output().lines"
+        );
+        let after: usize = out
+            .lines
+            .first()
+            .map(|line| line.content.spans.iter().map(|s| s.content.width()).sum())
+            .unwrap_or(0);
+        assert_eq!(
+            after, first_used,
+            "bubble copy must not change first-line wrap width"
+        );
+        assert!(
+            out.lines.iter().any(|line| line.copy_button_col.is_some()),
+            "a full-width first line must still mark a bubble-copy hit column"
+        );
+        assert!(
+            out.lines.iter().all(|line| {
+                line.content
+                    .spans
+                    .iter()
+                    .all(|s| s.content.as_ref() != crate::glyphs::copy_icon())
+            }),
+            "the copy icon is paint, not wrap content"
+        );
+        assert!(
+            out.lines.iter().any(paints_copy_icon),
+            "a full-width first line must still paint the copy icon"
+        );
     }
 
     #[test]
@@ -1168,5 +1300,168 @@ mod tests {
                 crate::theme::cache::terminal_native_locked(),
             )
         );
+    }
+
+    fn accent_test_ctx() -> BlockContext {
+        BlockContext {
+            mode: DisplayMode::Expanded,
+            is_running: false,
+            width: 80,
+            raw: false,
+            max_lines: None,
+            appearance: crate::appearance::AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    /// Human prompts always paint a static left rail (`┃` via EntryRenderer),
+    /// same geometry as Recap. Colour is the Human token (`accent_user`).
+    #[test]
+    fn user_prompt_block_accent_is_static_human_rail() {
+        use ratatui::style::Color;
+
+        let ctx = accent_test_ctx();
+        let theme = Theme::current();
+        let expected = match theme.accent_user {
+            Color::Reset => Color::Cyan,
+            c => c,
+        };
+        let blocks: Vec<UserPromptBlock> = vec![
+            UserPromptBlock::new("hello"),
+            UserPromptBlock::bash("ls -la"),
+            UserPromptBlock::skill("/pr-babysit check"),
+            UserPromptBlock::cron("scheduled"),
+            UserPromptBlock::interjection("mid-turn"),
+            UserPromptBlock::with_skill_tokens("see /todo later", vec![4..9]),
+        ];
+        for block in blocks {
+            let accent = block
+                .accent(&ctx)
+                .expect("Human prompts must return a left accent rail");
+            assert!(
+                !accent.animated,
+                "Human rail is static (not wave-animated like running tools)"
+            );
+            assert_eq!(
+                accent.color, expected,
+                "rail must share the Human accent_user token (Reset→Cyan like pointer)"
+            );
+            assert!(
+                !matches!(accent.color, Color::Gray | Color::DarkGray),
+                "Human rail must not paint ANSI gray: {:?}",
+                accent.color
+            );
+        }
+    }
+
+    /// DOGE theme table: Human token is pure green. Live `accent()` follows
+    /// `Theme::current()` after pinning `ThemeKind::Doge` (not `pin_theme()`,
+    /// which forces GrokNight). Under `NO_COLOR`, slots are Reset and the
+    /// product falls back to Cyan (same as the pointer).
+    #[test]
+    fn user_prompt_block_accent_is_green_rail_under_doge_default() {
+        use ratatui::style::Color;
+
+        let doge = Theme::doge();
+        assert_eq!(
+            doge.accent_user,
+            Color::Rgb(0, 255, 0),
+            "DOGE accent_user must be pure green for Human chrome"
+        );
+        assert_eq!(doge.accent_success, Color::Rgb(0, 255, 0));
+        assert_ne!(doge.accent_user, Color::Rgb(255, 255, 255));
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let accent = UserPromptBlock::new("hi")
+            .accent(&accent_test_ctx())
+            .expect("rail on");
+        assert!(!accent.animated, "Human rail is static");
+        // Not gray and not the old white Human chrome.
+        assert!(
+            !matches!(
+                accent.color,
+                Color::Gray | Color::DarkGray | Color::Rgb(255, 255, 255)
+            ),
+            "Human rail must not be gray/white: {:?}",
+            accent.color
+        );
+        let live = Theme::current().accent_user;
+        let expected = match live {
+            Color::Reset => Color::Cyan,
+            c => c,
+        };
+        assert_eq!(accent.color, expected);
+        if live == Color::Rgb(0, 255, 0) {
+            assert_eq!(accent.color, Color::Rgb(0, 255, 0));
+        }
+    }
+
+    /// Prefix pointer and left rail share the same Human colour token.
+    #[test]
+    fn user_prompt_prefix_matches_human_rail_color() {
+        use ratatui::style::Color;
+
+        let block = UserPromptBlock::new("hello");
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        let prefix_fg = lines[0].content.spans[0].style.fg;
+        let theme = Theme::current();
+        let expected = match theme.accent_user {
+            Color::Reset => Some(Color::Cyan),
+            c => Some(c),
+        };
+        assert_eq!(prefix_fg, expected, "pointer uses Human accent_user");
+        let rail = block.accent(&accent_test_ctx()).expect("rail on").color;
+        assert_eq!(Some(rail), expected, "rail matches pointer Human colour");
+    }
+
+    /// Fullscreen paint: Human prompt left cell is `┃` in `accent_user`.
+    /// `accent()` returning green is not enough if EntryRenderer never paints it.
+    #[test]
+    fn user_prompt_entry_renderer_paints_green_rail() {
+        use crate::render::Renderable;
+        use crate::scrollback::RenderBlock;
+        use crate::scrollback::entry::ScrollbackEntry;
+        use crate::scrollback::wrappers::EntryRenderer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = Theme::current();
+        let expected = match theme.accent_user {
+            Color::Reset => Color::Cyan,
+            c => c,
+        };
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt("hello from the human"));
+        let renderer = EntryRenderer::new(&entry, &theme);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let bar = crate::glyphs::accent_bar();
+        let rail = (0..area.height)
+            .find_map(|y| {
+                let c = buf.cell((0, y))?;
+                (c.symbol() == bar).then_some(c.clone())
+            })
+            .expect("Human prompt must paint a left ┃ rail");
+        assert_eq!(
+            rail.fg, expected,
+            "painted rail must be Human accent_user, got {:?}",
+            rail.fg
+        );
+        assert_ne!(rail.fg, theme.accent_running);
+        assert_ne!(rail.fg, Color::Rgb(255, 255, 255));
     }
 }

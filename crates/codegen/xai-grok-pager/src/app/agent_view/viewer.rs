@@ -16,6 +16,21 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+/// Bare typing while plan.md is open: letters and delete keys go to the
+/// composer. Ctrl/Alt/Super chords stay with the viewer (fullscreen, quit).
+fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    matches!(
+        key.code,
+        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+    )
+}
+
 impl AgentView {
     // ── Line viewer methods ────────────────────────────────────────────
 
@@ -98,6 +113,13 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        // Isolated plan.md / side panel is visual. Printable keys and
+        // Backspace stay on the composer so present never steals typing.
+        // Empty-prompt a/A/?/s/q still decide via handle_plan_feedback_key.
+        if in_plan_approval && plan_preview_key_is_composer_text(key) {
+            return self.handle_plan_feedback_key(key);
+        }
+
         if in_plan_approval && crate::input::key::RowWalk::from_key(key).is_some() {
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Prompt;
@@ -151,14 +173,25 @@ impl AgentView {
         if in_plan_approval && key!('a').matches(key) {
             return self.approve_plan();
         }
+        if in_plan_approval
+            && key.code == KeyCode::Char('A')
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            return self.focus_plan_prompt(
+                crate::views::plan_approval_view::PlanPromptIntent::ApproveNotes,
+            );
+        }
+        if in_plan_approval
+            && key.code == KeyCode::Char('?')
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            return self
+                .focus_plan_prompt(crate::views::plan_approval_view::PlanPromptIntent::Questions);
+        }
 
-        // s: switch to prompt so the user can type an overall revision
-        // message before submitting. Enter from Prompt does the actual send.
+        // Decisive Revise: send cancelled immediately (not a prompt-focus hop).
         if in_plan_approval && key!('s').matches(key) {
-            if let Some(ref mut pav) = self.plan_approval_view {
-                pav.focus = PlanApprovalFocus::Prompt;
-            }
-            return InputOutcome::Changed;
+            return self.request_plan_revise();
         }
 
         if in_plan_approval && key!('q').matches(key) {
@@ -256,6 +289,12 @@ impl AgentView {
         }
         if key!(Esc).matches(key) || key!('q').matches(key) || key!('c', CONTROL).matches(key) {
             if in_plan_approval {
+                // Ctrl+C must reach the plan feedback path: empty composer
+                // abandons (like panel `q`); non-empty clears the draft.
+                // Do not return Changed and swallow the chord.
+                if key!('c', CONTROL).matches(key) {
+                    return self.handle_plan_feedback_key(key);
+                }
                 return InputOutcome::Changed;
             }
             // In the plan viewer, Esc first clears visual selection / search
@@ -408,6 +447,8 @@ impl AgentView {
         let send_area = viewer.plan_ref().and_then(|p| p.send_button_area);
         let abandon_area = viewer.plan_ref().and_then(|p| p.abandon_button_area);
         let approve_area = viewer.plan_ref().and_then(|p| p.approve_button_area);
+        let approve_notes_area = viewer.plan_ref().and_then(|p| p.approve_notes_button_area);
+        let questions_area = viewer.plan_ref().and_then(|p| p.questions_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
         let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
         // Cached `is_plan_viewer()` so we don't need to call self while
@@ -475,6 +516,17 @@ impl AgentView {
                 if abandon_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     return self.abandon_plan();
                 }
+                if approve_notes_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()))
+                {
+                    return self.focus_plan_prompt(
+                        crate::views::plan_approval_view::PlanPromptIntent::ApproveNotes,
+                    );
+                }
+                if questions_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    return self.focus_plan_prompt(
+                        crate::views::plan_approval_view::PlanPromptIntent::Questions,
+                    );
+                }
                 if approve_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
                         return self.approve_plan();
@@ -504,10 +556,7 @@ impl AgentView {
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        if let Some(ref mut pav) = self.plan_approval_view {
-                            pav.focus = PlanApprovalFocus::Prompt;
-                        }
-                        return InputOutcome::Changed;
+                        return self.request_plan_revise();
                     }
                     return self.send_casual_plan_comments();
                 }
@@ -608,6 +657,20 @@ impl AgentView {
                 let prev_approve = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
                 if approve_hover != prev_approve {
                     viewer.plan_mut().approve_hovered = approve_hover;
+                    changed = true;
+                }
+                let notes_hover = approve_notes_area
+                    .is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_notes = viewer.plan_ref().is_some_and(|p| p.approve_notes_hovered);
+                if notes_hover != prev_notes {
+                    viewer.plan_mut().approve_notes_hovered = notes_hover;
+                    changed = true;
+                }
+                let questions_hover =
+                    questions_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_questions = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
+                if questions_hover != prev_questions {
+                    viewer.plan_mut().questions_hovered = questions_hover;
                     changed = true;
                 }
                 let comment_btn_hover =
@@ -844,7 +907,13 @@ impl AgentView {
         };
 
         let header_selected = self.scrollback.entry_content_hidden_by_group(selected_idx);
-        let has_copy = entry.block.supports_copy() && !header_selected;
+        let bubble_copy = self
+            .scrollback
+            .appearance()
+            .scrollback
+            .display
+            .bubble_copy_buttons;
+        let has_copy = entry.block.supports_copy() && !header_selected && !bubble_copy;
         let has_view = entry.block.supports_fullscreen() && !header_selected;
         if !has_copy && !has_view {
             self.hit_sb_copy.clear();

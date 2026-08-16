@@ -46,6 +46,8 @@ use crate::types::resources::{
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
+mod dangerous_cargo;
+
 #[derive(thiserror::Error, Debug)]
 pub enum BashError {
     #[error("Failed to spawn command: {0}")]
@@ -2010,6 +2012,13 @@ impl xai_tool_runtime::Tool for BashTool {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(
                 "Background execution is disabled.".to_string(),
             ));
+        }
+
+        // --- Refuse crate-wide / workspace cargo (do not spawn cargo) ---
+        // Same intercept style as memory.py: decide before TerminalBackend.
+        // Do not rewrite argv into a guessed file list.
+        if let Some(message) = dangerous_cargo::try_parse_dangerous_cargo_refuse(&input.command) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
         }
 
         // --- Skill-script intercepts (embedded Rust; never spawn python) ---
@@ -5168,11 +5177,17 @@ mod tests {
     }
 
     fn make_tracking_resources() -> (Resources, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        // If shell is wrongly used for memory.py, surface a distinctive error.
+        make_tracking_resources_with(MockTerminal::failing())
+    }
+
+    fn make_tracking_resources_with(
+        inner: MockTerminal,
+    ) -> (Resources, std::sync::Arc<std::sync::atomic::AtomicBool>) {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mock = TrackingTerminal {
             called: called.clone(),
-            // If shell is wrongly used for memory.py, surface a distinctive error.
-            inner: MockTerminal::failing(),
+            inner,
         };
         let mut resources = Resources::new();
         let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
@@ -5346,6 +5361,148 @@ mod tests {
                 let v: serde_json::Value = serde_json::from_str(text.trim()).expect("list JSON");
                 assert_eq!(v["tool"], "claude");
                 assert!(v["sessions"].is_array());
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
+    // ─── Dangerous crate-wide cargo refuse ───
+    //
+    // Agents must not spawn crate-wide / workspace cargo from bash. The
+    // structured edit hook formats the files it wrote; bash must refuse
+    // the old mop argv and must not start cargo. Honest
+    // `cargo test -p <crate> --lib <filter>` stays allowed.
+
+    async fn run_bash_tracking_success(
+        cmd: &str,
+    ) -> (
+        Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (resources, called) =
+            make_tracking_resources_with(MockTerminal::success("should-not-run-cargo\n", 0));
+        let tool = BashTool;
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(cmd))
+                .await;
+        (result, called)
+    }
+
+    fn refuse_message_from_result(
+        result: Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        cmd: &str,
+    ) -> String {
+        match result {
+            Err(err) => err.to_string(),
+            Ok(BashToolOutput::Foreground(bash)) => {
+                assert_ne!(
+                    bash.exit_code, 0,
+                    "dangerous cargo `{cmd}` must be refused, not exit 0; output={}",
+                    bash.output_for_prompt
+                );
+                let out = String::from_utf8_lossy(&bash.output);
+                format!("{}\n{out}", bash.output_for_prompt)
+            }
+            Ok(BashToolOutput::Background(_)) => {
+                panic!("dangerous cargo `{cmd}` must not start a background task")
+            }
+        }
+    }
+
+    fn assert_dangerous_cargo_refused(
+        result: Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        called: &std::sync::atomic::AtomicBool,
+        cmd: &str,
+    ) {
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "dangerous cargo must not reach TerminalBackend (cargo must not spawn): {cmd}"
+        );
+        let message = refuse_message_from_result(result, cmd);
+        assert!(
+            !message.contains("should-not-run-cargo"),
+            "refuse for `{cmd}` leaked the mock shell output: {message}"
+        );
+        let lower = message.to_lowercase();
+        assert!(
+            lower.contains("cargo"),
+            "refuse for `{cmd}` should mention cargo: {message}"
+        );
+        assert!(
+            lower.contains("refuse")
+                || lower.contains("not spawn")
+                || lower.contains("do not run")
+                || lower.contains("crate-wide")
+                || lower.contains("workspace-wide"),
+            "refuse for `{cmd}` should say why (refuse / do not run crate-wide cargo): {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_fmt_all_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo fmt --all";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_fmt_package_without_file_list_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo fmt -p xai-grok-pager";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_all_targets_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy --all-targets";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_package_all_targets_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy -p xai-grok-pager --all-targets -- -D warnings";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_workspace_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy --workspace";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_test_workspace_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo test --workspace";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_nextest_run_without_package_or_filter_is_refused_and_does_not_spawn_shell()
+     {
+        let cmd = "cargo nextest run";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_test_package_lib_filter_is_not_refused() {
+        let cmd = "cargo test -p xai-grok-tools --lib implement_memory_snapshot_intercept";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "honest cargo test -p <crate> --lib <filter> must still reach TerminalBackend: {cmd}"
+        );
+        match result.expect("honest cargo test must not be refused as invalid arguments") {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0, "output={}", bash.output_for_prompt);
+                assert_eq!(
+                    String::from_utf8_lossy(&bash.output),
+                    "should-not-run-cargo\n"
+                );
             }
             BashToolOutput::Background(_) => panic!("expected foreground"),
         }

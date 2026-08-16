@@ -6,9 +6,11 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **1.0.3 restack inventory (updated 2026-08-13).** First chrome-only pass was too narrow. Three reports: SQL (`.agents/reports/fork-gaps-sql-features-2026-08-13.md`), config (`.agents/reports/fork-gaps-config-options-2026-08-13.md`), remaining seams (`.agents/reports/fork-gaps-remaining-seams-2026-08-13.md`). **Restored in source this wave:** dual-auth hop after included SuperGrok period limits are full (`.agents/reports/bug-dual-auth-spend-hop-restore-2026-08-13.md`); unread config fields plus `/settings` rows (`.agents/reports/bug-config-unread-restore-2026-08-13.md`); `/spend` ingest of `usage.jsonl` plus remote samples / reconciliation rows (`.agents/reports/bug-spend-ledger-restore-2026-08-13.md`); leftover plan chrome. Last-session and cancel-resume are not SQL. **Honest leftovers:** `sampling_identity` is unused; host `~/.grok/docs` extract stays stale until the next product launch; live TUI stays the old 1.0.3 binary until a successful rebuild/install. SuperGrok is paid; say **included SuperGrok period limits**.
+
 - **Workspace fuzzy search reuses one matcher per root (2026-08-12, shipped).** Opening many workspace fuzzy searches without `close` no longer grows a new nucleo worker pair per `open`; `FuzzySearchManager` keeps one live search per cwd/root, and poll-only `get_results` does not reset the stale timer. Restack onto Grok Build 1.0.3 (2026-08-12) kept this contract in `xai-grok-workspace` plus `xai-fuzzy-file-search` `Nucleo::new(..., Some(2), 1)`.
 
-- **Onto restack onto public Grok Build 1.0.3 (2026-08-12).** Product stack replayed onto `e5fd4816`. PR branch `onto-xai/b13fa526f511` joins `origin/main` `f17e84d8`. Shell `--lib` and pager `--lib` compile after the mop. Nucleo reuse-per-root tests are green. History-search lazy spawn tests are green. Still open after this restack: the 1.0.3 plan panel (three placeholder buttons) is on tip; the older five-CTA Approve / Notes / Clarify / Revise / Quit panel was not wholesale-restored. Dual-auth spend-order wiring in `sampling_config_for_model` may still use empty failover after the 1.0.3 AuthManager restore. Do not treat dogfood as done until install plus this PR is pushed.
+- **Onto restack onto public Grok Build 1.0.3 (2026-08-12).** Product stack replayed onto `e5fd4816`. PR branch `onto-xai/b13fa526f511` joins `origin/main` `f17e84d8`. Shell `--lib` and pager `--lib` compile after the mop. Nucleo reuse-per-root tests are green. History-search lazy spawn tests are green. **Five-CTA plan panel is restored in source (2026-08-13):** Approve / Notes / Clarify / Revise / Quit as clickable footer buttons, same vocabulary on the composer shortcut row, and shell `"questions"` for Clarify. Dual-auth hop after included SuperGrok period limits are full is restored in source (`sampling_config_for_model` fills the hop list; extras keep SuperGrok primary). Live TUI stays the old 1.0.3 placeholder until a successful rebuild/install. Do not treat dogfood as done until install plus this PR is pushed.
 
 - **Rust 1.97.1 + CI unit mop (2026-08-12, shipped, not open).**
   Project pin is `rust-toolchain.toml` / fenix **1.97.1**. Surmount keeps that
@@ -32,23 +34,54 @@ or code — not only here. Closed campaign history:
   rebuild/reopen (wait for
   `.agents/reports/impl-rebuild-auto-resume-after-error-2026-08-09.md` or
   equivalent green). Soft-stop **button** and mid-sample freeze-without-cancel
-  are **not** shipped. Free SuperGrok period C4 stays server ticket (below §4).
-  Post-dogfood process features: agentic fmt/clippy ACP + thoughtful todos
-  (next two Open bullets).
+  are **not** shipped. Included SuperGrok period C4 stays server ticket (below §4).
+  Post-dogfood process feature still open: thoughtful todos (next Open
+  bullet). Operator dogfood after install stays open in this item.
 
-- **Agent process: cargo fmt / post-impl verify via ACP (OPEN — plan thoughtfully later; not this dogfood wave).**
-  Operator (2026-08-09): the standing process note that implementers must run
-  `cargo fmt` (and clippy + targeted tests) on touched packages **is not
-  working reliably in practice**. Do **not** paper over with more prose-only
-  scolds. Treat as a **product + process feature to plan carefully**: a more
-  **agentic ACP** approach so format/lint/test mop is structural (tooling,
-  hooks, post-turn effects, subagent mop contract, or host/product integration
-  that actually runs), not a chat checklist agents skip under load. **Defer
-  design and implementation** until after the current full check + rebuild
-  dogfood wave. Board: `feat:agentic-fmt-clippy-acp`. Related host law today:
-  post-impl verify / process mop in `~/.grok/AGENTS.md` and project
-  `AGENTS.md` hard constraint 3a/3b (still the intended bar until product
-  makes it stick).
+- **Structured Rust edit format and lint (product shipped 2026-08-15).**
+  After ACP `search_replace` / `apply_patch`, a `.rs` write means rustfmt
+  that file and clippy-driver that file. Not `cargo clippy -p <crate>
+  --lib`. The command-running tool refuses crate-wide cargo and does not
+  start those commands. Honest `cargo test -p <crate> --lib <filter>`
+  stays allowed. Kill switch: `GROK_SKIP_EDIT_VERIFY=1`. FORK subsection
+  **File-level infer-from-path verify**. Named tests:
+  `rust_edit_verify` (25) and `dangerous_cargo` (11). Reports:
+  `.agents/reports/impl-edit-verify-89e0807b.md`,
+  `.agents/reports/fork-file-level-edit-verify.md`. Effort-3 three-way
+  review was cancelled by the operator (lookalike Review rows). Do not
+  re-fan that review. Thoughtful todo tracking stays its own residual
+  bullet below. Live snapshot:
+  `.agents/reports/live-tasks-2026-08-15.md`.
+
+- **ACP edit tools take a per-path write lock (shipped 2026-08-15).**
+  `search_replace`, `apply_patch`, and `write` acquire the path
+  automatically as part of the tool call. Happy path is silent (no lock
+  argument). A held path is a tool error that names the holder and the
+  file. The tool does not write, wait, or show a human steal, skip, or
+  wait menu. Agents resolve the conflict by talking to each other. Lock
+  releases when the call finishes. File-level infer-from-path verify
+  still runs under the same hold. FORK subsection **ACP per-path write
+  lock**. Named tests: `per_path_write_lock` (9). Report:
+  `.agents/reports/impl-acp-file-edit-lock.md`. Leftover: OpenCode
+  `edit` is not wired (that file was reserved for the relative-path
+  fixer). Hashline edit is not in this slice.
+
+- **Tools improve tools (pinned 2026-08-15; process law, not a product
+  slice).** Do not write disposable bash, Python, or one-off `curl` as
+  agent glue. Improve the named product tools. Dual-pin: project
+  `AGENTS.md` hard constraint 6; host `~/.grok/AGENTS.md` same heading;
+  skill-rules rule 17. Report:
+  `.agents/reports/pin-tools-improve-tools.md`.
+
+- **L2 wait on a live L3 (shipped 2026-08-15).** Nested spawn is
+  reparented to the L1 root for limits and stop. Query used only that
+  root parent, so the L2 session got `not_found` while the parent
+  still saw the live L3. Visibility now also matches the immediate
+  spawner. Named test:
+  `spawner_can_wait_on_the_id_it_just_received_while_the_task_is_live`.
+  Report: `.agents/reports/bug-l2-wait-l3-not-found.md`. Leftover: a
+  short fire-and-forget race if the tool returns an id before the
+  coordinator processes Spawn. Not the hundreds-of-seconds miss.
 
 - **Agent process: more thoughtful todo tracking (OPEN — plan thoughtfully later).**
   Operator (2026-08-09): session board / `todo_write` fib leaves and
@@ -187,14 +220,15 @@ or code — not only here. Closed campaign history:
      corrective judgment when models drift. Positive-sum default.
 
    **Meters stay distinct in speech** (never mash):
-   SuperGrok **dollar credits** ≠ free SuperGrok period **limits** ≠ console
+   SuperGrok **dollar credits** ≠ included SuperGrok period **limits** ≠ console
    team prepaid / console API **credits** ≠ second SuperGrok OAuth identity.
    When billing or limits come up, name which meter.
    **Vocabulary (pinned 2026-08-08):** say **limits** not bare "allowance";
-   say **credits** not bare "extras." Full names when it matters: free SuperGrok
-   period limits; SuperGrok dollar credits; console team prepaid / console API
-   credits. Spend order: free SuperGrok period limits first, then SuperGrok
-   dollar credits, then console. Never invent free SuperGrok period used % on
+   say **credits** not bare "extras." SuperGrok is paid; never call SuperGrok
+   free. Full names when it matters: included SuperGrok period limits; SuperGrok
+   dollar credits; console team prepaid / console API
+   credits. Spend order: included SuperGrok period limits first, then SuperGrok
+   dollar credits, then console. Never invent included SuperGrok period used % on
    the client. Project law: `AGENTS.md` hard constraint 4.
 
    Plain English in chat, residual, plans, user-guide, toasts, reports, board
@@ -427,11 +461,11 @@ or code — not only here. Closed campaign history:
    - **Meter honesty sticky console:** silent prefer-console / console auth
      primary no longer sells SuperGrok dollar extras as live spend
      (`meter_sampling_identity`, allowance Cleared keeps ConsoleKey).
-   - **Free SuperGrok period before credits chrome (shipped 2026-08-07):** sticky
-     exhaust memo must not paint `console · $N` while live free SuperGrok period
+   - **Included SuperGrok period before credits chrome (shipped 2026-08-07):** sticky
+     exhaust memo must not paint `console · $N` while live included SuperGrok period
      still has headroom (`status_sampling_identity_for_compact_meter` + Design A).
-     `limits --json` / human **Active:** `activeDriver` names free SuperGrok
-     period | SuperGrok extras | console key. Settlement dual-bill (C6 + flat
+     `limits --json` / human **Active:** `activeDriver` names included SuperGrok
+     period limits | SuperGrok extras | console key. Settlement dual-bill (C6 + flat)
      free period note) stays distinct from SuperGrok extras. Client TE vertical
      complete; **C4 server free-period debit** still open below.
    Joins: `/tmp/grok-join-impl-dual-supergrok-auto-failover-2026-07-29.md`,
@@ -551,7 +585,7 @@ or code — not only here. Closed campaign history:
    P1: `/limits` Console puts **Team postpaid OAuth / Grok Build class** near
    top when known; SuperGrok-live footer chip `team Grok Build class: $N` when
    postpaid OAuth class is in Management process cache (separate from team
-   prepaid and free SuperGrok period %). Design A compact free-period `%`
+   prepaid and included SuperGrok period %). Design A compact free-period `%`
    unchanged. Dual SuperGrok poll honesty stays closed for this problem. Report:
    [`.agents/reports/impl-grok-business-license-zeros-vs-team-usage-2026-08-07.md`](.agents/reports/impl-grok-business-license-zeros-vs-team-usage-2026-08-07.md).
 
@@ -563,13 +597,13 @@ or code — not only here. Closed campaign history:
    60s soft TTL with prepaid/postpaid; explicit open/collect busts series with
    the other billing meters (no unbounded spam). `/limits` rebuild attaches
    warm series into the Console block when known. Meters stay distinct (series
-   USD ≠ team prepaid ≠ free SuperGrok period %). Full browser-style series
+   USD ≠ team prepaid ≠ included SuperGrok period %). Full browser-style series
    **charts** UI still not shipped (text totals only). Report:
    [`.agents/reports/impl-p2-usage-series-fetch-billing-2026-08-07.md`](.agents/reports/impl-p2-usage-series-fetch-billing-2026-08-07.md).
 
    **Also shipped (Token Economy full product — 2026-08-03):** implement-effort
    policy under economic mode (ceiling 3 / desired 2 / all implement entry
-   paths / clamp+toast); free SuperGrok period linear-burn pacing on
+   paths / clamp+toast); included SuperGrok period linear-burn pacing on
    credit/status + `/limits` + `/usage`; double-entry local vs Management on
    `/spend` and `/limits` section; durable **`$GROK_HOME/grok_oss.db`**. Report:
    [`.agents/joins/impl-token-economy-full-2026-08-03.md`](.agents/joins/impl-token-economy-full-2026-08-03.md).
@@ -579,32 +613,32 @@ or code — not only here. Closed campaign history:
    (resume later; do not implement TE pillars in the SuperGrok-live team usage
    exclusive priority).
 
-   **Still open (limits-first + Half B remaining — do not invent free SuperGrok
+   **Still open (limits-first + Half B remaining — do not invent included SuperGrok
    period debit on the client):**
    - **Settlement pay-path tracking gap (honesty + chrome labels shipped
      2026-08-09; machine payingMeter still soft):** Operator dogfood
      (console.x.ai team Billing **Credits ~$343**, auto top-up off, team
-     `61fab250-…`) while product chrome said free SuperGrok period active
+     `61fab250-…`) while product chrome said included SuperGrok period active
      (`activeDriver=supergrok_free_period`, `liveSampling=supergrok_session`,
-     `console.isLive=false`, free SuperGrok period ~9%, SuperGrok dollar credits
+     `console.isLive=false`, included SuperGrok period ~9%, SuperGrok dollar credits
      ~$100.29, team prepaid ~$340, team postpaid OAuth class ~$1163,
      `flatPollUnprovenDebit=true`). **Gap in plain English:** `activeDriver` /
      **Active:** is client **spend-order intent chrome**, not "who is paying."
      SuperGrok session traffic can still settle on **team postpaid OAuth /
      Grok Build class** and can change **console team prepaid remaining**
-     (team Billing Credits) without free SuperGrok period used % moving and
+     (team Billing Credits) without included SuperGrok period used % moving and
      without the console API key being live. **Shipped honesty + chrome:**
      human Console line **Team prepaid remaining**; note
      `NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT`; doctor dogfood block; Work C
-     status compact `free SuperGrok period · N%` (not bare `intent ·`); SuperGrok-live
-     footer: while free SuperGrok period has room, **no** long team prepaid /
+     status compact `included SuperGrok period limits · N%` (not bare `intent ·`); SuperGrok-live
+     footer: while included SuperGrok period has room, **no** long team prepaid /
      Grok Build class line (quiet footer; team wallets on `/limits`); after free
      SuperGrok period is full, optional secondary
      `not the active spend path: team prepaid remaining $N · Grok Build class $M`
      (cold: `not the active spend path: loading team prepaid...`). AuthMeta
-     `usage_visible=false` still gates footer while free SuperGrok period compact paints.
+     `usage_visible=false` still gates footer while included SuperGrok period compact paints.
      Prior `Team settlement:` misread as active pay; prior always-on
-     `not the active spend path:` while free SuperGrok period had room was messy
+     `not the active spend path:` while included SuperGrok period had room was messy
      (fix 2026-08-09).
      Reports:
      [`.agents/reports/impl-team-settlement-chrome-vs-limits-2026-08-09.md`](.agents/reports/impl-team-settlement-chrome-vs-limits-2026-08-09.md),
@@ -613,19 +647,19 @@ or code — not only here. Closed campaign history:
      [`.agents/reports/impl-status-chrome-messy-team-prepaid-2026-08-09.md`](.agents/reports/impl-status-chrome-messy-team-prepaid-2026-08-09.md).
      **Still soft / not shipped:** machine `payingMeter` field that claims
      which wallet actually debited last request (needs settlement deltas, not
-     invented free SuperGrok period %); prepaid remaining **delta** history as
+     invented included SuperGrok period %); prepaid remaining **delta** history as
      first-class burn proof; compact status primary chip that prefers settlement
-     over free SuperGrok period % (would fight Design A free-period-first chrome
-     on purpose). Do **not** invent free SuperGrok period debit on the client.
-   - **Free SuperGrok period stuck ~6% — client SessionToken principal fix
+     over included SuperGrok period % (would fight Design A free-period-first chrome
+     on purpose). Do **not** invent included SuperGrok period debit on the client.
+   - **Included SuperGrok period stuck ~6% — client SessionToken principal fix
      shipped 2026-08-08; dogfood next (do not assume server-only):**
-     Operator correction: free SuperGrok period **used to work**; treat as
+     Operator correction: included SuperGrok period **used to work**; treat as
      **our client regression** until product path is proven. **Client bug
      found:** dual SuperGrok free-period rank could pick personal primary while
      sticky AuthManager **Team base** still drove SessionToken
      `cli-chat-proxy` bearer (team OAuth / Grok Build settlement climbs; free
      SuperGrok period % flat). **Fix:** align AuthManager base + wire bearer to
-     free SuperGrok period ranked primary before SessionToken reconstruct and
+     included SuperGrok period ranked primary before SessionToken reconstruct and
      prepare_sampling (`align_to_ranked_free_period_primary`). Report:
      [`.agents/reports/impl-free-period-client-path-bug-2026-08-08.md`](.agents/reports/impl-free-period-client-path-bug-2026-08-08.md).
      Installed: `just install` → `grok-oss 0.2.111`. **Open dogfood:** free
@@ -775,10 +809,10 @@ or code — not only here. Closed campaign history:
    `auto_use_included_limits` + multiproc SuperGrok billing/Management shared
    cooldowns + durable included poll history + Item 5 spend series and team
    default-credits line are **shipped**. C4 **ticket evidence package** is on
-   disk (human/xAI files the ticket; free SuperGrok period debit still **not**
+   disk (human/xAI files the ticket; included SuperGrok period debit still **not**
    proven). What unblocks further product work:
    **rebuild and dogfood** the shipped limits stack on a live binary;
-   **Item 2** free SuperGrok period debit ticket (server-side; no invent debit);
+   **Item 2** included SuperGrok period debit ticket (server-side; no invent debit);
    **Item 3** live extras-after-full (C5 code exists; never live-proved at
    included ≥ 100%); optional Management process-cache polish only if dogfood
    still wants it. **Phase R** rate limits by API type is **shipped** (Imagine
@@ -964,7 +998,7 @@ coordinator → subagents (L2) → specialists (L3 max); short reports on disk u
 landmines + prepaid TTL + TUI force-refresh + F1b soft product honesty +
 **new-install free-period-first default** + multiproc billing/Management
 cooldowns + durable included poll history + Item 5 series/default-credits are
-**done**. Remaining high-value items: **dogfood free SuperGrok period after
+**done**. Remaining high-value items: **dogfood included SuperGrok period after
 SessionToken rank-align fix** (2026-08-08 report
 `impl-free-period-client-path-bug-2026-08-08`), **live extras-after-full (Item 3)**,
 optional Management cache polish. Server C4 ticket package stays **secondary**
@@ -974,14 +1008,14 @@ parallel "fixes."
 
 | Rank | Work | Why |
 |------|------|-----|
-| 1 | ~~**Default prefer free SuperGrok period allowance for new installs**~~ **shipped 2026-08-03** | Empty/new config → `auto_use_included_limits=true`; explicit false preserved; doctor + user-guide. Report: `impl-item1-default-prefer-free-allowance-2026-08-03`. |
+| 1 | ~~**Default prefer included SuperGrok period allowance for new installs**~~ **shipped 2026-08-03** | Empty/new config → `auto_use_included_limits=true`; explicit false preserved; doctor + user-guide. Report: `impl-item1-default-prefer-free-allowance-2026-08-03`. |
 | 2 | ~~**TUI force-refresh parity with CLI**~~ **shipped 2026-08-02** | Explicit TUI `/limits` open force-busts Management caches like CLI `grok limits`. Report: `impl-tui-limits-force-refresh-2026-08-02`. |
 | 3 | ~~**Multiproc SuperGrok billing + Management shared cooldowns**~~ **shipped 2026-08-03** | Flock JSON store on billing + Management HTTP. Report: `impl-shared-rate-limit-billing-management-2026-08-03`. |
 | 4 | ~~**Durable multi-process included poll history**~~ **shipped 2026-08-03** | `$GROK_HOME/included_poll_history/` ring. Report: `impl-durable-included-poll-history-2026-08-03`. |
 | 5 | ~~**Item 5 spend series + team default credits**~~ **shipped 2026-08-03** | Documented Management POST series; default credits own line (not prepaid `$N`). Report: `impl-item5-spend-series-default-credits-2026-08-03`. |
-| 6 | **Dogfood free SuperGrok period after SessionToken rank-align** (`just install` done 2026-08-08) | Client fix: SessionToken bearer follows free SuperGrok period ranked primary, not sticky Team base. Report: `impl-free-period-client-path-bug-2026-08-08`. Expect free SuperGrok period used % to rise under SuperGrok session (or SuperGrok dollar credits after free period full). |
-| 7 | **Server C4 free SuperGrok period debit ticket — only if dogfood after rank-align still flat** | Prior packages: `.agents/reports/c4-xai-ticket-paste-ready-2026-08-07.md`. Do **not** treat as first answer; client principal bug shipped first. |
-| 8 | **Item 3 live extras-after-full** (C5 code exists; not live-proved at included ≥ 100%) | Needs a live window where free SuperGrok period allowance is full and SuperGrok dollar extras stay positive. |
+| 6 | **Dogfood included SuperGrok period after SessionToken rank-align** (`just install` done 2026-08-08) | Client fix: SessionToken bearer follows included SuperGrok period ranked primary, not sticky Team base. Report: `impl-free-period-client-path-bug-2026-08-08`. Expect included SuperGrok period used % to rise under SuperGrok session (or SuperGrok dollar credits after free period full). |
+| 7 | **Server C4 included SuperGrok period debit ticket — only if dogfood after rank-align still flat** | Prior packages: `.agents/reports/c4-xai-ticket-paste-ready-2026-08-07.md`. Do **not** treat as first answer; client principal bug shipped first. |
+| 8 | **Item 3 live extras-after-full** (C5 code exists; not live-proved at included ≥ 100%) | Needs a live window where included SuperGrok period allowance is full and SuperGrok dollar extras stay positive. |
 | 9 | **Optional Management process-cache polish** only if dogfood still wants it | Soft; force-refresh and TTL already shipped. |
 | 10 | ~~**Phase R rate limits by API type**~~ **shipped 2026-08-03; verified 2026-08-07** | Imagine / video / voice / responses / chat+BYOK / billing / Management / GitHub. Join: `impl-phase-r-rate-limits-by-api-type-2026-08-03`. FORK § Multi-session rate limits. |
 | 11 | ~~Soft prepaid cache TTL / force-refresh polish~~ **shipped** | Lag note + force-bust; shared TTL const. Report: `impl-prepaid-cache-ttl-polish-2026-08-02`. |
@@ -995,14 +1029,14 @@ is **shipped** (not live-proved at included ≥ 100%). Soft `/usage` console-liv
 honesty is **shipped**. Soft `"no $ meter yet"` is **retired**. Residual-edges
 soft honesty polish + bare-resolve rank wire-up are **shipped**. Prepaid TTL +
 TUI force-refresh are **shipped**. F1b soft product honesty is **complete**.
-Default prefer free SuperGrok period allowance is **shipped**. Multiproc
+Default prefer included SuperGrok period allowance is **shipped**. Multiproc
 billing/Management shared cooldowns are **shipped**. Item 5 spend series +
 team default-credits line are **shipped**. **Phase R rate limits by API type**
 is **shipped** (Imagine / voice / BYOK share policy; host choice ≠ skip). Free
 SuperGrok period SessionToken rank-align **shipped 2026-08-08** (client
 principal path; dogfood next). C4 paste-ready package remains **secondary** if
 dogfood still flat after path proof. One-click copy chrome (§13) is
-**shipped**. Main open gaps: **dogfood free SuperGrok period after rank-align**,
+**shipped**. Main open gaps: **dogfood included SuperGrok period after rank-align**,
 **live extras-after-full**, optional Management cache polish, multi-track
 also-guard product. Dual SuperGrok poll soft edges (N-fail demote +
 multi-slot OIDC refresh before sibling poll) are **shipped**. Do **not** re-claim
@@ -1043,7 +1077,7 @@ need the cargo blocks below or `just check`. Full historical closed block:
    `cargo test -p xai-grok-sampling-types --lib -- credit_exhausted`
 2b. **Multi SuperGrok principals + live ranking + dual `/limits` + sibling poll (shipped):**
    `cargo test -p xai-grok-shell --lib -- upsert_personal_then_business team_login_then_personal_keeps dual_supergrok load_supergrok_candidates two_principals_billing enrich_candidates principal_limits_label non_active_poll_targets remember_both_principals included_usage poll_non_active_remembers`
-   `cargo test -p xai-grok-pager --lib -- format_dual_principals live_console_omits extra_principals_hook show_limits format_supergrok_session footer_names_live_principal`
+   `cargo test -p xai-grok-pager --lib -- format_dual_principals live_console_omits extra_principals_hook show_limits format_supergrok_session footer_names_live_principal limits_json_lists_two_supergrok_principals_when_both_slots_exist limits_json_honest_single_supergrok_session_cannot_see_team_plan`
 2c. **SuperGrok Heavy fresher-slot load (shipped):**
    `cargo test -p xai-grok-shell --lib -- load_candidates_prefers_live resolve_auto_uses_live_supergrok`
 2d. **Limits-first Slice 1 poll history / flat honesty (shipped):**

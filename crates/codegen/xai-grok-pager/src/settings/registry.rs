@@ -280,6 +280,19 @@ pub struct PagerLocalSnapshot {
     pub show_tips: Option<bool>,
     /// `[cli].auto_update` mirror. `None` = no TOML override → default `true`.
     pub auto_update: Option<bool>,
+    /// `[session].auto_compact_threshold_percent` mirror.
+    /// `None` = no TOML override → default 95 (unless tokens are set).
+    pub auto_compact_threshold_percent: Option<u8>,
+    /// `[session].auto_compact_threshold_tokens` mirror.
+    /// When `Some`, absolute-token mode wins over percent for the session tier.
+    pub auto_compact_threshold_tokens: Option<u64>,
+    /// Live auto session-recap preference (`[ui.notifications] session_recap`).
+    pub notifications_session_recap: bool,
+    /// Live auto recap debounce seconds.
+    pub notifications_session_recap_threshold_secs: u64,
+    /// Effective/user `[features] session_recap` preference (default true).
+    /// Restart-required for shell ACP re-advertise; modal shows this mirror.
+    pub features_session_recap: bool,
     /// Process-wide vim-mode scrollback flag. Mirrors
     /// `appearance::cache::load_vim_mode()` at snapshot time.
     pub vim_mode: bool,
@@ -320,6 +333,11 @@ impl Default for PagerLocalSnapshot {
             plan_mode_active: false,
             show_tips: None,
             auto_update: None,
+            auto_compact_threshold_percent: None,
+            auto_compact_threshold_tokens: None,
+            notifications_session_recap: true,
+            notifications_session_recap_threshold_secs: 30,
+            features_session_recap: true,
             vim_mode: false,
             // Matches the registry default and
             // `appearance::cache::SCROLL_SPEED_DEFAULT`. Bare `u8::default()`
@@ -333,6 +351,111 @@ impl Default for PagerLocalSnapshot {
             scheduler_background_loops: true,
         }
     }
+}
+
+/// Parsed auto-compact modal choice: percent of window or absolute tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoCompactThresholdChoice {
+    Percent(u8),
+    Tokens(u64),
+}
+
+impl AutoCompactThresholdChoice {
+    /// Registry / toast canonical string.
+    pub fn as_canonical(self) -> &'static str {
+        match self {
+            Self::Percent(p) => canonical_auto_compact_threshold_percent(p),
+            Self::Tokens(t) => canonical_auto_compact_threshold_tokens(t),
+        }
+    }
+}
+
+/// Map a numeric percent onto a modal enum canonical (`"85"`…`"98"`).
+///
+/// Exact matches pass through; any other value snaps to the nearest percent
+/// choice so the picker always has a selected row.
+pub fn canonical_auto_compact_threshold_percent(percent: u8) -> &'static str {
+    match percent {
+        85 => "85",
+        90 => "90",
+        95 => "95",
+        98 => "98",
+        other => {
+            const CHOICES: &[(u8, &str)] = &[(85, "85"), (90, "90"), (95, "95"), (98, "98")];
+            CHOICES
+                .iter()
+                .min_by_key(|(c, _)| c.abs_diff(other))
+                .map(|(_, s)| *s)
+                .unwrap_or("95")
+        }
+    }
+}
+
+/// Map an absolute token count onto a modal enum canonical (`"200k"` / `"475k"`).
+///
+/// Exact Grok 4.5 card presets pass through; other values snap to the nearest
+/// token preset so the picker has a selected row.
+pub fn canonical_auto_compact_threshold_tokens(tokens: u64) -> &'static str {
+    use xai_grok_shell::util::config::{
+        GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
+    };
+    match tokens {
+        t if t == GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS => "200k",
+        t if t == GROK_45_DEFAULT_AUTO_COMPACT_TOKENS => "475k",
+        other => {
+            const CHOICES: &[(u64, &str)] = &[
+                (GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS, "200k"),
+                (GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, "475k"),
+            ];
+            CHOICES
+                .iter()
+                .min_by_key(|(c, _)| c.abs_diff(other))
+                .map(|(_, s)| *s)
+                .unwrap_or("200k")
+        }
+    }
+}
+
+/// Resolve the live modal canonical from session percent and/or tokens mirrors.
+///
+/// Token mode wins when `tokens` is `Some` (matches shell resolver session tier).
+pub fn canonical_auto_compact_threshold(percent: Option<u8>, tokens: Option<u64>) -> &'static str {
+    if let Some(t) = tokens.filter(|&t| t > 0) {
+        return canonical_auto_compact_threshold_tokens(t);
+    }
+    let pct =
+        percent.unwrap_or(xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
+    canonical_auto_compact_threshold_percent(pct)
+}
+
+/// Parse a modal enum canonical into percent or absolute tokens.
+///
+/// Accepts `"85"`…`"98"` (percent) and `"200k"` / `"475k"` (Grok 4.5 card).
+pub fn parse_auto_compact_threshold_canonical(
+    canonical: &str,
+) -> Option<AutoCompactThresholdChoice> {
+    use xai_grok_shell::util::config::{
+        GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
+    };
+    let s = canonical.trim();
+    match s {
+        "200k" | "200K" => Some(AutoCompactThresholdChoice::Tokens(
+            GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
+        )),
+        "475k" | "475K" => Some(AutoCompactThresholdChoice::Tokens(
+            GROK_45_DEFAULT_AUTO_COMPACT_TOKENS,
+        )),
+        other => {
+            let n: u8 = other.parse().ok()?;
+            matches!(n, 85 | 90 | 95 | 98).then_some(AutoCompactThresholdChoice::Percent(n))
+        }
+    }
+}
+
+/// Backward-compatible alias: percent-only canonicalize (nearest of 85/90/95/98).
+#[inline]
+pub fn canonical_auto_compact_threshold_from_percent(percent: u8) -> &'static str {
+    canonical_auto_compact_threshold_percent(percent)
 }
 
 /// Canonicalize a raw voice-capture mode to a registry choice. Case-insensitive
@@ -444,7 +567,9 @@ impl SettingsRegistry {
         self.entries.iter().filter(move |m| m.category == cat)
     }
 
-    /// Multi-word AND match against label, description, key, and keywords.
+    /// Multi-word AND match against label, description, keywords, and
+    /// a leading key prefix. Interior key segments are not substring
+    /// matches (`ascii` must not hit `scrub_ascii_punct`).
     pub fn search(&self, query: &str) -> Vec<&SettingMeta> {
         let q = query.to_lowercase();
         let words: Vec<&str> = q.split_whitespace().collect();
@@ -453,10 +578,7 @@ impl SettingsRegistry {
         }
         self.entries
             .iter()
-            .filter(|m| {
-                let haystack = build_search_haystack(m);
-                words.iter().all(|w| haystack.contains(w))
-            })
+            .filter(|m| words.iter().all(|w| setting_matches_search_word(m, w)))
             .collect()
     }
 }
@@ -481,13 +603,27 @@ fn assert_unique_keys(entries: &[SettingMeta]) {
     );
 }
 
+fn setting_matches_search_word(m: &SettingMeta, word: &str) -> bool {
+    if build_search_haystack(m).contains(word) {
+        return true;
+    }
+    key_matches_search_word(m.key, word)
+}
+
+/// Whole key, or a leading dotted / underscored prefix. Interior
+/// segments stay unmatched so `ascii` does not hit `scrub_ascii_punct`.
+fn key_matches_search_word(key: &str, word: &str) -> bool {
+    let key_lc = key.to_ascii_lowercase();
+    key_lc == word
+        || key_lc.starts_with(&format!("{word}."))
+        || key_lc.starts_with(&format!("{word}_"))
+}
+
 fn build_search_haystack(m: &SettingMeta) -> String {
     let mut s = String::new();
     s.push_str(&m.label.to_lowercase());
     s.push(' ');
     s.push_str(&m.description.to_lowercase());
-    s.push(' ');
-    s.push_str(m.key);
     for kw in m.keywords {
         s.push(' ');
         s.push_str(kw);
@@ -577,6 +713,28 @@ pub fn current_value_for(
         "show_thinking_blocks" => Some(SettingValue::Bool(
             crate::appearance::cache::load_show_thinking_blocks(),
         )),
+        "always_expand_thinking" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_always_expand_thinking(),
+        )),
+        "hide_header" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_hide_header(),
+        )),
+        "scrub_ascii_punct" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_scrub_ascii_punct(),
+        )),
+        "plan_approval_park" => Some(SettingValue::Enum(
+            if crate::appearance::cache::load_plan_approval_force_modal() {
+                "modal"
+            } else {
+                "soft"
+            },
+        )),
+        "allow_worktree" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_allow_worktree(),
+        )),
+        "bubble_copy_buttons" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_bubble_copy_buttons(),
+        )),
         // Live cache (like `show_thinking_blocks`).
         "group_tool_verbs" => Some(SettingValue::Bool(
             crate::appearance::cache::load_group_tool_verbs(),
@@ -588,6 +746,69 @@ pub fn current_value_for(
         // Live cache; `GROK_PROMPT_SUGGESTIONS` env overrides at the gate.
         "prompt_suggestions" => Some(SettingValue::Bool(
             crate::appearance::cache::load_prompt_suggestions(),
+        )),
+        "auto_run_implement" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_auto_run_implement(),
+        )),
+        "economic_mode" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_economic_mode(),
+        )),
+        "resume_canceled_turn_on_restart" => Some(SettingValue::Bool(
+            ui.resume_canceled_turn_on_restart_enabled(),
+        )),
+        "token_economy.cap_implement_effort_when_economic" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Bool(cfg.cap_implement_effort_when_economic))
+        }
+        "token_economy.show_period_pacing" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Bool(cfg.show_period_pacing))
+        }
+        "token_economy.local_spend_ledger" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Bool(cfg.local_spend_ledger))
+        }
+        "token_economy.reconcile_management_usage" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Bool(cfg.reconcile_management_usage))
+        }
+        "token_economy.max_implement_effort" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Int(i64::from(cfg.max_implement_effort)))
+        }
+        "token_economy.min_implement_effort" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Int(i64::from(cfg.min_implement_effort)))
+        }
+        "token_economy.desired_implement_effort" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Int(i64::from(cfg.desired_implement_effort)))
+        }
+        "token_economy.lock_implement_effort" => {
+            let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+            Some(SettingValue::Int(i64::from(
+                cfg.lock_implement_effort.unwrap_or(0),
+            )))
+        }
+        "auto_compact_threshold_percent" => {
+            Some(SettingValue::Enum(canonical_auto_compact_threshold(
+                pager.auto_compact_threshold_percent,
+                pager.auto_compact_threshold_tokens,
+            )))
+        }
+        "notifications.session_recap" => {
+            Some(SettingValue::Bool(pager.notifications_session_recap))
+        }
+        "notifications.session_recap_threshold_secs" => Some(SettingValue::Int(
+            pager.notifications_session_recap_threshold_secs as i64,
+        )),
+        "features.session_recap" => Some(SettingValue::Bool(pager.features_session_recap)),
+        "cancel_subagents_on_turn_cancel" => Some(SettingValue::Enum(
+            match ui.cancel_subagents_on_turn_cancel.as_deref() {
+                Some("always_stop") => "always_stop",
+                Some("always_continue") => "always_continue",
+                _ => "ask",
+            },
         )),
         "respect_manual_folds" => Some(SettingValue::Bool(pager.respect_manual_folds)),
         // SHELL — canonicalized from `[ui].hunk_tracker_mode`.
@@ -620,14 +841,14 @@ pub fn current_value_for(
             ui.theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
-                .unwrap_or("groknight"),
+                .unwrap_or("doge"),
         )),
         "auto_dark_theme" => Some(SettingValue::Enum(
             ui.auto_dark_theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
                 .filter(|s| *s != "auto")
-                .unwrap_or("groknight"),
+                .unwrap_or("doge"),
         )),
         "auto_light_theme" => Some(SettingValue::Enum(
             ui.auto_light_theme
@@ -749,6 +970,53 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_choices_include_doge_and_default_is_doge() {
+        let reg = SettingsRegistry::defaults();
+        let theme = reg
+            .find("theme")
+            .expect("theme must be registered in /settings");
+        match &theme.kind {
+            SettingKind::Enum {
+                default, choices, ..
+            } => {
+                assert_eq!(
+                    *default, "doge",
+                    "Settings theme default must be doge so committing Theme does not write groknight over the product default"
+                );
+                assert!(
+                    choices.iter().any(|c| c.canonical == "doge"),
+                    "THEME_CHOICES must include doge so /settings can pick DOGE"
+                );
+                assert!(
+                    choices
+                        .iter()
+                        .any(|c| c.canonical == "doge" && c.display == "DOGE"),
+                    "doge display name in /settings must be DOGE"
+                );
+            }
+            other => panic!("theme must be an Enum, got {other:?}"),
+        }
+        let auto_dark = reg
+            .find("auto_dark_theme")
+            .expect("auto_dark_theme must be registered");
+        match &auto_dark.kind {
+            SettingKind::Enum {
+                default, choices, ..
+            } => {
+                assert_eq!(
+                    *default, "doge",
+                    "auto dark theme default must be doge, not groknight"
+                );
+                assert!(
+                    choices.iter().any(|c| c.canonical == "doge"),
+                    "concrete theme choices must include doge"
+                );
+            }
+            other => panic!("auto_dark_theme must be an Enum, got {other:?}"),
+        }
+    }
 
     /// Every SHELL/SHARED setting's default must match `UiConfig::default()`.
     /// PAGER-owned settings are covered by `defaults_match_pager_state`.
@@ -874,7 +1142,7 @@ mod tests {
                         .theme
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
-                        .unwrap_or("groknight");
+                        .unwrap_or("doge");
                     assert_eq!(
                         *default, expected,
                         "theme default drifts from UiConfig::default()",
@@ -890,7 +1158,7 @@ mod tests {
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
                         .filter(|s| *s != "auto")
-                        .unwrap_or("groknight");
+                        .unwrap_or("doge");
                     assert_eq!(
                         *default, expected,
                         "auto_dark_theme default drifts from UiConfig::default()",
@@ -998,6 +1266,39 @@ mod tests {
                         *default,
                         ui.show_thinking_blocks.unwrap_or(true),
                         "show_thinking_blocks default drifts from UiConfig::default()"
+                    );
+                }
+                ("always_expand_thinking", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.always_expand_thinking.unwrap_or(false),
+                        "always_expand_thinking default drifts from UiConfig::default()"
+                    );
+                }
+                ("hide_header", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default, ui.hide_header,
+                        "hide_header default drifts from UiConfig::default()"
+                    );
+                }
+                ("scrub_ascii_punct", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.scrub_ascii_punct_enabled(),
+                        "scrub_ascii_punct default drifts from UiConfig::default()"
+                    );
+                }
+                ("plan_approval_park", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        ui.plan_approval_park_mode(),
+                        "plan_approval_park default drifts from UiConfig::default()"
+                    );
+                }
+                ("allow_worktree", SettingKind::Bool { default }) => {
+                    assert!(
+                        !*default,
+                        "allow_worktree registry default must be false (force-none)"
                     );
                 }
                 // group_tool_verbs: Option<bool>; None → true (client default).
@@ -1190,6 +1491,104 @@ mod tests {
                          models::default_model() — drift here breaks the empty-fold contract",
                     );
                 }
+                ("auto_run_implement", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.auto_run_implement.unwrap_or(true),
+                        "auto_run_implement default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "auto_run_implement must default ON");
+                }
+                ("economic_mode", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.economic_mode.unwrap_or(true),
+                        "economic_mode default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "economic_mode must default ON");
+                }
+                ("resume_canceled_turn_on_restart", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.resume_canceled_turn_on_restart.unwrap_or(true),
+                        "resume_canceled_turn_on_restart default drifts from UiConfig"
+                    );
+                    assert!(*default, "resume_canceled_turn_on_restart must default ON");
+                }
+                (
+                    "token_economy.cap_implement_effort_when_economic",
+                    SettingKind::Bool { default },
+                ) => {
+                    assert!(*default);
+                }
+                ("token_economy.show_period_pacing", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.local_spend_ledger", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.reconcile_management_usage", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.max_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 3);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                ("token_economy.min_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 1);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                (
+                    "token_economy.desired_implement_effort",
+                    SettingKind::Int { default, min, max },
+                ) => {
+                    assert_eq!(*default, 2);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                ("token_economy.lock_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 0);
+                    assert_eq!((*min, *max), (0, 5));
+                }
+                ("auto_compact_threshold_percent", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL,
+                        "auto_compact_threshold_percent registry default must be \"95\""
+                    );
+                    assert_eq!(
+                        xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+                        95,
+                        "shell DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT drifted from 95"
+                    );
+                }
+                ("notifications.session_recap", SettingKind::Bool { default }) => {
+                    assert!(
+                        *default,
+                        "notifications.session_recap must default ON (auto away-recap)"
+                    );
+                    assert_eq!(
+                        ui.notifications.session_recap.unwrap_or(true),
+                        *default,
+                        "notifications.session_recap default drifts from UiConfig"
+                    );
+                }
+                (
+                    "notifications.session_recap_threshold_secs",
+                    SettingKind::Int { default, .. },
+                ) => {
+                    assert_eq!(*default, 30);
+                    assert_eq!(
+                        ui.notifications.session_recap_threshold_secs.unwrap_or(30) as i64,
+                        *default,
+                    );
+                }
+                ("features.session_recap", SettingKind::Bool { default }) => {
+                    assert!(*default, "features.session_recap master must default ON");
+                }
+                ("cancel_subagents_on_turn_cancel", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(*default, "ask");
+                    assert_eq!(ui.cancel_subagents_on_turn_cancel, None);
+                }
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
@@ -1228,6 +1627,13 @@ mod tests {
                         crate::appearance::ScrollConfig::default().respect_manual_folds,
                         "respect_manual_folds default drifts from ScrollConfig::default() — \
                          the appearance config is the source of truth"
+                    );
+                }
+                ("bubble_copy_buttons", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
+                        "bubble_copy_buttons default drifts from ScrollbackDisplayConfig"
                     );
                 }
                 // plan_mode: per-session, not persisted.
@@ -1435,7 +1841,7 @@ mod tests {
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
         assert_eq!(
             value,
-            SettingValue::Enum("groknight"),
+            SettingValue::Enum("doge"),
             "corrupted `auto_dark_theme = \"auto\"` must fall back to canonical default",
         );
     }
@@ -1464,7 +1870,7 @@ mod tests {
         };
         let pager = PagerLocalSnapshot::default();
         let value = current_value_for("auto_dark_theme", &ui, &pager).expect("must resolve");
-        assert_eq!(value, SettingValue::Enum("groknight"));
+        assert_eq!(value, SettingValue::Enum("doge"));
     }
 
     /// The persisted `fork_secondary_model` slug resolves to the catalog

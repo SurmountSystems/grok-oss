@@ -28,7 +28,7 @@ const LOGO_H_PAD: u16 = 3;
 /// message never paints over the button.
 const UPGRADE_CTA_ROWS: u16 = 2;
 
-const HERO_SUBTITLE: &str = "Thanks for trying Grok Build, give feedback with /feedback!";
+const HERO_SUBTITLE: &str = "Thanks for trying Grok OSS, give feedback with /feedback!";
 
 use super::{PROMPT_HEIGHT, VERSION_GAP};
 
@@ -700,6 +700,19 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Style;
+
+    /// Named contract: hero thanks-line brands **Grok OSS**, not Grok Build.
+    #[test]
+    fn hero_subtitle_brands_grok_oss() {
+        assert!(
+            HERO_SUBTITLE.contains("Grok OSS"),
+            "hero subtitle must say Grok OSS: {HERO_SUBTITLE:?}"
+        );
+        assert!(
+            !HERO_SUBTITLE.contains("Grok Build"),
+            "hero subtitle must not say Grok Build: {HERO_SUBTITLE:?}"
+        );
+    }
 
     fn extract_text(buf: &Buffer, x: u16, y: u16, width: u16) -> String {
         (x..x + width)

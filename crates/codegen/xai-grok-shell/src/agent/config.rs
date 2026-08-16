@@ -56,6 +56,17 @@ pub(crate) fn split_api_key_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn push_unique_key(out: &mut Vec<String>, key: String) {
+    let t = key.trim();
+    if t.is_empty() {
+        return;
+    }
+    if out.iter().any(|k| k.trim() == t) {
+        return;
+    }
+    out.push(t.to_owned());
+}
+
 /// Default base URL for the public xAI API.
 pub const XAI_API_BASE_URL_DEFAULT: &str = "https://api.x.ai/v1";
 const NO_INLINE_CITATIONS_RESPONSE_INCLUDE: &str = "no_inline_citations";
@@ -121,6 +132,10 @@ impl EnvKeys {
         self.resolve_value_with(|name| std::env::var(name).ok())
     }
     /// Testable resolve with an injected getenv.
+    ///
+    /// First set, non-blank value wins. Whitespace-only is unset (fall through).
+    /// Padding on a real token is kept (`"  tok  "` stays padded); do not route
+    /// this through [`split_api_key_list`], which trims list parts.
     pub(crate) fn resolve_value_with(
         &self,
         mut getenv: impl FnMut(&str) -> Option<String>,
@@ -133,6 +148,26 @@ impl EnvKeys {
             }
         }
         None
+    }
+    /// All distinct non-blank values from configured names (each name may
+    /// expand to multiple keys via commas/newlines). Order preserved.
+    pub(crate) fn resolve_all_values(&self) -> Vec<String> {
+        self.resolve_all_values_with(|name| std::env::var(name).ok())
+    }
+    /// Testable multi-value resolve.
+    pub(crate) fn resolve_all_values_with(
+        &self,
+        mut getenv: impl FnMut(&str) -> Option<String>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for name in self.names() {
+            if let Some(value) = getenv(name) {
+                for part in split_api_key_list(&value) {
+                    push_unique_key(&mut out, part);
+                }
+            }
+        }
+        out
     }
 }
 /// Semantic equality: compares the ordered name lists, so `One("X")` and
@@ -1499,6 +1534,10 @@ pub struct Config {
     #[serde(skip)]
     pub subagent_personas:
         std::collections::HashMap<String, xai_grok_subagent_resolution::config::SubagentPersona>,
+    /// Whether subagents may create worktrees. Empty/false = force isolation
+    /// none. `true` opts in. Copied from `[subagents] allow_worktree`.
+    #[serde(skip)]
+    pub subagent_allow_worktree: bool,
     /// Whether web search is force-disabled via `--disable-web-search` CLI flag.
     /// When true, the web search tool is never added to the agent toolset
     /// regardless of available credentials.
@@ -1815,6 +1854,7 @@ impl Default for Config {
             subagent_toggle: std::collections::HashMap::new(),
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
+            subagent_allow_worktree: false,
             disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
@@ -2127,6 +2167,7 @@ impl Config {
         self.subagent_toggle = sa.toggle;
         self.subagent_roles = sa.roles;
         self.subagent_personas = sa.personas;
+        self.subagent_allow_worktree = sa.allow_worktree;
         let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH).ok();
         let remote = self
             .remote_settings
@@ -4829,10 +4870,34 @@ pub struct Features {
 /// Resolved credentials for a model session.
 pub(crate) struct ResolvedCredentials {
     pub api_key: Option<String>,
+    /// Extra API keys for credit-exhaustion failover. Never includes `api_key`.
+    pub failover_api_keys: Vec<String>,
     pub base_url: String,
     pub auth_type: xai_chat_state::AuthType,
     pub auth_scheme: AuthScheme,
+    /// Dual-auth: console API host when split from session `base_url`.
+    pub failover_base_url: Option<String>,
+    /// Dual-auth: session host when primary is console key.
+    pub session_base_url: Option<String>,
+    /// Dual-auth: exact session JWT for hop detection / bearer reinstall.
+    pub session_identity_key: Option<String>,
 }
+
+impl Default for ResolvedCredentials {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            failover_api_keys: Vec::new(),
+            base_url: String::new(),
+            auth_type: xai_chat_state::AuthType::ApiKey,
+            auth_scheme: AuthScheme::default(),
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
+        }
+    }
+}
+
 /// First usable BYOK credential: a non-empty (trimmed) api_key, else the first
 /// set, non-empty env_key value. Single source of truth for has_own_credentials,
 /// resolve_credentials, and the JWT-reload path.
@@ -4840,92 +4905,503 @@ pub(crate) fn first_own_credential(
     api_key: Option<&str>,
     env_key: Option<&EnvKeys>,
 ) -> Option<String> {
-    api_key
-        .filter(|k| !k.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| env_key.and_then(EnvKeys::resolve_value))
+    collect_own_credentials(api_key, env_key, /* openrouter */ false)
+        .into_iter()
+        .next()
 }
-/// Priority: model api_key/env_key > cached auth-provider token > session
-/// token > XAI_API_KEY.
+
+/// Ordered unique BYOK keys: inline `api_key` (may be a comma-list), then every
+/// value from `env_key` names, then (OpenRouter only) secret-store key.
+pub(crate) fn collect_own_credentials(
+    api_key: Option<&str>,
+    env_key: Option<&EnvKeys>,
+    openrouter: bool,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(raw) = api_key {
+        for part in split_api_key_list(raw) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    if let Some(env) = env_key {
+        for v in env.resolve_all_values() {
+            push_unique_key(&mut keys, v);
+        }
+    }
+    if openrouter && let Ok(extra) = std::env::var(crate::auth::openrouter::OPENROUTER_API_KEYS_ENV)
+    {
+        for part in split_api_key_list(&extra) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    if openrouter {
+        let store = crate::auth::credentials_store::CredentialsStore::default_store();
+        let url = crate::auth::openrouter::openrouter_credential_url(None);
+        if let Ok(Some((_, store_key))) = store.read(&url) {
+            push_unique_key(&mut keys, store_key);
+        } else if keys.is_empty() {
+            if let Ok(Some(k)) = crate::auth::openrouter::load_openrouter_api_key_default() {
+                push_unique_key(&mut keys, k);
+            }
+        }
+    }
+    keys
+}
+
+fn split_primary_failover(keys: Vec<String>) -> (Option<String>, Vec<String>) {
+    let mut iter = keys.into_iter();
+    let primary = iter.next();
+    (primary, iter.collect())
+}
+
+/// Ordered unique first-party console / Business API keys for dual-auth failover.
+///
+/// Order: `XAI_API_KEY` (comma-list) → credentials store → `auth.json` api key.
+pub(crate) fn collect_xai_console_api_keys() -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(raw) = crate::agent::auth_method::read_xai_api_key_env() {
+        for part in split_api_key_list(&raw) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    let store = crate::auth::credentials_store::CredentialsStore::default_store();
+    let url = crate::auth::xai_console::credential_url(None);
+    if let Ok(Some((_, secret))) = store.read(&url) {
+        for part in split_api_key_list(&secret) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    let home = crate::util::grok_home::grok_home();
+    if let Some(disk) = crate::auth::read_api_key(&home) {
+        for part in split_api_key_list(&disk) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    keys
+}
+
+fn collect_xai_api_key_env_list() -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(raw) = crate::agent::auth_method::read_xai_api_key_env() {
+        for part in split_api_key_list(&raw) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    keys
+}
+
+fn console_hop_host(model: &ModelEntry, first_party: bool) -> String {
+    let info = model.info();
+    model
+        .api_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let base = info.base_url.as_str();
+            let on_cli_chat_proxy = {
+                let lower = base.to_ascii_lowercase();
+                lower.contains("cli-chat-proxy") || lower.contains("cli_chat_proxy")
+            };
+            if first_party && on_cli_chat_proxy {
+                XAI_API_BASE_URL_DEFAULT.to_owned()
+            } else {
+                info.base_url.clone()
+            }
+        })
+}
+
+/// Resolve credentials for a model (session-first when both session + console key).
+///
+/// See [`resolve_credentials_preferring`] for dual-auth ordering.
 pub(crate) fn resolve_credentials(
     model: &ModelEntry,
     session_key: Option<&str>,
 ) -> ResolvedCredentials {
+    resolve_credentials_preferring(model, session_key, None)
+}
+
+/// Resolve credentials with optional dual-auth primary pin.
+///
+/// When both an OAuth/session token and console API key(s) are available on a
+/// first-party xAI host:
+/// - `preferred = None` or `Some(Oidc)` → session primary, console keys failover
+/// - `preferred = Some(ApiKey)` → first console key primary, remaining keys then
+///   session JWT as failover
+/// - `auto_use_included_limits = true` (and not api_key pin) → prefer included
+///   SuperGrok period limits; omit console while any SuperGrok still has
+///   included remaining; after those included SuperGrok period limits are full,
+///   SuperGrok dollar credits (when known positive) stay primary with console
+///   as failover; when extras are 0 or unknown, console leads
+pub(crate) fn resolve_credentials_preferring(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+) -> ResolvedCredentials {
+    resolve_credentials_preferring_with_rank(model, session_key, preferred, false)
+}
+
+/// Like [`resolve_credentials_preferring`] with explicit SuperGrok multi-identity
+/// ranking (`[auth] auto_use_included_limits`).
+pub(crate) fn resolve_credentials_preferring_with_rank(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
+) -> ResolvedCredentials {
+    if crate::auth::preferred_uses_supergrok_auto_rank(auto_use_included_limits, preferred) {
+        let home = crate::util::grok_home::grok_home();
+        let mut candidates = crate::auth::load_supergrok_session_candidates(&home);
+        if candidates.is_empty()
+            && let Some(sess) = session_key.map(str::trim).filter(|s| !s.is_empty())
+        {
+            candidates.push(crate::auth::SupergrokSessionCandidate {
+                headroom: crate::auth::SupergrokIdentityHeadroom {
+                    identity_id: "session".into(),
+                    role: crate::auth::SupergrokAccountRole::Personal,
+                    included_remaining: if xai_grok_sampler::is_credential_exhausted(sess) {
+                        0
+                    } else {
+                        1
+                    },
+                    reset_at: None,
+                },
+                access_token: sess.to_owned(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
+            });
+        }
+        if !candidates.is_empty() {
+            return resolve_credentials_preferring_with_supergrok_sessions(
+                model,
+                &candidates,
+                preferred,
+                auto_use_included_limits,
+            );
+        }
+    }
+    resolve_credentials_preferring_inner(model, session_key, preferred)
+}
+
+/// Dual SuperGrok + console under `auto_use_included_limits`.
+pub(crate) fn resolve_credentials_preferring_with_supergrok_sessions(
+    model: &ModelEntry,
+    sessions: &[crate::auth::SupergrokSessionCandidate],
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
+) -> ResolvedCredentials {
+    if !crate::auth::preferred_uses_supergrok_auto_rank(auto_use_included_limits, preferred) {
+        let first = sessions.first().map(|s| s.access_token.as_str());
+        return resolve_credentials_preferring_inner(model, first, preferred);
+    }
+
     let info = model.info();
-    let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
+    let is_openrouter = crate::auth::openrouter::is_openrouter_base_url(&info.base_url);
+    let first_party = crate::util::is_xai_api_url(&info.base_url);
+    if is_openrouter || !first_party || model.has_own_credentials() {
+        let first = sessions.first().map(|s| s.access_token.as_str());
+        return resolve_credentials_preferring_inner(model, first, preferred);
+    }
+
+    let console_keys = collect_xai_console_api_keys();
+    let order = crate::auth::order_credentials_for_preferred_auto(sessions, &console_keys);
+
+    let session_host = info.base_url.clone();
+    let console_host = console_hop_host(model, first_party);
+    let split_hosts = session_host.trim_end_matches('/') != console_host.trim_end_matches('/');
+
+    let auth_type = if order.primary_is_supergrok_included {
+        xai_chat_state::AuthType::SessionToken
+    } else {
+        xai_chat_state::AuthType::ApiKey
+    };
+    let base_url = if order.primary_is_supergrok_included {
+        session_host.clone()
+    } else {
+        console_host.clone()
+    };
+
+    let session_identity = order.session_identity_key.clone().or_else(|| {
+        sessions
+            .iter()
+            .find(|s| !s.hard_expired)
+            .map(|s| s.access_token.clone())
+    });
+
+    ResolvedCredentials {
+        api_key: order.primary,
+        failover_api_keys: order.failover,
+        base_url,
+        auth_type,
+        auth_scheme: info.auth_scheme,
+        failover_base_url: if split_hosts {
+            Some(console_host)
+        } else {
+            None
+        },
+        session_base_url: if split_hosts {
+            Some(session_host)
+        } else {
+            None
+        },
+        session_identity_key: session_identity,
+    }
+}
+
+fn resolve_credentials_preferring_inner(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+) -> ResolvedCredentials {
+    let info = model.info();
+    let is_openrouter = crate::auth::openrouter::is_openrouter_base_url(&info.base_url);
+    let first_party = crate::util::is_xai_api_url(&info.base_url);
+    let prefer_api_key_primary =
+        matches!(preferred, Some(crate::auth::PreferredAuthMethod::ApiKey));
+    let own = collect_own_credentials(
+        model.api_key.as_deref(),
+        model.env_key.as_ref(),
+        is_openrouter,
+    );
+    let (
+        api_key,
+        failover_api_keys,
+        base_url,
+        auth_type,
+        failover_base_url,
+        session_base_url,
+        session_identity_key,
+    ) = if !own.is_empty() {
+        let (primary, failover) = split_primary_failover(own);
         (
-            Some(key),
+            primary,
+            failover,
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
+            None,
+            None,
+            None,
+        )
+    } else if is_openrouter {
+        tracing::warn!(
+            model = %info.model,
+            env = crate::auth::openrouter::OPENROUTER_API_KEY_ENV,
+            "OpenRouter model has no API key — set OPENROUTER_API_KEY or run `grok login --openrouter`"
+        );
+        (
+            None,
+            Vec::new(),
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+            None,
+            None,
+            None,
         )
     } else if let Some(provider) = model.auth_provider.as_ref() {
         debug_assert!(model.effective_auth_provider().is_some());
         (
             provider.cached_token(),
+            Vec::new(),
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
-        )
-    } else if crate::auth::openrouter::is_openrouter_base_url(&info.base_url) {
-        // OpenRouter is BYOK. Never send an xAI SuperGrok session JWT.
-        (
             None,
-            info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
+            None,
+            None,
         )
-    } else if let Some(key) = session_key {
-        (
-            Some(key.to_owned()),
-            info.base_url.clone(),
-            xai_chat_state::AuthType::SessionToken,
-        )
-    } else if let Ok(key) = crate::agent::auth_method::read_xai_api_key_env() {
-        let url = model
-            .api_base_url
-            .clone()
-            .unwrap_or_else(|| info.base_url.clone());
-        (Some(key), url, xai_chat_state::AuthType::ApiKey)
     } else {
-        if let Some(ref env_keys) = model.env_key
-            && !env_keys.is_empty()
-        {
-            tracing::warn!(
-                model = %info.model,
-                env_key = %env_keys,
-                "model has env_key configured but none of the environment variables are set — \
-                 requests will have no API key",
-            );
+        let session = session_key
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let console_keys = if first_party {
+            collect_xai_console_api_keys()
+        } else {
+            Vec::new()
+        };
+        let env_only_keys = if !first_party {
+            collect_xai_api_key_env_list()
+        } else {
+            Vec::new()
+        };
+        let session_host = info.base_url.clone();
+        let console_host = console_hop_host(model, first_party);
+        let split_hosts = session_host.trim_end_matches('/') != console_host.trim_end_matches('/');
+
+        match (session.as_deref(), !console_keys.is_empty(), first_party) {
+            (Some(sess), true, true) if prefer_api_key_primary => {
+                let mut keys = console_keys;
+                keys.retain(|k| k.trim() != sess);
+                if keys.is_empty() {
+                    (
+                        None,
+                        Vec::new(),
+                        session_host,
+                        xai_chat_state::AuthType::ApiKey,
+                        None,
+                        None,
+                        None,
+                    )
+                } else {
+                    let (primary, mut failover) = split_primary_failover(keys);
+                    failover.push(sess.to_owned());
+                    (
+                        primary,
+                        failover,
+                        console_host.clone(),
+                        xai_chat_state::AuthType::ApiKey,
+                        if split_hosts {
+                            Some(console_host.clone())
+                        } else {
+                            None
+                        },
+                        if split_hosts {
+                            Some(session_host)
+                        } else {
+                            None
+                        },
+                        Some(sess.to_owned()),
+                    )
+                }
+            }
+            (Some(sess), true, true) => {
+                let mut keys = console_keys;
+                keys.retain(|k| k.trim() != sess);
+                (
+                    Some(sess.to_owned()),
+                    keys,
+                    session_host.clone(),
+                    xai_chat_state::AuthType::SessionToken,
+                    if split_hosts {
+                        Some(console_host)
+                    } else {
+                        None
+                    },
+                    if split_hosts {
+                        Some(session_host)
+                    } else {
+                        None
+                    },
+                    Some(sess.to_owned()),
+                )
+            }
+            (Some(_), false, _) if prefer_api_key_primary => {
+                if let Some(ref env_keys) = model.env_key
+                    && !env_keys.is_empty()
+                {
+                    tracing::warn!(
+                        model = %info.model,
+                        env_key = %env_keys,
+                        "model has env_key configured but none of the environment variables are set — \
+                         requests will have no API key",
+                    );
+                }
+                (
+                    None,
+                    Vec::new(),
+                    info.base_url.clone(),
+                    xai_chat_state::AuthType::ApiKey,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            (Some(sess), _, _) => (
+                Some(sess.to_owned()),
+                Vec::new(),
+                info.base_url.clone(),
+                xai_chat_state::AuthType::SessionToken,
+                None,
+                None,
+                None,
+            ),
+            (None, true, true) => {
+                let (primary, failover) = split_primary_failover(console_keys);
+                (
+                    primary,
+                    failover,
+                    console_host,
+                    xai_chat_state::AuthType::ApiKey,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            (None, _, false) if !env_only_keys.is_empty() => {
+                let url = model
+                    .api_base_url
+                    .clone()
+                    .unwrap_or_else(|| info.base_url.clone());
+                let (primary, failover) = split_primary_failover(env_only_keys);
+                (
+                    primary,
+                    failover,
+                    url,
+                    xai_chat_state::AuthType::ApiKey,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            (None, _, _) => {
+                if let Some(ref env_keys) = model.env_key
+                    && !env_keys.is_empty()
+                {
+                    tracing::warn!(
+                        model = %info.model,
+                        env_key = %env_keys,
+                        "model has env_key configured but none of the environment variables are set — \
+                         requests will have no API key",
+                    );
+                }
+                (
+                    None,
+                    Vec::new(),
+                    info.base_url.clone(),
+                    xai_chat_state::AuthType::ApiKey,
+                    None,
+                    None,
+                    None,
+                )
+            }
         }
-        (
-            None,
-            info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
-        )
     };
     let auth_scheme = info.auth_scheme;
     tracing::debug!(
         model = %info.model,
         auth_type = ?auth_type,
+        failover_keys = failover_api_keys.len(),
+        has_failover_base = failover_base_url.is_some(),
         "resolved credentials"
     );
     ResolvedCredentials {
         api_key,
+        failover_api_keys,
         base_url,
         auth_type,
         auth_scheme,
+        failover_base_url,
+        session_base_url,
+        session_identity_key,
     }
 }
+
 /// `disable_api_key_auth` at the credential seam: swap a first-party xAI API
 /// key for the IdP session (absent => request fails => forces login). BYOK
 /// (non-xAI `base_url`) is untouched; no-op when the switch is off.
+///
+/// Always clears console-key failover on first-party hosts under the kill
+/// switch (enterprise single-identity).
 pub(crate) fn enforce_disable_api_key_auth(
     creds: &mut ResolvedCredentials,
     disable_api_key_auth: bool,
     session_key: Option<&str>,
 ) {
-    if disable_api_key_auth
-        && creds.auth_type == xai_chat_state::AuthType::ApiKey
-        && crate::util::is_xai_api_url(&creds.base_url)
-    {
+    if !disable_api_key_auth || !crate::util::is_xai_api_url(&creds.base_url) {
+        return;
+    }
+    let was_api_key = creds.auth_type == xai_chat_state::AuthType::ApiKey;
+    if was_api_key {
         creds.auth_type = xai_chat_state::AuthType::SessionToken;
         creds.api_key = session_key.map(str::to_owned);
         xai_grok_telemetry::unified_log::debug(
@@ -4937,6 +5413,23 @@ pub(crate) fn enforce_disable_api_key_auth(
             })),
         );
     }
+    if !creds.failover_api_keys.is_empty()
+        || creds.failover_base_url.is_some()
+        || creds.session_base_url.is_some()
+        || creds.session_identity_key.is_some()
+    {
+        creds.failover_api_keys.clear();
+        creds.failover_base_url = None;
+        creds.session_base_url = None;
+        creds.session_identity_key = None;
+        if !was_api_key {
+            xai_grok_telemetry::unified_log::debug(
+                "auth: kill switch cleared first-party API key failover list",
+                None,
+                Some(serde_json::json!({ "base_url": creds.base_url })),
+            );
+        }
+    }
 }
 /// Resolve credentials for an auxiliary sampling path (web search, image
 /// description) with the first-party API-key kill switch applied, so these
@@ -4946,7 +5439,24 @@ fn resolve_credentials_enforced(
     session_key: Option<&str>,
     disable_api_key_auth: bool,
 ) -> ResolvedCredentials {
-    let mut credentials = resolve_credentials(entry, session_key);
+    resolve_credentials_enforced_preferring(entry, session_key, disable_api_key_auth, None, false)
+}
+
+/// Like [`resolve_credentials_enforced`] but honors `[auth] preferred_method`
+/// and `[auth] auto_use_included_limits` for dual-auth hop order.
+pub(crate) fn resolve_credentials_enforced_preferring(
+    entry: &ModelEntry,
+    session_key: Option<&str>,
+    disable_api_key_auth: bool,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
+) -> ResolvedCredentials {
+    let mut credentials = resolve_credentials_preferring_with_rank(
+        entry,
+        session_key,
+        preferred,
+        auto_use_included_limits,
+    );
     enforce_disable_api_key_auth(&mut credentials, disable_api_key_auth, session_key);
     credentials
 }
@@ -4967,13 +5477,13 @@ pub(crate) fn try_resolve_model_credentials(
         .ok()?;
     let models = resolve_model_list(&cfg, None);
     let entry = find_model_by_id(&models, model_id)?;
-    let mut credentials = resolve_credentials(entry, session_key);
-    enforce_disable_api_key_auth(
-        &mut credentials,
-        cfg.grok_com_config.api_key_auth_disabled(),
+    Some(resolve_credentials_enforced_preferring(
+        entry,
         session_key,
-    );
-    Some(credentials)
+        cfg.grok_com_config.api_key_auth_disabled(),
+        cfg.grok_com_config.preferred_method,
+        cfg.grok_com_config.auto_use_included_limits,
+    ))
 }
 /// Per-model auth facts (BYOK status + auth scheme) from one effective-config
 /// load, memoized by the session actor.
@@ -5282,13 +5792,47 @@ pub(crate) fn sampling_config_for_model(
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
         header_injector: None,
-        failover_api_keys: Vec::new(),
-        failover_base_url: None,
-        session_base_url: None,
-        session_identity_key: None,
+        failover_api_keys: credentials.failover_api_keys,
+        failover_base_url: credentials.failover_base_url,
+        session_base_url: credentials.session_base_url,
+        session_identity_key: credentials.session_identity_key,
         stashed_bearer_resolver: None,
         session_bearer_resolver: None,
     }
+}
+
+/// Resolve a catalog model id to a [`SamplerConfig`] with dual-auth rank.
+///
+/// Pass live `[auth] preferred_method` and `auto_use_included_limits` so this
+/// helper cannot re-introduce console keys while included SuperGrok period
+/// limits still have room.
+pub(crate) fn resolve_model_to_sampling_config(
+    model_id: &str,
+    models: &IndexMap<String, ModelEntry>,
+    session_key: Option<&str>,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+    fallback_entry: Option<ModelEntry>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
+) -> Option<SamplerConfig> {
+    let entry = find_model_by_id(models, model_id)
+        .cloned()
+        .or(fallback_entry)?;
+    let credentials = resolve_credentials_preferring_with_rank(
+        &entry,
+        session_key,
+        preferred,
+        auto_use_included_limits,
+    );
+    Some(sampling_config_for_model(
+        &entry,
+        credentials,
+        alpha_test_key,
+        client_version,
+        None,
+        None,
+    ))
 }
 /// Fold URL-derived headers into `extra_headers`.
 ///

@@ -1442,16 +1442,16 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum(
             &mut app,
         );
 
-        // Reset → SetTheme("groknight") (the registered default).
+        // Reset → SetTheme("doge") (the registered product default).
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             Effect::PersistSetting { key, value, .. } => {
                 assert_eq!(*key, "theme");
-                assert_eq!(value, &SettingValue::Enum("groknight"));
+                assert_eq!(value, &SettingValue::Enum("doge"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
-        assert_eq!(app.current_ui.theme.as_deref(), Some("groknight"));
+        assert_eq!(app.current_ui.theme.as_deref(), Some("doge"));
     });
 }
 
@@ -1836,4 +1836,72 @@ fn fetch_failures_surface_in_open_modal() {
     let state = usage_modal_state(&app);
     assert_eq!(state.session_error.as_deref(), Some("info boom"));
     assert_eq!(state.context_error.as_deref(), Some("ctx boom"));
+}
+
+/// `/spend` must open `$GROK_HOME/grok_oss.db` (or the Token Economy path
+/// override), ingest session `usage.jsonl` into `local_usage_event`, persist a
+/// `reconciliation_run`, and format a real double-entry report. Not
+/// `DoubleEntryReport::default()`.
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn show_spend_ingests_usage_jsonl_and_is_not_empty_default() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = tmp.path().join("grok_oss.db");
+    let cfg = xai_grok_shell::token_economy::TokenEconomyConfig {
+        grok_oss_database_path: Some(db.clone()),
+        ..xai_grok_shell::token_economy::TokenEconomyConfig::default()
+    };
+    xai_grok_shell::token_economy::set_token_economy_live(cfg);
+
+    let home = xai_grok_shell::util::grok_home::grok_home();
+    let plant_root = home.join("sessions").join("spend-ledger-restore-tdd");
+    let sess_dir = plant_root.join("sess-spend-restore");
+    std::fs::create_dir_all(&sess_dir).expect("plant session dir");
+    let event_ulid = "01SPENDLEDGERRESTORE0000001";
+    let usage_line = format!(
+        r#"{{"schema_version":1,"event_ulid":"{event_ulid}","timestamp":"2026-08-13T12:00:00.000Z","turn_type":"main","agent_kind":"main","session_id":"sess-spend-restore","input_tokens":4242,"output_tokens":7,"total_tokens":4249,"cost_usd_ticks":123456,"cost_missing":false,"incomplete":false}}"#
+    );
+    std::fs::write(sess_dir.join("usage.jsonl"), format!("{usage_line}\n")).expect("write usage");
+
+    struct Guard {
+        plant_root: std::path::PathBuf,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.plant_root);
+            xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+        }
+    }
+    let _guard = Guard {
+        plant_root: plant_root.clone(),
+    };
+
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::ShowSpend, &mut app);
+    assert!(
+        effects.is_empty(),
+        "/spend is scrollback-only, got {effects:?}"
+    );
+
+    let body = last_system_text(&app, AgentId(0));
+    let empty = xai_grok_shell::token_economy::format_double_entry_report(
+        &xai_grok_shell::token_economy::DoubleEntryReport::default(),
+    );
+    assert_ne!(
+        body, empty,
+        "/spend must format the live ledger, not DoubleEntryReport::default()"
+    );
+
+    let store = xai_grok_shell::grok_oss::open_at(&db).expect("open isolated grok_oss.db");
+    assert!(
+        xai_grok_shell::token_economy::local_usage_event_exists(&store, event_ulid)
+            .expect("query local_usage_event"),
+        "/spend must ingest the fixture usage.jsonl row"
+    );
+    let runs = xai_grok_shell::token_economy::count_reconciliation_runs(&store)
+        .expect("query reconciliation_run");
+    assert!(
+        runs >= 1,
+        "/spend must persist a reconciliation_run row, got {runs}"
+    );
 }

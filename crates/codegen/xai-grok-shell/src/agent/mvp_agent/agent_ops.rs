@@ -2022,21 +2022,35 @@ impl MvpAgent {
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
-        let prefers_oidc = preferred == Some(PreferredAuthMethod::Oidc);
+        let auto_use_included_limits =
+            self.cfg.borrow().grok_com_config.auto_use_included_limits;
         let is_session_based_auth = self.is_session_based_auth();
-        let session = match preferred {
-            Some(PreferredAuthMethod::ApiKey) => None,
-            _ if is_session_based_auth => self.auth_manager.current_or_expired(),
-            _ => None,
-        };
+        // Align sticky AuthManager base to included SuperGrok period ranked
+        // primary before SessionToken primary is read. Rank can prefer personal
+        // while base stays Team after a business login; sampling must follow rank.
+        if auto_use_included_limits {
+            let _ = self.auth_manager.align_to_ranked_free_period_primary();
+        }
+        // Always surface a live/expired session when present so dual-auth
+        // resolve can place console keys in failover (or session in failover
+        // under preferred_method=api_key). Exclusive api_key pin with *no*
+        // console key is still fail-closed inside resolve_credentials_preferring.
+        let session = self.auth_manager.current_or_expired();
         let has_session_key = session.is_some();
-        let mut credentials = resolve_credentials(
+        let mut credentials =
+            crate::agent::config::resolve_credentials_preferring_with_rank(
             model,
             session.as_ref().map(|a| a.key.as_str()),
+            preferred,
+            auto_use_included_limits,
         );
-        if prefers_oidc && !model.has_own_credentials()
+        if matches!(preferred, Some(PreferredAuthMethod::Oidc))
+            && !model.has_own_credentials()
             && credentials.auth_type == xai_chat_state::AuthType::ApiKey
+            && credentials.failover_api_keys.is_empty()
         {
+            // OIDC pin with only a static key and no dual-auth failover:
+            // force session identity (historical exclusive behavior).
             credentials.api_key = None;
             credentials.auth_type = xai_chat_state::AuthType::SessionToken;
         }
@@ -2106,10 +2120,11 @@ impl MvpAgent {
         config.origin_client = origin_client;
         config
     }
-    /// Resolve sampling config for a model by ID, falling back to the global
-    /// default on resolution failure. This ensures API-key auth routes to
-    /// the public API (via resolve_credentials) instead of the global config's
-    /// cli-chat-proxy base_url.
+    /// Resolve sampling config for a model by ID. Unknown ids keep the
+    /// requested slug and Chat Completions (`ModelEntry::fallback`) so a
+    /// seeded session model is not remapped onto the default Responses
+    /// catalog entry. Credentials still go through `resolve_credentials`
+    /// (API-key env / public API), not the global cli-chat-proxy default.
     pub(super) fn resolve_sampling_config_for_model(
         &self,
         model_id: &acp::ModelId,
@@ -2118,9 +2133,9 @@ impl MvpAgent {
         if let Ok(model) = self.resolve_model_id(model_id) {
             self.prepare_sampling_config_for_model(&model, origin_client.clone())
         } else {
-            let mut c = self.sampling_config.borrow().clone();
-            c.origin_client = origin_client;
-            c
+            let endpoints = self.cfg.borrow().endpoints.clone();
+            let fallback = ModelEntry::fallback(model_id.0.as_ref(), &endpoints);
+            self.prepare_sampling_config_for_model(&fallback, origin_client)
         }
     }
     /// Resolve `AgentDefinition.model` override for the parent session.

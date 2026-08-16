@@ -2489,3 +2489,91 @@ fn mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent() {
 
     reset_mouse_capture_enabled(true);
 }
+
+/// Named contract: cold session load with `canceled_turn_resume.json` must
+/// toast **Continuing interrupted turn** and emit SendPrompt of the marker
+/// text. This is continue interrupted turn, not `/resume` session pick.
+#[test]
+fn session_loaded_applies_cancel_resume_marker_and_toasts() {
+    use crate::app::actions::TaskResult;
+    use agent_client_protocol as acp;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "load-resume-sess";
+    let cwd = std::path::PathBuf::from("/tmp/load-resume-cwd");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    app.current_ui.resume_canceled_turn_on_restart = Some(true);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::Idle;
+        agent.session.loading_replay = true;
+        agent.session.pending_prompts.clear();
+    }
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+        "finish the multi-track guard after killall",
+        Some("pid-load-resume"),
+        "2026-08-08T12:00:00Z",
+    )
+    .expect("marker");
+    xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+        &cwd_str, sid, &marker,
+    )
+    .expect("write marker");
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new(sid),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+
+    let agent = app.agents.get(&id).unwrap();
+    let toast = agent
+        .toast
+        .as_ref()
+        .map(|(msg, _)| msg.as_str())
+        .unwrap_or("");
+    assert!(
+        toast.contains("Continuing interrupted turn"),
+        "session load must show continue-interrupted-turn toast; got {toast:?}"
+    );
+    let started = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::SendPrompt { text, .. }
+                if text == "finish the multi-track guard after killall"
+        ) || matches!(
+            e,
+            Effect::SendPromptBlocks { .. } | Effect::SetModeThenPrompt { .. }
+        )
+    });
+    assert!(
+        started,
+        "session load with cancel-resume marker must emit SendPrompt (auto-run), got {effects:?}"
+    );
+    assert!(
+        agent.session.state.is_turn_running(),
+        "resumed turn must be running; state={:?}",
+        agent.session.state
+    );
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "resumed prompt must be drained out of the queue, not left for Enter"
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+}

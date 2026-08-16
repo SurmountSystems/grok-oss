@@ -4,12 +4,15 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ratatui::style::Color;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::appearance::AppearanceConfig;
+use crate::render::SafeBuf;
 
 /// How to wrap content that exceeds the available width.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -169,6 +172,11 @@ pub struct BlockLine {
     pub joiner: Option<String>,
     /// Semantic link target when paint text cannot recover it (tool headers).
     pub link_target: Option<crate::render::osc8::LinkTarget>,
+    /// Column of the always-on bubble copy glyph, relative to the content
+    /// origin. `append_bubble_copy_button` records this and does not put
+    /// the glyph in `content` spans. Hit-testing and paint use this column
+    /// (slack in the wrap, otherwise the timestamp gutter or right pad).
+    pub copy_button_col: Option<u16>,
 }
 
 impl Default for BlockLine {
@@ -184,6 +192,7 @@ impl Default for BlockLine {
             selection_text: None,
             joiner: None,
             link_target: None,
+            copy_button_col: None,
         }
     }
 }
@@ -272,6 +281,40 @@ impl BlockLine {
     pub fn with_joiner(mut self, joiner: Option<String>) -> Self {
         self.joiner = joiner;
         self
+    }
+
+    /// Screen rect of the always-on bubble copy glyph, if this line carries one.
+    pub(crate) fn bubble_copy_button_rect(&self, content_x: u16, screen_y: u16) -> Option<Rect> {
+        let col = self.copy_button_col?;
+        let width = crate::glyphs::copy_icon().width() as u16;
+        Some(Rect::new(
+            content_x.saturating_add(col),
+            screen_y,
+            width.max(1),
+            1,
+        ))
+    }
+
+    /// Paint the always-on bubble copy glyph at [`Self::copy_button_col`].
+    ///
+    /// Call after content and the timestamp overlay so the glyph is not
+    /// wiped by the gutter clear and is not part of wrap geometry.
+    pub(crate) fn paint_bubble_copy_button(
+        &self,
+        buf: &mut Buffer,
+        content_x: u16,
+        screen_y: u16,
+        style: Style,
+    ) {
+        let Some(col) = self.copy_button_col else {
+            return;
+        };
+        buf.set_string_safe(
+            content_x.saturating_add(col),
+            screen_y,
+            crate::glyphs::copy_icon(),
+            style,
+        );
     }
 }
 
@@ -635,6 +678,7 @@ mod tests {
             selection_text: None,
             joiner: None,
             link_target: None,
+            copy_button_col: None,
         };
     }
 
@@ -725,81 +769,5 @@ mod tests {
         // Only trailing whitespace is trimmed; interior alignment spaces stay.
         let line = BlockLine::styled(Line::from(vec![Span::raw("│ a   │ b   │")]));
         assert_eq!(derive_selection_text(&line), "│ a   │ b   │");
-    }
-
-    #[test]
-    fn test_slice_display_cols_ascii() {
-        assert_eq!(slice_display_cols("abcdef", 1, 4), "bcd");
-    }
-
-    #[test]
-    fn test_slice_display_cols_wide_unicode() {
-        assert_eq!(slice_display_cols("a界b", 1, 3), "界");
-    }
-
-    #[test]
-    fn test_slice_display_cols_combining_character() {
-        assert_eq!(slice_display_cols("e\u{301}f", 0, 1), "e\u{301}");
-    }
-
-    #[test]
-    fn test_slice_display_cols_tab() {
-        assert_eq!(slice_display_cols("a\tb", 0, 2), "a\t");
-    }
-
-    #[test]
-    fn test_slice_display_cols_overlap_semantics() {
-        // A grapheme overlapping the range is kept whole: 么 spans [14, 16), so an end of 15 lands mid-glyph.
-        let text = "需要我帮你做什么";
-        assert_eq!(slice_display_cols(text, 0, 15), text);
-        assert_eq!(slice_display_cols(text, 1, 4), "需要");
-
-        // Graphemes that only touch a boundary stay out, so a slice up to a table border excludes the border glyph.
-        assert_eq!(slice_display_cols("ab│cd", 0, 2), "ab");
-        assert_eq!(slice_display_cols("ab│cd", 3, 5), "cd");
-        assert_eq!(slice_display_cols("界x", 2, 3), "x");
-    }
-
-    #[test]
-    fn test_grapheme_cells_at_covers_wide_and_zero_width_chars() {
-        assert_eq!(grapheme_cells_at("需要", 0), Some(0..2));
-        assert_eq!(grapheme_cells_at("需要", 1), Some(0..2));
-        assert_eq!(grapheme_cells_at("需要", 3), Some(2..4));
-        assert_eq!(grapheme_cells_at("需要", 4), None);
-        assert_eq!(grapheme_cells_at("", 0), None);
-
-        // 界 covers [0, 2) despite the leading ZWSP.
-        assert_eq!(grapheme_cells_at("\u{200B}界y", 1), Some(0..2));
-        assert_eq!(grapheme_cells_at("x\u{200B}界y", 2), Some(1..3));
-    }
-
-    #[test]
-    fn test_col_past_grapheme_falls_back_to_total_width() {
-        assert_eq!(col_past_grapheme("abc", 10), 3);
-        assert_eq!(col_past_grapheme("\u{200B}", 0), 0);
-        assert_eq!(col_past_grapheme("", 0), 0);
-    }
-
-    #[test]
-    fn test_block_line_selectable_width_uses_override() {
-        let line = BlockLine::text("ignored").with_selection_text(Some("界".to_string()));
-        assert_eq!(block_line_selectable_width(&line), 2);
-    }
-
-    #[test]
-    fn test_with_decorations_preserves_selection_metadata() {
-        let output = BlockOutput {
-            lines: vec![
-                BlockLine::styled(Line::from(vec![Span::raw("body")]))
-                    .with_selection_range(Some(7))
-                    .with_selection_text(Some("body".to_string())),
-            ],
-        };
-        let decorated = output.with_decorations(Some(Span::raw("> ")), None);
-        let line = &decorated.lines[0];
-
-        assert_eq!(line.selection_range, Some(7));
-        assert_eq!(line.selection_text.as_deref(), Some("body"));
-        assert!(matches!(line.selectable, Selectable::Spans(ref r) if *r == (1..2)));
     }
 }

@@ -260,6 +260,10 @@ fn headless_materialize_ctx_stays_non_chat() {
             let ctx = headless_materialize_ctx(pinned, restore_code);
             assert!(!ctx.chat_mode);
             assert!(
+                !ctx.open_last_session_on_start,
+                "headless -p must stay a fresh session unless -c / --resume"
+            );
+            assert!(
                 !ctx.has_worktree,
                 "headless must not defer remote miss to a worktree it never creates"
             );

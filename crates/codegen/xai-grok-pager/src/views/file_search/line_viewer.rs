@@ -653,10 +653,15 @@ pub enum LineViewerKind {
 pub struct PlanViewerExtras {
     pub send_button_area: Option<Rect>,
     pub send_hovered: bool,
+    pub questions_button_area: Option<Rect>,
+    pub questions_hovered: bool,
     pub show_action_buttons: bool,
     pub feedback_active: bool,
     pub approve_button_area: Option<Rect>,
     pub approve_hovered: bool,
+    /// `A notes` — approval mode only.
+    pub approve_notes_button_area: Option<Rect>,
+    pub approve_notes_hovered: bool,
     pub comment_button_area: Option<Rect>,
     pub comment_hovered: bool,
     pub abandon_button_area: Option<Rect>,
@@ -1435,6 +1440,24 @@ fn build_shortcut_button<'a>(
     ]
 }
 
+/// Key-only CTA button (no label) for narrow plan approval footers.
+fn build_shortcut_button_key_only<'a>(
+    key: char,
+    hovered: bool,
+    theme: &crate::theme::Theme,
+) -> Vec<Span<'a>> {
+    let bg = if hovered {
+        theme.bg_highlight
+    } else {
+        theme.bg_base
+    };
+    let key_style = Style::default()
+        .fg(theme.text_primary)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    vec![Span::styled(key.to_string(), key_style)]
+}
+
 /// Render the line viewer popup.
 ///
 /// In normal mode, draws a 75% centered panel with dimmed background
@@ -1647,7 +1670,10 @@ pub fn render_line_viewer(
     // mouse handlers don't act on positions from a previous render.
     if let Some(plan) = viewer.plan.as_mut() {
         plan.send_button_area = None;
+        plan.questions_button_area = None;
         plan.approve_button_area = None;
+        plan.approve_notes_button_area = None;
+        plan.comment_button_area = None;
         plan.abandon_button_area = None;
     }
 
@@ -1713,7 +1739,9 @@ pub fn render_line_viewer(
     //    Buttons use the same `key bold + label dim` treatment as
     //    `render_modal_shortcuts`, sit in a single row separated by
     //    `  |  `, centered within the modal frame.
-    //    Casual preview omits `q` (close via the X button).
+    //
+    //    - Plan-approval:  a approve | A notes | ? clarify | s revise | q quit
+    //    - Casual preview: c comment | y copy plan | s send  (no `q` — close-X)
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
         let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
@@ -1725,60 +1753,14 @@ pub fn render_line_viewer(
         let abandon_hovered = viewer.plan_ref().is_some_and(|p| p.abandon_hovered);
         let comment_hovered = viewer.plan_ref().is_some_and(|p| p.comment_hovered);
         let approve_hovered = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
+        let approve_notes_hovered = viewer.plan_ref().is_some_and(|p| p.approve_notes_hovered);
         let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
         let is_approval = viewer.feedback_active();
 
-        let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
-        let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
+        let separator = "  |  ";
+        let sep_w: u16 = 5;
+        let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
 
-        let copy_spans = build_shortcut_button('y', "copy plan", copy_hovered, theme);
-        let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
-
-        // In approval mode, always show `a approve`. When there are
-        // pending review comments, also show `s revise` (request changes).
-        // In approval mode, show `a approve` (or `a approve w/ comments`
-        // when inline comments are pending). In casual mode, show `s send`
-        // only when comments exist.
-        let (_action_label, action_w, action_spans): (&str, u16, Option<Vec<Span>>) = if is_approval
-        {
-            let label = if comment_count > 0 {
-                "approve w/ comments"
-            } else {
-                "approve"
-            };
-            let spans = build_shortcut_button('a', label, approve_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            (label, w, Some(spans))
-        } else if comment_count > 0 {
-            let spans = build_shortcut_button('s', "send", approve_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            ("send", w, Some(spans))
-        } else {
-            ("", 0, None)
-        };
-
-        // `s revise` button — always visible in approval mode so the
-        // user can request changes (switches to prompt for revision notes).
-        let (revise_w, revise_spans): (u16, Option<Vec<Span>>) = if is_approval {
-            let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
-            let spans = build_shortcut_button('s', "request changes", send_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            (w, Some(spans))
-        } else {
-            (0, None)
-        };
-
-        // Quit button only renders in approval mode (casual closes via X).
-        let quit_spans = if is_approval {
-            let s = build_shortcut_button('q', "quit plan", abandon_hovered, theme);
-            let w: u16 = s.iter().map(|s| s.width() as u16).sum();
-            Some((s, w))
-        } else {
-            None
-        };
-
-        // Pending-comment badge rendered after the `c comment` button
-        // as ` N ●` in `accent_plan`. Shown whenever comments exist.
         use unicode_width::UnicodeWidthStr;
         let badge_text: String = if comment_count > 0 {
             format!(" {comment_count} {}", crate::glyphs::filled_dot())
@@ -1788,78 +1770,147 @@ pub fn render_line_viewer(
         let badge_w: u16 = badge_text.width() as u16;
         let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
 
-        let separator = "  |  ";
-        let sep_w: u16 = 5; // separator is fixed-width ASCII; matches modal_window.rs:565
-        let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+        if is_approval {
+            // Clickable CTA buttons. Side panels / narrow terminals must not
+            // drop hit targets: full labels → compact → key-only.
+            let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
+            let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
+            let label_modes: [[&str; 5]; 2] = [
+                ["approve", "notes", "clarify", "revise", "quit"],
+                ["", "", "", "", ""],
+            ];
+            let keys = ['a', 'A', '?', 's', 'q'];
+            let hovers = [
+                approve_hovered,
+                approve_notes_hovered,
+                questions_hovered,
+                send_hovered,
+                abandon_hovered,
+            ];
 
-        let mut base_w: u16 = 0;
-        if action_w > 0 {
-            base_w = base_w.saturating_add(action_w).saturating_add(sep_w);
-        }
-        if revise_w > 0 {
-            base_w = base_w.saturating_add(revise_w).saturating_add(sep_w);
-        }
-        base_w = base_w.saturating_add(comment_w).saturating_add(badge_w);
-        if let Some((_, w)) = &quit_spans {
-            base_w = base_w.saturating_add(sep_w).saturating_add(*w);
-        }
-        let with_copy_w = base_w.saturating_add(sep_w).saturating_add(copy_w);
-        let show_copy = with_copy_w <= inner.width;
-        let total_w = if show_copy { with_copy_w } else { base_w };
+            let mut painted = false;
+            for labels in &label_modes {
+                let span_sets: Vec<Vec<Span>> = keys
+                    .iter()
+                    .zip(labels.iter())
+                    .zip(hovers.iter())
+                    .map(|((&k, &lab), &hov)| {
+                        if lab.is_empty() {
+                            build_shortcut_button_key_only(k, hov, theme)
+                        } else {
+                            build_shortcut_button(k, lab, hov, theme)
+                        }
+                    })
+                    .collect();
+                let widths: Vec<u16> = span_sets
+                    .iter()
+                    .map(|s| s.iter().map(|sp| sp.width() as u16).sum())
+                    .collect();
+                let mut total_w = widths.iter().copied().sum::<u16>();
+                total_w = total_w.saturating_add(sep_w.saturating_mul(4));
+                total_w = total_w.saturating_add(badge_w);
+                if total_w > inner.width {
+                    continue;
+                }
 
-        if total_w <= inner.width {
-            let mut x = inner.x + (inner.width - total_w) / 2;
+                let mut x = inner.x + (inner.width - total_w) / 2;
+                let mut areas: [Option<Rect>; 5] = [None; 5];
+                for i in 0..5 {
+                    let start = x;
+                    for span in &span_sets[i] {
+                        let w = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, w);
+                        x += w;
+                    }
+                    if i == 1 && badge_w > 0 {
+                        buf.set_string(x, bottom_y, &badge_text, badge_style);
+                        x += badge_w;
+                    }
+                    areas[i] = Some(Rect::new(start, bottom_y, widths[i], 1));
+                    if i < 4 {
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                    }
+                }
 
-            // Action button (approve / send) — left-most.
-            if let Some(spans) = &action_spans {
-                let approve_x = x;
-                for span in spans {
+                let plan = viewer.plan_mut();
+                plan.approve_button_area = areas[0];
+                plan.approve_notes_button_area = areas[1];
+                plan.questions_button_area = areas[2];
+                plan.send_button_area = areas[3];
+                plan.abandon_button_area = areas[4];
+                plan.comment_button_area = None;
+                plan.copy_button_area = None;
+                painted = true;
+                break;
+            }
+
+            if !painted {
+                let mut x = inner.x;
+                let mut areas: [Option<Rect>; 5] = [None; 5];
+                for (i, &k) in keys.iter().enumerate() {
+                    let spans = build_shortcut_button_key_only(k, hovers[i], theme);
+                    let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+                    let need = if i == 0 { w } else { sep_w.saturating_add(w) };
+                    if x.saturating_sub(inner.x).saturating_add(need) > inner.width {
+                        break;
+                    }
+                    if i > 0 {
+                        buf.set_string(x, bottom_y, separator, sep_style);
+                        x += sep_w;
+                    }
+                    let start = x;
+                    for span in &spans {
+                        let sw = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, sw);
+                        x += sw;
+                    }
+                    areas[i] = Some(Rect::new(start, bottom_y, w, 1));
+                }
+                let plan = viewer.plan_mut();
+                plan.approve_button_area = areas[0];
+                plan.approve_notes_button_area = areas[1];
+                plan.questions_button_area = areas[2];
+                plan.send_button_area = areas[3];
+                plan.abandon_button_area = areas[4];
+                plan.comment_button_area = None;
+                plan.copy_button_area = None;
+            }
+        } else {
+            let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
+            let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
+            let copy_spans = build_shortcut_button('y', "copy plan", copy_hovered, theme);
+            let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
+            let (send_w, send_spans): (u16, Option<Vec<Span>>) = if comment_count > 0 {
+                let spans = build_shortcut_button('s', "send", approve_hovered, theme);
+                let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+                (w, Some(spans))
+            } else {
+                (0, None)
+            };
+
+            let mut total_w = comment_w.saturating_add(badge_w);
+            total_w = total_w.saturating_add(sep_w).saturating_add(copy_w);
+            if send_w > 0 {
+                total_w = total_w.saturating_add(sep_w).saturating_add(send_w);
+            }
+
+            if total_w <= inner.width {
+                let mut x = inner.x + (inner.width - total_w) / 2;
+
+                let comment_x = x;
+                for span in &comment_spans {
                     let w = span.width() as u16;
                     buf.set_span(x, bottom_y, span, w);
                     x += w;
                 }
-                viewer.plan_mut().approve_button_area =
-                    Some(Rect::new(approve_x, bottom_y, action_w, 1));
-
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-            } else {
-                viewer.plan_mut().approve_button_area = None;
-            }
-
-            // Revise button — approval mode with comments.
-            if let Some(spans) = &revise_spans {
-                let revise_x = x;
-                for span in spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
+                viewer.plan_mut().comment_button_area =
+                    Some(Rect::new(comment_x, bottom_y, comment_w, 1));
+                if badge_w > 0 {
+                    buf.set_string(x, bottom_y, &badge_text, badge_style);
+                    x += badge_w;
                 }
-                viewer.plan_mut().send_button_area =
-                    Some(Rect::new(revise_x, bottom_y, revise_w, 1));
 
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-            } else {
-                viewer.plan_mut().send_button_area = None;
-            }
-
-            // Comment button — always present in both modes.
-            let comment_x = x;
-            for span in &comment_spans {
-                let w = span.width() as u16;
-                buf.set_span(x, bottom_y, span, w);
-                x += w;
-            }
-            viewer.plan_mut().comment_button_area =
-                Some(Rect::new(comment_x, bottom_y, comment_w, 1));
-
-            if badge_w > 0 {
-                buf.set_string(x, bottom_y, &badge_text, badge_style);
-                x += badge_w;
-            }
-
-            if show_copy {
                 buf.set_string(x, bottom_y, separator, sep_style);
                 x += sep_w;
                 let copy_x = x;
@@ -1869,32 +1920,37 @@ pub fn render_line_viewer(
                     x += w;
                 }
                 viewer.plan_mut().copy_button_area = Some(Rect::new(copy_x, bottom_y, copy_w, 1));
-            } else {
-                viewer.plan_mut().copy_button_area = None;
-            }
 
-            // Quit button — approval mode only.
-            if let Some((spans, w)) = quit_spans {
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-                let quit_x = x;
-                for span in &spans {
-                    let sw = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, sw);
-                    x += sw;
+                if let Some(spans) = &send_spans {
+                    buf.set_string(x, bottom_y, separator, sep_style);
+                    x += sep_w;
+                    let send_x = x;
+                    for span in spans {
+                        let w = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, w);
+                        x += w;
+                    }
+                    viewer.plan_mut().approve_button_area =
+                        Some(Rect::new(send_x, bottom_y, send_w, 1));
+                } else {
+                    viewer.plan_mut().approve_button_area = None;
                 }
-                viewer.plan_mut().abandon_button_area = Some(Rect::new(quit_x, bottom_y, w, 1));
+
+                let plan = viewer.plan_mut();
+                plan.approve_notes_button_area = None;
+                plan.questions_button_area = None;
+                plan.send_button_area = None;
+                plan.abandon_button_area = None;
             } else {
-                viewer.plan_mut().abandon_button_area = None;
+                let plan = viewer.plan_mut();
+                plan.approve_button_area = None;
+                plan.approve_notes_button_area = None;
+                plan.questions_button_area = None;
+                plan.send_button_area = None;
+                plan.comment_button_area = None;
+                plan.copy_button_area = None;
+                plan.abandon_button_area = None;
             }
-        } else {
-            // Footer too narrow — disable hit-tests so stale rects
-            // from a previous render don't fire.
-            let plan = viewer.plan_mut();
-            plan.approve_button_area = None;
-            plan.comment_button_area = None;
-            plan.copy_button_area = None;
-            plan.abandon_button_area = None;
         }
     }
 }
@@ -2111,6 +2167,68 @@ mod tests {
                 (2, "Line two,".to_owned()),
                 (3, "Line three.".to_owned()),
             ]
+        );
+    }
+
+    /// Named contract: plan-approval footer is five clickable CTAs
+    /// (Approve / Notes / Clarify / Revise / Quit), not the 1.0.3
+    /// `request changes` + `c comment` placeholder row.
+    #[test]
+    fn plan_approval_footer_paints_five_cta_vocabulary() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        assert!(
+            !footer.contains("request changes"),
+            "approval footer must not use the 1.0.3 request-changes placeholder; got {footer:?}"
+        );
+        for needle in ["approve", "notes", "clarify", "revise", "quit"] {
+            assert!(
+                footer.to_ascii_lowercase().contains(needle),
+                "approval footer must name {needle}; got {footer:?}"
+            );
+        }
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.approve_button_area.is_some(),
+            "Approve must be a clickable hit target"
+        );
+        assert!(
+            plan.approve_notes_button_area.is_some(),
+            "Notes must be a clickable hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_some(),
+            "Clarify must be a clickable hit target"
+        );
+        assert!(
+            plan.send_button_area.is_some(),
+            "Revise must be a clickable hit target"
+        );
+        assert!(
+            plan.abandon_button_area.is_some(),
+            "Quit must be a clickable hit target"
+        );
+        assert!(
+            plan.comment_button_area.is_none(),
+            "approval footer must not paint casual c-comment as a decision CTA"
         );
     }
 

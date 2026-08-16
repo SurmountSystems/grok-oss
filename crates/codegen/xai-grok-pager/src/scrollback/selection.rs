@@ -47,6 +47,13 @@ pub struct SelectionBox {
     pub close_hovered: bool,
     /// Optional close label; `None` uses default `✗`.
     pub close_label: Option<&'static str>,
+    /// Optional action label left of close (todo pane clear-finished `[−]`).
+    pub action_label: Option<&'static str>,
+    /// Whether the action control is currently hovered.
+    pub action_hovered: bool,
+    /// When false, the action still paints in a reserved slot (dim) but is not
+    /// a live click target. Keeps chrome geometry stable as finished counts change.
+    pub action_enabled: bool,
 }
 
 /// Output from render that needs post-processing.
@@ -82,6 +89,8 @@ pub struct RenderOutput {
     pub inline_media: Vec<crate::scrollback::render::InlineMediaPlacement>,
     /// Mermaid diagram affordance rows to paint + register click hit-rects for.
     pub diagram_affordances: Vec<crate::scrollback::render::DiagramAffordancePlacement>,
+    /// Always-on bubble copy ⧉ hit rects: `(screen rect, entry_idx)`.
+    pub bubble_copy_hits: Vec<(Rect, usize)>,
     /// Screen row (relative to the scrollback area top) of the sticky
     /// header's gap row, when this frame drew a pinned header. The ▲
     /// response-top indicator renders here; publishing the row the pane
@@ -134,6 +143,9 @@ impl SelectionBox {
             closable: false,
             close_hovered: false,
             close_label: None,
+            action_label: None,
+            action_hovered: false,
+            action_enabled: true,
         }
     }
 
@@ -167,6 +179,24 @@ impl SelectionBox {
         self
     }
 
+    /// Optional chrome action left of close (e.g. clear-finished `[−]`).
+    ///
+    /// Geometry is independent of focus; product clear-finished supplies a
+    /// label when the todo board is open with finished rows. Defaults to
+    /// enabled (live click).
+    pub fn with_action_label(mut self, label: Option<&'static str>, hovered: bool) -> Self {
+        self.action_label = label;
+        self.action_hovered = hovered;
+        self
+    }
+
+    /// When false, label still occupies its reserved slot (dim paint) but is not
+    /// interactive. Prefer over dropping the label so chrome does not jump.
+    pub fn with_action_enabled(mut self, enabled: bool) -> Self {
+        self.action_enabled = enabled;
+        self
+    }
+
     /// Hit-test rect for the close control, if it would be rendered.
     ///
     /// Pure computation — does not touch the buffer. Use for mouse hit-testing.
@@ -188,6 +218,85 @@ impl SelectionBox {
             width: label_w,
             height: 1,
         })
+    }
+
+    /// Layout rect for the optional action control left of close.
+    ///
+    /// One space gap between action label and close. Always reserves a
+    /// close-slot width (default ✗ = 1 cell) even when close is not painted, so
+    /// the action does not jump left/right when focus toggles the close control.
+    /// `None` when no label, top clipped, or not enough width.
+    ///
+    /// Geometry is independent of [`Self::action_enabled`]; callers register a
+    /// mouse hit only when enabled.
+    pub fn action_button_rect(&self) -> Option<Rect> {
+        let label = self.action_label?;
+        if self.top_clipped || self.inner_area.y == 0 {
+            return None;
+        }
+        let label_w = (label.chars().count() as u16).max(1);
+        let y = self.inner_area.y - 1;
+        let close_w = self
+            .close_button_rect()
+            .map(|r| r.width)
+            .unwrap_or(1)
+            .max(1);
+        let need = label_w.saturating_add(1).saturating_add(close_w);
+        if need > self.inner_area.width {
+            return None;
+        }
+        let right_x = self.inner_area.x + self.inner_area.width.saturating_sub(1);
+        let close_x = right_x.saturating_sub(close_w.saturating_sub(1));
+        let x = close_x.saturating_sub(1 + label_w);
+        if x < self.inner_area.x {
+            return None;
+        }
+        Some(Rect {
+            x,
+            y,
+            width: label_w,
+            height: 1,
+        })
+    }
+
+    /// Style for the optional action label (todo clear-finished icon).
+    ///
+    /// Quiet idle: theme `gray` when enabled (not always-on neon
+    /// `accent_user` green). Stronger on hover (`text_primary`). Disabled
+    /// uses dimmer `gray_dim`. Never agent magenta.
+    fn action_paint_style(&self) -> Style {
+        let theme = Theme::current();
+        if !self.action_enabled {
+            Style::default().fg(theme.gray_dim)
+        } else if self.action_hovered {
+            Style::default().fg(theme.text_primary)
+        } else {
+            Style::default().fg(theme.gray)
+        }
+    }
+
+    /// Paint only the optional action label (no rails, corners, or close).
+    ///
+    /// Used when the todo board is open but unfocused (finished rows only).
+    pub fn render_action_only(&self, buf: &mut Buffer) {
+        self.paint_action_label(buf);
+    }
+
+    fn paint_action_label(&self, buf: &mut Buffer) {
+        if self.top_clipped || self.inner_area.y == 0 {
+            return;
+        }
+        if let Some(action_rect) = self.action_button_rect()
+            && let Some(label) = self.action_label
+        {
+            use crate::render::SafeBuf;
+            buf.set_string_safe(
+                action_rect.x,
+                action_rect.y,
+                label,
+                self.action_paint_style(),
+            );
+        }
     }
 
     /// Render the selection box to the buffer.
@@ -252,6 +361,7 @@ impl SelectionBox {
             } else if let Some(cell) = buf.cell_mut((right_x, corner_y)) {
                 cell.set_char(border_chars::TOP_RIGHT).set_style(self.style);
             }
+            self.paint_action_label(buf);
         }
 
         // Draw bottom corners (if not clipped)
@@ -435,5 +545,186 @@ mod tests {
 
         // Bottom corners at y=4
         assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "└");
+    }
+
+    /// Compact chrome control for archiving finished board rows (`[−]`).
+    fn clear_finished_chrome() -> &'static str {
+        crate::glyphs::clear_finished_button()
+    }
+
+    #[test]
+    fn action_button_sits_left_of_close_with_gap() {
+        let label = clear_finished_chrome();
+        let sel = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default())
+            .with_closable(true, false)
+            .with_action_label(Some(label), false);
+        let close = sel.close_button_rect().expect("close");
+        let action = sel.action_button_rect().expect("action");
+        assert_eq!(action.height, 1);
+        assert_eq!(action.y, close.y);
+        assert_eq!(action.width, label.chars().count() as u16);
+        assert_eq!(action.width, 3, "clear-finished chrome is icon-width [−]");
+        assert_eq!(action.x + action.width + 1, close.x);
+    }
+
+    /// Named contract: without a painted close control, action still reserves
+    /// a close slot so x matches the focused (closable) layout.
+    #[test]
+    fn action_button_without_close_reserves_close_slot() {
+        let label = clear_finished_chrome();
+        let open = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default())
+            .with_action_label(Some(label), false);
+        assert!(open.close_button_rect().is_none());
+        let action = open.action_button_rect().expect("action without close");
+        assert_eq!(action.width, label.chars().count() as u16);
+        assert_eq!(action.y, 1);
+        let right_x = 40 - 1;
+        assert_eq!(action.x + action.width + 1 + 1 - 1, right_x);
+    }
+
+    /// Named contract: action x is identical with and without closable close,
+    /// so focusing the todo pane does not jump the clear-finished control.
+    #[test]
+    fn action_button_x_stable_with_or_without_close() {
+        let area = Rect::new(0, 2, 40, 4);
+        let label = clear_finished_chrome();
+        let without_close =
+            SelectionBox::new(area, Style::default()).with_action_label(Some(label), false);
+        let with_close = SelectionBox::new(area, Style::default())
+            .with_closable(true, false)
+            .with_action_label(Some(label), false);
+        let a = without_close.action_button_rect().expect("unfocused");
+        let b = with_close.action_button_rect().expect("focused");
+        assert_eq!(
+            a.x, b.x,
+            "clear-finished x must not jump when focus paints close"
+        );
+        assert_eq!(a.width, b.width);
+        assert_eq!(a.y, b.y);
+    }
+
+    /// Named contract: enabled idle clear-finished is quiet gray,
+    /// not always-on neon `accent_user` green, and never agent magenta.
+    #[test]
+    fn clear_finished_action_idle_is_quiet_not_neon_green_or_magenta() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let magenta = theme.accent_running;
+        let neon = theme.accent_user;
+        assert_ne!(magenta, neon, "DOGE setup: magenta != human green");
+
+        let label = clear_finished_chrome();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+        let sel = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default().fg(magenta))
+            .with_action_label(Some(label), false)
+            .with_action_enabled(true);
+        sel.render_action_only(&mut buf);
+
+        let action = sel.action_button_rect().expect("action");
+        let cell = buf.cell((action.x, action.y)).expect("label cell");
+        assert_eq!(
+            cell.fg, theme.gray,
+            "enabled idle clear-finished must be quiet gray, got {:?}",
+            cell.fg
+        );
+        assert_ne!(
+            cell.fg, neon,
+            "enabled idle must not be always-on accent_user neon green"
+        );
+        assert_ne!(
+            cell.fg, magenta,
+            "clear-finished must not inherit agent magenta"
+        );
+        let mut painted = String::new();
+        for x in action.x..action.x + action.width {
+            if let Some(c) = buf.cell((x, action.y)) {
+                painted.push_str(c.symbol());
+            }
+        }
+        assert_eq!(painted, label, "must paint compact clear-finished icon");
+        assert!(!painted.contains("Clear finished"));
+        assert!(
+            painted.contains('\u{2212}') || painted.contains('-'),
+            "must use minus glyph, not empty-set, got {painted:?}"
+        );
+        assert!(
+            !painted.contains('\u{2205}'),
+            "empty-set was dogfood-rejected"
+        );
+    }
+
+    /// Hover brightens clear-finished above idle gray.
+    #[test]
+    fn clear_finished_action_hover_is_stronger_than_idle() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let label = clear_finished_chrome();
+
+        let mut buf_idle = Buffer::empty(Rect::new(0, 0, 40, 8));
+        let idle = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default())
+            .with_action_label(Some(label), false)
+            .with_action_enabled(true);
+        idle.render_action_only(&mut buf_idle);
+        let action = idle.action_button_rect().expect("action");
+        let idle_fg = buf_idle.cell((action.x, action.y)).expect("idle").fg;
+
+        let mut buf_hover = Buffer::empty(Rect::new(0, 0, 40, 8));
+        let hover = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default())
+            .with_action_label(Some(label), true)
+            .with_action_enabled(true);
+        hover.render_action_only(&mut buf_hover);
+        let hover_fg = buf_hover.cell((action.x, action.y)).expect("hover").fg;
+
+        assert_eq!(idle_fg, theme.gray);
+        assert_eq!(hover_fg, theme.text_primary);
+        assert_ne!(
+            idle_fg, hover_fg,
+            "hover must read stronger than quiet idle"
+        );
+        assert_ne!(hover_fg, theme.accent_running, "hover must not be magenta");
+    }
+
+    /// Named contract: disabled action still paints in the reserved slot (dim),
+    /// same geometry as enabled, so zero finished rows do not collapse chrome.
+    #[test]
+    fn clear_finished_disabled_reserves_slot_and_paints_dim() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let area = Rect::new(0, 2, 40, 4);
+        let label = clear_finished_chrome();
+
+        let enabled = SelectionBox::new(area, Style::default())
+            .with_action_label(Some(label), false)
+            .with_action_enabled(true);
+        let disabled = SelectionBox::new(area, Style::default())
+            .with_action_label(Some(label), false)
+            .with_action_enabled(false);
+
+        let e = enabled.action_button_rect().expect("enabled geom");
+        let d = disabled.action_button_rect().expect("disabled geom");
+        assert_eq!(e.x, d.x, "disabled must keep same x as enabled");
+        assert_eq!(e.width, d.width);
+        assert_eq!(e.width, 3, "icon-width reserved slot");
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+        disabled.render_action_only(&mut buf);
+        let cell = buf.cell((d.x, d.y)).expect("label cell");
+        assert_eq!(
+            cell.fg, theme.gray_dim,
+            "disabled clear-finished must paint gray_dim, got {:?}",
+            cell.fg
+        );
+        assert_ne!(
+            cell.fg, theme.accent_user,
+            "disabled must not look like a live human-green CTA"
+        );
+        assert_ne!(
+            cell.fg, theme.gray,
+            "disabled must read dimmer than enabled idle gray"
+        );
+        assert_eq!(cell.symbol().chars().next(), Some('['));
     }
 }

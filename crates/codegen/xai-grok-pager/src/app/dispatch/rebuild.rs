@@ -1,17 +1,14 @@
 //! `/rebuild` TaskResult handling: report, cancel mid-turn, arm self re-exec.
 //!
-//! Peer TUIs (other live product windows) receive `SIGUSR1` after a rebuild
-//! and arm re-exec via [`try_arm_peer_rebuild_relaunch_from_request`].
+//! Peer TUIs (other live product windows) receive `SIGUSR1` **after** a
+//! successful install and arm re-exec via
+//! [`try_arm_peer_rebuild_relaunch_from_request`]. A failed `just install` /
+//! verify must not signal peers.
 //!
 //! **Exit-path contract:** every event-loop exit that can race with peer
 //! rebuild (SIGUSR1 quit notify, leader IPC disconnect) must call
 //! [`arm_peer_rebuild_before_exit`] so the window re-execs onto the new binary
 //! instead of only quitting.
-
-// Peer-rebuild helpers are unit-tested. Event-loop SIGUSR1 / leader-disconnect
-// wire-up is not on this restack tip yet (clippy --lib --bins does not compile
-// tests, so those items look unused).
-#![allow(dead_code)]
 
 use super::router::dispatch;
 use super::turn::do_cancel_turn_for;
@@ -193,7 +190,7 @@ pub(super) fn handle_rebuild_done(
                 agent.rebuild_progress = None;
                 agent.show_toast("Rebuild failed");
                 agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Rebuild failed (no leaders were signaled):\n{error}"
+                    "Rebuild failed (no other sessions were asked to quit or re-exec):\n{error}"
                 )));
             }
             vec![]
@@ -266,6 +263,43 @@ fn unregister_and_quit(app: &mut AppView) -> Vec<Effect> {
 /// with a resume hint instead of `exec`.
 pub(crate) fn may_exec_relaunch_after_restore(restore_succeeded: bool) -> bool {
     restore_succeeded
+}
+
+/// What the quit tail should do after `restore_terminal`.
+///
+/// Rebuild re-exec (new binary, same session) wins over screen-mode re-exec
+/// when both are set. A failed `/rebuild` never arms rebuild, so this stays
+/// `None` and the session remains invokable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostRestoreRelaunch {
+    None,
+    ExecRebuild,
+    ExecScreenMode,
+    BlockedRebuild,
+    BlockedScreenMode,
+}
+
+/// Pure quit-tail decision used by `app::run` after restore.
+pub(crate) fn post_restore_relaunch_action(
+    restore_succeeded: bool,
+    has_rebuild: bool,
+    has_screen_mode: bool,
+) -> PostRestoreRelaunch {
+    if has_rebuild {
+        if may_exec_relaunch_after_restore(restore_succeeded) {
+            PostRestoreRelaunch::ExecRebuild
+        } else {
+            PostRestoreRelaunch::BlockedRebuild
+        }
+    } else if has_screen_mode {
+        if may_exec_relaunch_after_restore(restore_succeeded) {
+            PostRestoreRelaunch::ExecScreenMode
+        } else {
+            PostRestoreRelaunch::BlockedScreenMode
+        }
+    } else {
+        PostRestoreRelaunch::None
+    }
 }
 
 /// User-visible stderr line after restore, before rebuild `exec`.
@@ -684,6 +718,96 @@ mod tests {
         assert!(
             !out.contains("Resume with: grok-oss --resume"),
             "must use full screen-mode resume hint:\n{out}"
+        );
+    }
+
+    /// Contract: failed `just install` / verify reports in this session and
+    /// does not arm self re-exec (peers were not asked to quit).
+    #[test]
+    fn handle_rebuild_done_failure_reports_and_does_not_relaunch() {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
+                fraction: 0.97,
+                detail: "Verifying installed binary".into(),
+            });
+        }
+        let effects = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Err("`just install` failed with status exit 1\nError: os error 6".into()),
+        );
+        assert!(
+            effects.is_empty(),
+            "failed rebuild must not quit: {effects:?}"
+        );
+        assert!(
+            app.rebuild_relaunch.is_none(),
+            "failed install must not arm self re-exec"
+        );
+        let agent = app.agents.get(&agent_id).expect("agent");
+        assert!(
+            agent.rebuild_progress.is_none(),
+            "failed rebuild must clear the in-progress bar so /rebuild is invokable"
+        );
+        let scroll: Vec<&str> = agent
+            .scrollback
+            .iter_entries()
+            .filter_map(|(_, e)| match &e.block {
+                crate::scrollback::block::RenderBlock::System(s) => Some(s.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let joined = scroll.join("\n");
+        assert!(
+            joined.contains("Rebuild failed"),
+            "failure must land in scrollback: {joined}"
+        );
+        assert!(
+            joined.contains("asked to quit"),
+            "failure copy must say the fleet was not signaled: {joined}"
+        );
+    }
+
+    /// Contract: after a failed rebuild, `/rebuild` still starts a new run.
+    #[test]
+    fn rebuild_still_invokable_after_failed_rebuild_done() {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        let _ = handle_rebuild_done(&mut app, agent_id, Err("just install failed".into()));
+        let effects = super::super::dispatch(Action::RebuildAndRelaunch, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::RunRebuild { .. })),
+            "after a failed rebuild, /rebuild must still spawn RunRebuild: {effects:?}"
+        );
+    }
+
+    /// Contract: restore + rebuild_relaunch execs the new binary; a failed
+    /// install never sets rebuild_relaunch so this stays None.
+    #[test]
+    fn post_restore_prefers_rebuild_relaunch_only_when_armed() {
+        assert_eq!(
+            post_restore_relaunch_action(true, false, false),
+            PostRestoreRelaunch::None
+        );
+        assert_eq!(
+            post_restore_relaunch_action(true, true, true),
+            PostRestoreRelaunch::ExecRebuild
+        );
+        assert_eq!(
+            post_restore_relaunch_action(false, true, false),
+            PostRestoreRelaunch::BlockedRebuild
+        );
+        assert_eq!(
+            post_restore_relaunch_action(true, false, true),
+            PostRestoreRelaunch::ExecScreenMode
+        );
+        assert_eq!(
+            post_restore_relaunch_action(false, false, true),
+            PostRestoreRelaunch::BlockedScreenMode
         );
     }
 }

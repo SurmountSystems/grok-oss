@@ -1239,20 +1239,22 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
     background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
     isolation_param: "${{ params.task.isolation }}",
 };
-/// Concise task-tool description for child sessions. Delegation from a child
-/// is possible but discouraged — prefer doing the work directly.
+/// Concise task-tool description for child (L2) sessions. L2 always
+/// spawns L3 for any tools/work. L2 never does greps, edits, or tests.
+/// Three layers always. Do not compact-and-continue a product restore on L2.
 ///
 /// NOTE: This hardcodes the built-in agent type names ("general-purpose",
 /// "explore", "plan"). If custom child-visible subagent types become common,
 /// consider generating this list dynamically like the parent description does.
 const CHILD_TASK_DESCRIPTION: &str = "\
-Launch a sub-agent to handle a specific sub-task. Use this only when \n\
-the sub-task is clearly independent and would benefit from a separate \n\
-context (e.g., a parallel search while you continue working).\n\
+Launch a specialist (L3) for an independent sub-task that needs its own context.\n\
 \n\
-Prefer doing the work yourself unless delegation is clearly necessary.\n\
+You are L2. Whenever work is to be done and tools are to be called, agents are \
+three layers deep. Always. Including implement loops. \
+You MUST always spawn L3 for any tools/work. L2 never does greps, edits, or tests. \
+Do not compact-and-continue a product restore on L2. No L4.\n\
 \n\
-Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \n\
+Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
 ${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
 /// CLI [`xai_tool_types::SubagentToolNaming`]: each kind maps to its
@@ -1541,8 +1543,32 @@ mod tests {
     #[test]
     fn child_task_description_is_concise() {
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("Prefer doing the work yourself"),
-            "child description should discourage recursive delegation"
+            CHILD_TASK_DESCRIPTION.contains("three layers deep. Always"),
+            "child description must teach three layers always"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("MUST always spawn L3 for any tools/work"),
+            "child description must tell L2 to always spawn L3 for any tools/work"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("L2 never does greps, edits, or tests"),
+            "child description must forbid L2 greps, edits, and tests"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("Including implement loops"),
+            "child description must include implement loops in the three-layer rule"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("Do not compact-and-continue"),
+            "child description must forbid compact-and-continue on L2"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("many greps"),
+            "child description must not teach the old many-greps spawn rule"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("half the window"),
+            "child description must not teach the old half-window spawn rule"
         );
         assert!(
             !CHILD_TASK_DESCRIPTION.contains("Agent types:"),

@@ -20,7 +20,7 @@ A hook is a shell command or HTTP endpoint that Grok calls when a specific lifec
 - **Safety guards**: Block commands such as `rm -rf /` before they run.
 - **Audit logging**: Record tool use and sessions to a file or external service.
 - **Notifications**: Send a message when a task finishes.
-- **Auto-formatting**: Run `cargo fmt` or `prettier` after edits.
+- **Auto-formatting**: After a structured edit of a `.rs` file, the product already formats that file. Do not add a second crate-wide `cargo fmt` hook for Rust. Use a hook for other languages if you want.
 - **Environment setup**: Export variables at session start.
 - **Custom workflows**: Trigger builds, tests, or deployments on specific events.
 
@@ -479,4 +479,4 @@ echo '{"decision": "allow"}'
 - **Hook not running?** Press `Ctrl+L` on non–VS Code family (or run `/hooks` anywhere) to see if it is loaded and matched.
 - **Project hooks ignored?** The folder may be untrusted. Run `/hooks-trust` (or relaunch with `--trust`).
 - **Script not found?** Check the path is relative to the `.json` file and executable (`chmod +x`).
-- **See errors?** Capture logs by launching with `RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok`, then check `/tmp/grok.log`.
+- **See errors?** Capture logs by launching with `RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok-oss`, then check `/tmp/grok.log`.

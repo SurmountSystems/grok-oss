@@ -21,6 +21,9 @@ use xai_grok_pager::app::app_view::{ActiveView, AppView};
 use xai_grok_pager::minimal_api;
 use xai_grok_pager::theme::Theme;
 
+/// Operator-visible product name on the pager-minimal welcome card.
+const WELCOME_CARD_PRODUCT_NAME: &str = "Grok OSS";
+
 /// Commit the welcome card when one is pending (set at session start / `/new`).
 ///
 /// Called at the top of the minimal draw, before `commit_active`, so the card
@@ -72,7 +75,7 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     let mut info: Vec<Line<'static>> = Vec::new();
     info.push(Line::from(vec![
         Span::styled(
-            "Grok Build",
+            WELCOME_CARD_PRODUCT_NAME,
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
@@ -140,4 +143,14 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     // Trailing gap, matching every committed block, so the first conversation
     // block is separated from the card.
     super::commit::insert_gap(terminal);
+}
+
+#[cfg(test)]
+mod tests {
+    /// Named contract: pager-minimal welcome card brands **Grok OSS**.
+    #[test]
+    fn pager_minimal_welcome_brands_grok_oss() {
+        assert_eq!(super::WELCOME_CARD_PRODUCT_NAME, "Grok OSS");
+        assert_ne!(super::WELCOME_CARD_PRODUCT_NAME, "Grok Build");
+    }
 }

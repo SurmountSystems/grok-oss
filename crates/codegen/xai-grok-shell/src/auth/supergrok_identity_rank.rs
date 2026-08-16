@@ -2,8 +2,9 @@
 //! `[auth] auto_use_included_limits` is enabled (not a `preferred_method` value).
 //!
 //! Prefer **included** SuperGrok limits before dollar extras / console $.
-//! Among identities with included headroom, sooner reset is a ranking heuristic.
-//! Meters stay distinct: personal included ≠ Business included.
+//! Among identities with included headroom, Business / Team included wins
+//! over personal included. Among the same role, sooner reset then
+//! `identity_id`. Meters stay distinct: personal included ≠ Business included.
 //!
 //! After every SuperGrok included pool is exhausted: if any principal still has
 //! SuperGrok **$ extras** (`prepaid_balance_cents > 0`) and a **live** session
@@ -73,6 +74,114 @@ pub struct IncludedBillingFields {
     /// principal. `None` = not on wire / not remembered (honest absence).
     /// Ranking ignores this field; dual `/limits` surfaces it on sibling rows.
     pub grok_build_usage_pct: Option<f64>,
+}
+
+/// One SuperGrok principal's included SuperGrok period reading for
+/// [`combined_included_remaining`].
+///
+/// `usage_pct` `None` is honest absence: that identity does not add to the
+/// sum (do not invent included SuperGrok period used percent).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncludedPoolReading {
+    pub identity_id: String,
+    pub usage_pct: Option<f64>,
+    pub reset_at: Option<DateTime<Utc>>,
+    /// Wire `is_unified_billing_user` when known. `Some(true)` means this
+    /// row shares one included pool with the other SuperGrok principals.
+    pub is_unified_billing_user: Option<bool>,
+}
+
+/// Remaining included SuperGrok period limits across distinct pools.
+///
+/// Units are remaining percent-units from [`included_remaining_from_usage_pct`]
+/// (not invented token counts). Combined used percent for chrome is
+/// `100 - floor(sum_remaining / (100 * distinct_pool_count) * 100)`, clamped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CombinedIncludedRemaining {
+    pub remaining_units: u64,
+    pub distinct_pool_count: usize,
+    /// Combined used percent for compact chrome. `None` when no known readings.
+    pub used_pct_for_chrome: Option<f64>,
+}
+
+impl CombinedIncludedRemaining {
+    pub fn empty() -> Self {
+        Self {
+            remaining_units: 0,
+            distinct_pool_count: 0,
+            used_pct_for_chrome: None,
+        }
+    }
+}
+
+/// Sum remaining included SuperGrok period limits across distinct pools.
+///
+/// Unified pool (`is_unified_billing_user == true`, or the same floored used
+/// percent and the same reset): count once (max remaining, not 2×).
+/// Unknown identities do not add.
+pub fn combined_included_remaining(readings: &[IncludedPoolReading]) -> CombinedIncludedRemaining {
+    let known: Vec<&IncludedPoolReading> =
+        readings.iter().filter(|r| r.usage_pct.is_some()).collect();
+    if known.is_empty() {
+        return CombinedIncludedRemaining::empty();
+    }
+
+    let any_unified = known
+        .iter()
+        .any(|r| r.is_unified_billing_user == Some(true));
+
+    let mut pool_remaining: Vec<u64> = Vec::new();
+    if any_unified {
+        let max_rem = known
+            .iter()
+            .map(|r| included_remaining_from_usage_pct(r.usage_pct.unwrap()))
+            .max()
+            .unwrap_or(0);
+        pool_remaining.push(max_rem);
+    } else {
+        // Group by (floored used percent, reset). Same pair = one pool.
+        let mut groups: std::collections::BTreeMap<(i64, Option<DateTime<Utc>>), u64> =
+            std::collections::BTreeMap::new();
+        for r in &known {
+            let pct = r.usage_pct.unwrap();
+            let key = (pct.floor() as i64, r.reset_at);
+            let rem = included_remaining_from_usage_pct(pct);
+            let entry = groups.entry(key).or_insert(0);
+            *entry = (*entry).max(rem);
+        }
+        pool_remaining.extend(groups.into_values());
+    }
+
+    let distinct_pool_count = pool_remaining.len();
+    let remaining_units: u64 = pool_remaining.iter().sum();
+    let used_pct_for_chrome = if distinct_pool_count == 0 {
+        None
+    } else {
+        let denom = 100.0 * distinct_pool_count as f64;
+        let used = 100.0 - ((remaining_units as f64 / denom) * 100.0).floor();
+        Some(used.clamp(0.0, 100.0))
+    };
+    CombinedIncludedRemaining {
+        remaining_units,
+        distinct_pool_count,
+        used_pct_for_chrome,
+    }
+}
+
+/// Compact / driver chrome: while any distinct included pool has remaining,
+/// paint and drive included SuperGrok period limits (combined used percent),
+/// not SuperGrok dollar credits on a full active JWT.
+pub fn chrome_included_usage_from_combined(
+    active_known: bool,
+    active_pct: f64,
+    combined: &CombinedIncludedRemaining,
+) -> (bool, f64) {
+    if combined.remaining_units > 0
+        && let Some(pct) = combined.used_pct_for_chrome
+    {
+        return (true, pct);
+    }
+    (active_known, active_pct)
 }
 
 /// Map included usage % to ranking headroom units.
@@ -221,10 +330,11 @@ pub enum PickSupergrokForAuto {
 ///
 /// Rules (included headroom only):
 /// 1. Prefer identities with `included_remaining > 0`.
-/// 2. Among those, earlier `reset_at` wins (sooner reset preferred).
-/// 3. Missing `reset_at` sorts after known times.
-/// 4. Tie-break: `identity_id` lexicographic (stable, not "Business first").
-/// 5. If none have headroom but some identities exist → [`PickSupergrokForAuto::ExhaustedAll`].
+/// 2. Among those, Business / Team included wins over personal included.
+/// 3. Among the same role, earlier `reset_at` wins (sooner reset preferred).
+/// 4. Missing `reset_at` sorts after known times (same role).
+/// 5. Tie-break: `identity_id` lexicographic (same role).
+/// 6. If none have headroom but some identities exist → [`PickSupergrokForAuto::ExhaustedAll`].
 pub fn pick_supergrok_identity_for_auto(
     identities: &[SupergrokIdentityHeadroom],
 ) -> PickSupergrokForAuto {
@@ -241,21 +351,43 @@ pub fn pick_supergrok_identity_for_auto(
         return PickSupergrokForAuto::ExhaustedAll;
     }
 
-    with_headroom.sort_by(|a, b| {
-        // Earlier reset first; None last.
-        match (a.reset_at, b.reset_at) {
-            (Some(ra), Some(rb)) => ra.cmp(&rb),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
-        .then_with(|| a.identity_id.cmp(&b.identity_id))
-    });
+    with_headroom.sort_by(|a, b| cmp_included_headroom_rank(a, b));
 
     let best = with_headroom[0];
     PickSupergrokForAuto::Use {
         identity_id: best.identity_id.clone(),
         role: best.role,
+    }
+}
+
+/// Business / Team included SuperGrok period limits before personal included.
+/// Same role: sooner reset, then `identity_id`.
+fn cmp_included_headroom_rank(
+    a: &SupergrokIdentityHeadroom,
+    b: &SupergrokIdentityHeadroom,
+) -> std::cmp::Ordering {
+    included_role_rank(a.role)
+        .cmp(&included_role_rank(b.role))
+        .then_with(|| cmp_reset_at_sooner_first(a.reset_at, b.reset_at))
+        .then_with(|| a.identity_id.cmp(&b.identity_id))
+}
+
+fn included_role_rank(role: SupergrokAccountRole) -> u8 {
+    match role {
+        SupergrokAccountRole::Business => 0,
+        SupergrokAccountRole::Personal => 1,
+    }
+}
+
+fn cmp_reset_at_sooner_first(
+    a: Option<DateTime<Utc>>,
+    b: Option<DateTime<Utc>>,
+) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(ra), Some(rb)) => ra.cmp(&rb),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     }
 }
 
@@ -411,7 +543,8 @@ pub fn session_bearer_should_align_to_ranked_free_period_primary(
     }
 }
 
-/// Rank SuperGrok candidates with included headroom (sooner reset first).
+/// Rank SuperGrok candidates with included headroom (Business included first,
+/// then personal; sooner reset among the same role).
 ///
 /// Bounded dual SuperGrok poll hygiene: identities whose last billing poll was
 /// **auth-failed** are not treated as free-period primary. Prefer a poll-OK
@@ -499,15 +632,7 @@ pub fn order_live_supergrok_for_auto(
 }
 
 fn sort_live_supergrok_by_reset(live: &mut [&SupergrokSessionCandidate]) {
-    live.sort_by(|a, b| {
-        match (a.headroom.reset_at, b.headroom.reset_at) {
-            (Some(ra), Some(rb)) => ra.cmp(&rb),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
-        .then_with(|| a.headroom.identity_id.cmp(&b.headroom.identity_id))
-    });
+    live.sort_by(|a, b| cmp_included_headroom_rank(&a.headroom, &b.headroom));
 }
 
 /// Build primary/failover for `auto_use_included_limits`.
@@ -718,6 +843,8 @@ mod tests {
         );
     }
 
+    /// Operator contract 2026-08-14: Business included beats personal included
+    /// even when personal resets sooner. Was sooner-reset-across-roles.
     #[test]
     fn both_have_headroom_personal_resets_sooner() {
         let personal = id("personal-1", SupergrokAccountRole::Personal, 50, Some(500));
@@ -731,9 +858,57 @@ mod tests {
         assert_eq!(
             pick,
             PickSupergrokForAuto::Use {
-                identity_id: "personal-1".into(),
+                identity_id: "business-1".into(),
+                role: SupergrokAccountRole::Business,
+            },
+            "Business included SuperGrok period limits beat personal included (sooner personal reset does not win mixed roles)"
+        );
+    }
+
+    /// Named operator contract (2026-08-14): when both stored SuperGrok logins
+    /// still have included SuperGrok period limits remaining, spend Business /
+    /// Team included first, then personal. Personal sooner reset must not win
+    /// the mixed-role case. Among two Team (or two personal), sooner reset
+    /// then identity_id still applies.
+    #[test]
+    fn pick_prefers_business_included_before_personal_when_both_have_remaining() {
+        let personal = id("personal-1", SupergrokAccountRole::Personal, 80, Some(100));
+        let business = id(
+            "business-1",
+            SupergrokAccountRole::Business,
+            20,
+            Some(9_000),
+        );
+        let pick = pick_supergrok_identity_for_auto(&[personal.clone(), business.clone()]);
+        assert_eq!(
+            pick,
+            PickSupergrokForAuto::Use {
+                identity_id: "business-1".into(),
+                role: SupergrokAccountRole::Business,
+            },
+            "Business included SuperGrok period limits beat personal included even when personal resets sooner and has more remaining"
+        );
+
+        let team_soon = id("team-soon", SupergrokAccountRole::Business, 10, Some(100));
+        let team_late = id("team-late", SupergrokAccountRole::Business, 90, Some(9_000));
+        assert_eq!(
+            pick_supergrok_identity_for_auto(&[team_late, team_soon.clone()]),
+            PickSupergrokForAuto::Use {
+                identity_id: "team-soon".into(),
+                role: SupergrokAccountRole::Business,
+            },
+            "among two Team logins, sooner reset still wins"
+        );
+
+        let pers_soon = id("pers-soon", SupergrokAccountRole::Personal, 10, Some(100));
+        let pers_late = id("pers-late", SupergrokAccountRole::Personal, 90, Some(9_000));
+        assert_eq!(
+            pick_supergrok_identity_for_auto(&[pers_late, pers_soon.clone()]),
+            PickSupergrokForAuto::Use {
+                identity_id: "pers-soon".into(),
                 role: SupergrokAccountRole::Personal,
-            }
+            },
+            "among two personal logins, sooner reset still wins"
         );
     }
 
@@ -802,18 +977,34 @@ mod tests {
 
     #[test]
     fn unknown_reset_sorts_after_known() {
+        // Mixed role: Business included still wins even when reset is unknown.
         let known = id("early", SupergrokAccountRole::Personal, 1, Some(10));
         let unknown = id("late", SupergrokAccountRole::Business, 1, None);
         let pick = pick_supergrok_identity_for_auto(&[unknown, known]);
         assert_eq!(
             pick,
             PickSupergrokForAuto::Use {
-                identity_id: "early".into(),
+                identity_id: "late".into(),
+                role: SupergrokAccountRole::Business,
+            },
+            "Business included SuperGrok period limits beat personal included even when Business reset is unknown"
+        );
+
+        // Same role: unknown reset still sorts after a known reset.
+        let known_p = id("pers-known", SupergrokAccountRole::Personal, 1, Some(10));
+        let unknown_p = id("pers-unknown", SupergrokAccountRole::Personal, 1, None);
+        assert_eq!(
+            pick_supergrok_identity_for_auto(&[unknown_p, known_p]),
+            PickSupergrokForAuto::Use {
+                identity_id: "pers-known".into(),
                 role: SupergrokAccountRole::Personal,
-            }
+            },
+            "among two personal logins, known sooner reset beats unknown reset"
         );
     }
 
+    /// Operator contract 2026-08-14: mixed personal+Team is Business first,
+    /// not lex identity_id. Same-role lex id still applies.
     #[test]
     fn equal_reset_tiebreak_by_identity_id_not_business_first() {
         let business = id("zzz-biz", SupergrokAccountRole::Business, 1, Some(100));
@@ -822,10 +1013,21 @@ mod tests {
         assert_eq!(
             pick,
             PickSupergrokForAuto::Use {
-                identity_id: "aaa-per".into(),
-                role: SupergrokAccountRole::Personal,
+                identity_id: "zzz-biz".into(),
+                role: SupergrokAccountRole::Business,
             },
-            "must not hardcode Business first; equal reset → id order"
+            "Business included SuperGrok period limits beat personal included at equal reset"
+        );
+
+        let team_aaa = id("aaa-team", SupergrokAccountRole::Business, 1, Some(100));
+        let team_zzz = id("zzz-team", SupergrokAccountRole::Business, 1, Some(100));
+        assert_eq!(
+            pick_supergrok_identity_for_auto(&[team_zzz, team_aaa]),
+            PickSupergrokForAuto::Use {
+                identity_id: "aaa-team".into(),
+                role: SupergrokAccountRole::Business,
+            },
+            "among two Team logins at equal reset, identity_id lex still wins"
         );
     }
 
@@ -979,9 +1181,9 @@ mod tests {
         assert!(!order.exhausted_all_supergrok_included);
     }
 
-    /// Named contract: free SuperGrok period rank primary is personal when both
-    /// principals share headroom and the same reset (lex identity_id), not the
-    /// sticky Team/business base scope that SessionToken AuthManager may hold.
+    /// Named contract: when both principals still have included SuperGrok
+    /// period limits remaining, rank primary is Business / Team, not lex
+    /// identity_id personal. Sticky personal AuthManager must align to Team.
     #[test]
     fn ranked_free_period_primary_personal_when_equal_headroom_not_sticky_business() {
         let personal = cand(
@@ -998,20 +1200,18 @@ mod tests {
             Some(1_000),
             "tok-business-team-base",
         );
-        // Sticky AuthManager base is often business (last Team login); rank must
-        // still pick personal when headroom + reset are equal (lex id).
         let ranked = ranked_free_period_primary_token(&[business.clone(), personal.clone()]);
         assert_eq!(
             ranked.as_deref(),
-            Some("tok-personal-free-period"),
-            "equal free SuperGrok period headroom must not sticky-prefer Team base"
+            Some("tok-business-team-base"),
+            "equal included SuperGrok period remaining must pick Business / Team, not lex personal"
         );
         assert!(session_bearer_should_align_to_ranked_free_period_primary(
-            Some("tok-business-team-base"),
+            Some("tok-personal-free-period"),
             ranked.as_deref(),
         ));
         assert!(!session_bearer_should_align_to_ranked_free_period_primary(
-            Some("tok-personal-free-period"),
+            Some("tok-business-team-base"),
             ranked.as_deref(),
         ));
     }
@@ -1032,6 +1232,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn auto_order_not_business_first_when_personal_resets_sooner() {
         let personal = cand(
             "personal-1",
@@ -1048,8 +1249,12 @@ mod tests {
             "tok-b",
         );
         let order = order_credentials_for_preferred_auto(&[business, personal], &["ck".into()]);
-        assert_eq!(order.primary.as_deref(), Some("tok-p"));
-        assert_eq!(order.failover[0], "tok-b");
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-b"),
+            "Business included SuperGrok period limits beat personal included even when personal resets sooner"
+        );
+        assert_eq!(order.failover[0], "tok-p");
     }
 
     #[test]
@@ -1283,6 +1488,102 @@ mod tests {
         assert!(!order.exhausted_all_supergrok_included);
     }
 
+    /// Named contract: personal included SuperGrok period limits full with
+    /// SuperGrok dollar credits still on that login must hop to a Business
+    /// sibling that still has included remaining. Next plan's included beats
+    /// this plan's never-expiring extras. Console stays omitted.
+    #[test]
+    fn order_credentials_personal_full_with_extras_hops_to_business_included_before_extras() {
+        let personal_full_with_extras = cand_with_extras(
+            "personal-1",
+            SupergrokAccountRole::Personal,
+            0,
+            Some(1_000),
+            "tok-personal-extras",
+            Some(10_029),
+        );
+        let business_included = cand(
+            "business-1",
+            SupergrokAccountRole::Business,
+            40,
+            Some(2_000),
+            "tok-business-included",
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[personal_full_with_extras, business_included],
+            &["console-after-extras".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-business-included"),
+            "sibling included SuperGrok period limits must beat personal SuperGrok dollar credits: {order:?}"
+        );
+        assert!(
+            order.primary_is_supergrok_included,
+            "primary stays SuperGrok session while a sibling included pool has remaining"
+        );
+        assert!(
+            !order.exhausted_all_supergrok_included,
+            "Business included remaining means not every distinct pool is full"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("tok-personal-extras"),
+            "must not stay on personal extras while Business included remains"
+        );
+        assert!(
+            !order
+                .failover
+                .iter()
+                .any(|k| k == "console-after-extras" || k == "tok-personal-extras"),
+            "console and the full personal extras JWT stay off the hop list while sibling included remains: {:?}",
+            order.failover
+        );
+    }
+
+    /// Named operator contract: both logins still have included SuperGrok
+    /// period limits remaining. Primary is Business / Team included, then
+    /// personal on failover. Console stays omitted. Personal sooner reset
+    /// must not become primary.
+    #[test]
+    fn order_credentials_business_included_before_personal_when_both_have_room() {
+        let personal = cand(
+            "personal-1",
+            SupergrokAccountRole::Personal,
+            80,
+            Some(100),
+            "tok-personal-included",
+        );
+        let business = cand(
+            "business-1",
+            SupergrokAccountRole::Business,
+            20,
+            Some(9_000),
+            "tok-business-included",
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[personal, business],
+            &["console-must-wait".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-business-included"),
+            "Business included SuperGrok period limits must be primary while both pools have remaining: {order:?}"
+        );
+        assert_eq!(
+            order.failover,
+            vec!["tok-personal-included".to_string()],
+            "personal included stays next, not extras or console: {:?}",
+            order.failover
+        );
+        assert!(
+            !order.failover.iter().any(|k| k == "console-must-wait"),
+            "console omitted while any included SuperGrok period pool has remaining"
+        );
+        assert!(order.primary_is_supergrok_included);
+        assert!(!order.exhausted_all_supergrok_included);
+    }
+
     /// Included full but SuperGrok $ extras remain → stay on SuperGrok session;
     /// console only as failover (after-burner).
     #[test]
@@ -1513,7 +1814,7 @@ mod tests {
                 identity_id: "team-biz".into(),
                 role: SupergrokAccountRole::Business,
             },
-            "sooner reset + headroom beats later reset even with more remaining"
+            "Business included SuperGrok period limits beat personal included (sooner reset among same role is unchanged)"
         );
 
         let order = order_credentials_for_preferred_auto(
@@ -1584,7 +1885,7 @@ mod tests {
         assert_eq!(
             order.primary.as_deref(),
             Some("tok-b"),
-            "business sooner reset after enrich"
+            "Business included SuperGrok period limits after enrich (Team class before personal)"
         );
     }
 
@@ -1777,5 +2078,65 @@ mod tests {
         );
         assert_eq!(role_label(SupergrokAccountRole::Personal), "personal");
         assert_eq!(role_label(SupergrokAccountRole::Business), "business");
+    }
+
+    fn pool(
+        identity_id: &str,
+        usage_pct: Option<f64>,
+        reset: Option<i64>,
+        unified: Option<bool>,
+    ) -> IncludedPoolReading {
+        IncludedPoolReading {
+            identity_id: identity_id.into(),
+            usage_pct,
+            reset_at: reset.map(ts),
+            is_unified_billing_user: unified,
+        }
+    }
+
+    /// Named contract: personal 100% + Business 24% are distinct pools.
+    /// Remaining is 0 + 76. Combined used percent for chrome is
+    /// 100 - floor(76 / 200 * 100) = 62.
+    #[test]
+    fn combined_included_remaining_sums_distinct_personal_and_business_pools() {
+        let combined = combined_included_remaining(&[
+            pool("personal-1", Some(100.0), Some(1_000), None),
+            pool("business-1", Some(24.0), Some(2_000), None),
+        ]);
+        assert_eq!(combined.remaining_units, 76);
+        assert_eq!(combined.distinct_pool_count, 2);
+        assert_eq!(combined.used_pct_for_chrome, Some(62.0));
+        // Unknown identity does not invent a percent or add remaining.
+        let with_unknown = combined_included_remaining(&[
+            pool("personal-1", Some(100.0), Some(1_000), None),
+            pool("business-1", Some(24.0), Some(2_000), None),
+            pool("ghost", None, None, None),
+        ]);
+        assert_eq!(with_unknown.remaining_units, 76);
+        assert_eq!(with_unknown.distinct_pool_count, 2);
+    }
+
+    /// Named contract: unified pool (wire flag, or same floored used percent
+    /// and same reset) counts once (max remaining, not 2×).
+    #[test]
+    fn combined_included_remaining_does_not_double_count_unified_pool() {
+        let unified_flag = combined_included_remaining(&[
+            pool("personal-1", Some(10.0), Some(1_000), Some(true)),
+            pool("business-1", Some(90.0), Some(1_000), Some(true)),
+        ]);
+        assert_eq!(
+            unified_flag.remaining_units, 90,
+            "unified pool uses max remaining, not 90+10"
+        );
+        assert_eq!(unified_flag.distinct_pool_count, 1);
+        assert_eq!(unified_flag.used_pct_for_chrome, Some(10.0));
+
+        let same_pct_and_reset = combined_included_remaining(&[
+            pool("personal-1", Some(24.0), Some(5_000), None),
+            pool("business-1", Some(24.4), Some(5_000), None),
+        ]);
+        assert_eq!(same_pct_and_reset.distinct_pool_count, 1);
+        assert_eq!(same_pct_and_reset.remaining_units, 76);
+        assert_eq!(same_pct_and_reset.used_pct_for_chrome, Some(24.0));
     }
 }

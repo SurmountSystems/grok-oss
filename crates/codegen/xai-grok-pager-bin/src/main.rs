@@ -1592,6 +1592,26 @@ fn install_heap_profile_hooks() {
         prof_available: jemalloc_prof_available,
     });
 }
+/// Print `grok-oss --version` / `version [--json]` to stdout. No TTY, sandbox,
+/// or tokio. Used by install verify and `/rebuild` captured stdio.
+fn print_cli_version(json: bool) -> Result<()> {
+    if json {
+        let payload = serde_json::json!(
+            { "currentVersion" : env!("VERSION_WITH_COMMIT"), "channel" :
+            xai_grok_update::channel_name().unwrap_or("unknown"), }
+        );
+        println!("{}", serde_json::to_string(&payload)?);
+    } else {
+        println!(
+            "{}",
+            xai_grok_pager::client_identity::product_version_line(
+                env!("VERSION_WITH_COMMIT"),
+                xai_grok_update::channel_label(),
+            )
+        );
+    }
+    Ok(())
+}
 fn main() {
     xai_grok_pager_minimal::install();
     #[cfg(all(feature = "jemalloc", unix))]
@@ -1605,6 +1625,16 @@ fn main() {
     install_heap_profile_hooks();
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
+    }
+    // `--version` / `version` must not start the TUI. `just install` verify
+    // and `/rebuild` run this with stdin `/dev/null` and no controlling
+    // terminal; `enable_raw_mode` then fails with ENXIO (os error 6).
+    if let Some(json) = PagerArgs::parse_cli().version_only_json() {
+        if let Err(e) = print_cli_version(json) {
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
     }
     xai_grok_pager::memory_trace::start(
         xai_grok_shell::util::grok_home::grok_home().join("memtrace"),
@@ -1739,21 +1769,7 @@ async fn async_main() -> Result<()> {
     if let Some(command) = args.command.take() {
         match command {
             Command::Version { json } => {
-                if json {
-                    let payload = serde_json::json!(
-                        { "currentVersion" : env!("VERSION_WITH_COMMIT"), "channel" :
-                        xai_grok_update::channel_name().unwrap_or("unknown"), }
-                    );
-                    println!("{}", serde_json::to_string(&payload)?);
-                } else {
-                    println!(
-                        "grok {}",
-                        xai_grok_version::display_version_with_commit(
-                            env!("VERSION_WITH_COMMIT"),
-                            xai_grok_update::channel_label(),
-                        )
-                    );
-                }
+                print_cli_version(json)?;
                 return Ok(());
             }
             Command::Agent(agent_args) => {

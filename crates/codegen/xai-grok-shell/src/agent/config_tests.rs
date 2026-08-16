@@ -1111,6 +1111,7 @@ fn sampling_config_uses_fallback_when_no_model_api_key() {
             base_url: model.info().base_url.clone(),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: AuthScheme::Bearer,
+            ..Default::default()
         },
         None,
         None,
@@ -1189,6 +1190,7 @@ fn default_models_dual_endpoint_routing() {
                 .unwrap_or(entry.info().base_url.clone()),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: AuthScheme::Bearer,
+            ..Default::default()
         };
         assert_eq!(
             api_key_creds.base_url, endpoints.xai_api_base_url,
@@ -1560,6 +1562,7 @@ fn api_key_creds(base_url: &str) -> ResolvedCredentials {
         base_url: base_url.to_string(),
         auth_type: xai_chat_state::AuthType::ApiKey,
         auth_scheme: Default::default(),
+        ..Default::default()
     }
 }
 /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).
@@ -7428,4 +7431,302 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
         Some(true),
         true,
     );
+}
+
+/// Named contract: after included SuperGrok period limits are full, the hop
+/// list on `SamplerConfig` must not stay empty when a console key is available.
+///
+/// Spend order: included SuperGrok period limits first, then SuperGrok dollar
+/// credits (session stays primary when extras are known positive), then console
+/// team prepaid / console API credits. This test covers included full + extras
+/// unknown: console must appear as primary or failover. Do not accept an empty
+/// hop as success.
+#[test]
+#[serial]
+fn sampling_config_auto_use_fills_console_hop_after_included_full() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-after-included-key");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let session = "session-jwt-included-full";
+    let sessions = vec![SupergrokSessionCandidate {
+        headroom: SupergrokIdentityHeadroom {
+            identity_id: "personal-included-full".into(),
+            role: SupergrokAccountRole::Personal,
+            included_remaining: 0,
+            reset_at: None,
+        },
+        access_token: session.into(),
+        prepaid_balance_cents: None,
+        hard_expired: false,
+    }];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    let console_in_chain = sampling.api_key.as_deref() == Some("console-after-included-key")
+        || sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-after-included-key");
+    assert!(
+        console_in_chain,
+        "after included SuperGrok period limits are full, hop must include the console key; primary={:?} failover={:?}",
+        sampling.api_key, sampling.failover_api_keys
+    );
+    assert!(
+        !sampling.failover_api_keys.is_empty()
+            || sampling.api_key.as_deref() == Some("console-after-included-key"),
+        "hop list must not stay empty when console should be available after included SuperGrok period limits are full; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// Catalog name: while included SuperGrok period limits still have room,
+/// `resolve_model_to_sampling_config` must omit the console key from the hop.
+#[test]
+#[serial]
+fn sampling_config_auto_use_omits_console() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::PreferredAuthMethod;
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-omit-while-included");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let mut models = IndexMap::new();
+    models.insert("m".to_string(), model);
+    let sc = resolve_model_to_sampling_config(
+        "m",
+        &models,
+        Some("tok-session-included-headroom"),
+        None,
+        None,
+        None,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    )
+    .expect("model resolves");
+    assert_ne!(
+        sc.api_key.as_deref(),
+        Some("console-must-omit-while-included"),
+        "primary must not be console while included SuperGrok period limits have room"
+    );
+    assert!(sc.api_key.is_some());
+    assert!(
+        !sc.failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-omit-while-included"),
+        "must omit console while included SuperGrok period limits have room; failover={:?}",
+        sc.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// Catalog name: `resolve_model_to_sampling_config` after included SuperGrok
+/// period limits are full must fill console failover (or console primary when
+/// SuperGrok dollar credits are unknown).
+#[test]
+#[serial]
+fn resolve_model_to_sampling_config_auto_use() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-resolve-model-hop");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let sessions = vec![SupergrokSessionCandidate {
+        headroom: SupergrokIdentityHeadroom {
+            identity_id: "personal-full".into(),
+            role: SupergrokAccountRole::Personal,
+            included_remaining: 0,
+            reset_at: None,
+        },
+        access_token: "tok-included-full-resolve-model".into(),
+        prepaid_balance_cents: None,
+        hard_expired: false,
+    }];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sc = sampling_config_for_model(&model, creds, None, None, None, None);
+    let console_in_chain = sc.api_key.as_deref() == Some("console-resolve-model-hop")
+        || sc
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-resolve-model-hop");
+    assert!(
+        console_in_chain,
+        "resolve_model / sampling hop after included SuperGrok period limits are full must include console; primary={:?} failover={:?}",
+        sc.api_key, sc.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// Included SuperGrok period limits full + SuperGrok dollar credits remain:
+/// SuperGrok session stays primary; console is failover only.
+#[test]
+#[serial]
+fn sampling_config_auto_use_extras_keep_session_console_failover() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_chat_state::AuthType;
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-afterburner-key");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let sessions = vec![SupergrokSessionCandidate {
+        headroom: SupergrokIdentityHeadroom {
+            identity_id: "team-extras".into(),
+            role: SupergrokAccountRole::Business,
+            included_remaining: 0,
+            reset_at: None,
+        },
+        access_token: "tok-extras-afterburner".into(),
+        prepaid_balance_cents: Some(10_029),
+        hard_expired: false,
+    }];
+    let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("tok-extras-afterburner"),
+        "SuperGrok dollar credits keep SuperGrok session primary"
+    );
+    assert!(
+        sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-afterburner-key"),
+        "console must be failover while SuperGrok dollar credits remain: {:?}",
+        sampling.failover_api_keys
+    );
+    let _ = AuthType::SessionToken;
+    clear_all_including_durable();
+}
+
+/// Named catalog contract: personal included SuperGrok period limits full with
+/// SuperGrok dollar credits remaining hops to a Business sibling that still
+/// has included remaining. Console stays off the hop list. Keep the
+/// single-identity extras test above green (no sibling).
+#[test]
+#[serial]
+fn sampling_config_hops_to_sibling_included_before_extras() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(
+        XAI_API_KEY_ENV_VAR,
+        "console-must-wait-for-sibling-included",
+    );
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let sessions = vec![
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "personal-full-extras".into(),
+                role: SupergrokAccountRole::Personal,
+                included_remaining: 0,
+                reset_at: None,
+            },
+            access_token: "tok-personal-full-extras".into(),
+            prepaid_balance_cents: Some(10_029),
+            hard_expired: false,
+        },
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "business-included".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 55,
+                reset_at: None,
+            },
+            access_token: "tok-business-included".into(),
+            prepaid_balance_cents: None,
+            hard_expired: false,
+        },
+    ];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("tok-business-included"),
+        "sampling hop must use Business included SuperGrok period limits before personal extras; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert!(
+        !sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-wait-for-sibling-included"
+                || k == "tok-personal-full-extras"),
+        "console and personal extras stay off the hop list while sibling included remains: {:?}",
+        sampling.failover_api_keys
+    );
+    clear_all_including_durable();
 }

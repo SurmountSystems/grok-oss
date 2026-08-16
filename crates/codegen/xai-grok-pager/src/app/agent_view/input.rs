@@ -1306,8 +1306,17 @@ impl AgentView {
         registry: &ActionRegistry,
         typing: bool,
     ) -> Option<InputOutcome> {
-        if registry.lookup(key, When::Always) == Some(ActionId::Quit) {
+        if matches!(
+            registry.lookup(key, When::Always),
+            Some(ActionId::Quit) | Some(ActionId::CaptureTuiScreenshot)
+        ) {
             return Some(InputOutcome::Unchanged);
+        }
+        // Preview line-viewer swallows Ctrl+C as a no-op. Route CancelTurn
+        // into the plan feedback path so empty-composer Ctrl+C can abandon
+        // (same as `q`) and a non-empty draft can still clear first.
+        if registry.matches_id(ActionId::CancelTurn, key) {
+            return Some(self.handle_plan_feedback_key(key));
         }
         let action_id = registry.lookup(key, When::AgentScreen)?;
         match action_id {

@@ -120,6 +120,9 @@ pub enum ActionId {
     // Settings
     OpenSettings,
 
+    /// Capture the current TUI frame as a PNG (`/screenshot`). Bound to F9.
+    CaptureTuiScreenshot,
+
     // Agent Dashboard
     OpenDashboard,
     DashboardSelectNext,
@@ -927,9 +930,13 @@ mod tests {
             registry.lookup(&ctrl_m, When::PromptFocused),
             Some(ActionId::ToggleMultiline)
         );
-        // Former mouse-toggle dual bindings removed from scrollback.
+        // F9 is the TUI screenshot chord (When::Always), not scrollback/agent-scoped.
         assert_eq!(registry.lookup(&f9, When::ScrollbackFocused), None);
         assert_eq!(registry.lookup(&f9, When::AgentScreen), None);
+        assert_eq!(
+            registry.lookup(&f9, When::Always),
+            Some(ActionId::CaptureTuiScreenshot)
+        );
         // Ctrl+Shift+M is no longer the voice chord — it resolves to nothing.
         assert_eq!(
             registry.lookup(&ctrl_shift_m, When::ScrollbackFocused),
@@ -956,6 +963,39 @@ mod tests {
     fn exit_session_is_command_only() {
         let registry = ActionRegistry::defaults();
         assert!(registry.find(ActionId::ExitSession).is_none());
+    }
+
+    /// Named contract: F9 is the free global chord for TUI self-screenshot
+    /// (`/screenshot` remains the slash surface). Not bound to other Always actions.
+    #[test]
+    fn capture_tui_screenshot_bound_to_f9_always() {
+        let registry = ActionRegistry::defaults();
+        let def = registry
+            .find(ActionId::CaptureTuiScreenshot)
+            .expect("CaptureTuiScreenshot must be registered");
+        assert_eq!(def.label, "screenshot");
+        assert_eq!(def.context, When::Always);
+        assert!(!def.requires_confirmation);
+
+        let f9 = KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE);
+        assert_eq!(
+            registry.lookup(&f9, When::Always),
+            Some(ActionId::CaptureTuiScreenshot)
+        );
+        // Exact-context lookups on other When variants miss (bubbling uses Always).
+        assert_eq!(registry.lookup(&f9, When::AgentScreen), None);
+        assert_eq!(registry.lookup(&f9, When::PromptFocused), None);
+        // F8 stays voice; F2 stays settings — no collision.
+        let f8 = KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE);
+        assert_eq!(
+            registry.lookup(&f8, When::Always),
+            Some(ActionId::VoiceToggle)
+        );
+        let f2 = KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE);
+        assert_eq!(
+            registry.lookup(&f2, When::AgentScreen),
+            Some(ActionId::OpenSettings)
+        );
     }
 
     fn binds_ctrl_4(def: &ActionDef) -> bool {

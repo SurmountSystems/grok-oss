@@ -178,6 +178,8 @@ pub struct ScrollRenderResult {
     pub inline_media: Vec<InlineMediaPlacement>,
     /// Diagram affordance rows to paint + register click hit-rects for.
     pub diagram_affordances: Vec<DiagramAffordancePlacement>,
+    /// Always-on bubble copy ⧉ hit rects: `(screen rect, entry_idx)`.
+    pub bubble_copy_hits: Vec<(ratatui::layout::Rect, usize)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -575,6 +577,9 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                     re,
                     true,
                 );
+            }
+            if let Some(rect) = line.bubble_copy_button_rect(entry_row_layout.content.x, screen_y) {
+                result.bubble_copy_hits.push((rect, logical_idx));
             }
             if let (Some(range_id), Some(cols)) = (
                 line.selection_range,

@@ -4,9 +4,23 @@
 > additive changes may occur without notice, renames/removals will bump the
 > version and be called out in the changelog.
 
-Grok CLI can export usage **metrics** and **events** to your organization's
+This page is **external OpenTelemetry** for org collectors. It is **not** the
+personal spend meter.
+
+For included SuperGrok period limits, SuperGrok dollar credits, and console
+team prepaid, type **`/limits`** in the TUI or click the compact meter on the
+status row. See [Authentication](02-authentication.md) and
+[Slash Commands → `/limits`](04-slash-commands.md#limits). `/spend` is the
+local Token Economy book. Spend included SuperGrok period limits on stored
+Business / Team SuperGrok logins first, then personal included, then SuperGrok
+dollar credits that never expire, then console team prepaid / console API
+credits. Remaining included SuperGrok period limits across distinct stored
+plans are added together. After included SuperGrok period limits are full,
+sampling hops to SuperGrok dollar credits, then to the console API as failover.
+
+Grok OSS can export usage **metrics** and **events** to your organization's
 own OpenTelemetry collector, so platform teams can monitor adoption, token
-consumption, tool-permission decisions, and errors across the fleet — without
+consumption, tool-permission decisions, and errors across the fleet, without
 any data flowing through SpaceXAI.
 
 ## Related settings
@@ -48,7 +62,7 @@ export OTEL_LOGS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf  # or grpc
 export OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.corp.example:4318
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <collector-token>"
-grok
+grok-oss
 ```
 
 `GROK_EXTERNAL_OTEL=1` alone enables **nothing** — you must also select at
@@ -112,7 +126,7 @@ There is deliberately no `headers` key: supply collector auth via
 `OTEL_EXPORTER_OTLP_HEADERS` so tokens are never stored on disk.
 
 Managed deployments can additionally enable org-wide telemetry by distributing
-the `[telemetry]` `otel_*` keys through `grok setup` managed config /
+the `[telemetry]` `otel_*` keys through `grok-oss setup` managed config /
 requirements pins, or force-disable it fleet-wide with the same local config
 layers (`external_otel_disabled`, content-gate locks).
 
@@ -137,7 +151,7 @@ A fleet policy that arrives afterwards still applies; it can only ever
 something your local configuration did not.
 
 If your collector receives nothing at all, check the debug log
-(`grok --debug`) for `external otel:` lines — they record whether the stream
+(`grok-oss --debug`) for `external otel:` lines. They record whether the stream
 resolved its configuration, and whether it is exporting or suppressed.
 
 ## Resource attributes

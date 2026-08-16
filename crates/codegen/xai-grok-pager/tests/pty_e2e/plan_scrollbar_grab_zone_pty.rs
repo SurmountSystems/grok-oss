@@ -47,7 +47,7 @@ async fn plan_scrollbar_grab_zone_pty() {
         .inject_keys(b"present the plan\r")
         .expect("submit plan prompt");
     harness
-        .wait_for_text("request changes", Duration::from_secs(60))
+        .wait_for_text("Plan ready. Side panel open", Duration::from_secs(60))
         .unwrap_or_else(|e| {
             panic!(
                 "plan approval never parked: {e}\nscreen:\n{}",
@@ -148,7 +148,7 @@ async fn plan_scrollbar_grab_zone_pty() {
 
     let after = harness.screen_contents();
     assert!(
-        after.contains("request changes"),
+        after.contains("revise") && after.contains("approve"),
         "approval chrome must stay open after scrollbar gestures; screen:\n{after}"
     );
     assert!(

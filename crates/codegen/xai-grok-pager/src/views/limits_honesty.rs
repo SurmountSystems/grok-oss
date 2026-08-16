@@ -33,49 +33,49 @@ poll reading, not proof of included-limit burn.";
 /// Management postpaid preview shows OAuth class strictly above API class
 /// (and &gt; 0). Distinct from console ApiKey live, from prepaid ledger
 /// remaining, and from SuperGrok included weekly debit proof. Does **not**
-/// mean SuperGrok dollar extras are the live driver or that free SuperGrok
-/// period moved.
+/// mean SuperGrok dollar extras are the live driver or that included SuperGrok
+/// period limits moved.
 pub const NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS: &str = "Note: SuperGrok session can still \
 move team Usage dollars (OAuth / Grok Build class on the team invoice) without proving \
 SuperGrok included weekly moved, even when the console API key is not live. That settlement \
-rise is not free SuperGrok period burn proof and not SuperGrok dollar extras as the live driver.";
+rise is not included SuperGrok period burn proof and not SuperGrok dollar extras as the live driver.";
 
-/// Flat free SuperGrok period + rising team OAuth / Grok Build settlement.
+/// Flat included SuperGrok period limits + rising team OAuth / Grok Build settlement.
 ///
 /// Shown when SuperGrok is live, flat-poll evidence is set, and OAuth postpaid
 /// dominates. Strengthens C6: names that team Grok Build class can climb while
 /// free period stays flat, without calling that class SuperGrok extras.
-pub const NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS: &str = "Note: free SuperGrok period \
-can stay flat across recent polls while team Grok Build / OAuth settlement dollars rise under \
-SuperGrok session; product does not invent free-period debit and does not treat team settlement \
-as SuperGrok dollar extras.";
+pub const NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS: &str = "Note: included SuperGrok \
+period limits can stay flat across recent polls while team Grok Build / OAuth settlement dollars \
+rise under SuperGrok session; product does not invent included-period debit and does not treat \
+team settlement as SuperGrok dollar extras.";
 
 /// Active / `activeDriver` is intent chrome, not settlement proof.
 ///
 /// Shown when SuperGrok session is live and the product also has team prepaid
 /// remaining and/or team postpaid OAuth class dominating. Closes the gap where
-/// chrome says free SuperGrok period is active while dogfood burn still settles
+/// chrome says included SuperGrok period limits are active while dogfood burn still settles
 /// on team Billing Credits (prepaid remaining) and/or team OAuth / Grok Build
-/// class without free SuperGrok period used % moving and without console key live.
-pub const NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT: &str = "Note: Active free SuperGrok period \
-(activeDriver) is the client spend-order driver and intent chrome, not proof of which wallet \
-settles the bill. SuperGrok session traffic can still settle on team postpaid OAuth / Grok Build \
-class and can change console team prepaid remaining (team Billing Credits) without free SuperGrok \
-period used % moving and without the console API key being live. Product tracks team prepaid \
-remaining and team OAuth class when a management key is set; it does not invent free SuperGrok \
-period debit.";
+/// class without included SuperGrok period used % moving and without console key live.
+pub const NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT: &str = "Note: Active included SuperGrok \
+period limits (activeDriver) is the client spend-order driver and intent chrome, not proof of \
+which wallet settles the bill. SuperGrok session traffic can still settle on team postpaid OAuth \
+/ Grok Build class and can change console team prepaid remaining (team Billing Credits) without \
+included SuperGrok period used % moving and without the console API key being live. Product \
+tracks team prepaid remaining and team OAuth class when a management key is set; it does not \
+invent included SuperGrok period debit.";
 
-/// Opt-in hard block: sampler turns blocked under unproven free SuperGrok period debit.
+/// Opt-in hard block: sampler turns blocked under unproven included SuperGrok period debit.
 ///
-/// Shown when SuperGrok session is live, free SuperGrok period still has room,
+/// Shown when SuperGrok session is live, included SuperGrok period limits still have room,
 /// flat-poll unproven debit is true, and the operator set
 /// `[auth] allow_spend_when_free_period_debit_unproven = false` (hard block;
 /// default is allow). Matches the shell gate when that opt-in is on.
 pub const NOTE_TURNS_BLOCKED_FREE_PERIOD_DEBIT_UNPROVEN: &str = "Note: new agent turns are \
-blocked (opt-in hard block) while free SuperGrok period limits stay flat (unproven debit) and \
-still have room. SuperGrok session traffic can still move team Grok Build / OAuth settlement \
+blocked (opt-in hard block) while included SuperGrok period limits stay flat (unproven debit) \
+and still have room. SuperGrok session traffic can still move team Grok Build / OAuth settlement \
 and SuperGrok dollar credits. Set [auth] allow_spend_when_free_period_debit_unproven = true \
-(default) to allow turns under unproven free SuperGrok period debit, or wait until free \
+(default) to allow turns under unproven included SuperGrok period debit, or wait until included \
 SuperGrok period used % steps.";
 
 /// Console team prepaid lag honesty (when dollars are shown).
@@ -98,11 +98,11 @@ keep last successful cents until a later successful fetch. Running grok limits o
 /// Team default credits are a separate dashboard allotment meter.
 ///
 /// Shown when postpaid preview carried `defaultCredits`. Not the console team
-/// prepaid wallet, not free SuperGrok period allowance, not SuperGrok top-up
+/// prepaid wallet, not included SuperGrok period limits, not SuperGrok top-up
 /// dollars.
 pub const NOTE_TEAM_DEFAULT_CREDITS_ARE_DASHBOARD_ALLOTMENT: &str = "Note: team default credits \
 are the console dashboard allotment (postpaid preview defaultCredits), not the team prepaid \
-wallet, not free SuperGrok period allowance, and not SuperGrok prepaid top-up dollars.";
+wallet, not included SuperGrok period limits, and not SuperGrok prepaid top-up dollars.";
 
 /// Platforms → Grok Business → licenses Usage (messages / conversations) is
 /// not dogfood proof for this CLI.
@@ -129,7 +129,7 @@ pub fn dogfood_burn_proof_doctor_block() -> String {
 console team prepaid remaining, and usage series when a management key is set; \
 browser team Usage (console.x.ai team .../usage spend charts) and team Billing \
 Credits.\n\
-  Active free SuperGrok period (activeDriver) is client spend-order intent chrome, \
+  Active included SuperGrok period limits (activeDriver) is client spend-order intent chrome, \
 not settlement proof when team prepaid remaining or team OAuth / Grok Build class \
 moves under SuperGrok session with console not live.\n\
   Not proof: Platforms → Grok Business → licenses Usage (messages / \
@@ -345,8 +345,8 @@ mod tests {
             "must exclude prepaid wallet: {n}"
         );
         assert!(
-            n.contains("not free SuperGrok period allowance"),
-            "must exclude free SuperGrok period allowance: {n}"
+            n.contains("not included SuperGrok period limits"),
+            "must exclude included SuperGrok period limits: {n}"
         );
         assert!(
             n.contains("not SuperGrok prepaid top-up"),
@@ -552,8 +552,8 @@ mod tests {
             "must name team OAuth / Grok Build settlement: {note}"
         );
         assert!(
-            lower.contains("does not invent") && lower.contains("free supergrok period"),
-            "must ban invent free SuperGrok period debit: {note}"
+            lower.contains("does not invent") && lower.contains("included supergrok period"),
+            "must ban invent included SuperGrok period debit: {note}"
         );
         assert!(
             !note.contains('\u{2014}') && !note.contains('—') && !note.contains('\u{2026}'),
@@ -1009,8 +1009,8 @@ mod tests {
             "C6 must not sell settlement as SuperGrok extras: {c6}"
         );
         assert!(
-            c6.contains("not free SuperGrok period burn proof"),
-            "C6 must not sell settlement as free-period burn: {c6}"
+            c6.contains("not included SuperGrok period burn proof"),
+            "C6 must not sell settlement as included-period burn: {c6}"
         );
         assert!(
             !c6.contains('\u{2014}') && !c6.contains(" -- "),
@@ -1066,8 +1066,13 @@ mod tests {
                 || settle.contains("does not treat team settlement"),
             "must not call team settlement SuperGrok extras: {settle}"
         );
+        // Named contract (C4): do not invent debit. User-facing copy names
+        // included SuperGrok period limits (SuperGrok is paid). The older
+        // "does not invent free-period debit" phrase was a vocabulary rename,
+        // not a weaker honesty bar.
         assert!(
-            settle.contains("does not invent free-period debit"),
+            settle.contains("does not invent included-period debit")
+                || settle.contains("does not invent included SuperGrok period debit"),
             "must keep C4 honesty (no invent debit): {settle}"
         );
     }

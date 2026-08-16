@@ -73,6 +73,15 @@ pub(super) fn hover_style(theme: &Theme, hovered: bool, base: Style) -> Style {
     }
 }
 
+/// Height of the welcome location/version top bar. Zero when `[ui] hide_header` is on.
+pub(crate) fn welcome_top_bar_height() -> u16 {
+    if crate::appearance::cache::load_hide_header() {
+        0
+    } else {
+        1
+    }
+}
+
 /// Horizontal margin (left and right) in normal mode.
 const H_MARGIN: u16 = 2;
 /// Horizontal margin in compact mode.
@@ -394,11 +403,11 @@ impl WelcomeLayout {
 
 /// Controls what the version badge renders.
 pub(super) enum VersionBadgeMode<'a> {
-    /// Full badge: team | tier | api_key | **Grok Build** VERSION+channel (right-aligned).
+    /// Full badge: team | tier | api_key | **Grok OSS** VERSION+channel (right-aligned).
     Full { subscription_tier: Option<&'a str> },
     /// Hero footer: team | api_key | channel (right-aligned, gray).
     HeroFooter,
-    /// Hero inline: **Grok Build**  VERSION (left-aligned).
+    /// Hero inline: **Grok OSS**  VERSION (left-aligned).
     HeroInline,
 }
 
@@ -455,7 +464,7 @@ pub(super) fn render_version_badge(
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
-                "Grok Build  ",
+                "Grok OSS  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -475,7 +484,7 @@ pub(super) fn render_version_badge(
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
-                "Grok Build  ",
+                "Grok OSS  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -693,22 +702,25 @@ pub fn render_welcome(
 
     buf.set_style(area, Style::default().bg(theme.bg_base));
 
-    // Announcements only render inside the hero box. Top bar is always 1 row.
+    // Announcements only render inside the hero box. Top bar is 1 row unless hide_header.
+    let top_bar_h = welcome_top_bar_height();
     let [_, top_bar_area, content_area, _] = Layout::vertical([
         Constraint::Length(v_margin),
-        Constraint::Length(1),
+        Constraint::Length(top_bar_h),
         Constraint::Min(10),
         Constraint::Length(v_margin),
     ])
     .areas(area);
 
-    let top_bar_inner = Rect {
-        x: top_bar_area.x + h_margin,
-        y: top_bar_area.y,
-        width: top_bar_area.width.saturating_sub(h_margin * 2),
-        height: 1,
-    };
-    render_top_bar(top_bar_inner, buf, &theme, None);
+    if top_bar_h > 0 {
+        let top_bar_inner = Rect {
+            x: top_bar_area.x + h_margin,
+            y: top_bar_area.y,
+            width: top_bar_area.width.saturating_sub(h_margin * 2),
+            height: 1,
+        };
+        render_top_bar(top_bar_inner, buf, &theme, None);
+    }
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
@@ -2697,6 +2709,20 @@ mod tests {
             .to_string()
     }
 
+    #[test]
+    fn hide_header_zeros_welcome_top_bar_height() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_hide_header(true);
+            assert_eq!(
+                welcome_top_bar_height(),
+                0,
+                "[ui] hide_header must zero the welcome top bar"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
     /// The badge carries the product name, the version, and the channel, and never a release label.
     /// The hero footer prints a channel only on alpha and beta builds, so on stable it must not end on a separator.
     #[test]
@@ -2716,13 +2742,36 @@ mod tests {
                 "badge must not label the product: {rendered:?}"
             );
         }
-        assert!(full.contains("Grok Build"), "full badge: {full:?}");
-        assert!(inline.contains("Grok Build"), "inline badge: {inline:?}");
+        assert!(full.contains("Grok OSS"), "full badge: {full:?}");
+        assert!(inline.contains("Grok OSS"), "inline badge: {inline:?}");
         assert!(footer.contains("acme"), "footer keeps the team: {footer:?}");
         assert!(
             !footer.ends_with('\u{2502}'),
             "footer must not end on a separator: {footer:?}"
         );
+    }
+
+    /// Named contract: Welcome badge paints **Grok OSS**, never leftover
+    /// upstream **Grok Build**.
+    #[test]
+    fn welcome_badge_brands_grok_oss() {
+        let full = badge_text(
+            VersionBadgeMode::Full {
+                subscription_tier: None,
+            },
+            Some("acme"),
+        );
+        let inline = badge_text(VersionBadgeMode::HeroInline, None);
+        for rendered in [&full, &inline] {
+            assert!(
+                rendered.contains("Grok OSS"),
+                "Welcome badge must say Grok OSS: {rendered:?}"
+            );
+            assert!(
+                !rendered.contains("Grok Build"),
+                "Welcome badge must not say Grok Build: {rendered:?}"
+            );
+        }
     }
 
     #[test]

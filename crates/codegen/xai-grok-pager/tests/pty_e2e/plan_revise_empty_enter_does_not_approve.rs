@@ -35,7 +35,7 @@ async fn plan_revise_empty_enter_does_not_approve() {
         .inject_keys(b"present the plan\r")
         .expect("submit plan prompt");
     harness
-        .wait_for_text("request changes", Duration::from_secs(60))
+        .wait_for_text("Plan ready. Side panel open", Duration::from_secs(60))
         .unwrap_or_else(|e| {
             panic!(
                 "plan approval never parked: {e}\nscreen:\n{}",
@@ -43,7 +43,7 @@ async fn plan_revise_empty_enter_does_not_approve() {
             )
         });
 
-    harness.inject_keys(b"s").expect("focus revise prompt");
+    harness.inject_keys(b"\t").expect("focus plan prompt");
     for _ in 0..5 {
         harness.update(Duration::from_millis(100));
     }
@@ -59,7 +59,7 @@ async fn plan_revise_empty_enter_does_not_approve() {
         "empty Enter must toast a nudge, not approve; screen:\n{screen}"
     );
     assert!(
-        screen.contains("request changes") && screen.contains("Waiting on plan approval"),
+        screen.contains("revise") && screen.contains("Plan ready. Side panel open"),
         "empty Enter must leave plan approval open; screen:\n{screen}"
     );
     assert!(

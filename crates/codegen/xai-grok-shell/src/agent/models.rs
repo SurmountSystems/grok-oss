@@ -11,7 +11,9 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use indexmap::IndexMap;
 
-use crate::agent::config::{self, ModelEntry, resolve_credentials, sampling_config_for_model};
+use crate::agent::config::{
+    self, ModelEntry, resolve_credentials_preferring_with_rank, sampling_config_for_model,
+};
 use crate::auth::{AuthManager, GrokAuth, GrokComConfig};
 use crate::remote::{FetchModelsResult, fetch_models_blocking};
 use crate::sampling::SamplerConfig as SamplingConfig;
@@ -319,26 +321,16 @@ impl ModelsManager {
         prefetched_models: Option<IndexMap<String, ModelEntry>>,
         auth_manager: Arc<AuthManager>,
     ) -> Result<Self, String> {
-        let has_session = auth_manager.current_or_expired().is_some();
         let is_session_auth = auth_manager
             .current_or_expired()
             .is_some_and(|a| a.is_session_auth());
-        let fetch_auth = ModelFetchAuth::resolve(&cfg.endpoints, has_session);
-        let mut cached_etag = None;
-        let prefetched_models = prefetched_models.or_else(|| {
-            let cache = ModelsCacheManager::new();
-            cache
-                .load_fresh(
-                    &fetch_auth.cache_auth_method(),
-                    &crate::remote::models_list_url(&cfg.endpoints, fetch_auth),
-                )
-                .map(|c| {
-                    cached_etag = c.etag;
-                    c.models
-                })
-        });
+        // Only an explicit prefetch is a real catalog. A grok-home disk hit is
+        // prefetch's job (`prefetch_models_blocking`); treating it as fetched
+        // here makes a no-prefetch boot claim a real catalog. Empty prefetch
+        // is a miss (`resolve_model_list(Some(empty))` would wipe bundled).
+        let prefetched_models = prefetched_models.filter(|models| !models.is_empty());
         let has_prefetched = prefetched_models.is_some();
-        let catalog = resolve_model_catalog(cfg, prefetched_models.clone());
+        let mut catalog = resolve_model_catalog(cfg, prefetched_models.clone());
 
         if has_prefetched {
             validate_selectable(cfg, &catalog)?;
@@ -346,6 +338,11 @@ impl ModelsManager {
 
         let (current_model_key, current_model, model_source) =
             resolve_default_model(cfg, &catalog, is_session_auth);
+        // Zero-network / custom-endpoint / empty-cache boot must still produce
+        // a usable catalog that contains the resolved default.
+        if !catalog.contains_key(&current_model_key) {
+            catalog.insert(current_model_key.clone(), current_model.clone());
+        }
 
         tracing::info!(
             model_id = %current_model.model,
@@ -365,8 +362,6 @@ impl ModelsManager {
         if has_prefetched {
             let mut cat = mgr.inner.catalog.write();
             cat.has_fetched_real_catalog = true;
-            // With the etag, the first check renews instead of refetching.
-            cat.etag = cached_etag;
             mgr.inner
                 .catalog_progress
                 .send_replace(CatalogProgress::Ready);
@@ -634,8 +629,8 @@ impl ModelsManager {
         self.inner.catalog.read().prefetched.clone()
     }
 
-    #[cfg(test)]
-    fn has_fetched_real_catalog(&self) -> bool {
+    /// True after the first remote (or prefetched) catalog publish.
+    pub(crate) fn has_fetched_real_catalog(&self) -> bool {
         self.inner.catalog.read().has_fetched_real_catalog
     }
 
@@ -1034,8 +1029,16 @@ impl ModelsManager {
         };
 
         let session_auth = auth_manager.current_or_expired();
-        let credentials =
-            resolve_credentials(current_model, session_auth.as_ref().map(|a| a.key.as_str()));
+        // Same dual-auth rank as main chat prepare: preferred_method +
+        // auto_use_included_limits so startup / ModelsManager consumers do not
+        // re-queue console keys while included SuperGrok period limits still
+        // have room.
+        let credentials = resolve_credentials_preferring_with_rank(
+            current_model,
+            session_auth.as_ref().map(|a| a.key.as_str()),
+            config.grok_com_config.preferred_method,
+            config.grok_com_config.auto_use_included_limits,
+        );
 
         sampling_config_for_model(
             current_model,

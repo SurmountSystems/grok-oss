@@ -96,7 +96,7 @@ elif [[ "$merge_head" == "yes" ]]; then
 elif [[ "$onto_ish" == "yes" && "$main_ancestor" == "no" ]]; then
   next="run ./scripts/join-main-into-onto.sh (stages -s ours), then human: git commit -S join message"
 elif [[ "$onto_ish" == "yes" && "$main_ancestor" == "yes" ]]; then
-  next="clean recon state (onto tip; main is ancestor). Land: ./scripts/assert-process-pins.sh HEAD && just check; push/PR only if asked"
+  next="clean recon state (onto tip; main is ancestor). Land: ./scripts/assert-process-pins.sh HEAD; walk FORK/catalog named tests in doc/dev/upstream-regression-filters.md (seven product classes plus listed neighbors; rg each identifier for fn; chrome-only is a failed land); just check is quality only. Push/PR only if asked"
 else
   next="clean (not mid cherry-pick/merge). Route if needed: ./scripts/detect-upstream-export.sh or put-history / import (see git-recon recon:route)"
 fi
@@ -113,7 +113,7 @@ if ((unmerged_count > 0)); then
   for p in "${unmerged[@]}"; do
     ((i++)) || true
     if ((i > max_show)); then
-      echo "  … and $((unmerged_count - max_show)) more"
+      echo "  ... and $((unmerged_count - max_show)) more"
       break
     fi
     echo "  - $p"

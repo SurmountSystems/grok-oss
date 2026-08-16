@@ -110,7 +110,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     /// Re-key a nested spawn (its parent is itself a subagent) to the root
     /// session, inheriting workflow lineage and loop identity; rejects the
     /// spawn when its parent subagent is already being torn down.
-    fn reparent_nested_spawn(&self, request: &mut SubagentRequest) -> Result<(), SubagentResult> {
+    fn reparent_nested_spawn(
+        &mut self,
+        request: &mut SubagentRequest,
+    ) -> Result<(), SubagentResult> {
         let Some((root_parent, loop_task_id, spawner_cancelled, spawner_owner)) = self
             .active
             .values()
@@ -135,6 +138,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 true,
             ));
         }
+        self.spawned_by_session
+            .insert(request.id.clone(), request.parent_session_id.clone());
         request.parent_session_id = root_parent;
         request.surface_completion = false;
         // Nested children keep workflow lineage after reparent so

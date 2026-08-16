@@ -75,6 +75,70 @@
                 .and_then(|v| v.markdown_content_for_test()),
             Some("# File Plan")
         );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.feedback_active()),
+            "file-backed exit_plan_mode must arm five-CTA approval chrome"
+        );
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+            "file-backed park is review, not Waiting on plan approval"
+        );
+    }
+
+    #[test]
+    fn plan_approval_soft_park_is_not_fullscreen() {
+        let mut app = make_app_with_agent("sess-1");
+        app.current_ui.plan_approval_park = Some("soft".into());
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Soft Park"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let viewer = agent
+            .line_viewer
+            .as_ref()
+            .expect("soft park must open the plan preview");
+        assert!(
+            !viewer.fullscreen,
+            "[ui] plan_approval_park = soft must open a side panel, not fullscreen"
+        );
+        assert!(
+            !app.current_ui.plan_approval_force_modal(),
+            "pager must consult plan_approval_force_modal (soft is false)"
+        );
+    }
+
+    #[test]
+    fn plan_approval_modal_park_is_fullscreen() {
+        let mut app = make_app_with_agent("sess-1");
+        app.current_ui.plan_approval_park = Some("modal".into());
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Modal Park"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let viewer = agent
+            .line_viewer
+            .as_ref()
+            .expect("modal park must open the plan preview");
+        assert!(
+            viewer.fullscreen,
+            "[ui] plan_approval_park = modal must force fullscreen"
+        );
+        assert!(
+            app.current_ui.plan_approval_force_modal(),
+            "pager must consult plan_approval_force_modal (modal is true)"
+        );
     }
 
     #[test]
@@ -168,6 +232,35 @@
         );
         assert!(agent.plan_approval_view.is_some());
         assert!(agent.line_viewer.is_some());
+    }
+
+    #[test]
+    fn new_exit_plan_mode_present_clears_decision_resolved_and_in_flight() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.plan_decision_resolved = true;
+            agent.plan_feedback_in_flight = Some(
+                crate::views::plan_approval_view::PlanFeedbackInFlight::Revising,
+            );
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Second plan"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            !agent.plan_decision_resolved,
+            "new exit_plan_mode present must clear plan_decision_resolved"
+        );
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "new exit_plan_mode present must clear plan_feedback_in_flight"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "new present must park review chrome (not auto-approve)"
+        );
     }
 
     #[test]
@@ -412,5 +505,129 @@
         );
         assert!(agent.plan_mode_active);
         assert!(agent.plan_mode_pending.is_none());
+    }
+
+    /// Isolated `plan.md` present must not wipe a mid-compose draft or treat
+    /// the next letter as Approve. L1 stays the typer.
+    #[test]
+    fn exit_plan_mode_keeps_mid_compose_draft_and_a_types() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("oh you interrupted my typing");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Isolated plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(
+            agent.prompt.text().contains("oh you interrupted my typing"),
+            "present must keep the live composer draft, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(agent.plan_approval_view.is_some());
+        assert!(
+            agent.line_viewer.is_some(),
+            "soft park still auto-opens the plan.md side panel"
+        );
+
+        let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let _ = agent.handle_input(&a, &ActionRegistry::defaults());
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "mid-compose `a` must type, not Approve"
+        );
+        assert!(
+            agent.prompt.text().contains("oh you interrupted my typing"),
+            "draft must still be in the composer after `a`"
+        );
+        assert!(
+            agent.prompt.text().contains('a'),
+            "the typed `a` must land in the composer, got {:?}",
+            agent.prompt.text()
+        );
+    }
+
+    /// Force-fullscreen modal park is paint-only. Mid-compose keys stay text.
+    #[test]
+    fn exit_plan_mode_modal_park_does_not_steal_mid_compose_keys() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        app.current_ui.plan_approval_park = Some("modal".into());
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("still typing a thought");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Modal plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let viewer = agent
+            .line_viewer
+            .as_ref()
+            .expect("modal park still opens plan.md");
+        assert!(
+            viewer.fullscreen,
+            "modal park may paint fullscreen; it must not steal keys"
+        );
+        assert!(
+            agent.prompt.text().contains("still typing a thought"),
+            "modal present must keep the live draft, got {:?}",
+            agent.prompt.text()
+        );
+
+        let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        let _ = agent.handle_input(&q, &ActionRegistry::defaults());
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "mid-compose `q` must type, not Quit"
+        );
+        assert!(
+            agent.prompt.text().contains('q'),
+            "typed `q` must land in the composer, got {:?}",
+            agent.prompt.text()
+        );
+    }
+
+    /// Empty composer after present: printable letters still go to the
+    /// composer (non-capturing side panel). Empty-prompt `a` still Approves.
+    #[test]
+    fn exit_plan_mode_empty_present_printable_goes_to_composer() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Empty present"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.prompt.text().trim().is_empty());
+        let h = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        let _ = agent.handle_input(&h, &ActionRegistry::defaults());
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "a non-accelerator letter must not decide the plan"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "h",
+            "printable keys go to the composer after present, got {:?}",
+            agent.prompt.text()
+        );
     }
 

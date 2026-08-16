@@ -221,13 +221,32 @@ Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **parent/ses
 
 ## Isolation: Worktree Mode
 
-For tasks that modify files, run a subagent in an isolated git worktree with `isolation: worktree`. This keeps the child's edits from conflicting with the parent's:
+By default, subagents share the parent workspace (`isolation: none`). For tasks that must keep edits separate from the parent, request an isolated git worktree with `isolation: worktree`:
 
 - The subagent works in its own copy of the working tree.
 - Its changes stay isolated from the parent until you merge them.
 - The subagent's result includes the worktree path.
 
-Grok Build manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
+Grok OSS manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
+
+Prefer no worktree when parallel subagents edit disjoint paths or when you want simpler git state.
+
+### Worktree isolation is off by default
+
+Grok OSS defaults `[subagents] allow_worktree` to **`false`**. Empty config means spawn **forces** `isolation = none` even if the agent requested `worktree` or a role or persona defaulted to worktree. Resume of a subagent that already has a worktree still reuses that path.
+
+To opt in to worktree isolation:
+
+```toml
+[subagents]
+allow_worktree = true
+```
+
+This row is also in `/settings` → Agent (**Allow Isolated Agent worktrees**). Earlier releases defaulted `allow_worktree` to `true`. If you relied on that, set the key above explicitly. Force-none still applies whenever the value is `false` (default or explicit).
+
+See [Configuration](05-configuration.md) for the same key.
+
+Mid-turn interject injects into the current turn and never cancels. Cancel is Esc or **[stop]** only. Keys and the composer Enter cue (send / queue / interject) are in [Keyboard shortcuts](03-keyboard-shortcuts.md).
 
 ---
 
@@ -320,7 +339,21 @@ Use `q`, `Esc`, or click the close button to pop back to the parent view. The pa
 
 ## Depth Limits
 
-Only the top-level session spawns subagents. A subagent cannot spawn its own subagents: the maximum nesting depth is one. If a subagent calls `spawn_subagent`, the call fails with a depth-limit error. This keeps the agent tree flat and prevents runaway spawning.
+The default nesting limit is two. The main thread (L1) can spawn subagents (L2). An L2 can spawn specialists (L3). An L3 at that default cannot spawn further (no L4). If the current depth is already at `max_depth`, `spawn_subagent` fails with a depth-limit error. Set `[subagents] max_depth = 1` if only the main thread should spawn.
+
+## Token efficiency
+
+Whenever work is to be done and tools are to be called, agents are three layers deep. Always. That includes implement loops. Perceived simplicity is not an exception.
+
+| Depth | Does | Does not |
+| ----- | ---- | -------- |
+| **L1 main** | Status to you. Spawn L2. Wait. Read short reports. Update the session board. | Grep, diagnose, implement, multi-file reads, CI logs |
+| **L2 subagent** | Parallelize. Spawn L3 specialists. Stay token-efficient. Discard context after a report goes up. | Product work. Tool work. Greps. Edits. Tests. Skill body rewrites |
+| **L3 specialist** | All actual tools and work, in parallel | Spawn L4 (forbidden) |
+
+L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. Doing the work on L2 fills L2 and causes compaction. The older softer rule (spawn L3 only when there are many greps, or after half the window) is too weak and is replaced.
+
+See [Configuration → Token Economy](05-configuration.md#token-economy) for economic mode, implement-effort Settings, and ASCII scrub. `/spend` and `/limits` are the live views. Isolated Agents are not free. They help when the parent stays small.
 
 ---
 
@@ -328,13 +361,12 @@ Only the top-level session spawns subagents. A subagent cannot spawn its own sub
 
 **Good use cases:**
 
-- Researching a codebase while the parent continues other work
-- Running tests in parallel while the parent implements changes
+- Researching a codebase while the main thread stays free for you
+- Running tests in parallel with other specialists
 - Reviewing generated changes before you commit them
 - Delegating independent tasks that do not depend on each other
 
 **When not to use:**
 
-- Simple tasks that the parent can handle directly
 - Tasks that require tight back-and-forth with the user, since a subagent runs autonomously and isn't suited to interactive exchanges
-- Tasks where the context setup cost exceeds the parallelism benefit
+- Tasks where the Isolated Agent setup cost exceeds the parallelism benefit (the main thread still does not take over the tools; simple tasks and implement loops still stay three layers deep)

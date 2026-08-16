@@ -236,9 +236,22 @@ pub fn compute_layout(area: Rect, peek_visible: bool) -> DashboardLayout {
 fn dashboard_chrome_heights(area: Rect) -> (u16, u16, u16, u16, u16, u16, u16, bool) {
     // Match welcome/agent top margin; drop on short terminals.
     let top_margin_h: u16 = if area.height > 6 { 1 } else { 0 };
-    let header_h: u16 = if area.height > 4 { 1 } else { 0 };
+    let hide_header = crate::appearance::cache::load_hide_header();
+    let header_h: u16 = if hide_header {
+        0
+    } else if area.height > 4 {
+        1
+    } else {
+        0
+    };
     // Header↔list gap; collapses with dispatch/shortcuts gaps on short terms.
-    let header_gap_h: u16 = if area.height > 10 { 1 } else { 0 };
+    let header_gap_h: u16 = if hide_header {
+        0
+    } else if area.height > 10 {
+        1
+    } else {
+        0
+    };
     let footer_h: u16 = if area.height >= 2 { 1 } else { 0 };
     // Match agent prompt/shortcuts gaps; drop on short terminals.
     let dispatch_gap_h: u16 = if area.height > 10 { 1 } else { 0 };
@@ -765,6 +778,25 @@ mod tests {
             0,
             "short terminal must collapse shortcuts gap",
         );
+    }
+
+    #[test]
+    fn hide_header_zeroes_header_and_header_gap() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_hide_header(true);
+            let area = Rect::new(0, 0, 80, 30);
+            let layout = compute_layout(area, false);
+            assert_eq!(
+                layout.header.height, 0,
+                "[ui] hide_header must zero the dashboard header"
+            );
+            assert_eq!(
+                layout.header_gap.height, 0,
+                "[ui] hide_header must zero the dashboard header gap"
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     /// The dashboard reserves a 1-row gap between

@@ -16,6 +16,7 @@ pub mod path_suggestions;
 pub mod plan_validate;
 pub(crate) mod query_tools;
 pub mod remap;
+pub mod rust_edit_verify;
 pub mod serde_base64;
 pub mod session_reader;
 pub mod shell_env_policy;

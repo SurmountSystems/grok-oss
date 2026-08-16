@@ -568,6 +568,24 @@ upstream-join-main *ARGS:
 upstream-assert-process-pins *ARGS:
     ./scripts/assert-process-pins.sh {{ ARGS }}
 
+# Path assert, then remind land agents to walk the existing catalog.
+# Does not replace just check. Does not run cargo (deleted tests stay silent).
+upstream-land-filters *ARGS:
+    ./scripts/assert-process-pins.sh {{ ARGS }}
+    @echo ""
+    @echo "Path assert OK. Next: walk FORK.md Land checklist and"
+    @echo "doc/dev/upstream-regression-filters.md Required land inventory."
+    @echo "Seven product classes: CLI identity; config is a surface; /spend ingest;"
+    @echo "DOGE/chrome paint; dual-auth hop after included SuperGrok period limits are full;"
+    @echo "last-session on start; product skills are not a Python runtime."
+    @echo "rg each required identifier for a matching fn. Missing fn = land failed."
+    @echo "Walk extra neighbors the catalog lists (bubble click, plan present is not Approve,"
+    @echo "SHA-aware rebuild, nucleo, from_config cold catalog, pause / Clear finished,"
+    @echo "always-three-layer product prompt, user-guide hop / spend-order)."
+    @echo "Not a second numbered board."
+    @echo "Then run the operator cheat-sheet cargo blocks in that catalog."
+    @echo "just check is quality only. Chrome-only is a failed land."
+
 # Read-only recon probe: branch, CHERRY_PICK/MERGE, UU count, onto-ish, next human action
 recon-status:
     ./scripts/recon-status.sh

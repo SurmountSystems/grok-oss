@@ -41,6 +41,10 @@ const VIM_MODE_DEFAULT: bool = false;
 const SHOW_THINKING_BLOCKS_DEFAULT: bool = true;
 /// Keep thinking fully expanded by default — off (collapsed on finish).
 const ALWAYS_EXPAND_THINKING_DEFAULT: bool = false;
+/// Hide in-app status / welcome / dashboard headers. Default off.
+const HIDE_HEADER_DEFAULT: bool = false;
+/// Force fullscreen plan approval. Default off (`soft` park).
+const PLAN_APPROVAL_FORCE_MODAL_DEFAULT: bool = false;
 const GROUP_TOOL_VERBS_DEFAULT: bool = true;
 /// Collapsed-Edit-blocks rollout flag defaults OFF (legacy expanded diffs).
 const COLLAPSED_EDIT_BLOCKS_DEFAULT: bool = false;
@@ -353,6 +357,113 @@ pub fn load_always_expand_thinking() -> bool {
 pub fn set_always_expand_thinking(enabled: bool) {
     ALWAYS_EXPAND_THINKING_CURRENT.with(|c| c.set(enabled));
     ALWAYS_EXPAND_THINKING_LOADED.with(|l| l.set(true));
+}
+
+// -- Hide in-app header ------------------------------------------------------
+
+thread_local! {
+    static HIDE_HEADER_CURRENT: Cell<bool> = const { Cell::new(HIDE_HEADER_DEFAULT) };
+    static HIDE_HEADER_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[ui].hide_header`. Default off. Paint paths must read this.
+pub fn load_hide_header() -> bool {
+    HIDE_HEADER_LOADED.with(|loaded| {
+        if !loaded.get() {
+            HIDE_HEADER_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "hide_header",
+                    HIDE_HEADER_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    HIDE_HEADER_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `hide_header`.
+pub fn set_hide_header(enabled: bool) {
+    HIDE_HEADER_CURRENT.with(|c| c.set(enabled));
+    HIDE_HEADER_LOADED.with(|l| l.set(true));
+}
+
+// -- Plan approval park (soft vs modal) --------------------------------------
+
+thread_local! {
+    static PLAN_APPROVAL_FORCE_MODAL_CURRENT: Cell<bool> =
+        const { Cell::new(PLAN_APPROVAL_FORCE_MODAL_DEFAULT) };
+    static PLAN_APPROVAL_FORCE_MODAL_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[ui].plan_approval_park == "modal"`. Default off (soft park).
+pub fn load_plan_approval_force_modal() -> bool {
+    PLAN_APPROVAL_FORCE_MODAL_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_str_from_effective_config("plan_approval_park")
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| s.eq_ignore_ascii_case("modal"));
+            PLAN_APPROVAL_FORCE_MODAL_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    PLAN_APPROVAL_FORCE_MODAL_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached plan-approval fullscreen force.
+pub fn set_plan_approval_force_modal(force_modal: bool) {
+    PLAN_APPROVAL_FORCE_MODAL_CURRENT.with(|c| c.set(force_modal));
+    PLAN_APPROVAL_FORCE_MODAL_LOADED.with(|l| l.set(true));
+}
+
+// -- Subagent worktrees ------------------------------------------------------
+
+thread_local! {
+    static ALLOW_WORKTREE_CURRENT: Cell<bool> = const { Cell::new(false) };
+    static ALLOW_WORKTREE_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[subagents].allow_worktree`. Empty/false = force-none. Default off.
+pub fn load_allow_worktree() -> bool {
+    ALLOW_WORKTREE_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_subagents_bool_from_effective_config("allow_worktree", false);
+            ALLOW_WORKTREE_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    ALLOW_WORKTREE_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `allow_worktree`.
+pub fn set_allow_worktree(enabled: bool) {
+    ALLOW_WORKTREE_CURRENT.with(|c| c.set(enabled));
+    ALLOW_WORKTREE_LOADED.with(|l| l.set(true));
+}
+
+// -- Bubble copy buttons (pager.toml) ----------------------------------------
+
+thread_local! {
+    static BUBBLE_COPY_BUTTONS_CURRENT: Cell<bool> = const { Cell::new(true) };
+    static BUBBLE_COPY_BUTTONS_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[scrollback.display].bubble_copy_buttons`. Default on.
+pub fn load_bubble_copy_buttons() -> bool {
+    BUBBLE_COPY_BUTTONS_LOADED.with(|loaded| {
+        if !loaded.get() {
+            BUBBLE_COPY_BUTTONS_CURRENT.with(|c| c.set(true));
+            loaded.set(true);
+        }
+    });
+    BUBBLE_COPY_BUTTONS_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `bubble_copy_buttons`.
+pub fn set_bubble_copy_buttons(enabled: bool) {
+    BUBBLE_COPY_BUTTONS_CURRENT.with(|c| c.set(enabled));
+    BUBBLE_COPY_BUTTONS_LOADED.with(|l| l.set(true));
 }
 
 // -- Group tool verbs ---------------------------------------------------------
@@ -740,6 +851,9 @@ pub fn prime(ui: &UiConfig) {
     );
     set_simple_mode(ui.simple_mode.unwrap_or(SIMPLE_MODE_DEFAULT));
     set_keep_text_selection(text_selection_from_ui(ui));
+    set_scrub_ascii_punct(ui.scrub_ascii_punct_enabled());
+    set_hide_header(ui.hide_header);
+    set_plan_approval_force_modal(ui.plan_approval_force_modal());
     // Layered-config keys (not the `UiConfig` arg) — seed so the first frame
     // skips disk. `load_*` is a no-op when already set (e.g. resolve at startup).
     let _ = load_vim_mode();
@@ -757,6 +871,18 @@ pub fn prime(ui: &UiConfig) {
     let _ = load_economic_mode();
     // `default_selected_permission` owns its own cache in `permission_cursor`.
     crate::appearance::permission_cursor::prime();
+}
+
+/// Read a `[subagents].<key>` boolean from the shell's layered effective config.
+fn load_subagents_bool_from_effective_config(key: &str, default: bool) -> bool {
+    let root = match xai_grok_config::load_effective_config_disk_only() {
+        Ok(r) => r,
+        Err(_) => return default,
+    };
+    root.get("subagents")
+        .and_then(|sa| sa.get(key))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
 }
 
 /// Read a `[ui].<key>` boolean from the shell's layered effective config
@@ -997,6 +1123,23 @@ mod tests {
             assert!(!load_show_thinking_blocks());
             set_show_thinking_blocks(true);
             assert!(load_show_thinking_blocks());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn prime_applies_scrub_ascii_punct_from_ui() {
+        std::thread::spawn(|| {
+            let ui = UiConfig {
+                scrub_ascii_punct: Some(false),
+                ..UiConfig::default()
+            };
+            prime(&ui);
+            assert!(
+                !load_scrub_ascii_punct(),
+                "prime must seed scrub_ascii_punct from UiConfig so disk false applies at launch"
+            );
         })
         .join()
         .unwrap();

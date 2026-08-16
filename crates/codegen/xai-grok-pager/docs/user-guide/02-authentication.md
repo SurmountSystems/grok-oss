@@ -1,6 +1,6 @@
 # Authentication
 
-Grok supports several authentication methods, including interactive browser login, enterprise single sign-on (SSO), and headless CI/CD runners.
+Grok OSS supports several authentication methods, including interactive browser login, a console API key, enterprise single sign-on (SSO), and headless CI/CD runners. SuperGrok is a **paid** product. This page says **included SuperGrok period limits** for the subscription-included quota in the current SuperGrok billing period. That is not SuperGrok dollar credits, and not console team prepaid.
 
 ---
 
@@ -9,7 +9,7 @@ Grok supports several authentication methods, including interactive browser logi
 On first launch, Grok opens your browser to authenticate with grok.com:
 
 ```bash
-grok
+grok-oss
 ```
 
 Grok stores credentials in `~/.grok/auth.json` and reuses them across sessions. Grok refreshes access tokens automatically in the background. When a token can't be refreshed, Grok prompts you to sign in again. Credentials without a server-provided expiry fall back to a 30-day lifetime.
@@ -27,17 +27,17 @@ Tokens in `~/.grok/auth.json` (and MCP OAuth tokens in `~/.grok/mcp_credentials.
 To switch accounts or resolve an authentication problem, run:
 
 ```bash
-grok login
+grok-oss login
 ```
 
-Running `grok login` starts the sign-in flow again, replacing your cached session. By default, it opens your browser and signs in through SpaceXAI OAuth at `auth.x.ai`. Pass a flag to select a different flow:
+Running `grok-oss login` starts the sign-in flow again, replacing your cached session. By default, it opens your browser and signs in through SpaceXAI OAuth at `auth.x.ai`. Pass a flag to select a different flow:
 
 | Flag | Description |
 |------|-------------|
 | `--oauth` | Sign in through SpaceXAI OAuth at `auth.x.ai`. This is the default, so the flag is optional. |
 | `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments. |
 
-To sign out, run `grok logout`. It takes no flags and clears your cached credentials.
+To sign out, run `grok-oss logout`. It takes no flags and clears your cached credentials.
 
 ---
 
@@ -47,10 +47,55 @@ For CI/CD, automation, or environments without browser access, use an API key fr
 
 ```bash
 export XAI_API_KEY="xai-..."
-grok
+grok-oss
 ```
 
-Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `grok logout` or delete `~/.grok/auth.json`.
+Grok OSS uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `grok-oss logout` or delete `~/.grok/auth.json`.
+
+You can also store console API keys in the OS secret store. Interactive `grok-oss login --api-key` prompts on a TTY (never pass the secret on the command line). `grok-oss login --list-api-keys` and `/doctor` show fingerprints only, never raw keys.
+
+```toml
+# ~/.grok/config.toml
+[auth]
+# Pin sampling: "oidc" (SuperGrok session first) or "api_key" (console first).
+# preferred_method = "api_key"
+
+# Prefer included SuperGrok period limits while that quota still has room.
+# Default true on a new or empty Grok home. Explicit false is kept.
+auto_use_included_limits = true
+```
+
+`[auth] auto_use_included_limits` is a **rank preference**. Grok OSS spends included SuperGrok period limits on stored Business / Team SuperGrok logins first, then personal included SuperGrok period limits, then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Stay on the SuperGrok session while included SuperGrok period limits still have room. After those included SuperGrok period limits are full (every distinct stored included pool), sampling hops to SuperGrok dollar credits, then to the console API as failover. When SuperGrok dollar credits are known positive, SuperGrok stays primary and the console key is failover. When they are zero or unknown, the console API key leads.
+
+Team prepaid / usage series need a Management key plus a team id:
+
+```toml
+[endpoints]
+management_team_id = "your-team-id"
+```
+
+Or set `XAI_MANAGEMENT_TEAM_ID`. Store the Management key with `grok-oss login --management-key` (that key is not the console inference key).
+
+### Included SuperGrok period limits and `/limits`
+
+Type **`/limits`** in the TUI, or click the compact meter on the top status row. Both open the same dismissible popup (Esc closes it). Outside the TUI: `grok-oss limits` or `grok-oss limits --json`.
+
+Meters stay distinct:
+
+| Meter | What it is | What it is not |
+|-------|------------|----------------|
+| Included SuperGrok period limits | Subscription-included quota for the current SuperGrok billing period (used %) | SuperGrok dollar credits; console team prepaid |
+| SuperGrok dollar credits | Prepaid SuperGrok top-up dollars | Included SuperGrok period limits; console team prepaid |
+| Console team prepaid | Console API team prepaid wallet remaining | SuperGrok dollar credits; included SuperGrok period limits |
+| Team Grok Build / OAuth class | Team invoice settlement for OAuth / Grok Build | Proof that included SuperGrok period limits burned |
+
+Desired spend order (chrome and rank): spend included SuperGrok period limits on stored Business / Team SuperGrok logins first, then personal included SuperGrok period limits, then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on the SuperGrok session. Compact status may paint `included SuperGrok period limits · N%` (cold `...%` until a real reading exists). Click that chip to open `/limits`.
+
+A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product. The second login does not wipe the first stored SuperGrok login. `/limits` and `/doctor` list both with role labels and fingerprints only.
+
+Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME` (`limits_snapshot.json`). There is no extra daemon. Rebuild SIGUSR1 is not this. That signal means fleet relaunch after `grok-oss rebuild`.
+
+See [Slash Commands → `/limits`](04-slash-commands.md#limits) and [Configuration → Token Economy](05-configuration.md#token-economy).
 
 ---
 
@@ -88,7 +133,7 @@ You can also override the API endpoint to point at your own proxy:
 export GROK_CLI_CHAT_PROXY_BASE_URL="https://grok-proxy.acme.com/v1"
 ```
 
-### 3. Run `grok`
+### 3. Run `grok-oss`
 
 The CLI discovers endpoints via `{issuer}/.well-known/openid-configuration`, opens the IdP login page, and stores tokens in `~/.grok/auth.json`. Tokens auto-refresh silently via the stored `refresh_token`.
 
@@ -188,7 +233,7 @@ same JSON fields (such as `issuer`) on every invocation, including refreshes.
   rejected. Nobody is watching. stdin is closed, your stderr is swallowed, and
   the binary is given a few seconds before it is killed. Mint silently or exit
   non-zero — never block.
-- **Unset — a sign-in.** `grok login`, the sign-in screen, or the escalation
+- **Unset, a sign-in.** `grok-oss login`, the sign-in screen, or the escalation
   Grok performs when a headless run couldn't mint. A user is waiting, your
   stderr reaches them, and you have 300 seconds — enough for a browser round
   trip or a device code.
@@ -247,7 +292,7 @@ goes to `~/.grok/leader.log` rather than to you.
 For headless environments (SSH sessions, Docker containers, remote VMs) where no browser is available locally:
 
 ```bash
-grok login --device-auth    # or: grok login --device-code
+grok-oss login --device-auth    # or: grok-oss login --device-code
 ```
 
 This prints a URL and code to the terminal. Open the URL on any device, enter the code, and complete authentication. Grok polls until the login is confirmed.
@@ -330,7 +375,7 @@ Set `RUST_LOG` to control the verbosity of the file log and headless stderr outp
 In the TUI, set `GROK_LOG_FILE` to an absolute path to write logs to that file:
 
 ```bash
-GROK_LOG_FILE=/tmp/grok.log RUST_LOG=debug grok
+GROK_LOG_FILE=/tmp/grok.log RUST_LOG=debug grok-oss
 tail -f /tmp/grok.log
 ```
 
@@ -339,7 +384,7 @@ tail -f /tmp/grok.log
 In headless mode, logs go to stderr. Redirect them to a file:
 
 ```bash
-RUST_LOG=debug grok -p "hello" 2> /tmp/grok.log
+RUST_LOG=debug grok-oss -p "hello" 2> /tmp/grok.log
 ```
 
 ### Common log messages
@@ -354,7 +399,7 @@ RUST_LOG=debug grok -p "hello" 2> /tmp/grok.log
 
 ### Common fixes
 
-- **"Authentication failed"** -- Run `grok logout` to clear cached credentials, then `grok login` to sign in again.
+- **"Authentication failed"** -- Run `grok-oss logout` to clear cached credentials, then `grok-oss login` to sign in again.
 - **Token expires too quickly** -- Set `auth_token_ttl` or return `expires_in` in your auth provider's JSON output.
 - **OIDC redirect fails** -- Ensure your IdP allows loopback redirect URIs (`http://127.0.0.1/callback`).
 - **External auth provider not found** -- Check that the `auth_provider_command` path is correct and the binary is executable.

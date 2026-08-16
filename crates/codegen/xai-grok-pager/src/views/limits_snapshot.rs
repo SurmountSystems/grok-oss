@@ -132,7 +132,7 @@ pub enum AutoTopupLine {
 ///
 /// [`Self::default_credits_cents`] is the dashboard-class **team default credits**
 /// allotment (often ~$1500 on the wire). It is **not** the prepaid wallet,
-/// **not** free SuperGrok period allowance, and **not** SuperGrok top-up dollars.
+/// **not** included SuperGrok period limits, and **not** SuperGrok top-up dollars.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsoleTeamPostpaidMeter {
     pub period_total_cents: i64,
@@ -340,6 +340,154 @@ pub struct LimitsSnapshot {
     /// True when the flat window observed SuperGrok $ extras. Ignored when
     /// [`Self::flat_poll_unproven_debit`] is false.
     pub flat_poll_observed_extras: bool,
+    /// Stored SuperGrok logins and console key fingerprints (no secrets).
+    pub discovered_identities: DiscoveredIdentities,
+}
+
+/// One stored SuperGrok login as the product can see it (role + fingerprint).
+///
+/// Never holds a JWT or API key. Used by `/limits` and `limits --json`
+/// **Discovered identities**.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredSupergrokSession {
+    /// `personal` or `business` when known.
+    pub role: String,
+    /// Blake3 hex of the session token. Omitted when the fixture has no token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// `oidc` or `external` when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+/// Combined **what we can see**: stored SuperGrok logins and console keys.
+///
+/// Honest when only one SuperGrok session is stored: no invented Business /
+/// Team row. Fingerprints only, never secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredIdentities {
+    pub supergrok_sessions: Vec<DiscoveredSupergrokSession>,
+    pub console_key_fingerprints: Vec<String>,
+    /// True when exactly one SuperGrok session is stored.
+    pub only_one_supergrok_session: bool,
+    /// Set when [`Self::only_one_supergrok_session`]: included SuperGrok period
+    /// limits can only be checked for that login until a second grok-oss login.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub honesty: Option<String>,
+}
+
+impl DiscoveredIdentities {
+    /// Build from stored SuperGrok sessions and console key fingerprints.
+    pub fn from_sessions(
+        supergrok_sessions: Vec<DiscoveredSupergrokSession>,
+        console_key_fingerprints: Vec<String>,
+    ) -> Self {
+        let only_one = supergrok_sessions.len() == 1;
+        Self {
+            honesty: if only_one {
+                Some(
+                    xai_grok_shell::auth::NOTE_SINGLE_SUPERGROK_SESSION_CANNOT_SEE_TEAM_PLAN
+                        .to_string(),
+                )
+            } else {
+                None
+            },
+            only_one_supergrok_session: only_one,
+            supergrok_sessions,
+            console_key_fingerprints,
+        }
+    }
+
+    /// Doctor / `auth.json` listings (fingerprints only).
+    pub fn from_dual_auth(dual: &xai_grok_shell::auth::DualAuthStatus) -> Self {
+        let sessions = dual
+            .supergrok_principals
+            .iter()
+            .map(|p| DiscoveredSupergrokSession {
+                role: p.role_label.to_string(),
+                fingerprint: Some(p.fingerprint.clone()),
+                mode: Some(p.mode_label.to_string()),
+            })
+            .collect();
+        let mut out = Self::from_sessions(sessions, dual.stored_fingerprints.clone());
+        // A SuperGrok session with no listed principal is still only one
+        // stored login. Do not invent a Business / Team row.
+        if dual.session_present && dual.supergrok_principals.len() < 2 {
+            out.only_one_supergrok_session = true;
+            out.honesty = Some(
+                xai_grok_shell::auth::NOTE_SINGLE_SUPERGROK_SESSION_CANNOT_SEE_TEAM_PLAN
+                    .to_string(),
+            );
+        }
+        out
+    }
+
+    /// Infer stored SuperGrok roles from `/limits` principal rows (no secrets).
+    ///
+    /// Hermetic fixtures have no JWT, so fingerprints stay empty. Live collect
+    /// overlays [`Self::from_dual_auth`] for fingerprints.
+    pub fn from_principal_inputs(principals: &[PrincipalLimitsInput]) -> Self {
+        let sessions = principals
+            .iter()
+            .map(|p| DiscoveredSupergrokSession {
+                role: discovered_role_from_principal(p),
+                fingerprint: None,
+                mode: None,
+            })
+            .collect();
+        Self::from_sessions(sessions, Vec::new())
+    }
+
+    fn from_snapshot_slots(
+        primary: &PrincipalLimitsSlot,
+        extras: &[PrincipalLimitsSlot],
+        live_role: Option<&str>,
+    ) -> Self {
+        let mut sessions = Vec::with_capacity(1 + extras.len());
+        sessions.push(DiscoveredSupergrokSession {
+            role: discovered_role_from_label(&primary.label, live_role),
+            fingerprint: None,
+            mode: None,
+        });
+        for extra in extras {
+            sessions.push(DiscoveredSupergrokSession {
+                role: discovered_role_from_label(&extra.label, None),
+                fingerprint: None,
+                mode: None,
+            });
+        }
+        Self::from_sessions(sessions, Vec::new())
+    }
+}
+
+fn discovered_role_from_principal(p: &PrincipalLimitsInput) -> String {
+    if let Some(role) = p
+        .role_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return role.to_string();
+    }
+    discovered_role_from_label(&p.label, Some("personal"))
+}
+
+fn discovered_role_from_label(label: &str, fallback: Option<&str>) -> String {
+    if let Some(role) = label
+        .strip_prefix("SuperGrok (")
+        .and_then(|s| s.strip_suffix(')'))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return role.to_string();
+    }
+    fallback
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("personal")
+        .to_string()
 }
 
 /// One SuperGrok principal input for multi-principal `/limits` build.
@@ -388,6 +536,18 @@ impl LimitsSnapshot {
         } else {
             IncludedSource::Unknown
         };
+        let discovered_identities = if live_identity.is_console() && included.is_none() {
+            DiscoveredIdentities::default()
+        } else {
+            DiscoveredIdentities::from_sessions(
+                vec![DiscoveredSupergrokSession {
+                    role: "personal".into(),
+                    fingerprint: None,
+                    mode: None,
+                }],
+                Vec::new(),
+            )
+        };
         Self {
             live_identity,
             live_principal_label: None,
@@ -418,11 +578,49 @@ impl LimitsSnapshot {
                 usage_series: None,
             },
             // Single SuperGrok section: no dual-login shared-pool note.
+            // One SuperGrok live/billing row is one stored login until collect
+            // overlays doctor listings. Do not invent a Business row. Console
+            // live with no SuperGrok meters is not a stored SuperGrok session.
             shared_unified_supergrok_pool: false,
             flat_poll_unproven_debit: false,
             flat_poll_observed_build: false,
             flat_poll_observed_extras: false,
+            discovered_identities,
         }
+    }
+
+    /// Replace the discovered-identities block (CLI collect / doctor listings).
+    pub fn with_discovered_identities(mut self, discovered: DiscoveredIdentities) -> Self {
+        self.discovered_identities = discovered;
+        self
+    }
+
+    /// Fill discovered identities from principal rows when fingerprints are absent.
+    ///
+    /// Live `grok limits` overlays [`DiscoveredIdentities::from_dual_auth`]
+    /// after this so fingerprints come from stored sessions, not invented.
+    pub fn infer_discovered_identities_from_slots(mut self) -> Self {
+        if self
+            .discovered_identities
+            .supergrok_sessions
+            .iter()
+            .any(|s| s.fingerprint.is_some())
+        {
+            return self;
+        }
+        if self.live_identity.is_console()
+            && self.extra_principals.is_empty()
+            && self.live_principal_label.is_none()
+            && !self.primary.label.contains('(')
+        {
+            return self;
+        }
+        self.discovered_identities = DiscoveredIdentities::from_snapshot_slots(
+            &self.primary,
+            &self.extra_principals,
+            self.live_principal_label.as_deref(),
+        );
+        self
     }
 
     /// Mark optional flat-poll honesty (included debit unproven under load).
@@ -609,6 +807,7 @@ impl LimitsSnapshot {
             flat_poll_unproven_debit: false,
             flat_poll_observed_build: false,
             flat_poll_observed_extras: false,
+            discovered_identities: DiscoveredIdentities::from_principal_inputs(principals),
         }
     }
 
@@ -626,6 +825,51 @@ impl LimitsSnapshot {
     }
 }
 
+/// Combined remaining included SuperGrok period limits from `/limits` rows.
+///
+/// Distinct pools sum. Unified pool (`shared_unified_supergrok_pool`) counts
+/// once. Slots without an included reading do not invent a percent.
+pub fn combined_included_from_limits_snapshot(
+    snap: &LimitsSnapshot,
+) -> xai_grok_shell::auth::CombinedIncludedRemaining {
+    use xai_grok_shell::auth::{IncludedPoolReading, combined_included_remaining};
+
+    let unified = snap.shared_unified_supergrok_pool;
+    let mut readings = Vec::new();
+    let mut push_slot = |id: String, slot: &PrincipalLimitsSlot| {
+        if let Some(inc) = &slot.included {
+            readings.push(IncludedPoolReading {
+                identity_id: id,
+                usage_pct: Some(inc.used_pct),
+                reset_at: inc.next_reset_at,
+                is_unified_billing_user: if unified { Some(true) } else { None },
+            });
+        }
+    };
+    push_slot("primary".into(), &snap.primary);
+    for (i, extra) in snap.extra_principals.iter().enumerate() {
+        push_slot(format!("extra-{i}"), extra);
+    }
+    combined_included_remaining(&readings)
+}
+
+/// Included used percent for compact / `activeDriver` chrome.
+///
+/// While any distinct included pool still has remaining, this stays on
+/// included SuperGrok period limits (combined used percent), even if the
+/// active JWT is at 100%.
+pub fn chrome_included_from_limits_snapshot(snap: &LimitsSnapshot) -> (bool, f64) {
+    let combined = combined_included_from_limits_snapshot(snap);
+    let active_known = snap.primary.included.is_some();
+    let active_pct = snap
+        .primary
+        .included
+        .as_ref()
+        .map(|i| i.used_pct)
+        .unwrap_or(0.0);
+    xai_grok_shell::auth::chrome_included_usage_from_combined(active_known, active_pct, &combined)
+}
+
 /// **Active:** line for human `/limits` (same Design A driver as status chrome).
 ///
 /// Names free SuperGrok period, SuperGrok extras after-burner, or console key.
@@ -635,14 +879,8 @@ impl LimitsSnapshot {
 pub fn active_driver_line_for_snapshot(snap: &LimitsSnapshot) -> String {
     use super::credit_bar::active_spend_driver;
 
-    let included_known = snap.primary.included.is_some();
-    let included_pct = snap
-        .primary
-        .included
-        .as_ref()
-        .map(|i| i.used_pct)
-        .unwrap_or(0.0);
     let extras_cents = snap.primary.dollar_extras.as_ref().map(|d| d.balance_cents);
+    let (included_known, included_pct) = chrome_included_from_limits_snapshot(snap);
     let driver = active_spend_driver(
         snap.live_identity,
         included_known,
@@ -881,6 +1119,45 @@ fn fill_unified_dollar_extras_on_empty_slots(
     (primary, extras)
 }
 
+/// Combined **Discovered identities** block (roles + fingerprints, no secrets).
+fn format_discovered_identities(lines: &mut Vec<String>, discovered: &DiscoveredIdentities) {
+    if discovered.supergrok_sessions.is_empty()
+        && !discovered.only_one_supergrok_session
+        && discovered.honesty.is_none()
+        && discovered.console_key_fingerprints.is_empty()
+    {
+        return;
+    }
+    lines.push(String::new());
+    lines.push("Discovered identities:".to_string());
+    for session in &discovered.supergrok_sessions {
+        let mut bits = vec![format!("SuperGrok ({})", session.role)];
+        if let Some(mode) = session
+            .mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            bits.push(mode.to_string());
+        }
+        if let Some(fp) = session
+            .fingerprint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            bits.push(format!("fingerprint {fp}"));
+        }
+        lines.push(format!("- {}", bits.join(" · ")));
+    }
+    for fp in &discovered.console_key_fingerprints {
+        lines.push(format!("- console API key fingerprint {fp}"));
+    }
+    if let Some(note) = &discovered.honesty {
+        lines.push(note.clone());
+    }
+}
+
 /// Multi-line `/limits` body. Pure; hermetic fixtures only.
 ///
 /// No body title: modal chrome already shows **Limits** (double title was a
@@ -907,6 +1184,7 @@ Extra Usage Credits (not console team prepaid)."
     for note in dual_poll_honesty_notes(snap) {
         lines.push(note);
     }
+    format_discovered_identities(&mut lines, &snap.discovered_identities);
     lines.push(String::new());
 
     let console_live = snap.live_identity.is_console();
@@ -1391,8 +1669,8 @@ mod tests {
             "live identity: {out}"
         );
         assert!(
-            out.contains("Active: free SuperGrok period"),
-            "active driver with free-period headroom: {out}"
+            out.contains("Active: included SuperGrok period limits"),
+            "active driver with included-period headroom: {out}"
         );
         assert!(
             out.contains("Included weekly allowance: 24% used · 76% remaining"),
@@ -1774,9 +2052,7 @@ mod tests {
         // Free SuperGrok period line is percent, not series USD.
         let free_period_line = out
             .lines()
-            .find(|l| {
-                l.contains("included") || l.contains("free SuperGrok") || l.contains("% used")
-            })
+            .find(|l| l.contains("included") || l.contains("% used"))
             .unwrap_or("");
         assert!(
             !free_period_line.contains("823"),
@@ -2344,6 +2620,7 @@ mod tests {
             flat_poll_unproven_debit: false,
             flat_poll_observed_build: false,
             flat_poll_observed_extras: false,
+            discovered_identities: DiscoveredIdentities::default(),
         };
         let out = format_limits_detail(&snap);
         assert!(

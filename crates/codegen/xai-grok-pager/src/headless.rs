@@ -741,6 +741,7 @@ fn headless_materialize_ctx(
         },
         restore_code,
         restore_progress_on_stdout: false,
+        open_last_session_on_start: false,
     }
 }
 

@@ -84,6 +84,10 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
+    /// Child id → session that issued the spawn, when that child was
+    /// reparented to the root. Query/cancel-by-id from the immediate
+    /// spawner must still find the live child.
+    spawned_by_session: HashMap<String, String>,
 }
 
 /// Backstop for a delete-path teardown hold: if a cancelled child never
@@ -146,6 +150,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             progress: FuturesUnordered::new(),
             list_requests: HashMap::new(),
             next_list_request_id: 0,
+            spawned_by_session: HashMap::new(),
         }
     }
 
@@ -203,6 +208,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     break;
                 };
                 self.completed.remove(&id);
+                self.spawned_by_session.remove(&id);
             }
         }
 
@@ -775,8 +781,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         parent_session_id: Option<&str>,
         explicit: bool,
     ) -> SubagentCancelOutcome {
+        let spawned_by = self.spawned_by_session.get(id).cloned();
         if let Some(child) = self.active.get_mut(id)
-            && belongs_to_session(&child.request, parent_session_id)
+            && belongs_to_session(&child.request, parent_session_id, spawned_by.as_deref())
         {
             child.explicitly_killed |= explicit;
             child.cancellation.cancel();
@@ -784,20 +791,21 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return SubagentCancelOutcome::Cancelled;
         }
         if let Some(child) = self.pending.get_mut(id)
-            && belongs_to_session(&child.request, parent_session_id)
+            && belongs_to_session(&child.request, parent_session_id, spawned_by.as_deref())
         {
             child.explicitly_killed |= explicit;
             child.cancellation.cancel();
             return SubagentCancelOutcome::Cancelled;
         }
         if self.remove_queued(|request| {
-            request.id == id && belongs_to_session(request, parent_session_id)
+            request.id == id
+                && belongs_to_session(request, parent_session_id, spawned_by.as_deref())
         }) > 0
         {
             return SubagentCancelOutcome::Cancelled;
         }
         if let Some(child) = self.completed.get(id)
-            && belongs_to_session(&child.request, parent_session_id)
+            && belongs_to_session(&child.request, parent_session_id, spawned_by.as_deref())
         {
             return SubagentCancelOutcome::AlreadyFinished {
                 status: child.result.status().to_owned(),
@@ -807,9 +815,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn cancel_parent_prompt(&mut self, parent_prompt_id: &str, parent_session_id: Option<&str>) {
+        let spawned_by = self.spawned_by_session.clone();
         for child in self.active.values() {
             if child.request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    parent_session_id,
+                    spawned_by.get(&child.request.id).map(String::as_str),
+                )
             {
                 child.cancellation.cancel();
                 child.control.cancel();
@@ -817,14 +830,22 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         for child in self.pending.values() {
             if child.request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    parent_session_id,
+                    spawned_by.get(&child.request.id).map(String::as_str),
+                )
             {
                 child.cancellation.cancel();
             }
         }
         self.remove_queued(|request| {
             request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
-                && belongs_to_session(request, parent_session_id)
+                && belongs_to_session(
+                    request,
+                    parent_session_id,
+                    spawned_by.get(&request.id).map(String::as_str),
+                )
         });
     }
 
@@ -947,9 +968,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn cancel_workflow_children(&mut self, run_id: &str, parent_session_id: Option<&str>) {
+        let spawned_by = self.spawned_by_session.clone();
         for child in self.active.values() {
             if child.request.owner.workflow_run_id() == Some(run_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    parent_session_id,
+                    spawned_by.get(&child.request.id).map(String::as_str),
+                )
             {
                 child.cancellation.cancel();
                 child.control.cancel();
@@ -957,7 +983,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         for child in self.pending.values() {
             if child.request.owner.workflow_run_id() == Some(run_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    parent_session_id,
+                    spawned_by.get(&child.request.id).map(String::as_str),
+                )
             {
                 child.cancellation.cancel();
             }
@@ -1114,8 +1144,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 }
 
-fn belongs_to_session(request: &SubagentRequest, parent_session_id: Option<&str>) -> bool {
-    parent_session_id.is_none_or(|id| request.parent_session_id == id)
+fn belongs_to_session(
+    request: &SubagentRequest,
+    parent_session_id: Option<&str>,
+    spawned_by: Option<&str>,
+) -> bool {
+    parent_session_id.is_none_or(|id| request.parent_session_id == id || spawned_by == Some(id))
 }
 
 impl<R: ChildRunner> Drop for SubagentCoordinator<R> {

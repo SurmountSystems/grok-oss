@@ -761,6 +761,18 @@ fn remember_prepaid(meter: &ConsoleTeamPrepaidMeter) {
     }
 }
 
+/// Seed process prepaid cache from a shared limits snapshot (no HTTP).
+pub fn seed_console_team_prepaid_cache(team_id: &str, balance_cents: i64) {
+    let team = team_id.trim();
+    if team.is_empty() {
+        return;
+    }
+    remember_prepaid(&ConsoleTeamPrepaidMeter {
+        team_id: team.to_owned(),
+        balance_cents,
+    });
+}
+
 /// Fetch console team prepaid balance when management key + team_id are present.
 ///
 /// When `team_id` is missing but the key is present, attempts key validation to
@@ -1205,6 +1217,14 @@ fn remember_postpaid(meter: &ConsoleTeamPostpaidPreview) {
     }
 }
 
+/// Seed process postpaid cache from a shared limits snapshot (no HTTP).
+pub fn seed_console_team_postpaid_cache(meter: ConsoleTeamPostpaidPreview) {
+    if meter.team_id.trim().is_empty() {
+        return;
+    }
+    remember_postpaid(&meter);
+}
+
 /// Structured fields for a successful postpaid preview fetch (no secrets).
 pub fn management_postpaid_success_log_fields(
     meter: &ConsoleTeamPostpaidPreview,
@@ -1619,6 +1639,14 @@ fn remember_usage_series(series: &ConsoleTeamUsageSeries, day_window: i64) {
             fetched_at: Instant::now(),
         });
     }
+}
+
+/// Seed process usage-series cache from a shared limits snapshot (no HTTP).
+pub fn seed_console_team_usage_series_cache(series: ConsoleTeamUsageSeries, day_window: i64) {
+    if series.team_id.trim().is_empty() {
+        return;
+    }
+    remember_usage_series(&series, day_window);
 }
 
 /// Fetch console team usage series via documented POST usage analytics.

@@ -33,11 +33,32 @@ Compress conversation history to reclaim context-window space. Pass a note to te
 /compact keep the auth implementation details
 ```
 
-Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
+Grok also auto-compacts once the context window hits **95%** by default (tune it with `/settings` → **Auto-compact at**, or `[session] auto_compact_threshold_percent`). Percent is of the *effective* window. With **Economic mode** on (default), that window is soft-capped at 200k tokens.
+
+### `/economic-mode`
+
+Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing. Default **on** for new sessions (`[ui] economic_mode` in `/settings`). Soft-caps the context window for compaction and the context bar.
+
+Token Economy may rewrite **implement-loop effort** (skill reviewer fan-out 1–5, not model reasoning effort `/effort`) on `/implement`. Optional lock and min floor always apply when set. Economic mode plus the cap master still own the hard ceiling (default 3) and desired inject when missing (default 2). See [Configuration → Token Economy](05-configuration.md#token-economy).
+
+```
+/economic-mode              # toggle this conversation
+/economic-mode on|off       # set this conversation
+/economic-mode status       # show session state
+/economic-mode global on|off  # session + persist [ui].economic_mode
+```
+
+Aliases: `/economic`, `/econ`
 
 ### `/context`
 
 Show how the context window is being used: a category breakdown (system prompt, messages, reasoning and overhead, free space) plus informational rows for tool definitions, the skills listing, and MCP server announcements with their estimated token cost.
+
+### `/recap`
+
+Generate a short "where was I" summary of the session so far. Alias: `/summarize`. The summary is display-only (not added to the model conversation). Grok OSS may also request the same kind of recap automatically when you return after being away.
+
+**Default on.** Search `/settings` for `recap` to toggle auto return-from-away (`[ui.notifications] session_recap`), the debounce (`session_recap_threshold_secs`, default 30), and the master feature (`[features] session_recap`, restart required). `GROK_SESSION_RECAP=0` kills both `/recap` and auto recap.
 
 ### `/session-info`
 
@@ -103,6 +124,14 @@ Rename the current session. Alias: `/title`.
 
 `--auto` unpins a manual title and lets auto-titling resume. It applies to Build sessions only — chat conversations have no local auto-titler. It must be the only argument (`/rename --auto Something` is an error). A session cannot be named `--auto` via this command; use the dashboard rename editor (`Ctrl+R`) for that pathological case.
 
+### `/clear-completed-todos`
+
+Archive completed and cancelled rows off the live session board. Pending and in-progress items stay. This is the same action as the compact **`[−]`** (U+2212 minus) in the todo header when the board is open and finished rows exist, and as optional focused `X` on the todo pane. Hints still say **Clear finished**. This is not `h` hide-done (that only hides finished rows on screen). This is not a `merge: false` wipe of open work.
+
+```
+/clear-completed-todos
+```
+
 ---
 
 ## Model and Mode
@@ -156,7 +185,7 @@ Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on)
 
 ### `/minimal` and `/fullscreen`
 
-Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to standard fullscreen mode. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
+Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to standard fullscreen mode. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok-oss` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
 
 A handful of commands only work in one of the two modes, because the surface they drive doesn't exist in the other: `/find`, `/jump`, `/timeline`, `/theme`, `/tutorial`, `/workflows`, and `/dashboard` are fullscreen-only, while `/expand` and `/edit-prompt` are minimal-only. Those are hidden from the command menu and the palette in the mode they can't run in. If you type one out anyway, Grok says why — and points you at whichever is actually useful. When the other mode is the only way to get it, that's the mode switch: `/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` When this mode already does the job another way, it names that instead: `/expand isn't available in fullscreen mode — press Tab to focus the scrollback, then → on the block.` Everything else works in both. Note that `--no-alt-screen` still counts as fullscreen here, so it keeps the fullscreen-only commands.
 
@@ -333,10 +362,39 @@ Report an issue or send feedback. A message sends immediately. With none, a pane
 
 ### `/btw`
 
-Send an aside to the agent without interrupting the current task. In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped. The side question and its answer aren't part of the main turn.
+Send an aside to the agent without interrupting the current task. The side question and its answer are not part of the main turn.
+
+In the full TUI, a finished answer opens a **Done** panel:
+
+- **`y`** (when the panel is focused) copies the full thread (`/btw <question>` plus the complete rendered answer, not only what is on screen).
+- **`a`** opens a follow-up composer in the same btw session.
+- **`Esc`** dismisses the panel.
+
+In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped.
 
 ```
 /btw also check the error handling
+```
+
+### `/note`
+
+Leave a mid-session operator note that is **not** a pending main-turn prompt.
+
+```
+/note check queue hold when subagents finish
+/note                  # list notes for this session
+```
+
+Bare `/note` (or `/notes`) lists notes. This does not call the model and does not touch the prompt queue.
+
+### `/screenshot`
+
+Capture the current Grok OSS TUI frame as a PNG under `$GROK_HOME/screenshots/tui-*.png`. Toast shows the path. This is not an OS screenshot of other windows.
+
+**F9** is the same action. When plan approval is open, the capture **auto-attaches** to the plan composer so Approve / Revise / Clarify can send it. See [Plan Mode](19-plan-mode.md).
+
+```
+/screenshot
 ```
 
 ### `/mcps`
@@ -346,6 +404,20 @@ Open the MCP servers management modal.
 ### `/doctor`
 
 Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
+
+The dual-auth block also lists SuperGrok principal(s) (role plus fingerprint only) and console key fingerprints. See [Authentication](02-authentication.md).
+
+### `/rebuild`
+
+Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances on this machine. Not SpaceXAI download, and not worktree database rebuild.
+
+1. Finds a Grok OSS source tree (`justfile` plus `crates/codegen/xai-grok-pager-bin`).
+2. Runs `just install` (or a fixed cargo install when `just` is missing).
+3. Verifies package version plus git SHA.
+4. Signals other live product TUIs so they re-exec onto the new binary with the same session.
+5. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success.
+
+CLI: `grok-oss rebuild`. Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
 
 ### `/release-notes`
 
@@ -401,18 +473,58 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 
 Log in or re-authenticate without leaving the session.
 
+A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product. The second login does not wipe the first stored SuperGrok login. See [Authentication](02-authentication.md#included-supergrok-period-limits-and-limits).
+
 ### `/logout`
 
 Log out and return to the login screen.
 
 ### `/usage`
 
-View credit usage or manage billing. Alias: `/cost`.
+View **session** token and cost totals, then SuperGrok billing when the consumer surface is visible. Alias: `/cost`.
+
+When included SuperGrok period bounds are known, also shows **linear-burn pacing** (ahead of or behind linear burn for the billing period; never as dollars). Full double-entry books are on `/spend` and a section of `/limits`.
 
 ```
 /usage
 /usage manage
 ```
+
+### `/spend`
+
+Token Economy double-entry: local calculated spend (from session `usage.jsonl` ingested into `$GROK_HOME/grok_oss.db`) next to remote Management samples when a management key is available. Shows gap honesty when local cost ticks are missing. Meters stay distinct (included SuperGrok period limits ≠ SuperGrok dollar credits ≠ console team prepaid). Aliases: `/double-entry`, `/ledger`.
+
+```
+/spend
+```
+
+### `/limits`
+
+Opens a dismissible popup (Esc to close) with spend meters from cached billing, not session tokens. Same data as clicking the compact meter on the top status row. CLI: `grok-oss limits` and `grok-oss limits --json`.
+
+Keeps each meter distinct:
+
+- **Included SuperGrok period limits** (used % · remaining % · next reset). SuperGrok is paid. This is the subscription-included quota for the current SuperGrok billing period, not SuperGrok dollar credits.
+- Linear-burn pacing when period bounds exist (ahead of or behind linear burn; omit when bounds are missing).
+- SuperGrok **dollar credits** (prepaid top-ups; separate from included SuperGrok period limits).
+- **Console API key** request path and **console team prepaid** when a Management key and `[endpoints] management_team_id` (or `XAI_MANAGEMENT_TEAM_ID`) are set. Honest gaps: `no management key`, `no management team id`, `loading team prepaid...`, `team prepaid unavailable`.
+- Team postpaid OAuth / Grok Build class and usage series when Management credentials work. That is not license message counts.
+- A short double-entry spend section. Full view is `/spend`.
+
+When two SuperGrok principals are stored, `/limits` stacks a section per principal. The live sampling line names which principal (or console key) is active when known. A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product.
+
+Desired spend-order chrome (compact meter and `/limits` **Active:** line): spend included SuperGrok period limits on stored Business / Team SuperGrok logins first, then personal included SuperGrok period limits, then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover.
+
+Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME`. There is no extra daemon. Rebuild SIGUSR1 is not this.
+
+```
+/limits
+/limits --json
+```
+
+`/limits --json` prints the same machine-readable JSON as `grok-oss limits --json` into the conversation (no secrets). Fields include `schemaVersion`, `liveSampling`, and `activeDriver` (`supergrok_free_period` | `supergrok_extras` | `console_key`). That `activeDriver` name is a wire field; the product name for the first value is **included SuperGrok period limits**.
+
+See [Authentication](02-authentication.md#included-supergrok-period-limits-and-limits).
 
 ### `/privacy`
 

@@ -182,6 +182,9 @@ pub(crate) struct RunResult {
     /// When set, the process should re-exec into the other screen mode after
     /// terminal restore. See `/minimal` and `/fullscreen`.
     pub relaunch: Option<super::app_view::ScreenModeRelaunch>,
+    /// When set, the process should re-exec onto the newly installed binary
+    /// after terminal restore (`/rebuild` invoker or peer SIGUSR1).
+    pub rebuild_relaunch: Option<super::app_view::RebuildRelaunch>,
 }
 
 /// In-flight reconnect re-initialization, tied to the agents whose reload
@@ -1553,6 +1556,15 @@ pub(crate) async fn run(
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
     // Prime thread-local caches so first render doesn't hit disk.
     crate::appearance::cache::prime(&app.current_ui);
+    crate::appearance::cache::set_bubble_copy_buttons(
+        app.appearance.scrollback.display.bubble_copy_buttons,
+    );
+    if app.appearance.hide_header != app.current_ui.hide_header {
+        let mut config = app.appearance.clone();
+        config.hide_header = app.current_ui.hide_header;
+        app.set_appearance(config);
+    }
+    xai_grok_shell::session::helpers::seed_from_effective_config();
     // Re-derive the render-value compact flag from the hydrated `current_ui`:
     // the seed above used the pre-hydration disk read, which layered/remote
     // config can contradict — the canonical single-writer corrects it (and
@@ -2278,12 +2290,23 @@ pub(crate) async fn run(
             // channel closes.  Without this arm the loop would hang
             // because AppView holds the client-side tx, keeping acp_rx open.
             _ = connection_cancel.cancelled() => {
+                // Leader IPC cancel wins this biased select over quit-notify.
+                // Arm peer rebuild here so SIGUSR1 / request-file races still
+                // re-exec instead of a clean quit that never comes back.
+                let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+                    &mut app,
+                    dispatch::rebuild::PeerRebuildExitReason::LeaderDisconnect,
+                );
                 break;
             }
 
             // Graceful-quit request from the signal handler. Kept high in the
             // biased order so a SIGTERM quit isn't starved by an ACP firehose.
             _ = quit_notify.notified() => {
+                let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+                    &mut app,
+                    dispatch::rebuild::PeerRebuildExitReason::SignalOrFlag,
+                );
                 let effs = dispatch::dispatch(Action::Quit, &mut app);
                 let _ = process_effects(effs, &mut tasks, &mut app, &progress_tx);
                 break;
@@ -3072,11 +3095,66 @@ pub(crate) async fn run(
         }
 
         presenter.present_if_dirty(&mut app, terminal);
+        maybe_capture_tui_screenshot(&mut app, terminal);
     }
 
     app.notification_service.shutdown();
 
     Ok(finish_run(&mut app))
+}
+
+/// If `/screenshot` or F9 armed a capture, write the last presented frame to
+/// `$GROK_HOME/screenshots/` and toast the path (or error).
+///
+/// When plan approval is open on the active agent, also attach the PNG to the
+/// plan composer so approve/revise/clarify multimodal drain reuses the paste path.
+fn maybe_capture_tui_screenshot(app: &mut AppView, terminal: &PagerTerminal) {
+    if !app.pending_tui_screenshot {
+        return;
+    }
+    app.pending_tui_screenshot = false;
+
+    let base = xai_grok_config::grok_home();
+    let path = crate::tui_screenshot::default_screenshot_path(&base);
+    let buffer = terminal.last_presented_buffer();
+    match crate::tui_screenshot::capture_buffer_to_png_file(buffer, &path) {
+        Ok(written) => {
+            let attached = attach_screenshot_to_active_plan(app, &written);
+            if attached {
+                app.show_toast(&format!(
+                    "Screenshot saved and attached to plan: {}",
+                    written.display()
+                ));
+            } else {
+                app.show_toast(&format!("Screenshot saved: {}", written.display()));
+            }
+        }
+        Err(err) => {
+            app.show_toast(&format!("Screenshot failed: {err}"));
+        }
+    }
+}
+
+/// Attach a just-captured PNG to the active agent plan composer when approval
+/// is open. Returns whether a chip was inserted.
+///
+/// Prefers the focused subagent when it has plan approval open; if the child
+/// has no approval view, falls through to the parent so soft-park / panel on
+/// the parent still gets the multimodal chip.
+fn attach_screenshot_to_active_plan(app: &mut AppView, path: &std::path::Path) -> bool {
+    let ActiveView::Agent(id) = app.active_view else {
+        return false;
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return false;
+    };
+    if let Some(child_sid) = agent.active_subagent.clone()
+        && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+        && child.try_attach_tui_screenshot_for_plan(path)
+    {
+        return true;
+    }
+    agent.try_attach_tui_screenshot_for_plan(path)
 }
 
 /// Load `UiConfig` from the shell's layered config at startup.
@@ -3221,6 +3299,11 @@ fn sync_appearance_watcher(watcher: &mut Option<SystemAppearanceWatcher>) {
 /// Exit funnel: releases the startup obligation and builds [`ExitInfo`].
 /// Summaries are fullscreen-only and always read the root agent.
 fn finish_run(app: &mut AppView) -> RunResult {
+    // Safety net: leftover SIGUSR1 flag (not ordinary /exit / SIGTERM).
+    let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
+        app,
+        dispatch::rebuild::PeerRebuildExitReason::SignalOrFlag,
+    );
     app.abandon_startup();
     let exit_info = app.active_agent().and_then(|agent| {
         let sid = agent.session.session_id.as_ref()?;
@@ -3246,6 +3329,7 @@ fn finish_run(app: &mut AppView) -> RunResult {
         exit_info,
         quit_for_update: app.quit_for_update,
         relaunch: app.relaunch.clone(),
+        rebuild_relaunch: app.rebuild_relaunch.clone(),
     }
 }
 
@@ -5811,5 +5895,27 @@ mod tests {
             app.active_view = view;
             assert!(finish_run(&mut app).exit_info.is_none());
         }
+    }
+
+    /// Contract: a successful `/rebuild` arms `rebuild_relaunch` and the
+    /// quit tail must carry it so this process execs the new binary.
+    /// A failed install never sets the field (see handle_rebuild_done).
+    #[test]
+    fn finish_run_carries_rebuild_relaunch_when_armed() {
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
+        app.rebuild_relaunch = Some(crate::app::app_view::RebuildRelaunch {
+            session_id: "test-session".into(),
+            installed_exe: std::path::PathBuf::from("/tmp/grok-oss-new"),
+            minimal: false,
+        });
+        let result = finish_run(&mut app);
+        let armed = result
+            .rebuild_relaunch
+            .expect("quit tail must carry rebuild re-exec");
+        assert_eq!(armed.session_id, "test-session");
+        assert_eq!(
+            armed.installed_exe,
+            std::path::PathBuf::from("/tmp/grok-oss-new")
+        );
     }
 }

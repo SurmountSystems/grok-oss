@@ -204,6 +204,8 @@ pub(super) fn handle_exit_plan_mode(
         agent.prompt.restore(stashed);
     }
 
+    let keep_draft = !agent.prompt.text().trim().is_empty();
+    let live_cursor = agent.prompt.cursor();
     let stashed = agent.prompt.stash();
     let state = PlanApprovalViewState::with_source(params, source, stashed, ext.response_tx);
 
@@ -215,17 +217,33 @@ pub(super) fn handle_exit_plan_mode(
     } else {
         agent.latest_inline_plan_content = None;
     }
+    // New present re-arms decision CTAs after a prior Approve/Quit and
+    // clears Revise/Clarify in-flight so CTAs arm once.
+    agent.clear_plan_loop_flags_for_new_present();
     agent.plan_approval_view = Some(state);
-    agent.prompt.set_text("");
+    // Keep a mid-compose draft visible. stash() copies text and does not
+    // clear it; only wipe when the composer was already empty so empty-prompt
+    // `a` / `s` / `q` stay accelerators.
+    if keep_draft {
+        agent.prompt.set_cursor(live_cursor);
+    } else {
+        agent.prompt.set_text("");
+    }
 
     agent.casual_commenting_range = None;
     agent.casual_editing_comment_id = None;
 
+    crate::appearance::cache::set_plan_approval_force_modal(
+        app.current_ui.plan_approval_force_modal(),
+    );
     agent.show_plan_preview_if_available();
 
     if agent.line_viewer.is_some() {
         if let Some(ref mut viewer) = agent.line_viewer {
             viewer.plan_mut().feedback_active = true;
+        }
+        if keep_draft && let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
         }
     } else if let Some(ref mut pav) = agent.plan_approval_view {
         pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;

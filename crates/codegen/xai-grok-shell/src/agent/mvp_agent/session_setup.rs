@@ -1210,7 +1210,10 @@ impl MvpAgent {
     ) {
         let session_id = session_id.clone();
         let persisted_model = summary.current_model_id.clone();
+        self.models_manager.wait_for_first_catalog().await;
         let models = self.models_manager.models();
+        let catalog_is_authoritative = self.models_manager.has_fetched_real_catalog()
+            || !crate::util::config::resolve_remote_fetch_enabled();
         let available = self.models_manager.available();
         self.session_registry.take_unavailable_model(&session_id);
         let resolved_catalog_key = resolve_catalog_key(&models, &persisted_model);
@@ -1229,11 +1232,13 @@ impl MvpAgent {
                 .keys()
                 .find(|id| id.0.starts_with("grok-build"))
                 .cloned()
-        } else {
+        } else if persisted_model.0.starts_with("grok-") {
             available
                 .keys()
-                .find(|id| !id.0.starts_with("grok-build"))
+                .find(|id| id.0.starts_with("grok-") && !id.0.starts_with("grok-build"))
                 .cloned()
+        } else {
+            None
         };
         let selectable_catalog_key =
             selectable_catalog_key_for_persisted(&models, &available, &persisted_model);
@@ -1267,6 +1272,27 @@ impl MvpAgent {
                 Some(serde_json::json!({
                     "persisted_model": persisted_model.0.as_ref(),
                 })),
+            );
+            persisted_model
+        } else if !catalog_is_authoritative {
+            tracing::warn!(
+                session_id = %session_id.0,
+                persisted = %persisted_model.0,
+                "load_session: remote catalog has not landed yet; keeping persisted model unverified"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "load_session: catalog not yet fetched, keeping persisted model unverified",
+                Some(session_id.0.as_ref()),
+                Some(serde_json::json!({
+                    "persisted_model": persisted_model.0.as_ref(),
+                })),
+            );
+            persisted_model
+        } else if keep_unverified_persisted_model(&models, &persisted_model) {
+            tracing::info!(
+                session_id = %session_id.0,
+                persisted = %persisted_model.0,
+                "load_session: persisted model not in catalog; keeping seeded model"
             );
             persisted_model
         } else if let Some(fallback) = same_family_fallback {

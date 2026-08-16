@@ -18,19 +18,66 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 The agent exited plan mode without writing a plan.
 
 - **Approve** — leave plan mode and start implementing
-- **Request changes** — send the agent back to planning
+- **Notes** — approve and send typed notes with the approval
+- **Clarify** — ask a question; do not rewrite the plan
+- **Revise** — send the agent back to rewrite the plan
 - **Quit** — abandon and turn plan mode off
 ";
 
+/// Status-line label while plan mode is active without a live reverse-request
+/// (idle / freeform dead end). Never return this while Revise/Clarify rewrite
+/// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]).
+pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
+
+/// Toast when freeform Enter cannot attach to a live plan-feedback channel
+/// (Revise/Clarify already unparked) and the message will queue as a normal
+/// follow-up instead. Never pretend the second note was live Revise/Clarify.
+pub const PLAN_FEEDBACK_QUEUE_TOAST: &str =
+    "No live plan feedback channel. Message will queue as a normal follow-up.";
+
+/// Human scrollback line when decisive Revise unparks with no freeform notes.
+/// Keeps the transcript from looking barren while the agent rewrites.
+pub const PLAN_REVISE_HUMAN_LINE: &str = "Revise the plan";
+
+/// Synthetic tool_call_id for local idle decision park (no shell reverse-request).
+pub const IDLE_PLAN_DECISION_TOOL_CALL_ID: &str = "local-idle-plan-decision";
+
+/// Status while Revise unparked and the agent is rewriting `plan.md`
+/// (waiting for a new `exit_plan_mode` present). Not idle click ceremony.
+pub const PLAN_REVISING_STATUS: &str = "Revising plan...";
+
+/// Status while Clarify unparked and the agent is answering without a new
+/// present yet. Same no-idle-chrome contract as revise-in-flight.
+pub const PLAN_WAITING_UPDATED_STATUS: &str = "Waiting for updated plan...";
+
+/// What decisive plan feedback is waiting on before decision chrome re-arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanFeedbackInFlight {
+    /// Revise (ACP cancelled / Interject rewrite).
+    Revising,
+    /// Clarify (ACP questions / Interject answer-only).
+    Clarifying,
+}
+
+impl PlanFeedbackInFlight {
+    /// Status-line label while this feedback is in flight (no live park).
+    pub fn status_label(self) -> &'static str {
+        match self {
+            Self::Revising => PLAN_REVISING_STATUS,
+            Self::Clarifying => PLAN_WAITING_UPDATED_STATUS,
+        }
+    }
+}
+
 /// Status-line label while plan approval is parked.
 ///
-/// Empty plans use an active decision prompt instead of "Waiting…", so the
-/// UI doesn't look stuck when there is no preview body to open.
+/// A new `exit_plan_mode` present is review park, not operator Approve.
+/// Empty plans still name a review path so the status line never looks stuck.
 pub fn plan_approval_status_label(has_plan: bool) -> &'static str {
     if has_plan {
-        "Waiting on plan approval"
+        "Plan ready. Side panel open"
     } else {
-        "No plan written — approve or request changes"
+        "No plan written. Side panel open"
     }
 }
 
@@ -39,6 +86,19 @@ pub enum PlanApprovalFocus {
     Preview,
     Prompt,
     Commenting,
+}
+
+/// What freeform Enter on the plan-approval prompt means.
+///
+/// - **Revise** (`s`): ACP `"cancelled"` — rewrite the plan.
+/// - **Questions** (`?` clarify): ACP `"questions"` — answer read-only; do not rewrite.
+/// - **ApproveNotes** (`A`): ACP `"approved"` + notes via approve Interject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanPromptIntent {
+    #[default]
+    Revise,
+    Questions,
+    ApproveNotes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,12 +123,17 @@ pub struct PlanApprovalViewState {
     pub response_tx: Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
 
     pub focus: PlanApprovalFocus,
+    /// Semantic for Prompt Enter with non-empty text (or comments).
+    pub prompt_intent: PlanPromptIntent,
     pub comments: Vec<PlanComment>,
     pub next_comment_id: u64,
     pub editing_comment_id: Option<u64>,
     pub commenting_range: Option<std::ops::Range<usize>>,
 
     pub stashed_feedback_prompt: Option<StashedPrompt>,
+    /// Local idle decision park: no live `exit_plan_mode` reverse-request.
+    /// Approve / Revise / Quit still work; Revise Interjects a rewrite.
+    pub is_local_idle_decision: bool,
 }
 
 impl PlanApprovalViewState {
@@ -101,11 +166,37 @@ impl PlanApprovalViewState {
             stashed_prompt,
             response_tx: Some(response_tx),
             focus: PlanApprovalFocus::Preview,
+            prompt_intent: PlanPromptIntent::Revise,
             comments: Vec::new(),
             next_comment_id: 0,
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            is_local_idle_decision: false,
+        }
+    }
+
+    /// Local decision park when plan mode is idle with a plan body but no
+    /// live `exit_plan_mode` reverse-request. Same side-panel CTAs; decisions
+    /// leave plan mode / Interject rather than ACP outcomes.
+    pub fn for_idle_decision(plan_content: Option<String>) -> Self {
+        let plan_content = plan_content.filter(|s| !s.trim().is_empty());
+        let has_plan = plan_content.is_some();
+        Self {
+            tool_call_id: IDLE_PLAN_DECISION_TOOL_CALL_ID.to_owned(),
+            has_plan,
+            plan_content,
+            source: PlanReviewSource::FileBacked,
+            stashed_prompt: StashedPrompt::default(),
+            response_tx: None,
+            focus: PlanApprovalFocus::Prompt,
+            prompt_intent: PlanPromptIntent::Revise,
+            comments: Vec::new(),
+            next_comment_id: 0,
+            editing_comment_id: None,
+            commenting_range: None,
+            stashed_feedback_prompt: None,
+            is_local_idle_decision: true,
         }
     }
 
@@ -184,6 +275,11 @@ impl PlanApprovalViewState {
 
     pub fn send_cancelled(&mut self, feedback: Option<String>) -> bool {
         send_ext_response(&mut self.response_tx, "cancelled", feedback)
+    }
+
+    /// Clarifying questions — plan mode stays Active; shell injects answer-only turn.
+    pub fn send_questions(&mut self, feedback: Option<String>) -> bool {
+        send_ext_response(&mut self.response_tx, "questions", feedback)
     }
 
     pub fn send_stale_cancel(&mut self) -> bool {
@@ -314,6 +410,18 @@ mod tests {
     }
 
     #[test]
+    fn test_send_questions_with_feedback() {
+        let (mut state, mut rx) = make_test_state();
+        assert!(state.send_questions(Some("Why Redis?".into())));
+        let resp = rx.try_recv().expect("should receive response");
+        let raw = resp.expect("should be Ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw.0.get()).expect("should be valid JSON");
+        assert_eq!(parsed["outcome"], "questions");
+        assert_eq!(parsed["feedback"], "Why Redis?");
+    }
+
+    #[test]
     fn test_send_cancelled_empty_feedback_is_none() {
         let (mut state, mut rx) = make_test_state();
         assert!(state.send_cancelled(Some("   ".into())));
@@ -399,13 +507,21 @@ mod tests {
 
     #[test]
     fn plan_approval_status_label_distinguishes_empty() {
-        assert_eq!(plan_approval_status_label(true), "Waiting on plan approval");
+        assert_eq!(
+            plan_approval_status_label(true),
+            "Plan ready. Side panel open"
+        );
         assert_eq!(
             plan_approval_status_label(false),
-            "No plan written — approve or request changes"
+            "No plan written. Side panel open"
         );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());
+        assert!(
+            PLAN_FEEDBACK_QUEUE_TOAST.to_lowercase().contains("queue"),
+            "queue toast must mention queue; got {PLAN_FEEDBACK_QUEUE_TOAST:?}"
+        );
+        assert_eq!(PLAN_REVISE_HUMAN_LINE, "Revise the plan");
     }
 
     #[test]

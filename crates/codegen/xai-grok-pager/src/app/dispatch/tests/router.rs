@@ -2143,6 +2143,21 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                          truth.",
                 );
             }
+            ("bubble_copy_buttons", SettingKind::Bool { default }) => {
+                let live = agent
+                    .scrollback
+                    .appearance()
+                    .scrollback
+                    .display
+                    .bubble_copy_buttons;
+                assert_eq!(
+                    *default, live,
+                    "registry default for `bubble_copy_buttons` ({default}) drifts \
+                         from AgentView::new's appearance initializer ({live}). Update one \
+                         to match the other — ScrollbackDisplayConfig::default() is the \
+                         source of truth.",
+                );
+            }
             _ => {
                 panic!(
                     "PAGER setting `{}` has no arm in \
